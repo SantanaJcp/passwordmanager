@@ -73,3 +73,81 @@ pub fn agent_rpc(
 ) -> Result<pm_crypto::ProtectedBytes, String> {
     windows::agent_rpc(profile, private, vault, request)
 }
+
+/// Fixed public failure categories for the existing native human TUI.
+#[derive(Debug)]
+pub struct HumanTuiError {
+    category: &'static str,
+    exit_code: u8,
+    cleanup_failed: bool,
+}
+
+impl HumanTuiError {
+    #[must_use]
+    pub const fn exit_code(&self) -> u8 {
+        self.exit_code
+    }
+}
+
+impl std::fmt::Display for HumanTuiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.category)?;
+        if self.cleanup_failed {
+            formatter.write_str("\nCLEANUP_FAILED")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for HumanTuiError {}
+
+/// Opens the existing TUI in this process. Arguments select its installed
+/// profile/key/endpoint and bounded timers; they never grant human authority.
+/// The command is fixed here, so no custody administration command is exposed.
+///
+/// # Errors
+/// Fails closed with fixed categories for invalid input, machine output mode,
+/// missing native resources, authentication failure, or failed restoration.
+pub fn human_tui(arguments: &[std::ffi::OsString]) -> Result<(), HumanTuiError> {
+    if arguments.iter().any(|argument| argument == "--json") {
+        return Err(HumanTuiError {
+            category: "UNAUTHORIZED",
+            exit_code: 3,
+            cleanup_failed: false,
+        });
+    }
+    #[cfg(unix)]
+    pm_crypto::harden_unix_process().map_err(|_| HumanTuiError {
+        category: "CUSTODY_UNAVAILABLE",
+        exit_code: 4,
+        cleanup_failed: false,
+    })?;
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    {
+        let fixed_arguments = std::iter::once(std::ffi::OsString::from("tui"))
+            .chain(arguments.iter().cloned())
+            .collect();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let result = linux::run(fixed_arguments);
+        #[cfg(target_os = "windows")]
+        let result = windows::run(fixed_arguments);
+        result.map_err(|failure| {
+            let (category, exit_code) = match failure.primary() {
+                failure::PrimaryFailure::Usage => ("INVALID_ARGUMENT", 2),
+                failure::PrimaryFailure::Unavailable => ("CUSTODY_UNAVAILABLE", 4),
+                failure::PrimaryFailure::DestinationExists => ("DESTINATION_EXISTS", 4),
+            };
+            HumanTuiError {
+                category,
+                exit_code,
+                cleanup_failed: !failure.cleanups().is_empty(),
+            }
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    Err(HumanTuiError {
+        category: "CUSTODY_UNAVAILABLE",
+        exit_code: 4,
+        cleanup_failed: false,
+    })
+}
