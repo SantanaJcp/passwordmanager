@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Synthetic fixture client; all mutations use the ordinary authenticated human wire.
+#[cfg(any(windows, test))]
+#[path = "windows_human_tui_seed/observer.rs"]
+mod observer;
+
 #[cfg(not(windows))]
 fn main() {
     eprintln!("Windows native fixture requires Windows");
@@ -646,41 +650,17 @@ mod fixture {
             return Ok(());
         }
         if args.len() == 2 && matches!(args[0].as_str(), "--sync-observe" | "--retire-observe") {
-            let db = rusqlite::Connection::open_with_flags(
-                &args[1],
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .map_err(|_| Failure::Unavailable)?;
-            let observation = (|| {
-                if args[0] == "--sync-observe" {
-                    let blocks: i64 = db
-                        .query_row("SELECT count(*) FROM blocks", [], |row| row.get(0))
-                        .map_err(|_| Failure::Unavailable)?;
-                    let roots: i64 = db
-                        .query_row("SELECT count(*) FROM roots", [], |row| row.get(0))
-                        .map_err(|_| Failure::Unavailable)?;
-                    if blocks <= 0 || roots <= 0 {
-                        return Err(Failure::Unavailable);
-                    }
-                    Ok(format!(
-                        "NATIVE_SYNC blocks={blocks} roots={roots} close=checked"
-                    ))
-                } else {
-                    let count: i64 = db.query_row("SELECT count(*) FROM authority_events WHERE kind='device-retire' AND subject=?1", [vec![0x28_u8;16]], |row| row.get(0)).map_err(|_| Failure::Unavailable)?;
-                    if count != 1 {
-                        return Err(Failure::Unavailable);
-                    }
-                    Ok(
-                        "PASS device-retire signed-event=1 subject=second-device close=checked"
-                            .to_owned(),
-                    )
-                }
-            })();
-            let closed = db.close().map_err(|_| Failure::Unavailable);
-            if closed.is_err() {
-                return Err(Failure::Unavailable);
-            }
-            println!("{}", observation?);
+            let operation = if args[0] == "--sync-observe" {
+                crate::observer::Operation::Sync
+            } else {
+                crate::observer::Operation::Retire
+            };
+            let output =
+                crate::observer::observe(Path::new(&args[1]), operation).map_err(|diagnostic| {
+                    eprintln!("{diagnostic}");
+                    Failure::Unavailable
+                })?;
+            println!("{output}");
             return Ok(());
         }
         if args.len() == 2 && args[0] == "--peer-negative" {
