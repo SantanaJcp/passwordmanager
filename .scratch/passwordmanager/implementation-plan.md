@@ -1,6 +1,6 @@
-# Propuesta Astra — DAG completo de implementación (35 tickets)
+# DAG aprobado — implementación completa (35 tickets)
 
-Fecha: 2026-09-12. Entregable de coordinación/revisión, sin implementación; propuesta local de granularidad para el despacho. Fuente: `.scratch/passwordmanager/spec.md` v1.0 §§0–16, `AGENTS.md`, `docs/agents/issue-tracker.md`, `CONTEXT.md` y anexos incorporados por §5.3. La autorización posterior del usuario comunicada por el orquestador permite ahora ejecutar; no atribuir esa autorización a la especificación histórica.
+Fecha: 2026-09-12. Entregable de coordinación/revisión, sin implementación; granularidad y orden aprobados por el usuario al responder «autorizado». Fuente: `.scratch/passwordmanager/spec.md` v1.0 §§0–16, `AGENTS.md`, `docs/agents/issue-tracker.md`, `CONTEXT.md` y anexos incorporados por §5.3. La autorización posterior del usuario comunicada por el orquestador permite ahora ejecutar; no atribuir esa autorización a la especificación histórica.
 
 ## 1. Condiciones de arranque y límites de ejecución
 
@@ -11,7 +11,7 @@ Fecha: 2026-09-12. Entregable de coordinación/revisión, sin implementación; p
 1. Sin commit base no pueden crearse worktrees del proyecto. **Actualización comunicada por root:** baseline `a7597be` y rama `codex/implement-passwordmanager` creados. Usarlos preservando todo el trabajo documental; no reset/clean ni borrar `.scratch/`.
 2. Crear primero los tickets locales con el formato del tracker. Cada implementador reclama exclusivamente un ticket de la frontera: `open → claimed → resolved`, y solo resuelve con evidencia entregada. Ausencia de resultado requerido no satisface dependencia. Un bloqueo conserva `open`, no inventa un estado `blocked`.
 3. Un worktree/rama por implementador, basado en HEAD integrado con todas sus dependencias. Astra coordina/revisa; Sol seguridad/composición/protocolos y Luna trabajo mecánico delimitado. Merger dedicado integra serialmente y ejecuta suite completa. Usar hasta dos implementadores cuando la cuarta plaza la necesita el merger.
-4. **Actualización comunicada por root:** el usuario autorizó crear repositorio público y subir documentación/código. Origin https://github.com/SantanaJcp/passwordmanager configurado y base master publicada. PR unificado pendiente de commits de ejecución; nunca inventar su URL.
+4. **Actualización comunicada por root:** el usuario autorizó crear repositorio público y subir documentación/código. Origin https://github.com/SantanaJcp/passwordmanager configurado y base master publicada. PR unificado borrador: https://github.com/SantanaJcp/passwordmanager/pull/1.
 5. Baseline de versiones seleccionado no equivale a resolución real. Ticket 01 debe comprobar fuentes/hashes/toolchain/build. Si una versión no existe, no compila o incumple un contrato concreto, guardar evidencia y corregir el contrato propietario + §15; no cambiar silenciosamente a `latest`, sustituir libsodium ni simular construcción exitosa.
 
 **No impiden comenzar, sí impiden cerrar el producto o anunciar soporte:**
@@ -27,13 +27,13 @@ Los gates de entorno son dependencias de evidencia, no excusa para eliminar func
 
 ## 2. Reglas comunes de aceptación y tamaño
 
-Cada ticket debe convertirse en archivo `issues/NN-<slug>.md` con `Spec: ../spec.md`, Requirements, Owner y deps exactas. Añadir punteros a §5.3 y anexos, no copiar schemas a otra fuente normativa. Tabla = propuesta, no segundo tracker de estados.
+Cada ticket debe convertirse en archivo `issues/NN-<slug>.md` con `Spec: ../spec.md`, Requirements, Owner y deps exactas. Añadir punteros a §5.3 y anexos, no copiar schemas a otra fuente normativa. Tickets publicados en [índice local](issues/README.md); esta tabla define dependencias/alcance, no duplica sus estados.
 
 Todos los tickets de código: pruebas red/green, comandos exactos, commit, fixtures sintéticos y evidencia de interfaz pública aplicable. Ningún motor/DB/autoridad mockeado en aceptación; dobles solo en proveedor externo. Todos los criterios siguientes son conjuntivos y binarios. Un `skip`, stub, `todo!`, respuesta estática de éxito o capability no ejecutada **no satisface** el criterio. Cada suite conserva historia/V/P, build, OS/CPU, pasos, resultado y artefactos revisados por canarios. Los scopes no autorizan datos reales en archivos/logs.
 
 Tickets 02–08 son tracer bullets acumulativos, no capas desconectadas: CLI humana/proceso real + SQLite temporal están presentes desde creación, y cada corte añade un recorrido observable. Interfaces internas no deben exponerse solo para mocks. Luna recibe contratos ya integrados; no decide primitivas, autoridad o aislamiento. Si el tamaño real exige división, actualizar DAG local antes de despachar, preservando criterios y sin tareas ocultas paralelas.
 
-## 3. DAG propuesto
+## 3. DAG aprobado
 
 | ID / título | Modelo / dependencias | Corte entregable y criterios binarios | Punteros |
 |---|---|---|---|

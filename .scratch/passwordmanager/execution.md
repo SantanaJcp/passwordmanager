@@ -23,7 +23,7 @@ El usuario solicitó explícitamente `implement-spec` después de publicar la es
 
 ## Condiciones de entrega
 
-El usuario autorizó crear repositorio público y publicar documentación/código: [SantanaJcp/passwordmanager](https://github.com/SantanaJcp/passwordmanager). Origin configurado; base documental subida a master. PR borrador aún no creado: requiere commits de ejecución en rama unificada. No publicar credenciales ni información ajena al proyecto. Un Markdown con enlace previsto no es un PR creado.
+El usuario autorizó crear repositorio público y publicar documentación/código: [SantanaJcp/passwordmanager](https://github.com/SantanaJcp/passwordmanager). Origin configurado; base documental subida a master. PR borrador [#1](https://github.com/SantanaJcp/passwordmanager/pull/1) creado; aún no declara producto implementado. No publicar credenciales ni información ajena al proyecto. Un Markdown con enlace previsto no es un PR creado.
 
 Solo Linux x86_64 está observado en este host. Las pruebas nativas de los otros cinco targets, Chromium propio, revisión independiente y firma/notarización necesitan sus entornos/artefactos. No simular resultados ni retirar esas puertas del alcance; documentar evidencia real y qué no se ejecutó.
 
@@ -35,4 +35,4 @@ Rust instalado de forma local en `.toolchain/`, sin modificar PATH/configuració
 
 Verificado en este host: `rustc 1.98.1 (48a229cea 2026-09-01)`, `cargo 1.98.1 (797e8a9bc 2026-08-05)`; rustfmt/clippy instalados para el mismo toolchain. Bootstrap oficial rustup-init validado SHA-256 `dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71`. [Manifest oficial del toolchain](https://static.rust-lang.org/dist/channel-rust-1.98.1.toml), [bootstrap checksum](https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256). Existencia de versiones no equivale a build del proyecto ni lockfile resuelto: todavía no hay código de producto ni tests ejecutados.
 
-Astra entregó [propuesta de DAG de 35 tickets](implementation-plan.md), comprobada con IDs consecutivos/dependencias previas/sin ciclos y criterios/punteros presentes. Se solicitó aprobación de granularidad/orden antes de publicar los tickets, conforme `to-tickets`. La frontera inicial será 01; no se puede ejecutar tickets descendientes en paralelo antes de integrar sus dependencias.
+Astra entregó [propuesta de DAG de 35 tickets](implementation-plan.md), comprobada con IDs consecutivos/dependencias previas/sin ciclos y criterios/punteros presentes. El usuario aprobó granularidad/orden con «autorizado»; [35 tickets publicados](issues/README.md) conforme `to-tickets`. La frontera inicial es 01; no se puede ejecutar tickets descendientes en paralelo antes de integrar sus dependencias.
