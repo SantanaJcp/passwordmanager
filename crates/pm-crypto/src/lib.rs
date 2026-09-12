@@ -2,10 +2,19 @@
 
 //! The only crate allowed to cross the libsodium FFI boundary.
 //!
-//! Ticket 01 exposes only the linked-library version. Cryptographic operations
-//! and sensitive-buffer handling belong to subsequent approved slices.
+//! Ticket 02 adds the typed G2 foundation and synthetic format vectors. It does
+//! not claim later authority reducers, CRUD flows, backups, or native custody.
+
+mod root;
 
 use std::ffi::CStr;
+
+pub use root::{
+    CreatedRoot, CryptoError, DeviceKeyPair, GrantVectorInput, ItemKind, KdfProfile,
+    OpenedRevisionPackage, PendingGrantVector, Pmf1Vector, RecoveryCode, RevisionPackage,
+    RevisionPackageInput, RootBundle, SignedGrantVector, TrustedRoot, UnlockedRoot,
+    create_human_root, open_human_root, recover_human_root,
+};
 
 /// Returns the version reported by the linked libsodium C artifact.
 #[must_use]

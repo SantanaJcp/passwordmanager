@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 libsodium-sys-stable.workspace = true
+minicbor.workspace = true
 
 [lints]
 workspace = true
