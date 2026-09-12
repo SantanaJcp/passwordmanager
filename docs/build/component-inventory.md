@@ -18,40 +18,63 @@ Runtime/build classification and enabled features are determined by `cargo tree`
 | dary_heap | 0.3.9 | crates.io lock | MIT OR Apache-2.0 |
 | equivalent | 1.0.2 | crates.io lock | Apache-2.0 OR MIT |
 | errno | 0.3.14 | crates.io lock | MIT OR Apache-2.0 |
+| fallible-iterator | 0.3.0 | crates.io lock | MIT/Apache-2.0 |
+| fallible-streaming-iterator | 0.1.9 | crates.io lock | MIT/Apache-2.0 |
 | filetime | 0.2.29 | crates.io lock | MIT/Apache-2.0 |
 | find-msvc-tools | 0.1.12 | crates.io lock | MIT OR Apache-2.0 |
 | flate2 | 1.1.10 | crates.io lock | MIT OR Apache-2.0 |
 | foldhash | 0.2.0 | crates.io lock | Zlib |
 | hashbrown | 0.16.1 | crates.io lock | MIT OR Apache-2.0 |
 | hashbrown | 0.17.1 | crates.io lock | MIT OR Apache-2.0 |
+| hashlink | 0.12.2 | crates.io lock | MIT OR Apache-2.0 |
 | http | 1.5.0 | crates.io lock | MIT OR Apache-2.0 |
 | httparse | 1.10.1 | crates.io lock | MIT OR Apache-2.0 |
 | indexmap | 2.14.2 | crates.io lock | Apache-2.0 OR MIT |
 | itoa | 1.0.18 | crates.io lock | MIT OR Apache-2.0 |
+| js-sys | 0.3.105 | crates.io lock | MIT OR Apache-2.0 |
 | libc | 0.2.189 | crates.io lock | MIT OR Apache-2.0 |
 | libflate | 2.3.2 | crates.io lock | MIT |
 | libflate_lz77 | 2.3.0 | crates.io lock | MIT |
 | libsodium-sys-stable | 1.24.0 | crates.io lock | MIT OR Apache-2.0 |
+| libsqlite3-sys | 0.38.2 | crates.io lock | MIT |
 | linux-raw-sys | 0.12.1 | crates.io lock | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | log | 0.4.34 | crates.io lock | MIT OR Apache-2.0 |
 | memchr | 2.8.3 | crates.io lock | Unlicense OR MIT |
+| minicbor | 2.3.0 | crates.io lock | BlueOak-1.0.0 |
 | minisign-verify | 0.2.5 | crates.io lock | MIT |
 | no_std_io2 | 0.9.4 | crates.io lock | Apache-2.0 OR MIT |
+| once_cell | 1.21.4 | crates.io lock | MIT OR Apache-2.0 |
 | percent-encoding | 2.3.2 | crates.io lock | MIT OR Apache-2.0 |
 | pkg-config | 0.3.34 | crates.io lock | MIT OR Apache-2.0 |
 | pm-cli | 0.1.0 | workspace | AGPL-3.0-only |
 | pm-crypto | 0.1.0 | workspace | AGPL-3.0-only |
 | pm-process-runner | 0.1.0 | workspace | AGPL-3.0-only |
+| pm-vault | 0.1.0 | workspace | AGPL-3.0-only |
+| proc-macro2 | 1.0.107 | crates.io lock | MIT OR Apache-2.0 |
+| quote | 1.0.47 | crates.io lock | MIT OR Apache-2.0 |
 | rle-decode-fast | 1.0.3 | crates.io lock | MIT OR Apache-2.0 |
+| rsqlite-vfs | 0.1.1 | crates.io lock | MIT |
+| rusqlite | 0.40.2 | crates.io lock | MIT |
 | rustix | 1.1.4 | crates.io lock | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| rustversion | 1.0.23 | crates.io lock | MIT OR Apache-2.0 |
 | shlex | 2.0.1 | crates.io lock | MIT OR Apache-2.0 |
 | simd-adler32 | 0.3.10 | crates.io lock | MIT |
+| smallvec | 1.16.1 | crates.io lock | MIT OR Apache-2.0 |
+| sqlite-wasm-rs | 0.5.5 | crates.io lock | MIT |
+| syn | 3.0.5 | crates.io lock | MIT OR Apache-2.0 |
 | tar | 0.4.46 | crates.io lock | MIT OR Apache-2.0 |
+| thiserror | 2.0.20 | crates.io lock | MIT OR Apache-2.0 |
+| thiserror-impl | 2.0.20 | crates.io lock | MIT OR Apache-2.0 |
 | typed-path | 0.12.3 | crates.io lock | MIT OR Apache-2.0 |
+| unicode-ident | 1.0.24 | crates.io lock | (MIT OR Apache-2.0) AND Unicode-3.0 |
 | ureq | 3.4.1 | crates.io lock | MIT OR Apache-2.0 |
 | ureq-proto | 0.6.2 | crates.io lock | MIT OR Apache-2.0 |
 | utf8-zero | 0.8.1 | crates.io lock | MIT OR Apache-2.0 |
 | vcpkg | 0.2.15 | crates.io lock | MIT/Apache-2.0 |
+| wasm-bindgen | 0.2.128 | crates.io lock | MIT OR Apache-2.0 |
+| wasm-bindgen-macro | 0.2.128 | crates.io lock | MIT OR Apache-2.0 |
+| wasm-bindgen-macro-support | 0.2.128 | crates.io lock | MIT OR Apache-2.0 |
+| wasm-bindgen-shared | 0.2.128 | crates.io lock | MIT OR Apache-2.0 |
 | windows-link | 0.2.1 | crates.io lock | MIT OR Apache-2.0 |
 | windows-sys | 0.61.2 | crates.io lock | MIT OR Apache-2.0 |
 | xattr | 1.6.1 | crates.io lock | MIT OR Apache-2.0 |
