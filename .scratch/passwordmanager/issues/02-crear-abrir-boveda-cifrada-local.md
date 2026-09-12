@@ -28,6 +28,12 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [ ] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
 - [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
+### Límite de aceptación G2 de este corte
+
+- Cubrir formato CBOR determinista y límites adversarios, contexto/propósito/AAD completos de G2 §§7–9, sobres, KDF, conservación ante error y vectores sintéticos de formatos.
+- Incluir base humana KH/SK_H y raíz PK_H confiable, vía KR con reintroducción al alta, y manifiesto con partes/sobres externos sin ciclos; no reducir este ticket a cifrar/abrir un blob.
+- Los flujos operativos de CRUD firmado (04), tipos (05), disponibilidad/autoridad (07/16), backup/rotación/restore (21/22) y evidencia nativa/independiente (30–34) conservan sus tickets. Los vectores de sus formatos no equivalen a esos flujos ni a «G2 completo validado».
+
 ## Answer
 Pendiente de implementación y evidencia.
 

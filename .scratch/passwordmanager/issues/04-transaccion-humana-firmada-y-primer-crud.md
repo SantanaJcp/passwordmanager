@@ -25,6 +25,7 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [ ] Crear/leer/editar/eliminar una contraseña por canal humano real usa prepare/commit/receipt y SK_H.
 - [ ] challenge vencido/body cambiado/rol falso/replay son rechazados.
 - [ ] pérdida de respuesta/commit interrumpido recupera recibo o no-op sin escritura parcial. No aceptar `role=human` por request.
+- [ ] El commit durable de G4 §9 incluye el registro cifrado mínimo de auditoría de la operación en la misma transacción que eventos/partes/challenge/outbox. Un fallo de auditoría impide la mutación; no usar callbacks vacíos ni escrituras posteriores. El ticket 06 amplía segmentos/consulta/purga sobre este mecanismo ya real.
 - [ ] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
 - [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
