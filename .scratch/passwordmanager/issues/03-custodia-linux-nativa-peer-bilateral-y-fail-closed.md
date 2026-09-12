@@ -19,6 +19,7 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [Ejecución y toolchain](../execution.md).
 - [DAG aprobado y cobertura](../implementation-plan.md).
 - [Contratos seleccionados](../spec.md#53-anexos-normativos-y-ubicación-de-cada-decisión).
+- [Sondeo de laboratorio Linux](../../../docs/verification/linux-lab-preflight.md) — viabilidad del entorno solamente, no aceptación del producto.
 - [Tracker](../../../docs/agents/issue-tracker.md).
 
 ## Acceptance criteria
@@ -33,3 +34,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-12 — Sondeo no privilegiado verificó que userns con sub-UIDs permite laboratorio multi-UID real. No implementa 03 ni sustituye TLS/RPK, códigos públicos y tests del producto; perfil de producción/reboot permanecen sujetos a evidencia nativa.
