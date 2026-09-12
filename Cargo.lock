@@ -431,8 +431,12 @@ dependencies = [
 name = "pm-vault"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "minicbor",
  "pm-crypto",
+ "pm-custody",
  "rusqlite",
+ "zeroize",
 ]
 
 [[package]]

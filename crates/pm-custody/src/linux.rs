@@ -4,12 +4,9 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::{
-        fd::AsRawFd,
-        unix::{
-            fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-            net::{UnixListener, UnixStream},
-        },
+    os::unix::{
+        fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        net::{UnixListener, UnixStream},
     },
     path::Path,
     sync::Arc,
@@ -39,6 +36,8 @@ use rustls::{
     version,
 };
 use zeroize::{Zeroize, Zeroizing};
+
+use pm_custody::unix_peer_uid;
 
 use crate::{Failure, take_path};
 
@@ -265,7 +264,7 @@ fn probe(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> 
     stream
         .set_write_timeout(Some(IO_TIMEOUT))
         .map_err(|_| Failure::Unavailable)?;
-    let observed_uid = peer_uid(&stream)?;
+    let observed_uid = unix_peer_uid(&stream).map_err(|_| Failure::Unavailable)?;
     if observed_uid != profile.server_uid {
         return Err(Failure::Unavailable);
     }
@@ -311,7 +310,7 @@ fn handle_connection(
     stream
         .set_write_timeout(Some(IO_TIMEOUT))
         .map_err(|_| Failure::Unavailable)?;
-    if peer_uid(&stream)? != expected_uid {
+    if unix_peer_uid(&stream).map_err(|_| Failure::Unavailable)? != expected_uid {
         return Err(Failure::Unavailable);
     }
     let connection = ServerConnection::new(config.clone()).map_err(|_| Failure::Unavailable)?;
@@ -675,30 +674,6 @@ fn bind_socket(path: &Path) -> Result<UnixListener, Failure> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o666))
         .map_err(|_| Failure::Unavailable)?;
     Ok(listener)
-}
-
-fn peer_uid(stream: &UnixStream) -> Result<u32, Failure> {
-    let mut credentials = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut length = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>())
-        .map_err(|_| Failure::Unavailable)?;
-    // SAFETY: the fd is live, and both output pointers are valid for `length`.
-    let result = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut credentials).cast(),
-            &raw mut length,
-        )
-    };
-    if result != 0 || usize::try_from(length).ok() != Some(std::mem::size_of::<libc::ucred>()) {
-        return Err(Failure::Unavailable);
-    }
-    Ok(credentials.uid)
 }
 
 fn take_u32(arguments: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<u32, Failure> {
