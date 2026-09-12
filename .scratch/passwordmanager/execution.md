@@ -26,7 +26,7 @@ El usuario solicitó explícitamente `implement-spec` después de publicar la es
 
 El usuario autorizó crear repositorio público y publicar documentación/código: [SantanaJcp/passwordmanager](https://github.com/SantanaJcp/passwordmanager). Origin configurado; base documental subida a master. PR borrador [#1](https://github.com/SantanaJcp/passwordmanager/pull/1) creado; aún no declara producto implementado. No publicar credenciales ni información ajena al proyecto. Un Markdown con enlace previsto no es un PR creado.
 
-Solo Linux x86_64 está observado en este host. Las pruebas nativas de los otros cinco targets, Chromium propio, revisión independiente y firma/notarización necesitan sus entornos/artefactos. No simular resultados ni retirar esas puertas del alcance; documentar evidencia real y qué no se ejecutó.
+Solo Linux x86_64 está observado en este host. El usuario confirmó disponibilidad de este Linux/Omarchy y una Mac Apple Silicon; acceso/ejecución en la Mac aún no verificados. Linux ARM64, macOS Intel y Windows x64/ARM64 no tienen entorno confirmado. El usuario asumirá la validación final del gate 34 y pidió que Astra también verifique todo lo posible: pruebas/review del agente son evidencia técnica, no auditoría externa certificada ni sustitución de la aceptación humana pendiente. Las pruebas nativas, Chromium propio y firma/notarización necesitan sus entornos/artefactos. No simular resultados ni retirar esas puertas del alcance; documentar evidencia real y qué no se ejecutó.
 
 La especificación y contratos están en [spec.md](spec.md). Este documento registra ejecución, no sustituye el estado de diseño de §15 ni redefine contratos.
 
