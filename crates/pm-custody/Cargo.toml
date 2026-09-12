@@ -1,0 +1,22 @@
+[package]
+name = "pm-custody"
+description = "Native custody process and authenticated local channels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "pm-custody"
+path = "src/main.rs"
+
+[dependencies]
+aws-lc-rs.workspace = true
+libc.workspace = true
+rustls.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true
