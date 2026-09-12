@@ -1,8 +1,8 @@
 # 02 — Crear/abrir bóveda cifrada local
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-02
 Blocked by: 01
 Spec: ../spec.md
 Requirements: R01,R04,R09,R15,R18
@@ -41,3 +41,5 @@ Pendiente de implementación y evidencia.
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-12 — Astra concretó el límite de aceptación G2 del corte: fundamento criptográfico completo, sin absorber flujos operativos asignados posteriormente ni declarar validación runtime global.
+
+2026-09-12 — Reclamado por Sol tras integrar y verificar 01; worktree aislado codex/pm-02. Review formal Astra reservado al final del DAG.
