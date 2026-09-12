@@ -1,0 +1,24 @@
+[workspace]
+members = [
+    "crates/pm-cli",
+    "crates/pm-crypto",
+    "crates/pm-process-runner",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "AGPL-3.0-only"
+repository = "https://github.com/SantanaJcp/passwordmanager"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
+[workspace.dependencies]
+libc = "=0.2.189"
+libsodium-sys-stable = { version = "=1.24.0", default-features = false }
+pm-crypto = { path = "crates/pm-crypto" }
+pm-process-runner = { path = "crates/pm-process-runner" }

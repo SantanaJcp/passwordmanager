@@ -1,0 +1,3 @@
+[env]
+# Cargo resolves this relative path from the workspace root.
+SODIUM_DIST_DIR = { value = "third_party/libsodium", relative = true, force = true }
