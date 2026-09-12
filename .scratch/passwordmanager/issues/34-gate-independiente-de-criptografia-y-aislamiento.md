@@ -9,7 +9,7 @@ Requirements: R09,R10,R18
 Model: gpt-6-astra
 
 ## Objective
-Revisor independiente identificado recibe composición real, código, threat model y evidencias; informe examina criptografía/FFI/claves/parser, aislamiento y actualización y hallazgos críticos se corrigen con regresión y revalidación; informe/version/alcance permanece accesible sin secretos. Falta de tercero = abierto, no sustituir con aprobación de Astra/Sol.
+El usuario, como revisor humano separado de los agentes implementadores, recibe composición real, código, threat model y evidencias; informe examina criptografía/FFI/claves/parser, aislamiento y actualización y hallazgos críticos se corrigen con regresión y revalidación; informe/version/alcance permanece accesible sin secretos. Falta de informe y aceptación humana = abierto, no sustituir con aprobación de Astra/Sol ni presentar como auditoría externa certificada.
 
 ## Scope
 Corte aprobado del DAG; implementar únicamente este ticket, preservando todos los contratos. No omitir criterios ni declarar soporte de plataforma/proveedor no probado. Sin secretos reales, sin cambios de sistema fuera de laboratorio autorizado, sin acciones/sesiones externas administradas por la bóveda.
@@ -21,12 +21,12 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [Contratos seleccionados](../spec.md#53-anexos-normativos-y-ubicación-de-cada-decisión).
 - [Tracker](../../../docs/agents/issue-tracker.md).
 
-Entornos/artefactos externos de aceptación deben existir realmente. Ausencia de evidencia mantiene el ticket sin resolver; revisión de agentes no sustituye revisión independiente especializada.
+Entornos/artefactos externos de aceptación deben existir realmente. Ausencia de evidencia mantiene el ticket sin resolver; la revisión técnica de agentes complementa, pero no sustituye, el informe y la aceptación humana asumidos por el usuario. No se atribuye especialización o certificación no acreditada.
 
 ## Acceptance criteria
-- [ ] Revisor independiente identificado recibe composición real, código, threat model y evidencias.
+- [ ] El usuario, como revisor humano separado de los agentes implementadores, recibe composición real, código, threat model y evidencias.
 - [ ] informe examina criptografía/FFI/claves/parser, aislamiento y actualización y hallazgos críticos se corrigen con regresión y revalidación.
-- [ ] informe/version/alcance permanece accesible sin secretos. Falta de tercero = abierto, no sustituir con aprobación de Astra/Sol.
+- [ ] informe/version/alcance permanece accesible sin secretos. Falta de informe y aceptación humana = abierto, no sustituir con aprobación de Astra/Sol ni presentar como auditoría externa certificada.
 - [ ] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
 - [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
