@@ -19,6 +19,7 @@ El usuario solicitó explícitamente `implement-spec` después de publicar la es
 - TDD: conservar evidencia de red/green, checks y revisión por ticket; no considerar ausencias de dependencias como prueba roja válida de comportamiento.
 - Integración: merger verifica commit/alcance, integra rama sin reescritura destructiva, ejecuta suite/configuración disponibles y reporta evidencia. Solo entonces resolver ticket y recalcular frontera.
 - Worktree se retira solo tras integrar y verificar, si está limpio; conservar rama/commit para trazabilidad. Nunca borrar archivos de otro agente activo.
+- No ejecutar review formal Astra por ticket: el usuario indicó «do the review at the end of all tickets not ticket by tickets». Cada ticket conserva TDD, checks, comprobación propia e integración verificada por merger; estos controles no son la revisión formal de código.
 - Revisión final Astra por dos ejes aislados (`Standards` y `Spec`) conforme `code-review`; no anunciar implementación completa por resolver un subconjunto.
 
 ## Condiciones de entrega
