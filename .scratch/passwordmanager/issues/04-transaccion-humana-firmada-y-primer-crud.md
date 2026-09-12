@@ -34,3 +34,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-12 — Astra explicitó el registro cifrado mínimo de auditoría en el commit atómico G4; 06 amplía ese mecanismo. No cambia el DAG ni el contrato.

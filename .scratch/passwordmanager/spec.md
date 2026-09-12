@@ -7,6 +7,8 @@ Publicación: especificación canónica en seguimiento local; síntesis `to-spec
 
 ## 0. Estado, autoridad y límites de este documento
 
+**Nota posterior de ejecución:** el estado de esta sección describe la publicación `to-spec`. El usuario autorizó después `implement-spec` y el DAG de tickets; autorización, implementación y evidencia actual se registran en [execution.md](execution.md) y [tickets](issues/README.md), sin alterar los contratos cerrados ni afirmar validación anticipada.
+
 - **Contrato funcional: confirmado por el usuario.** Esta especificación formaliza la entrevista grill-me y su confirmación final.
 - **Implementación: no autorizada en esta etapa.** No existe código de producto ni pruebas runtime del motor.
 - **Diseño técnico: G1–G8 cerrados documentalmente para el alcance y perfiles declarados.** Selecciones de ingeniería y contratos concretos enlazados en sección 15; no algoritmos atribuidos al usuario ni seguridad/compatibilidad certificadas. Pruebas nativas, revisión independiente y evidencia de publicación siguen pendientes de ejecución.
