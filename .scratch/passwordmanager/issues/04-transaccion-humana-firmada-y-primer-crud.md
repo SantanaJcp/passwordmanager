@@ -1,8 +1,8 @@
 # 04 — Transacción humana firmada y primer CRUD
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-04
 Blocked by: 03
 Spec: ../spec.md
 Requirements: R03,R04,R06,R09
@@ -36,3 +36,5 @@ Pendiente de implementación y evidencia.
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-12 — Astra explicitó el registro cifrado mínimo de auditoría en el commit atómico G4; 06 amplía ese mecanismo. No cambia el DAG ni el contrato.
+
+2026-09-12 — Reclamado por Sol tras 03 integrado/verificado; mantener registro de auditoría cifrado atómico mínimo para extensiones paralelas 05/06.
