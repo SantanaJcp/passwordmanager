@@ -1,8 +1,8 @@
 # 03 — Custodia Linux nativa, peer bilateral y fail-closed
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-03
 Blocked by: 02
 Spec: ../spec.md
 Requirements: R02,R09,R10,R11
@@ -36,3 +36,5 @@ Pendiente de implementación y evidencia.
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-12 — Sondeo no privilegiado verificó que userns con sub-UIDs permite laboratorio multi-UID real. No implementa 03 ni sustituye TLS/RPK, códigos públicos y tests del producto; perfil de producción/reboot permanecen sujetos a evidencia nativa.
+
+2026-09-12 — Reclamado por Sol después de integrar/verificar 02. Laboratorio descartable multi-UID permitido sin modificar cuentas/configuración del host; no equivale a perfil de producción certificado.
