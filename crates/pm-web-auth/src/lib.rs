@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Trusted Keycloak browser adapter. Configuration is an installed, closed
-//! profile; the delegated caller can select only its opaque identifier.
+//! Trusted web authentication adapters. Configuration is installed and closed;
+//! delegated callers select only opaque request profiles.
 
 use std::{collections::BTreeMap, path::Path};
 
 mod browser;
 mod exchange;
+mod github;
 mod oidc;
 mod provider;
 
@@ -49,6 +50,15 @@ const EXCHANGE_PROFILE_KEYS: [&str; 11] = [
     "ca_der",
 ];
 
+const GITHUB_PROFILE_KEYS: [&str; 6] = [
+    "version",
+    "profile_id",
+    "integration_id",
+    "origin",
+    "connect_port",
+    "ca_der",
+];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProfileError {
     Invalid,
@@ -65,6 +75,84 @@ pub struct Profile {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExchangeProfile {
     values: BTreeMap<String, String>,
+}
+
+/// Installed profile for the single typed GitHub issues request. The network
+/// origin, method, path and headers are not caller-controlled.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GithubProfile {
+    values: BTreeMap<String, String>,
+    connect_port: u16,
+}
+
+impl GithubProfile {
+    /// Parses the closed `github-rest-bearer/1` profile.
+    ///
+    /// # Errors
+    /// Rejects unknown/duplicate fields or any origin/request profile other
+    /// than the selected GitHub API contract.
+    pub fn parse(bytes: &[u8]) -> Result<Self, ProfileError> {
+        let text = std::str::from_utf8(bytes).map_err(|_| ProfileError::Invalid)?;
+        if text.len() > 16 * 1024 || !text.ends_with('\n') {
+            return Err(ProfileError::Invalid);
+        }
+        let mut values = BTreeMap::new();
+        for line in text.lines() {
+            let (key, value) = line.split_once('=').ok_or(ProfileError::Invalid)?;
+            if !GITHUB_PROFILE_KEYS.contains(&key)
+                || value.is_empty()
+                || values.insert(key.to_owned(), value.to_owned()).is_some()
+            {
+                return Err(ProfileError::Invalid);
+            }
+        }
+        let port = get(&values, "connect_port")?
+            .parse::<u16>()
+            .map_err(|_| ProfileError::Invalid)?;
+        if values.len() != GITHUB_PROFILE_KEYS.len()
+            || get(&values, "version")? != "1"
+            || get(&values, "profile_id")? != "github-assigned-issues/1"
+            || get(&values, "integration_id")? != "github-rest-bearer"
+            || get(&values, "origin")? != "https://api.github.com"
+            || port == 0
+            || !Path::new(get(&values, "ca_der")?).is_absolute()
+        {
+            return Err(ProfileError::Invalid);
+        }
+        Ok(Self {
+            values,
+            connect_port: port,
+        })
+    }
+
+    #[must_use]
+    pub fn profile_id(&self) -> &str {
+        self.value("profile_id")
+    }
+
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        self.value("origin")
+    }
+
+    #[must_use]
+    pub const fn connect_port(&self) -> u16 {
+        self.connect_port
+    }
+
+    #[must_use]
+    pub const fn path(&self) -> &'static str {
+        "/issues"
+    }
+
+    #[must_use]
+    pub const fn api_version(&self) -> &'static str {
+        "2026-03-10"
+    }
+
+    pub(crate) fn value(&self, key: &str) -> &str {
+        self.values.get(key).expect("validated GitHub profile")
+    }
 }
 
 impl ExchangeProfile {

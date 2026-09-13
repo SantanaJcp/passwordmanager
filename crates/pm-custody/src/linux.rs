@@ -177,6 +177,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-backup-exercise") => human_backup_exercise(&mut arguments),
         Some("human-backup-restore") => human_backup_restore(&mut arguments),
         Some("human-ssh-lab-setup") => human_ssh_lab_setup(&mut arguments),
+        Some("human-github-lab-setup") => human_github_lab_setup(&mut arguments),
         Some("human-recovery-restore") => human_recovery_restore(&mut arguments),
         Some("human-master-rotate") => human_master_rotate(&mut arguments),
         Some("human-recovery-rotate") => human_recovery_rotate(&mut arguments),
@@ -219,6 +220,61 @@ fn human_ssh_lab_setup(arguments: &mut impl Iterator<Item = OsString>) -> Result
         "PASS human-ssh-lab-setup key={} password={}",
         hex(key_item),
         hex(password_item)
+    );
+    Ok(())
+}
+
+fn human_github_lab_setup(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let token = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let record = LogicalRecord::new(
+        RecordKind::Token,
+        HumanMetadata {
+            title: "Synthetic GitHub assigned issues".to_owned(),
+            destinations: vec![Destination {
+                label: "installed profile".to_owned(),
+                value: "github-assigned-issues/1".to_owned(),
+            }],
+            tags: vec!["synthetic".to_owned()],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![AuthRecord::Token {
+            secret: token.to_vec(),
+            provider: "github".to_owned(),
+            profile_id: "github-assigned-issues/1".to_owned(),
+            destination_refs: vec![0],
+            expires_at: None,
+        }],
+        vec![],
+    );
+    let record = record.map_err(|_| Failure::Unavailable)?;
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    let created = rpc_prepare_record(&mut tls, 9, None, &record)?;
+    rpc_commit(&mut tls, &created)?;
+    let mut enable = vec![24];
+    enable.extend_from_slice(&created.item_id);
+    write_frame(&mut tls, &enable)?;
+    let enabled = decode_prepared_response(&read_frame(&mut tls)?)?;
+    rpc_commit(&mut tls, &enabled)?;
+    println!(
+        "PASS human-github-lab-setup item={} explicit-enable=1",
+        hex(&created.item_id)
     );
     Ok(())
 }
@@ -3064,7 +3120,10 @@ fn run_provider_once(service: &VaultService) -> Result<(), Failure> {
     } else {
         return Ok(());
     };
-    let guarded = if lease.integration_id() == "keycloak-token-exchange" {
+    let guarded = if matches!(
+        lease.integration_id(),
+        "keycloak-token-exchange" | "github-rest-bearer"
+    ) {
         attempts.with_authorized_provider_use(&lease, || call_controlled_provider(provider, &lease))
     } else {
         Ok(call_controlled_provider(provider, &lease))
@@ -3118,6 +3177,8 @@ fn call_controlled_provider(
         3
     } else if lease.integration_id() == "keycloak-token-exchange" {
         4
+    } else if lease.integration_id() == "github-rest-bearer" {
+        5
     } else {
         1
     };
@@ -3125,14 +3186,18 @@ fn call_controlled_provider(
     request.extend_from_slice(lease.attempt_id());
     request.extend_from_slice(lease.revision_id());
     if !lease.reconciliation_only() {
-        if matches!(opcode, 3 | 4) {
+        if matches!(opcode, 3..=5) {
             push_bytes(&mut request, lease.integration_id().as_bytes()).map_err(|_| ())?;
             push_bytes(&mut request, lease.method().as_bytes()).map_err(|_| ())?;
         }
         push_bytes(&mut request, lease.destination().as_bytes()).map_err(|_| ())?;
         push_bytes(&mut request, lease.context()).map_err(|_| ())?;
-        push_bytes(&mut request, lease.username().as_bytes()).map_err(|_| ())?;
-        push_bytes(&mut request, lease.password()).map_err(|_| ())?;
+        if opcode == 5 {
+            push_bytes(&mut request, lease.subject_token().ok_or(())?).map_err(|_| ())?;
+        } else {
+            push_bytes(&mut request, lease.username().as_bytes()).map_err(|_| ())?;
+            push_bytes(&mut request, lease.password()).map_err(|_| ())?;
+        }
         if opcode == 3 {
             if let Some(totp) = lease.totp() {
                 push_bytes(&mut request, totp.secret()).map_err(|_| ())?;
@@ -3174,6 +3239,9 @@ fn call_controlled_provider(
         }),
         5 => Ok(AttemptOutcome::Failed {
             reason: "INTEGRITY_FAILURE",
+        }),
+        6 => Ok(AttemptOutcome::Failed {
+            reason: "RATE_LIMITED",
         }),
         _ => Err(()),
     }

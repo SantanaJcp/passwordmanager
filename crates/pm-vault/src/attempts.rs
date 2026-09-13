@@ -1525,6 +1525,8 @@ fn credential_material(
         Ok(CredentialMaterial::empty())
     } else if integration == "keycloak-token-exchange" {
         token_exchange_material(auth, destination, now)
+    } else if integration == "github-rest-bearer" {
+        github_token_material(auth, destination, now)
     } else {
         password_material(auth, method)
     }
@@ -1543,6 +1545,12 @@ fn matches_authentication_profile(kind: RecordKind, request: &StartAttempt) -> b
                 request.method == "token_exchange"
                     && kind == RecordKind::Token
                     && request.context == request.destination.as_bytes()
+            }
+            "github-rest-bearer" => {
+                request.method == "bearer"
+                    && kind == RecordKind::Token
+                    && request.destination == "github-assigned-issues/1"
+                    && valid_github_context(&request.context)
             }
             _ => false,
         };
@@ -1775,6 +1783,112 @@ fn token_exchange_material(
         totp: None,
         ssh: None,
     })
+}
+
+fn github_token_material(
+    auth: &[u8],
+    destination: &str,
+    now: i64,
+) -> Result<CredentialMaterial, AttemptError> {
+    let mut decoder = Decoder::new(auth);
+    if decoder.array().map_err(|_| AttemptError::Integrity)? != Some(1)
+        || decoder.map().map_err(|_| AttemptError::Integrity)? != Some(6)
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "method"
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "token"
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "secret"
+    {
+        return Err(AttemptError::Integrity);
+    }
+    let token = Zeroizing::new(
+        decoder
+            .bytes()
+            .map_err(|_| AttemptError::Integrity)?
+            .to_vec(),
+    );
+    if decoder.str().map_err(|_| AttemptError::Integrity)? != "provider"
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "github"
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "profile_id"
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != destination
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "destination_refs"
+    {
+        return Err(AttemptError::Integrity);
+    }
+    let refs = decoder
+        .array()
+        .map_err(|_| AttemptError::Integrity)?
+        .ok_or(AttemptError::Integrity)?;
+    for _ in 0..refs {
+        decoder.u16().map_err(|_| AttemptError::Integrity)?;
+    }
+    if decoder.str().map_err(|_| AttemptError::Integrity)? != "expires_at" {
+        return Err(AttemptError::Integrity);
+    }
+    let expires =
+        if decoder.datatype().map_err(|_| AttemptError::Integrity)? == minicbor::data::Type::Null {
+            decoder.null().map_err(|_| AttemptError::Integrity)?;
+            None
+        } else {
+            Some(decoder.i64().map_err(|_| AttemptError::Integrity)?)
+        };
+    if decoder.position() != auth.len()
+        || token.is_empty()
+        || token.len() > 1024
+        || expires.is_some_and(|value| value <= now)
+    {
+        return Err(AttemptError::CredentialUnavailable);
+    }
+    Ok(CredentialMaterial {
+        username: String::new(),
+        password: Zeroizing::new(Vec::new()),
+        subject_token: Some(token),
+        totp: None,
+        ssh: None,
+    })
+}
+
+fn valid_github_context(context: &[u8]) -> bool {
+    let Ok(value) = std::str::from_utf8(context) else {
+        return false;
+    };
+    if !value.ends_with('\n') {
+        return false;
+    }
+    let mut lines = value.lines();
+    if lines.next() != Some("github-assigned-issues/1") {
+        return false;
+    }
+    let Some(filter) = lines.next().and_then(|line| line.strip_prefix("filter=")) else {
+        return false;
+    };
+    let Some(state) = lines.next().and_then(|line| line.strip_prefix("state=")) else {
+        return false;
+    };
+    let Some(sort) = lines.next().and_then(|line| line.strip_prefix("sort=")) else {
+        return false;
+    };
+    let Some(direction) = lines
+        .next()
+        .and_then(|line| line.strip_prefix("direction="))
+    else {
+        return false;
+    };
+    let Some(page) = lines.next().and_then(|line| line.strip_prefix("page=")) else {
+        return false;
+    };
+    let Some(per_page) = lines.next().and_then(|line| line.strip_prefix("per_page=")) else {
+        return false;
+    };
+    matches!(
+        filter,
+        "assigned" | "created" | "mentioned" | "subscribed" | "repos" | "all"
+    ) && matches!(state, "open" | "closed" | "all")
+        && matches!(sort, "created" | "updated" | "comments")
+        && matches!(direction, "asc" | "desc")
+        && page.parse::<u64>().is_ok_and(|value| value > 0)
+        && per_page
+            .parse::<u64>()
+            .is_ok_and(|value| (1..=100).contains(&value))
+        && lines.next().is_none()
 }
 fn load_owned(
     tx: &Transaction<'_>,

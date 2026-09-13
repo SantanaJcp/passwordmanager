@@ -194,6 +194,71 @@ fn keycloak_exchange_lease_is_context_bound_and_rechecked_before_provider_use() 
 }
 
 #[test]
+fn github_bearer_lease_accepts_only_the_closed_request_profile_and_keeps_token_custodial() {
+    let directory = TestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let item = commit_create(&mut human, &github_token_record());
+    enroll(&mut human, &enrollment(AGENT_A, REQUEST_A, &RPK_A), 1);
+    let resume = human.prepare_delegated_resume().unwrap();
+    commit(&mut human, &resume);
+    let enable = human.prepare_enable(item).unwrap();
+    commit(&mut human, &enable);
+    drop(human);
+
+    let peer = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
+    let attempts =
+        AttemptVault::open(DelegatedVault::open(&path, DEVICE, custody).unwrap()).unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
+    )
+    .unwrap();
+    let context = b"github-assigned-issues/1\nfilter=assigned\nstate=open\nsort=updated\ndirection=desc\npage=2\nper_page=50\n";
+    let request = StartAttempt::new(
+        item,
+        "github-rest-bearer",
+        1,
+        "bearer",
+        "github-assigned-issues/1",
+        context.to_vec(),
+        IdempotencyKey::new(now, [0x31; 16]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        attempts.start(&peer, &request).unwrap().state(),
+        AttemptState::Created
+    );
+    let lease = attempts.claim_next().unwrap().unwrap();
+    assert_eq!(lease.context(), context);
+    assert_eq!(
+        lease.subject_token(),
+        Some(b"synthetic-github-pat-canary".as_slice())
+    );
+    assert!(lease.username().is_empty());
+    assert!(lease.password().is_empty());
+
+    let injected = StartAttempt::new(
+        item,
+        "github-rest-bearer",
+        1,
+        "bearer",
+        "github-assigned-issues/1",
+        b"github-assigned-issues/1\nurl=https://reflect.invalid/\n".to_vec(),
+        IdempotencyKey::new(now, [0x32; 16]).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        attempts.start(&peer, &injected),
+        Err(AttemptError::CredentialUnavailable)
+    ));
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn durable_attempts_pin_revision_owner_idempotency_and_never_reexecute_indeterminate() {
     let directory = TestDir::new();
@@ -921,6 +986,34 @@ fn exchange_record() -> LogicalRecord {
             requester_client_secret: b"synthetic-requester-secret-canary".to_vec(),
             provider: "keycloak".to_owned(),
             profile_id: "keycloak-exchange-lab".to_owned(),
+            destination_refs: vec![0],
+            expires_at: None,
+        }],
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+fn github_token_record() -> LogicalRecord {
+    use pm_vault::{AuthRecord, Destination, HumanMetadata};
+    LogicalRecord::new(
+        RecordKind::Token,
+        HumanMetadata {
+            title: "Synthetic GitHub PAT".to_owned(),
+            destinations: vec![Destination {
+                label: "installed profile".to_owned(),
+                value: "github-assigned-issues/1".to_owned(),
+            }],
+            tags: Vec::new(),
+            favorite: false,
+            notes: String::new(),
+            fields: Vec::new(),
+            source_fields: Vec::new(),
+        },
+        vec![AuthRecord::Token {
+            secret: b"synthetic-github-pat-canary".to_vec(),
+            provider: "github".to_owned(),
+            profile_id: "github-assigned-issues/1".to_owned(),
             destination_refs: vec![0],
             expires_at: None,
         }],
