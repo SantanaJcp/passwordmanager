@@ -12,7 +12,7 @@ mod provider;
 pub use oidc::{OidcError, OidcResult};
 pub use provider::serve;
 
-const PROFILE_KEYS: [&str; 19] = [
+const PROFILE_KEYS: [&str; 22] = [
     "version",
     "profile_id",
     "issuer",
@@ -32,6 +32,9 @@ const PROFILE_KEYS: [&str; 19] = [
     "ca_der",
     "callback_cert",
     "callback_key",
+    "method",
+    "extension_path",
+    "extension_sha256",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,7 +68,13 @@ impl Profile {
                 return Err(ProfileError::Invalid);
             }
         }
-        if values.len() != PROFILE_KEYS.len()
+        let passkey = values.contains_key("method");
+        if values.len()
+            != if passkey {
+                PROFILE_KEYS.len()
+            } else {
+                PROFILE_KEYS.len() - 3
+            }
             || get(&values, "version")? != "1"
             || get(&values, "browser_version")? != "153.0.8010.36"
             || !is_identifier(get(&values, "profile_id")?, 128)
@@ -75,6 +84,13 @@ impl Profile {
             || !is_subject(get(&values, "expected_username")?)
             || !valid_scopes(get(&values, "scopes")?)
             || !is_sha256(get(&values, "browser_sha256")?)
+        {
+            return Err(ProfileError::Invalid);
+        }
+        if passkey
+            && (get(&values, "method")? != "webauthn"
+                || !Path::new(get(&values, "extension_path")?).is_absolute()
+                || !is_sha256(get(&values, "extension_sha256")?))
         {
             return Err(ProfileError::Invalid);
         }
@@ -118,6 +134,11 @@ impl Profile {
     #[must_use]
     pub fn browser_version(&self) -> &str {
         self.value("browser_version")
+    }
+
+    #[must_use]
+    pub fn is_passkey(&self) -> bool {
+        self.value("method") == "webauthn"
     }
 
     #[must_use]

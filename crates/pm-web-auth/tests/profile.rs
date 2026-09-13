@@ -65,3 +65,23 @@ fn rejects_unpinned_or_wrong_browser_artifact() {
         Err(ProfileError::Invalid)
     );
 }
+
+#[test]
+fn accepts_only_a_pinned_passkey_extension_profile() {
+    let passkey = format!(
+        "{VALID}method=webauthn\nextension_path=/opt/pm-lab/passkey-extension\nextension_sha256={}\n",
+        "ab".repeat(32)
+    );
+    let profile = Profile::parse(passkey.as_bytes()).unwrap();
+    assert!(profile.is_passkey());
+    let floating = passkey.replace(&"ab".repeat(32), "latest");
+    assert_eq!(
+        Profile::parse(floating.as_bytes()),
+        Err(ProfileError::Invalid)
+    );
+    let missing_adapter = passkey.replace("method=webauthn\n", "");
+    assert_eq!(
+        Profile::parse(missing_adapter.as_bytes()),
+        Err(ProfileError::Invalid)
+    );
+}

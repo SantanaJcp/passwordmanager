@@ -400,6 +400,7 @@ pub struct PasskeyPublicCredential {
     display_name: String,
     backup_eligible: bool,
     backup_state: bool,
+    client_data_json: Vec<u8>,
 }
 impl PasskeyPublicCredential {
     #[allow(clippy::too_many_arguments)]
@@ -412,6 +413,7 @@ impl PasskeyPublicCredential {
         display_name: String,
         backup_eligible: bool,
         backup_state: bool,
+        client_data_json: Vec<u8>,
     ) -> Self {
         Self {
             credential_id,
@@ -422,6 +424,7 @@ impl PasskeyPublicCredential {
             display_name,
             backup_eligible,
             backup_state,
+            client_data_json,
         }
     }
     #[must_use]
@@ -463,6 +466,72 @@ impl PasskeyPublicCredential {
     #[must_use]
     pub const fn backup_state(&self) -> bool {
         self.backup_state
+    }
+
+    /// Browser registration client data, bound to the challenge and origin
+    /// that caused this credential to be created.
+    #[must_use]
+    pub fn client_data_json(&self) -> &[u8] {
+        &self.client_data_json
+    }
+
+    /// Produces the `WebAuthn` `none` attestation for this custodial credential.
+    /// The private key is neither needed nor exposed by this public response.
+    ///
+    /// # Panics
+    /// Panics only if an internally constructed credential bypassed the
+    /// validated 1,024-byte credential-ID limit.
+    #[must_use]
+    pub fn attestation_object(&self) -> Vec<u8> {
+        let mut auth_data = Vec::new();
+        auth_data.extend_from_slice(&digest(self.rp_id.as_bytes()));
+        // UP, UV, BE and AT. BS remains false, matching the stored credential.
+        auth_data.push(0x4d);
+        auth_data.extend_from_slice(&0_u32.to_be_bytes());
+        auth_data.extend_from_slice(&[0; 16]);
+        auth_data.extend_from_slice(
+            &u16::try_from(self.credential_id.len())
+                .expect("validated credential ID fits WebAuthn")
+                .to_be_bytes(),
+        );
+        auth_data.extend_from_slice(&self.credential_id);
+        let mut cose = Encoder::new(Vec::new());
+        cose.map(4)
+            .unwrap()
+            .i8(1)
+            .unwrap()
+            .i8(1)
+            .unwrap()
+            .i8(3)
+            .unwrap()
+            .i8(-8)
+            .unwrap()
+            .i8(-1)
+            .unwrap()
+            .i8(6)
+            .unwrap()
+            .i8(-2)
+            .unwrap()
+            .bytes(&self.public_key)
+            .unwrap();
+        auth_data.extend_from_slice(&cose.into_writer());
+        let mut attestation = Encoder::new(Vec::new());
+        attestation
+            .map(3)
+            .unwrap()
+            .str("fmt")
+            .unwrap()
+            .str("none")
+            .unwrap()
+            .str("attStmt")
+            .unwrap()
+            .map(0)
+            .unwrap()
+            .str("authData")
+            .unwrap()
+            .bytes(&auth_data)
+            .unwrap();
+        attestation.into_writer()
     }
 }
 
@@ -968,6 +1037,15 @@ pub(crate) fn client_data_json(request: &PasskeyRequest) -> Vec<u8> {
     .into_bytes()
 }
 
+pub(crate) fn registration_client_data_json(request: &PasskeyRequest) -> Vec<u8> {
+    format!(
+        "{{\"type\":\"webauthn.create\",\"challenge\":\"{}\",\"origin\":\"{}\",\"crossOrigin\":false}}",
+        base64url(request.challenge()),
+        request.origin()
+    )
+    .into_bytes()
+}
+
 fn base64url(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -991,7 +1069,7 @@ pub(crate) fn encode_status(value: &PasskeyStatus) -> Vec<u8> {
     let mut e = Encoder::new(Vec::new());
     match value {
         PasskeyStatus::Registration(v) => {
-            e.array(10)
+            e.array(11)
                 .unwrap()
                 .u8(1)
                 .unwrap()
@@ -1012,6 +1090,8 @@ pub(crate) fn encode_status(value: &PasskeyStatus) -> Vec<u8> {
                 .bool(v.backup_eligible)
                 .unwrap()
                 .bool(v.backup_state)
+                .unwrap()
+                .bytes(&v.client_data_json)
                 .unwrap();
         }
         PasskeyStatus::Assertion(v) => {
@@ -1080,7 +1160,7 @@ pub(crate) fn decode_status(bytes: &[u8]) -> Result<PasskeyStatus, PasskeyError>
             document_id: d.str().map_err(invalid)?.to_owned(),
             uv: UserVerificationRequirement::parse(d.str().map_err(invalid)?)?,
         }),
-        (10, "registration") => PasskeyStatus::Registration(PasskeyPublicCredential {
+        (11, "registration") => PasskeyStatus::Registration(PasskeyPublicCredential {
             credential_id: d.bytes().map_err(invalid)?.to_vec(),
             rp_id: d.str().map_err(invalid)?.to_owned(),
             user_handle: d.bytes().map_err(invalid)?.to_vec(),
@@ -1089,6 +1169,7 @@ pub(crate) fn decode_status(bytes: &[u8]) -> Result<PasskeyStatus, PasskeyError>
             display_name: d.str().map_err(invalid)?.to_owned(),
             backup_eligible: d.bool().map_err(invalid)?,
             backup_state: d.bool().map_err(invalid)?,
+            client_data_json: d.bytes().map_err(invalid)?.to_vec(),
         }),
         (8, "assertion") => PasskeyStatus::Assertion(PasskeyAssertion {
             credential_id: d.bytes().map_err(invalid)?.to_vec(),

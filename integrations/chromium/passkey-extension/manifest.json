@@ -3,7 +3,7 @@
   "name": "Passwordmanager custodial passkey bridge",
   "version": "0.1.0",
   "key": "MCowBQYDK2VwAyEAAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
-  "permissions": ["nativeMessaging"],
+  "permissions": ["nativeMessaging", "scripting"],
   "host_permissions": ["https://passkey.test:8443/*"],
   "background": {"service_worker": "service.js"},
   "content_scripts": [{

@@ -397,6 +397,14 @@ fn status_json(status: &PasskeyStatus) -> Json {
             fields.push(("signCount".into(), Json::Number("0".into())));
             fields.push(("backupEligible".into(), Json::Bool(value.backup_eligible())));
             fields.push(("backupState".into(), Json::Bool(value.backup_state())));
+            fields.push((
+                "clientDataJSON".into(),
+                Json::String(hex(value.client_data_json())),
+            ));
+            fields.push((
+                "attestationObject".into(),
+                Json::String(hex(&value.attestation_object())),
+            ));
         }
         PasskeyStatus::Assertion(value) => {
             fields.push(("state".into(), Json::String("assertion".into())));

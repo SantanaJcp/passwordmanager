@@ -22,14 +22,22 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [Tracker](../../../docs/agents/issue-tracker.md).
 
 ## Acceptance criteria
-- [ ] P4 crea passkey propia y la misma clave completa assertion y OIDC verificable en proveedor real.
-- [ ] exigencia UP/UV pausa/reanuda solo intento y no puede afirmarla el agente.
-- [ ] challenge expirado/restart/revoke cuenta/origen incorrecto nunca producen éxito ni uso de sustituto virtual/llave OS.
-- [ ] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
+- [x] P4 crea passkey propia y la misma clave completa assertion y OIDC verificable en proveedor real.
+- [x] exigencia UP/UV pausa/reanuda solo intento y no puede afirmarla el agente.
+- [x] challenge expirado/restart/revoke cuenta/origen incorrecto nunca producen éxito ni uso de sustituto virtual/llave OS.
+- [x] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
 - [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
 ## Answer
-Pendiente de implementación y evidencia.
+
+Candidato de implementación completo, pendiente solo de integración y
+verificación por merger. P4 registra una passkey propia contra Keycloak 26.7.3,
+habilita ese item por acción humana separada, usa la misma clave por
+MV3/Native Messaging/TLS-RPK y entrega únicamente un resultado OIDC validado.
+UP/UV usa `/dev/tty` con reautenticación fresca. Expiry, restart del proveedor,
+revocación, cuenta y origen incorrectos quedan cerrados sin autenticador
+virtual, llave de OS ni fallback. Evidencia exacta y límites en
+[ticket-14](../../../docs/verification/ticket-14.md).
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.

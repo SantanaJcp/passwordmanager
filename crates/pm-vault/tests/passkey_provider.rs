@@ -15,7 +15,7 @@ use std::{
 
 use pm_crypto::{KdfProfile, verify_passkey_signature};
 use pm_vault::{
-    AgentEnrollment, AgentPeer, AttemptState, AttemptVault, AuditDeviceCustody,
+    AgentEnrollment, AgentPeer, AttemptOutcome, AttemptState, AttemptVault, AuditDeviceCustody,
     AuthorizationReason, DelegatedVault, HumanChannel, HumanVault, HumanVerification,
     IdempotencyKey, PasskeyError, PasskeyOperation, PasskeyProvider, PasskeyRequest, PasskeyStatus,
     PendingVault, StartAttempt, UserVerificationRequirement,
@@ -80,6 +80,33 @@ fn human_registration_generates_one_independent_g6_key_and_replays_public_respon
     assert_eq!(public.sign_count(), 0);
     assert!(public.backup_eligible());
     assert!(!public.backup_state());
+    let client_data = public.client_data_json();
+    assert_eq!(
+        client_data,
+        br#"{"type":"webauthn.create","challenge":"ISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISE","origin":"https://passkey.test","crossOrigin":false}"#
+    );
+    let attestation = public.attestation_object();
+    let mut decoder = minicbor::Decoder::new(&attestation);
+    assert_eq!(decoder.map().unwrap(), Some(3));
+    assert_eq!(decoder.str().unwrap(), "fmt");
+    assert_eq!(decoder.str().unwrap(), "none");
+    assert_eq!(decoder.str().unwrap(), "attStmt");
+    assert_eq!(decoder.map().unwrap(), Some(0));
+    assert_eq!(decoder.str().unwrap(), "authData");
+    let auth_data = decoder.bytes().unwrap();
+    assert_eq!(&auth_data[..32], pm_crypto::digest(RP.as_bytes()));
+    assert_eq!(
+        auth_data[32], 0x4d,
+        "UP+UV+BE+AT are real registration flags"
+    );
+    assert_eq!(&auth_data[33..37], &[0; 4]);
+    assert_eq!(&auth_data[37..53], &[0; 16]);
+    assert_eq!(
+        usize::from(u16::from_be_bytes(auth_data[53..55].try_into().unwrap())),
+        public.credential_id().len()
+    );
+    assert!(auth_data.ends_with(public.public_key()));
+    assert_eq!(decoder.position(), attestation.len());
     let item = *prepared.prepared().item_id();
     commit(&mut human, prepared.prepared());
     let completed = provider
@@ -295,6 +322,43 @@ fn assertion_needs_bound_up_uv_and_live_attempt_authority_before_signing() {
             .state(),
         AttemptState::Succeeded
     );
+
+    let login = provider
+        .attempts()
+        .start(
+            &peer,
+            &StartAttempt::new(
+                item,
+                "keycloak-webauthn",
+                1,
+                "webauthn",
+                ORIGIN,
+                b"keycloak-lab".to_vec(),
+                IdempotencyKey::new(now, [0x45; 16]).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(login.state(), AttemptState::Created);
+    let lease = provider.attempts().claim_next().unwrap().unwrap();
+    assert_eq!(lease.integration_id(), "keycloak-webauthn");
+    assert_eq!(lease.username(), "alice");
+    assert!(
+        lease.password().is_empty(),
+        "a passkey seed is never leased"
+    );
+    assert_eq!(lease.credential_id(), &item);
+    let finished = provider
+        .attempts()
+        .settle(
+            &lease,
+            AttemptOutcome::Succeeded {
+                result: b"validated-oidc-result".to_vec(),
+            },
+        )
+        .unwrap();
+    assert_eq!(finished.state(), AttemptState::Succeeded);
+    assert_eq!(finished.result(), Some(b"validated-oidc-result".as_slice()));
 
     let rollback_attempt = provider
         .attempts()

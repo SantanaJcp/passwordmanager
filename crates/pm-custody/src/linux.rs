@@ -2898,6 +2898,8 @@ fn call_controlled_provider(
     }
     let opcode = if lease.reconciliation_only() {
         2
+    } else if lease.integration_id() == "keycloak-webauthn" {
+        4
     } else if lease.integration_id() == "keycloak-browser-oidc" {
         3
     } else {
@@ -2907,7 +2909,7 @@ fn call_controlled_provider(
     request.extend_from_slice(lease.attempt_id());
     request.extend_from_slice(lease.revision_id());
     if !lease.reconciliation_only() {
-        if opcode == 3 {
+        if matches!(opcode, 3 | 4) {
             push_bytes(&mut request, lease.integration_id().as_bytes()).map_err(|_| ())?;
             push_bytes(&mut request, lease.method().as_bytes()).map_err(|_| ())?;
         }
@@ -2915,6 +2917,9 @@ fn call_controlled_provider(
         push_bytes(&mut request, lease.context()).map_err(|_| ())?;
         push_bytes(&mut request, lease.username().as_bytes()).map_err(|_| ())?;
         push_bytes(&mut request, lease.password()).map_err(|_| ())?;
+        if opcode == 4 {
+            request.extend_from_slice(lease.credential_id());
+        }
         if opcode == 3 {
             if let Some(totp) = lease.totp() {
                 push_bytes(&mut request, totp.secret()).map_err(|_| ())?;

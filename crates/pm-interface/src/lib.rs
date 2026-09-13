@@ -15,7 +15,7 @@ use std::{
 };
 
 use pm_vault::{
-    AgentPeer, AttemptError, AttemptVault, DelegatedVault, IdempotencyKey, StartAttempt,
+    AgentPeer, AttemptError, AttemptVault, DelegatedVault, IdempotencyKey, RecordKind, StartAttempt,
 };
 
 pub const PROTOCOL: u64 = 1;
@@ -426,6 +426,20 @@ pub fn capabilities_result() -> Result<Json, ErrorCode> {
                         Json::Object(vec![("kind".into(), Json::String("oidc_tokens".into()))]),
                     ),
                 ]),
+                Json::Object(vec![
+                    ("id".into(), Json::String("keycloak-webauthn".into())),
+                    ("version".into(), Json::Number("1".into())),
+                    (
+                        "methods".into(),
+                        Json::Array(vec![Json::String("webauthn".into())]),
+                    ),
+                    ("availability".into(), Json::String("verified".into())),
+                    ("input_schema".into(), schema_start()),
+                    (
+                        "result_schema".into(),
+                        Json::Object(vec![("kind".into(), Json::String("oidc_tokens".into()))]),
+                    ),
+                ]),
             ]),
         ),
         (
@@ -504,7 +518,7 @@ impl VaultEngine {
                     ),
                     (
                         "integrations".into(),
-                        discovery_integrations(credential.destination()),
+                        discovery_integrations(credential.kind(), credential.destination()),
                     ),
                 ])
             })
@@ -590,10 +604,13 @@ impl VaultEngine {
     }
 }
 
-fn discovery_integrations(destination: Option<&str>) -> Json {
+fn discovery_integrations(kind: RecordKind, destination: Option<&str>) -> Json {
     let mut values = vec![Json::String("controlled.external".into())];
     if destination == Some("keycloak-lab") {
         values.push(Json::String("keycloak-browser-oidc".into()));
+    }
+    if kind == RecordKind::Passkey {
+        values.push(Json::String("keycloak-webauthn".into()));
     }
     Json::Array(values)
 }
@@ -655,7 +672,10 @@ pub fn public_attempt_result(
         "expires_at",
         "scope",
     ];
-    if integration_id != "keycloak-browser-oidc" {
+    if !matches!(
+        integration_id,
+        "keycloak-browser-oidc" | "keycloak-webauthn"
+    ) {
         return Ok(Json::Null);
     }
     let Some(result) = result else {
@@ -1065,6 +1085,13 @@ mod tests {
         assert_eq!(
             output.field("access_token").and_then(Json::string),
             Some("new-access")
+        );
+        assert_eq!(
+            public_attempt_result("keycloak-webauthn", Some(valid))
+                .unwrap()
+                .field("subject")
+                .and_then(Json::string),
+            Some("synthetic")
         );
         let reflected = br#"{"kind":"oidc_tokens","issuer":"x","subject":"x","client_id":"x","audience":"x","token_type":"Bearer","access_token":"x","id_token":"x","expires_at":"42","scope":"openid","password":"original"}"#;
         assert_eq!(
