@@ -152,6 +152,45 @@ private-subdirectory denials, publishes only public RPKs through a root-owned
 observer. It never broadens a private directory or changes the runner parent.
 This is still a runtime fixture RED, not native acceptance.
 
+The fourth native product run
+[`34765246514`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34765246514)
+on checkpoint `8b54d20` is **RED** on both targets for two distinct reasons.
+Both CPUs again compiled the native binaries and ran exactly nine applicable
+native tests: one `pm-native-channel` test, five `pm-vault` unit tests and the
+three macOS-applicable `local_vault` tests. The other workspace integration
+executables reported zero tests because their cases remain Linux-gated, so
+this is not a full native workspace suite. Both jobs also verified the
+matching single-architecture Mach-O artifacts.
+
+On Apple silicon, the new prerequisite probe established that
+`/Users/runner/work/_temp` itself is not traversable by `_passwordmanager`.
+The laboratory stopped there before product setup, exactly as required; it
+did not modify the runner-owned parent. Moving the fixture outside the
+documented `RUNNER_TEMP` root would change the authorized method and therefore
+requires explicit approval. The single proposed replacement is the fixed
+`/private/var/tmp/passwordmanager-ticket26` root, with no alternate path: first
+require its parent to be root-owned mode `01777`, apply the existing collision
+guard, create the fixture root runner-owned `0711`, retain every private child
+at `0700`, run the same bilateral access probes, and clean only that owned
+fixture root.
+
+On Intel, the parent traversal probes passed and the fixture advanced through
+synthetic key generation, public-RPK publication, bootstrap/vault creation,
+launchd bootstrap, live process user/command checks and the protected-file
+metadata checks. The first real agent probe then received the explicit
+`CUSTODY_UNAVAILABLE` result. Read-only inspection bounds the failure to the
+probe's profile/key validation, Unix connection/configuration, cross-UID
+`getpeereid` comparison, or TLS-RPK/ALPN exchange. The profile is created by
+the root provisioner as mode `0444`; the agent key is created by the real
+agent UID under its own `0700` directory; the server profile and bootstrap
+derive from the same server RPK; and the published agent RPK is byte-compared
+with its private key's public companion before bootstrap provisioning. Those
+facts make an obvious path or trust-input divergence less likely, but the
+opaque failure does not prove which remaining boundary failed. The successful
+same-UID socket-pair `getpeereid` unit test does not establish the cross-UID
+launchd case. No product dispatch, native primitive, or verification method
+was changed on the basis of this uncertainty.
+
 The acceptance-workflow checker was written before the workflow existed:
 
 ```text
