@@ -4,6 +4,7 @@
 
 use std::{
     fmt,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -11,12 +12,12 @@ use std::{
 
 use minicbor::{Decoder, Encoder, data::Type};
 use pm_crypto::{
-    CryptoError, RevisionPackageInput, TrustedRoot, UnlockedRoot, digest, fill_random, random_id,
-    verify_human_command,
+    CryptoError, DigestState, RevisionPackageInput, TrustedRoot, UnlockedRoot, digest, fill_random,
+    random_id, verify_human_command,
 };
 pub use pm_native_channel::AuthenticatedHumanChannel as HumanChannel;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::audit::{
     self, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome,
@@ -43,6 +44,7 @@ pub enum HumanCommitError {
     Integrity,
     AuditKeyUnavailable,
     InvalidSignature,
+    Io(std::io::Error),
     ItemNotFound,
     RandomUnavailable,
     StateChanged,
@@ -63,6 +65,7 @@ impl fmt::Display for HumanCommitError {
             Self::Integrity => "audit integrity verification failed",
             Self::AuditKeyUnavailable => "device audit custody is unavailable",
             Self::InvalidSignature => "invalid human signature",
+            Self::Io(_) => "human content stream failed",
             Self::ItemNotFound => "item not found",
             Self::RandomUnavailable => "secure random source unavailable",
             Self::StateChanged => "vault authority state changed",
@@ -85,6 +88,25 @@ impl From<CryptoError> for HumanCommitError {
 impl From<rusqlite::Error> for HumanCommitError {
     fn from(value: rusqlite::Error) -> Self {
         Self::Storage(value)
+    }
+}
+
+impl From<std::io::Error> for HumanCommitError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+/// One bounded plaintext source matched to a declared attachment descriptor.
+pub struct AttachmentReader<'a> {
+    id: [u8; 16],
+    reader: &'a mut dyn Read,
+}
+
+impl<'a> AttachmentReader<'a> {
+    #[must_use]
+    pub fn new(id: [u8; 16], reader: &'a mut dyn Read) -> Self {
+        Self { id, reader }
     }
 }
 
@@ -514,7 +536,7 @@ impl HumanVault {
         if staged.body != body_bytes || staged.operation != command.operation {
             return Err(HumanCommitError::BodyChanged);
         }
-        validate_staged(&staged, &body)?;
+        validate_staged(&transaction, &staged, &body)?;
         let committed_at_us = now_us()?;
         let event_id = random_id()?;
         let previous = current_head(&transaction)?;
@@ -591,6 +613,14 @@ impl HumanVault {
             [body.transaction_id.as_slice()],
         )?;
         transaction.execute(
+            "DELETE FROM human_staging_stream_chunks WHERE transaction_id=?1",
+            [body.transaction_id.as_slice()],
+        )?;
+        transaction.execute(
+            "DELETE FROM human_staging_streams WHERE transaction_id=?1",
+            [body.transaction_id.as_slice()],
+        )?;
+        transaction.execute(
             "INSERT INTO human_receipts
              (transaction_id,body_hash,committed_heads,committed_at_us,outcome)
              VALUES (?1,?2,?3,?4,'committed')",
@@ -643,6 +673,119 @@ impl HumanVault {
         self.prepare_record_write(random_id()?, record)
     }
 
+    /// Encrypts declared files incrementally into SQLite staging and prepares
+    /// one atomic signed create without buffering a whole file.
+    ///
+    /// # Errors
+    /// Rejects short/long streams, hash mismatch, size overflow, I/O faults, or
+    /// storage failure without publishing any item or partial staging rows.
+    #[allow(clippy::too_many_lines)]
+    pub fn prepare_create_record_streaming(
+        &mut self,
+        record: &LogicalRecord,
+        sources: &mut [AttachmentReader<'_>],
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        self.channel.verify()?;
+        if record.attachments().len() != sources.len()
+            || record
+                .attachments()
+                .iter()
+                .zip(sources.iter())
+                .any(|(a, s)| a.id() != &s.id || !a.content().is_empty())
+        {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let item = random_id()?;
+        let revision = random_id()?;
+        let transaction_id = random_id()?;
+        let challenge = random_challenge()?;
+        let human = record.encode_human();
+        let auth = record.encode_auth();
+        let package = self
+            .root
+            .seal_revision_package(RevisionPackageInput {
+                item,
+                revision,
+                issuer_device: self.device,
+                modified_at: now_us()?,
+                kind: record.kind().crypto(),
+                human_plaintext: &human,
+                auth_plaintext: auth.as_deref(),
+            })?
+            .to_bytes();
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (descriptor, source) in record.attachments().iter().zip(sources.iter_mut()) {
+            let mut sealer = self.root.start_file(*descriptor.id(), revision)?;
+            let mut digest_state = DigestState::new()?;
+            let mut remaining = descriptor.size();
+            let mut index = 0_i64;
+            loop {
+                let count = usize::try_from(remaining.min(1024 * 1024))
+                    .map_err(|_| HumanCommitError::InvalidInput)?;
+                let mut plaintext = Zeroizing::new(vec![0_u8; count]);
+                source.reader.read_exact(&mut plaintext)?;
+                digest_state.update(&plaintext);
+                remaining -= u64::try_from(count).map_err(|_| HumanCommitError::InvalidInput)?;
+                let final_chunk = remaining == 0;
+                let frame = sealer.seal_chunk(&plaintext, final_chunk)?;
+                plaintext.zeroize();
+                transaction.execute("INSERT INTO human_staging_stream_chunks (transaction_id,attachment_id,chunk_index,ciphertext) VALUES (?1,?2,?3,?4)",params![transaction_id.as_slice(),descriptor.id().as_slice(),index,frame])?;
+                index = index.checked_add(1).ok_or(HumanCommitError::InvalidInput)?;
+                if final_chunk {
+                    break;
+                }
+            }
+            let mut extra = [0_u8; 1];
+            if source.reader.read(&mut extra)? != 0 || digest_state.finish() != *descriptor.sha256()
+            {
+                return Err(HumanCommitError::InvalidInput);
+            }
+            transaction.execute("INSERT INTO human_staging_streams (transaction_id,attachment_id,header,chunk_count) VALUES (?1,?2,?3,?4)",params![transaction_id.as_slice(),descriptor.id().as_slice(),sealer.header(),index])?;
+        }
+        let expected_state = state_digest(&transaction, self.root.vault_id(), 1)?;
+        let object_digest = Some(stream_object_digest(
+            &transaction,
+            transaction_id,
+            &package,
+        )?);
+        let event_manifest = encode_event_manifest(
+            "item-revision",
+            item,
+            Some(revision),
+            object_digest,
+            None,
+            None,
+        );
+        let body = encode_body(&Body {
+            transaction_id,
+            events_manifest_digest: digest(&event_manifest),
+            event_count: 1,
+            object_manifest_digest: object_digest,
+        });
+        let body_hash = digest(&body);
+        let expires_at_us = now_us()?
+            .checked_add(CHALLENGE_LIFETIME_US)
+            .ok_or(HumanCommitError::InvalidCommand)?;
+        let command = encode_command(&CommandFields {
+            vault: *self.root.vault_id(),
+            challenge,
+            expected_state,
+            operation: "item_write",
+            body_hash,
+            expires_at_us,
+        });
+        transaction.execute("INSERT INTO human_challenges (challenge,transaction_id,command,body_hash,expected_state,expires_at_us,consumed) VALUES (?1,?2,?3,?4,?5,?6,0)",params![challenge.as_slice(),transaction_id.as_slice(),command,body_hash.as_slice(),expected_state.as_slice(),expires_at_us])?;
+        transaction.execute("INSERT INTO human_staging (transaction_id,operation,event_kind,item_id,revision_id,body,package,item_kind,attachments) VALUES (?1,'item_write','item-revision',?2,?3,?4,?5,?6,NULL)",params![transaction_id.as_slice(),item.as_slice(),revision.as_slice(),body,package,record.kind().name()])?;
+        transaction.commit()?;
+        Ok(PreparedHumanCommand {
+            transaction_id,
+            item_id: item,
+            command,
+            body,
+        })
+    }
+
     /// Stages a complete replacement revision for any active logical item.
     ///
     /// # Errors
@@ -656,7 +799,9 @@ impl HumanVault {
         self.prepare_record_write(item, record)
     }
 
-    /// Reads, authenticates and reconstructs one complete logical record.
+    /// Reads and authenticates one logical record. Inline attachment bodies are
+    /// reconstructed; streaming attachments remain descriptors and are read with
+    /// `read_attachment_to` so this metadata operation stays bounded-memory.
     ///
     /// Passkey material returned here is preserved content only; this method is
     /// not a `WebAuthn` authenticator and cannot perform a login.
@@ -692,28 +837,99 @@ impl HumanVault {
             .iter()
             .map(|value| *value.id())
             .collect();
+        let mut has_stream = false;
         for id in ids {
-            let file: Vec<u8> = connection
+            let file: Option<Vec<u8>> = connection
                 .query_row(
                     "SELECT package FROM attachment_parts WHERE attachment_id=?1 AND revision_id=?2",
                     params![id.as_slice(), revision.as_slice()],
                     |row| row.get(0),
                 )
-                .optional()?
-                .ok_or(HumanCommitError::InvalidCommand)?;
-            let content = self.root.open_file(id, revision, &file)?;
-            record.restore_attachment(id, content)?;
+                .optional()?;
+            if let Some(file) = file {
+                let content = self.root.open_file(id, revision, &file)?;
+                record.restore_attachment(id, content)?;
+            } else {
+                let exists: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attachment_streams WHERE attachment_id=?1 AND revision_id=?2)",
+                    params![id.as_slice(), revision.as_slice()],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    return Err(HumanCommitError::InvalidCommand);
+                }
+                has_stream = true;
+            }
         }
         let attachment_count: i64 = connection.query_row(
-            "SELECT count(*) FROM attachment_parts WHERE revision_id=?1",
+            "SELECT (SELECT count(*) FROM attachment_parts WHERE revision_id=?1) + (SELECT count(*) FROM attachment_streams WHERE revision_id=?1)",
             [revision.as_slice()],
             |row| row.get(0),
         )?;
         if usize::try_from(attachment_count).ok() != Some(record.attachments().len()) {
             return Err(HumanCommitError::InvalidCommand);
         }
-        record.validate_complete()?;
+        if has_stream {
+            record.validate_descriptors()?;
+        } else {
+            record.validate_complete()?;
+        }
         Ok(record)
+    }
+
+    /// Authenticates and writes one active attachment incrementally.
+    ///
+    /// # Errors
+    /// Returns an error for altered/missing chunks, descriptor mismatch or output I/O.
+    pub fn read_attachment_to(
+        &self,
+        item: [u8; 16],
+        attachment: [u8; 16],
+        output: &mut dyn Write,
+    ) -> Result<(), HumanCommitError> {
+        self.channel.verify()?;
+        let connection = open_connection(&self.path)?;
+        let (revision_bytes,package):(Vec<u8>,Vec<u8>)=connection.query_row("SELECT i.visible_revision,r.package FROM vault_items i JOIN revision_parts r ON r.revision_id=i.visible_revision WHERE i.item_id=?1 AND i.status='active'",[item.as_slice()],|row|Ok((row.get(0)?,row.get(1)?))).optional()?.ok_or(HumanCommitError::ItemNotFound)?;
+        let revision = bytes::<16>(&revision_bytes)?;
+        let opened = self.root.open_revision_package(&package)?;
+        let record =
+            LogicalRecord::decode_parts(opened.human_plaintext(), opened.auth_plaintext())?;
+        let descriptor = record
+            .attachments()
+            .iter()
+            .find(|value| value.id() == &attachment)
+            .ok_or(HumanCommitError::ItemNotFound)?;
+        let (header,count):(Vec<u8>,i64)=connection.query_row("SELECT header,chunk_count FROM attachment_streams WHERE attachment_id=?1 AND revision_id=?2",params![attachment.as_slice(),revision.as_slice()],|row|Ok((row.get(0)?,row.get(1)?))).optional()?.ok_or(HumanCommitError::ItemNotFound)?;
+        let mut decryptor = self.root.start_file_open(attachment, revision, &header)?;
+        let mut digest_state = DigestState::new()?;
+        let mut total = 0_u64;
+        let mut statement=connection.prepare("SELECT chunk_index,ciphertext FROM attachment_stream_chunks WHERE attachment_id=?1 AND revision_id=?2 ORDER BY chunk_index")?;
+        let mut rows = statement.query(params![attachment.as_slice(), revision.as_slice()])?;
+        let mut seen = 0_i64;
+        while let Some(row) = rows.next()? {
+            let index: i64 = row.get(0)?;
+            let frame: Vec<u8> = row.get(1)?;
+            if index != seen {
+                return Err(HumanCommitError::InvalidCommand);
+            }
+            let mut plain = decryptor.open_chunk(&frame, seen + 1 == count)?;
+            total = total
+                .checked_add(
+                    u64::try_from(plain.len()).map_err(|_| HumanCommitError::InvalidInput)?,
+                )
+                .ok_or(HumanCommitError::InvalidInput)?;
+            digest_state.update(&plain);
+            output.write_all(&plain)?;
+            plain.zeroize();
+            seen += 1;
+        }
+        if seen != count
+            || total != descriptor.size()
+            || digest_state.finish() != *descriptor.sha256()
+        {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        Ok(())
     }
 
     /// Updates tags/favorite by publishing a complete encrypted revision.
@@ -953,6 +1169,7 @@ struct Challenge {
 }
 
 struct Staged {
+    transaction_id: [u8; 16],
     operation: String,
     event_kind: String,
     item_id: [u8; 16],
@@ -1004,19 +1221,15 @@ fn apply_staged(transaction: &Transaction<'_>, staged: &Staged) -> rusqlite::Res
                    visible_revision=excluded.visible_revision,kind=excluded.kind,status='active'",
                 params![staged.item_id.as_slice(), revision.as_slice(), kind],
             )?;
-            for (attachment, attachment_package) in decode_staged_attachments(
-                staged
-                    .attachments
-                    .as_ref()
-                    .expect("validated staged attachments"),
-            )
-            .map_err(|_| rusqlite::Error::InvalidQuery)?
-            {
-                transaction.execute(
-                    "INSERT INTO attachment_parts (attachment_id,revision_id,package) VALUES (?1,?2,?3)",
-                    params![attachment.as_slice(), revision.as_slice(), attachment_package],
-                )?;
+            if let Some(encoded) = &staged.attachments {
+                for (attachment, attachment_package) in
+                    decode_staged_attachments(encoded).map_err(|_| rusqlite::Error::InvalidQuery)?
+                {
+                    transaction.execute("INSERT INTO attachment_parts (attachment_id,revision_id,package) VALUES (?1,?2,?3)",params![attachment.as_slice(),revision.as_slice(),attachment_package])?;
+                }
             }
+            transaction.execute("INSERT INTO attachment_streams (attachment_id,revision_id,header,chunk_count) SELECT attachment_id,?2,header,chunk_count FROM human_staging_streams WHERE transaction_id=?1",params![staged.transaction_id.as_slice(),revision.as_slice()])?;
+            transaction.execute("INSERT INTO attachment_stream_chunks (attachment_id,revision_id,chunk_index,ciphertext) SELECT attachment_id,?2,chunk_index,ciphertext FROM human_staging_stream_chunks WHERE transaction_id=?1",params![staged.transaction_id.as_slice(),revision.as_slice()])?;
         }
         "trash" => {
             transaction.execute(
@@ -1030,19 +1243,39 @@ fn apply_staged(transaction: &Transaction<'_>, staged: &Staged) -> rusqlite::Res
     Ok(())
 }
 
-fn validate_staged(staged: &Staged, body: &Body) -> Result<(), HumanCommitError> {
-    let object_digest =
-        staged_object_digest(staged.package.as_deref(), staged.attachments.as_deref());
+fn validate_staged(
+    transaction: &Transaction<'_>,
+    staged: &Staged,
+    body: &Body,
+) -> Result<(), HumanCommitError> {
+    let stream_count: i64 = transaction.query_row(
+        "SELECT count(*) FROM human_staging_streams WHERE transaction_id=?1",
+        [staged.transaction_id.as_slice()],
+        |row| row.get(0),
+    )?;
+    let object_digest = if stream_count > 0 {
+        Some(stream_object_digest(
+            transaction,
+            staged.transaction_id,
+            staged
+                .package
+                .as_deref()
+                .ok_or(HumanCommitError::BodyChanged)?,
+        )?)
+    } else {
+        staged_object_digest(staged.package.as_deref(), staged.attachments.as_deref())
+    };
     let valid_shape = match staged.event_kind.as_str() {
         "item-revision" => {
             staged.operation == "item_write"
                 && staged.revision_id.is_some()
                 && staged.package.is_some()
                 && staged.item_kind.is_some()
-                && staged
+                && (staged
                     .attachments
                     .as_deref()
                     .is_some_and(|value| decode_staged_attachments(value).is_ok())
+                    || stream_count > 0)
                 && staged.audit_generation.is_none()
                 && staged.audit_through_seq.is_none()
         }
@@ -1186,6 +1419,52 @@ fn staged_object_digest(package: Option<&[u8]>, attachments: Option<&[u8]>) -> O
         encoder.null().unwrap();
     }
     Some(digest(&encoder.into_writer()))
+}
+
+fn stream_object_digest(
+    transaction: &Transaction<'_>,
+    transaction_id: [u8; 16],
+    package: &[u8],
+) -> Result<[u8; 32], HumanCommitError> {
+    let mut state = DigestState::new()?;
+    state.update(b"pm/staged-stream/v1");
+    state.update(
+        &u64::try_from(package.len())
+            .map_err(|_| HumanCommitError::InvalidInput)?
+            .to_be_bytes(),
+    );
+    state.update(package);
+    let mut headers = transaction.prepare("SELECT attachment_id,header,chunk_count FROM human_staging_streams WHERE transaction_id=?1 ORDER BY attachment_id")?;
+    let mut rows = headers.query([transaction_id.as_slice()])?;
+    while let Some(row) = rows.next()? {
+        let id: Vec<u8> = row.get(0)?;
+        let header: Vec<u8> = row.get(1)?;
+        let count: i64 = row.get(2)?;
+        state.update(&id);
+        state.update(
+            &u64::try_from(header.len())
+                .map_err(|_| HumanCommitError::InvalidInput)?
+                .to_be_bytes(),
+        );
+        state.update(&header);
+        state.update(&count.to_be_bytes());
+    }
+    let mut chunks=transaction.prepare("SELECT attachment_id,chunk_index,ciphertext FROM human_staging_stream_chunks WHERE transaction_id=?1 ORDER BY attachment_id,chunk_index")?;
+    let mut rows = chunks.query([transaction_id.as_slice()])?;
+    while let Some(row) = rows.next()? {
+        let id: Vec<u8> = row.get(0)?;
+        let index: i64 = row.get(1)?;
+        let bytes_value: Vec<u8> = row.get(2)?;
+        state.update(&id);
+        state.update(&index.to_be_bytes());
+        state.update(
+            &u64::try_from(bytes_value.len())
+                .map_err(|_| HumanCommitError::InvalidInput)?
+                .to_be_bytes(),
+        );
+        state.update(&bytes_value);
+    }
+    Ok(state.finish())
 }
 
 fn encode_command(command: &CommandFields<'_>) -> Vec<u8> {
@@ -1473,6 +1752,7 @@ fn load_staging(
                 let item: Vec<u8> = row.get(2)?;
                 let revision: Option<Vec<u8>> = row.get(3)?;
                 Ok(Staged {
+                    transaction_id,
                     operation: row.get(0)?,
                     event_kind: row.get(1)?,
                     item_id: item.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?,

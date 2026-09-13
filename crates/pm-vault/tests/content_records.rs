@@ -2,14 +2,19 @@
 
 #![cfg(target_os = "linux")]
 
-use std::{fs, os::unix::net::UnixStream, path::Path};
+use std::{
+    fs,
+    io::{Read, Write},
+    os::unix::net::UnixStream,
+    path::Path,
+};
 
 use pm_crypto::KdfProfile;
 use pm_vault::{
-    Attachment, AuthRecord, CustomField, Destination, GeneratorConfig, HumanChannel,
-    HumanCommitError, HumanMetadata, HumanVault, LogicalRecord, LogicalValue, PasswordRng,
-    PendingVault, PrivateKeyFormat, RecordKind, SearchQuery, SourceEncoding, SourceField,
-    TotpAlgorithm,
+    Attachment, AttachmentReader, AuthRecord, CustomField, Destination, GeneratorConfig,
+    HumanChannel, HumanCommitError, HumanMetadata, HumanVault, LogicalRecord, LogicalValue,
+    PasswordRng, PendingVault, PrivateKeyFormat, RecordKind, SearchQuery, SourceEncoding,
+    SourceField, TotpAlgorithm,
 };
 use rusqlite::Connection;
 
@@ -22,6 +27,227 @@ impl PasswordRng for FailingRng {
     fn fill(&mut self, _output: &mut [u8]) -> Result<(), HumanCommitError> {
         Err(HumanCommitError::RandomUnavailable)
     }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn attachment_above_16_mib_streams_atomically_in_bounded_chunks() {
+    const SIZE: u64 = 16 * 1024 * 1024 + 4096;
+    let directory = tempfile_dir("streaming");
+    let path = directory.join("vault.sqlite3");
+    persist_test_vault(&path);
+    let (mut vault, _peer) = open_human(&path);
+    let expected_hash = pattern_hash(SIZE);
+    let attachment = Attachment::descriptor(
+        [0x79; 16],
+        "large-雪.bin",
+        "application/octet-stream",
+        SIZE,
+        expected_hash,
+    )
+    .unwrap();
+    let record = LogicalRecord::new_streaming(
+        RecordKind::File,
+        HumanMetadata {
+            title: "Large".to_owned(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![attachment],
+    )
+    .unwrap();
+    let mut input = PatternReader {
+        remaining: SIZE,
+        position: 0,
+    };
+    let mut sources = [AttachmentReader::new([0x79; 16], &mut input)];
+    let prepared = vault
+        .prepare_create_record_streaming(&record, &mut sources)
+        .unwrap();
+    vault
+        .commit(
+            prepared.command(),
+            &vault.sign(&prepared).unwrap(),
+            prepared.body(),
+        )
+        .unwrap();
+    let metadata = vault.read_record(*prepared.item_id()).unwrap();
+    assert_eq!(metadata.attachments()[0].size(), SIZE);
+    assert!(metadata.attachments()[0].content().is_empty());
+    let mut output = HashingWriter::new();
+    vault
+        .read_attachment_to(*prepared.item_id(), [0x79; 16], &mut output)
+        .unwrap();
+    assert_eq!(output.size, SIZE);
+    assert_eq!(output.finish(), expected_hash);
+    let connection = Connection::open(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM attachment_stream_chunks", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        17
+    );
+    assert!(
+        connection
+            .query_row(
+                "SELECT max(length(ciphertext)) FROM attachment_stream_chunks",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap()
+            <= 1024 * 1024 + 21
+    );
+
+    let failed = Attachment::descriptor(
+        [0x7a; 16],
+        "short.bin",
+        "application/octet-stream",
+        SIZE,
+        expected_hash,
+    )
+    .unwrap();
+    let failed = LogicalRecord::new_streaming(
+        RecordKind::File,
+        HumanMetadata {
+            title: "Short".to_owned(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![failed],
+    )
+    .unwrap();
+    let mut short = PatternReader {
+        remaining: 1024,
+        position: 0,
+    };
+    let mut sources = [AttachmentReader::new([0x7a; 16], &mut short)];
+    assert!(matches!(
+        vault.prepare_create_record_streaming(&failed, &mut sources),
+        Err(HumanCommitError::Io(_))
+    ));
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM human_staging_streams", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        0
+    );
+
+    let exact_hash = pattern_hash(1024);
+    let excess = Attachment::descriptor(
+        [0x7e; 16],
+        "excess.bin",
+        "application/octet-stream",
+        1024,
+        exact_hash,
+    )
+    .unwrap();
+    let excess = LogicalRecord::new_streaming(
+        RecordKind::File,
+        HumanMetadata {
+            title: "Excess".to_owned(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![excess],
+    )
+    .unwrap();
+    let mut overlong = PatternReader {
+        remaining: 1025,
+        position: 0,
+    };
+    let mut sources = [AttachmentReader::new([0x7e; 16], &mut overlong)];
+    assert!(matches!(
+        vault.prepare_create_record_streaming(&excess, &mut sources),
+        Err(HumanCommitError::InvalidInput)
+    ));
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM human_staging_streams", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        0
+    );
+    drop(connection);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+struct PatternReader {
+    remaining: u64,
+    position: u64,
+}
+impl Read for PatternReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = buffer.len().min(usize::try_from(self.remaining).unwrap());
+        for byte in &mut buffer[..count] {
+            *byte = b'a' + u8::try_from(self.position % 23).unwrap();
+            self.position += 1;
+        }
+        self.remaining -= u64::try_from(count).unwrap();
+        Ok(count)
+    }
+}
+struct HashingWriter {
+    digest: pm_crypto::DigestState,
+    size: u64,
+}
+impl HashingWriter {
+    fn new() -> Self {
+        Self {
+            digest: pm_crypto::DigestState::new().unwrap(),
+            size: 0,
+        }
+    }
+    fn finish(self) -> [u8; 32] {
+        self.digest.finish()
+    }
+}
+impl Write for HashingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.digest.update(bytes);
+        self.size += u64::try_from(bytes.len()).unwrap();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn pattern_hash(size: u64) -> [u8; 32] {
+    let mut reader = PatternReader {
+        remaining: size,
+        position: 0,
+    };
+    let mut digest = pm_crypto::DigestState::new().unwrap();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let count = reader.read(&mut chunk).unwrap();
+        if count == 0 {
+            break;
+        }
+        digest.update(&chunk[..count]);
+    }
+    digest.finish()
 }
 
 #[test]

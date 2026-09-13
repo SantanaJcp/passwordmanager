@@ -282,6 +282,30 @@ impl Attachment {
         })
     }
 
+    /// Creates metadata for content supplied through the streaming seam.
+    ///
+    /// # Errors
+    /// Rejects declared sizes above 16 GiB or oversized untrusted names.
+    pub fn descriptor(
+        id: [u8; 16],
+        name: &str,
+        mime: &str,
+        size: u64,
+        sha256: [u8; 32],
+    ) -> Result<Self, HumanCommitError> {
+        if name.len() > MAX_TITLE || mime.len() > MAX_TITLE || size > MAX_FILE {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        Ok(Self {
+            id,
+            name: name.to_owned(),
+            mime: mime.to_owned(),
+            size,
+            sha256,
+            content: Vec::new(),
+        })
+    }
+
     #[must_use]
     pub const fn id(&self) -> &[u8; 16] {
         &self.id
@@ -456,6 +480,33 @@ impl LogicalRecord {
         Ok(record)
     }
 
+    /// Constructs a record whose attachment bytes arrive through bounded readers.
+    ///
+    /// # Errors
+    /// Rejects the same logical/type limits as `new` and any inline file bytes.
+    pub fn new_streaming(
+        kind: RecordKind,
+        human: HumanMetadata,
+        auth: Vec<AuthRecord>,
+        attachments: Vec<Attachment>,
+    ) -> Result<Self, HumanCommitError> {
+        let record = Self {
+            kind,
+            human,
+            auth,
+            attachments,
+        };
+        if record
+            .attachments
+            .iter()
+            .any(|value| !value.content.is_empty())
+        {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        record.validate_shape(false)?;
+        Ok(record)
+    }
+
     #[must_use]
     pub const fn kind(&self) -> RecordKind {
         self.kind
@@ -547,6 +598,56 @@ impl LogicalRecord {
         Ok(record)
     }
 
+    /// Encodes metadata/auth only for the chunked human transport.
+    ///
+    /// # Panics
+    /// The in-memory CBOR writer has an uninhabited encoder error; allocation failure
+    /// follows Rust's process-level behavior.
+    #[must_use]
+    pub fn to_descriptor_bytes(&self) -> Vec<u8> {
+        let human = self.encode_human();
+        let auth = self.encode_auth();
+        let mut encoder = Encoder::new(Vec::new());
+        encoder.map(3).unwrap();
+        key(&mut encoder, "v");
+        encoder.u8(1).unwrap();
+        key(&mut encoder, "human");
+        encoder.bytes(&human).unwrap();
+        key(&mut encoder, "auth");
+        encode_optional_bytes(&mut encoder, auth.as_deref());
+        encoder.into_writer()
+    }
+
+    /// Decodes metadata/auth only for the chunked human transport.
+    ///
+    /// # Errors
+    /// Rejects unknown/trailing/non-canonical native fields.
+    pub fn from_descriptor_bytes(bytes: &[u8]) -> Result<Self, HumanCommitError> {
+        let mut d = Decoder::new(bytes);
+        expect_map(&mut d, 3)?;
+        expect_key(&mut d, "v")?;
+        if d.u8().map_err(invalid)? != 1 {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        expect_key(&mut d, "human")?;
+        let human = d.bytes().map_err(invalid)?.to_vec();
+        expect_key(&mut d, "auth")?;
+        let auth = decode_optional_bytes(&mut d)?;
+        if d.position() != bytes.len() {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let record = Self::decode_parts(&human, auth.as_deref())?;
+        if record
+            .attachments
+            .iter()
+            .any(|value| !value.content.is_empty())
+            || record.to_descriptor_bytes() != bytes
+        {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        Ok(record)
+    }
+
     pub(crate) fn set_organization(
         &mut self,
         tags: Vec<String>,
@@ -610,6 +711,10 @@ impl LogicalRecord {
 
     pub(crate) fn validate_complete(&self) -> Result<(), HumanCommitError> {
         self.validate()
+    }
+
+    pub(crate) fn validate_descriptors(&self) -> Result<(), HumanCommitError> {
+        self.validate_shape(false)
     }
 
     pub(crate) fn encode_human(&self) -> Vec<u8> {

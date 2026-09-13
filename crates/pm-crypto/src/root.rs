@@ -13,6 +13,7 @@ const FORMAT_VERSION: u64 = 1;
 const SUITE: u64 = 1;
 const MAX_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 4 * 1024;
+const FILE_CHUNK_BYTES: usize = 1024 * 1024;
 
 /// Errors exposed by the typed cryptographic boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -757,6 +758,46 @@ impl UnlockedRoot {
         open_pmf1(&key, &package.stream)
     }
 
+    /// Starts bounded-memory PMF1 encryption for one attachment.
+    ///
+    /// # Errors
+    /// Returns an error when keys or secretstream state cannot be generated.
+    pub fn start_file(
+        &self,
+        attachment: [u8; ID_BYTES],
+        revision: [u8; ID_BYTES],
+    ) -> Result<FileSealer, CryptoError> {
+        let target = target_header(self.vault, attachment, revision, Purpose::File, 1);
+        let key = Secret::random()?;
+        let envelope = seal_key(
+            &self.human_root,
+            &key,
+            &target,
+            wrapping_header(
+                self.vault,
+                random_array()?,
+                revision,
+                Purpose::KeyWrap,
+                &target,
+                None,
+            ),
+        )?;
+        FileSealer::new(&key, target, &envelope)
+    }
+
+    /// Opens and verifies a streaming file header before accepting chunks.
+    ///
+    /// # Errors
+    /// Returns an error for altered or mismatched membership/key material.
+    pub fn start_file_open(
+        &self,
+        attachment: [u8; ID_BYTES],
+        revision: [u8; ID_BYTES],
+        header: &[u8],
+    ) -> Result<FileOpener, CryptoError> {
+        FileOpener::new(&self.human_root, self.vault, attachment, revision, header)
+    }
+
     /// Prepares the sealed portion and commitment before an authority event exists.
     ///
     /// # Errors
@@ -1442,6 +1483,281 @@ impl FileCiphertext {
         }
         Ok(package)
     }
+}
+
+/// Incremental SHA-256 through the repository's native crypto boundary.
+pub struct DigestState(libsodium_sys::crypto_hash_sha256_state);
+
+impl DigestState {
+    /// Starts a new digest.
+    ///
+    /// # Errors
+    /// Returns an error when libsodium cannot initialize.
+    pub fn new() -> Result<Self, CryptoError> {
+        sodium()?;
+        let mut state = Self(unsafe { std::mem::zeroed() });
+        if unsafe { libsodium_sys::crypto_hash_sha256_init(&raw mut state.0) } != 0 {
+            return Err(CryptoError::ResourceUnavailable);
+        }
+        Ok(state)
+    }
+    /// Incorporates one bounded input chunk.
+    pub fn update(&mut self, bytes: &[u8]) {
+        unsafe {
+            libsodium_sys::crypto_hash_sha256_update(
+                &raw mut self.0,
+                bytes.as_ptr(),
+                bytes.len() as u64,
+            );
+        }
+    }
+    /// Finalizes this digest state.
+    #[must_use]
+    pub fn finish(mut self) -> [u8; 32] {
+        let mut out = [0; 32];
+        unsafe {
+            libsodium_sys::crypto_hash_sha256_final(&raw mut self.0, out.as_mut_ptr());
+        }
+        out
+    }
+}
+
+impl Drop for DigestState {
+    fn drop(&mut self) {
+        // SAFETY: the state is valid storage and is not used after drop.
+        unsafe {
+            libsodium_sys::sodium_memzero((&raw mut self.0).cast(), std::mem::size_of_val(&self.0));
+        }
+    }
+}
+
+/// One bounded-memory PMF1 encryption session.
+pub struct FileSealer {
+    state: SecretStreamState,
+    target: Header,
+    stream_header: [u8; 24],
+    header: Vec<u8>,
+    index: u64,
+    finished: bool,
+}
+impl FileSealer {
+    fn new(key: &Secret, target: Header, envelope: &Envelope) -> Result<Self, CryptoError> {
+        let mut state = SecretStreamState::new();
+        let mut stream_header = [0; 24];
+        if unsafe {
+            libsodium_sys::crypto_secretstream_xchacha20poly1305_init_push(
+                &raw mut state.0,
+                stream_header.as_mut_ptr(),
+                key.0.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(CryptoError::RandomUnavailable);
+        }
+        let pmf = encode_pmf1_header(&target, &stream_header);
+        let mut e = Encoder::new(Vec::new());
+        e.map(3).unwrap();
+        e.str("v").unwrap().u64(1).unwrap();
+        e.str("key_envelope")
+            .unwrap()
+            .bytes(&encode_envelope(envelope))
+            .unwrap();
+        e.str("pmf1_header").unwrap().bytes(&pmf).unwrap();
+        let payload = e.into_writer();
+        let mut header = b"PMFS1".to_vec();
+        header.extend_from_slice(&u32::try_from(payload.len()).map_err(invalid)?.to_be_bytes());
+        header.extend_from_slice(&payload);
+        Ok(Self {
+            state,
+            target,
+            stream_header,
+            header,
+            index: 0,
+            finished: false,
+        })
+    }
+    #[must_use]
+    pub fn header(&self) -> &[u8] {
+        &self.header
+    }
+    /// Encrypts one chunk. `final_chunk` must be true exactly once, on the last chunk.
+    ///
+    /// # Errors
+    /// Returns an error for oversized chunks, calls after the final chunk, or native
+    /// authenticated-encryption failure.
+    pub fn seal_chunk(
+        &mut self,
+        plaintext: &[u8],
+        final_chunk: bool,
+    ) -> Result<Vec<u8>, CryptoError> {
+        if self.finished || plaintext.len() > FILE_CHUNK_BYTES {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let aad = encode_file_aad(&self.target, &self.stream_header, self.index);
+        let mut ciphertext = vec![0; plaintext.len() + 17];
+        let mut length = 0;
+        let tag = u8::try_from(if final_chunk {
+            libsodium_sys::crypto_secretstream_xchacha20poly1305_TAG_FINAL
+        } else {
+            libsodium_sys::crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
+        })
+        .map_err(invalid)?;
+        if unsafe {
+            libsodium_sys::crypto_secretstream_xchacha20poly1305_push(
+                &raw mut self.state.0,
+                ciphertext.as_mut_ptr(),
+                &raw mut length,
+                plaintext.as_ptr(),
+                plaintext.len() as u64,
+                aad.as_ptr(),
+                aad.len() as u64,
+                tag,
+            )
+        } != 0
+        {
+            ciphertext.fill(0);
+            return Err(CryptoError::Authentication);
+        }
+        self.index += 1;
+        self.finished = final_chunk;
+        let mut frame = u32::try_from(ciphertext.len())
+            .map_err(invalid)?
+            .to_be_bytes()
+            .to_vec();
+        frame.extend_from_slice(&ciphertext);
+        Ok(frame)
+    }
+}
+impl Drop for FileSealer {
+    fn drop(&mut self) {
+        self.header.fill(0);
+    }
+}
+
+pub struct FileOpener {
+    state: SecretStreamState,
+    target: Header,
+    stream_header: [u8; 24],
+    index: u64,
+    finished: bool,
+}
+impl FileOpener {
+    fn new(
+        root: &Secret,
+        vault: [u8; 16],
+        attachment: [u8; 16],
+        revision: [u8; 16],
+        header: &[u8],
+    ) -> Result<Self, CryptoError> {
+        let (envelope, target, stream_header) = decode_file_stream_header(header)?;
+        let (key, wrapped) = open_key(root, &envelope)?;
+        if wrapped != target
+            || target.vault != vault
+            || target.object != attachment
+            || target.revision != revision
+            || target.purpose != Purpose::File
+        {
+            return Err(CryptoError::Authentication);
+        }
+        let mut state = SecretStreamState::new();
+        if unsafe {
+            libsodium_sys::crypto_secretstream_xchacha20poly1305_init_pull(
+                &raw mut state.0,
+                stream_header.as_ptr(),
+                key.0.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(CryptoError::Authentication);
+        }
+        Ok(Self {
+            state,
+            target,
+            stream_header,
+            index: 0,
+            finished: false,
+        })
+    }
+    /// Authenticates and decrypts one bounded ciphertext frame.
+    ///
+    /// # Errors
+    /// Returns an error for malformed, reordered, truncated, or unauthenticated frames.
+    pub fn open_chunk(&mut self, frame: &[u8], final_chunk: bool) -> Result<Vec<u8>, CryptoError> {
+        if self.finished || frame_length(frame)? != frame.len() {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let ciphertext = &frame[4..];
+        let aad = encode_file_aad(&self.target, &self.stream_header, self.index);
+        let mut plain = vec![0; ciphertext.len() - 17];
+        let mut len = 0;
+        let mut tag = 0;
+        if unsafe {
+            libsodium_sys::crypto_secretstream_xchacha20poly1305_pull(
+                &raw mut self.state.0,
+                plain.as_mut_ptr(),
+                &raw mut len,
+                &raw mut tag,
+                ciphertext.as_ptr(),
+                ciphertext.len() as u64,
+                aad.as_ptr(),
+                aad.len() as u64,
+            )
+        } != 0
+        {
+            plain.fill(0);
+            return Err(CryptoError::Authentication);
+        }
+        let expected = u8::try_from(if final_chunk {
+            libsodium_sys::crypto_secretstream_xchacha20poly1305_TAG_FINAL
+        } else {
+            libsodium_sys::crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
+        })
+        .map_err(invalid)?;
+        if tag != expected {
+            plain.fill(0);
+            return Err(CryptoError::InvalidFormat);
+        }
+        self.index += 1;
+        self.finished = final_chunk;
+        Ok(plain)
+    }
+}
+fn decode_file_stream_header(header: &[u8]) -> Result<(Envelope, Header, [u8; 24]), CryptoError> {
+    if header.len() < 9 || &header[..5] != b"PMFS1" {
+        return Err(CryptoError::InvalidFormat);
+    }
+    let len = usize::try_from(u32::from_be_bytes(
+        header[5..9].try_into().map_err(invalid)?,
+    ))
+    .map_err(invalid)?;
+    if header.len() != 9 + len {
+        return Err(CryptoError::InvalidFormat);
+    }
+    let mut d = Decoder::new(&header[9..]);
+    expect_map(&mut d, 3)?;
+    expect_key(&mut d, "v")?;
+    if d.u64().map_err(invalid)? != 1 {
+        return Err(CryptoError::InvalidFormat);
+    }
+    expect_key(&mut d, "key_envelope")?;
+    let envelope = decode_envelope(d.bytes().map_err(invalid)?)?;
+    expect_key(&mut d, "pmf1_header")?;
+    let (target, stream) = decode_pmf1_header(d.bytes().map_err(invalid)?)?;
+    if d.position() != len {
+        return Err(CryptoError::InvalidFormat);
+    }
+    Ok((envelope, target, stream))
+}
+fn frame_length(bytes: &[u8]) -> Result<usize, CryptoError> {
+    if bytes.len() < 4 {
+        return Err(CryptoError::InvalidFormat);
+    }
+    let n = usize::try_from(u32::from_be_bytes(bytes[..4].try_into().map_err(invalid)?))
+        .map_err(invalid)?;
+    if !(17..=FILE_CHUNK_BYTES + 17).contains(&n) {
+        return Err(CryptoError::InvalidFormat);
+    }
+    Ok(4 + n)
 }
 
 impl Drop for OpenedRevisionPackage {
