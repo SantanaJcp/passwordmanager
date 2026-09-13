@@ -94,3 +94,49 @@ git diff --check
 # exit 0
 ```
 
+
+## Verificación del merger sobre la rama unificada
+
+El merger integró el candidato sobre `3ab994c` y sintetizó cuatro conflictos
+aditivos. Conservó WebAuthn/Keycloak P4, token exchange P2, SSH y los resultados
+opacos de `controlled.external`; añadió GitHub como perfil y payload separados.
+En particular, el opcode 5 transporta exclusivamente el bearer GitHub, mientras
+el opcode 4 mantiene sus payloads distintos para WebAuthn y token exchange.
+
+El límite de 1024 bytes está acotado a `github_token_material`: se aplica solo
+cuando un Token ya almacenado se materializa para `github-rest-bearer/1`, para
+acotar el valor del header Authorization del perfil nuevo. No cambió
+`MAX_FIELD` (1 MiB), la validación/persistencia general de `AuthRecord::Token`,
+ni `token_exchange_material`; el laboratorio P2 volvió a pasar en la misma
+corrida. Por tanto no recorta los Tokens existentes ni otra capacidad.
+
+Gates ejecutados de nuevo después de la síntesis:
+
+```text
+./scripts/cargo-local.sh test -p pm-web-auth -p pm-vault -p pm-interface -p pm-cli
+# exit 0
+
+./scripts/test-linux-github-bearer-lab.sh
+# tres líneas PASS; exit 0
+
+./scripts/check.sh
+# format, workspace/all-target check/tests y clippy -D warnings: exit 0
+
+./scripts/clean-offline-build.sh
+# locked/offline build finished in 35.31 s; exit 0
+
+export PM_KEYCLOAK_DIST=.scratch/lab-artifacts/keycloak/keycloak-26.7.3
+export PM_CFT_DIR=.scratch/lab-artifacts/cft/chrome-linux64
+for lab in $(find scripts -maxdepth 1 -name 'test-linux-*-lab.sh' | sort); do "$lab"; done
+# LAB_COUNT=17 ALL_LABS_EXIT=0
+
+git diff --check
+./scripts/cargo-local.sh fmt --all -- --check
+# exit 0
+```
+
+La corrida observable confirmó origin, path, método, headers, query y output
+tipados/fijos; redirect, reflection, 401/403, SSO, quota, Retry-After inválido y
+5xx quedaron en estados cerrados; la autoridad se revalidó antes de cada uso.
+No se llamó a GitHub real, no se creó proxy ni política de negocio y no se usó
+ningún secreto real.
