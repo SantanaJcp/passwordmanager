@@ -578,7 +578,12 @@ impl HumanVault {
                 .map(|value| value.value.clone()),
             Some(account),
         );
-        let plaintext = encode_credential(&descriptor);
+        let auth = Zeroizing::new(
+            record
+                .encode_auth()
+                .ok_or(AuthorizationError::CredentialUnavailable)?,
+        );
+        let plaintext = Zeroizing::new(encode_credential(&descriptor, &auth));
         let control_package = self
             .root
             .seal_control_package(

@@ -15,9 +15,233 @@ use std::{
 
 use pm_crypto::KdfProfile;
 use pm_vault::{
-    AgentEnrollment, AgentPeer, AuditDeviceCustody, AuthorizationError, AuthorizationReason,
-    DelegatedVault, HumanChannel, HumanVault, LogicalRecord, PendingVault, RecordKind,
+    AgentEnrollment, AgentPeer, AttemptError, AttemptOutcome, AttemptState, AttemptVault,
+    AuditDeviceCustody, AuthorizationError, AuthorizationReason, DelegatedVault, HumanChannel,
+    HumanVault, IdempotencyKey, LogicalRecord, PendingVault, RecordKind, StartAttempt,
 };
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn durable_attempts_pin_revision_owner_idempotency_and_never_reexecute_indeterminate() {
+    let directory = TestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let item = commit_create(&mut human, &password_record());
+    enroll(&mut human, &enrollment(AGENT_A, REQUEST_A, &RPK_A), 1);
+    enroll(&mut human, &enrollment(AGENT_B, REQUEST_B, &RPK_B), 1);
+    let prepared = human.prepare_delegated_resume().unwrap();
+    commit(&mut human, &prepared);
+    let prepared = human.prepare_enable(item).unwrap();
+    commit(&mut human, &prepared);
+    drop(human);
+    let peer_a = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
+    let peer_b = AgentPeer::from_transport_rpk(&RPK_B).unwrap();
+    let attempts =
+        AttemptVault::open(DelegatedVault::open(&path, DEVICE, Arc::clone(&custody)).unwrap())
+            .unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
+    )
+    .unwrap();
+    let key = IdempotencyKey::new(now, [8; 16]).unwrap();
+    let request = StartAttempt::new(
+        item,
+        "controlled.external",
+        1,
+        "password",
+        "https://ticket-07.invalid/login",
+        b"success".to_vec(),
+        key,
+    )
+    .unwrap();
+    let created = attempts.start(&peer_a, &request).unwrap();
+    assert_eq!(created.state(), AttemptState::Created);
+    assert_eq!(
+        attempts.start(&peer_a, &request).unwrap().attempt_id(),
+        created.attempt_id()
+    );
+    let conflicting = StartAttempt::new(
+        item,
+        "controlled.external",
+        1,
+        "password",
+        "https://ticket-07.invalid/login",
+        b"different".to_vec(),
+        key,
+    )
+    .unwrap();
+    assert!(matches!(
+        attempts.start(&peer_a, &conflicting),
+        Err(AttemptError::IdempotencyConflict)
+    ));
+    assert!(matches!(
+        attempts.get(&peer_b, *created.attempt_id()),
+        Err(AttemptError::NotFound)
+    ));
+    let lease = attempts.claim_next().unwrap().unwrap();
+    assert_eq!(lease.revision_id(), created.revision_id());
+    assert_eq!(lease.password(), SECRET);
+    assert!(attempts.claim_next().unwrap().is_none());
+    assert_eq!(attempts.recover_inflight().unwrap(), 1);
+    assert_eq!(
+        attempts
+            .get(&peer_a, *created.attempt_id())
+            .unwrap()
+            .state(),
+        AttemptState::Indeterminate
+    );
+    assert!(attempts.claim_next().unwrap().is_none());
+    let expiring = attempts
+        .start(
+            &peer_a,
+            &StartAttempt::new(
+                item,
+                "controlled.external",
+                1,
+                "password",
+                "https://ticket-07.invalid/login",
+                b"expire".to_vec(),
+                IdempotencyKey::new(now, [9; 16]).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE authentication_attempts SET expires_at_us=0 WHERE attempt_id=?1",
+            [expiring.attempt_id().as_slice()],
+        )
+        .unwrap();
+    assert_eq!(
+        attempts
+            .get(&peer_a, *expiring.attempt_id())
+            .unwrap()
+            .state(),
+        AttemptState::Expired
+    );
+    assert!(attempts.claim_next().unwrap().is_none());
+    let stale = StartAttempt::new(
+        item,
+        "controlled.external",
+        1,
+        "password",
+        "https://ticket-07.invalid/login",
+        Vec::new(),
+        IdempotencyKey::new(now - 601_000_000, [10; 16]).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        attempts.start(&peer_a, &stale),
+        Err(AttemptError::InvalidArgument)
+    ));
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE attempt_clock SET max_wall_us=?1 WHERE singleton=1",
+            [now + 1_000_000_000],
+        )
+        .unwrap();
+    let fresh = StartAttempt::new(
+        item,
+        "controlled.external",
+        1,
+        "password",
+        "https://ticket-07.invalid/login",
+        Vec::new(),
+        IdempotencyKey::new(now, [11; 16]).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        attempts.start(&peer_a, &fresh),
+        Err(AttemptError::ClockUntrusted)
+    ));
+}
+
+#[test]
+fn trusted_outcomes_pause_only_one_attempt_and_cancel_is_terminal() {
+    let directory = TestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let item = commit_create(&mut human, &password_record());
+    enroll(&mut human, &enrollment(AGENT_A, REQUEST_A, &RPK_A), 1);
+    let prepared = human.prepare_delegated_resume().unwrap();
+    commit(&mut human, &prepared);
+    let prepared = human.prepare_enable(item).unwrap();
+    commit(&mut human, &prepared);
+    drop(human);
+    let peer = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
+    let attempts =
+        AttemptVault::open(DelegatedVault::open(&path, DEVICE, custody).unwrap()).unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
+    )
+    .unwrap();
+    let mk = |nonce, ctx| {
+        StartAttempt::new(
+            item,
+            "controlled.external",
+            1,
+            "password",
+            "https://ticket-07.invalid/login",
+            ctx,
+            IdempotencyKey::new(now, nonce).unwrap(),
+        )
+        .unwrap()
+    };
+    let first = attempts
+        .start(&peer, &mk([1; 16], b"challenge".to_vec()))
+        .unwrap();
+    let second = attempts
+        .start(&peer, &mk([2; 16], b"success".to_vec()))
+        .unwrap();
+    let lease = attempts.claim_next().unwrap().unwrap();
+    assert_eq!(lease.attempt_id(), first.attempt_id());
+    attempts
+        .settle(
+            &lease,
+            AttemptOutcome::WaitingForHuman {
+                challenge: b"provider-ref".to_vec(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        attempts.get(&peer, *second.attempt_id()).unwrap().state(),
+        AttemptState::Created
+    );
+    let cancelled = attempts.cancel(&peer, *first.attempt_id()).unwrap();
+    assert_eq!(cancelled.state(), AttemptState::Cancelled);
+    assert!(
+        attempts
+            .claim_waiting_for_reconciliation()
+            .unwrap()
+            .is_none()
+    );
+    let lease = attempts.claim_next().unwrap().unwrap();
+    let done = attempts
+        .settle(
+            &lease,
+            AttemptOutcome::Succeeded {
+                result: b"synthetic evidence".to_vec(),
+            },
+        )
+        .unwrap();
+    assert_eq!(done.state(), AttemptState::Succeeded);
+    assert_eq!(
+        attempts.get(&peer, *second.attempt_id()).unwrap().result(),
+        Some(b"synthetic evidence".as_slice())
+    );
+}
 use rusqlite::Connection;
 
 const MASTER: &[u8] = b"synthetic ticket 07 master";

@@ -2,19 +2,24 @@
 
 //! Atomic persistence for already-encrypted vault objects.
 
+mod attempts;
 mod audit;
 mod authorization;
 mod content;
 mod human;
 mod reducer;
 
+pub use attempts::{
+    AttemptError, AttemptLease, AttemptOutcome, AttemptSnapshot, AttemptState, AttemptVault,
+    IdempotencyKey, StartAttempt,
+};
 pub use audit::{
     AuditAction, AuditActorKind, AuditDeviceCustody, AuditDiscontinuity, AuditEvent, AuditOutcome,
     AuditPurgeScope, AuditQuery, AuditRecordView, AutonomousAuditVault, PreparedAuditPurge,
 };
 pub use authorization::{
-    AgentEnrollment, AgentPeer, AuthorityEventHeader, AuthorizationError, AuthorizationReason,
-    DelegatedCredential, DelegatedVault, PreparedAgentEnrollment,
+    AgentEnrollment, AgentIdentity, AgentPeer, AuthorityEventHeader, AuthorizationError,
+    AuthorizationReason, DelegatedCredential, DelegatedVault, PreparedAgentEnrollment,
 };
 pub use content::{
     Attachment, AuthRecord, CustomField, Destination, GeneratedPassword, GeneratorConfig,
@@ -447,6 +452,28 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                control_package BLOB NOT NULL CHECK (length(control_package) BETWEEN 1 AND 16777216),
                grant BLOB NOT NULL CHECK (length(grant) BETWEEN 1 AND 16777216),
                grant_commitment BLOB NOT NULL CHECK (length(grant_commitment) = 32)
+             ) STRICT;
+             CREATE TABLE authentication_attempts (
+               attempt_id BLOB PRIMARY KEY CHECK(length(attempt_id)=16),
+               item_id BLOB NOT NULL CHECK(length(item_id)=16),
+               revision_id BLOB NOT NULL CHECK(length(revision_id)=16),
+               owner_subject BLOB NOT NULL CHECK(length(owner_subject)=16),
+               owner_generation INTEGER NOT NULL CHECK(owner_generation>0),
+               state TEXT NOT NULL CHECK(state IN ('created','running','waiting_for_human','succeeded','failed','cancelled','expired','indeterminate')),
+               created_at_us INTEGER NOT NULL,
+               expires_at_us INTEGER NOT NULL,
+               terminal_at_us INTEGER,
+               scope_digest BLOB NOT NULL UNIQUE CHECK(length(scope_digest)=32),
+               params_digest BLOB NOT NULL CHECK(length(params_digest)=32),
+               state_package BLOB CHECK(state_package IS NULL OR length(state_package) BETWEEN 1 AND 16777216),
+               lease_token BLOB CHECK(lease_token IS NULL OR length(lease_token)=16),
+               claimed_at_us INTEGER,
+               provider_sent INTEGER NOT NULL DEFAULT 0 CHECK(provider_sent IN (0,1))
+             ) STRICT;
+             CREATE INDEX attempts_owner_state ON authentication_attempts(owner_subject,owner_generation,state);
+             CREATE TABLE attempt_clock (
+               singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+               max_wall_us INTEGER NOT NULL
              ) STRICT;",
         )?;
         let transaction = connection.transaction()?;

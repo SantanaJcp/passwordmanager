@@ -40,12 +40,12 @@ use zeroize::{Zeroize, Zeroizing};
 
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
 use pm_vault::{
-    AgentEnrollment, AgentPeer, Attachment, AttachmentReader, AuditAction, AuditActorKind,
-    AuditDeviceCustody, AuditEvent, AuditOutcome, AuthRecord, AuthorizationReason,
-    AutonomousAuditVault, CustomField, DelegatedVault, Destination, GeneratorConfig,
-    HumanCommitError, HumanMetadata, HumanVault, LogicalRecord, LogicalValue, PasswordRecord,
-    PreparedHumanCommand, PrivateKeyFormat, RecordKind, SearchQuery, SourceEncoding, SourceField,
-    TotpAlgorithm,
+    AgentEnrollment, AgentPeer, Attachment, AttachmentReader, AttemptOutcome, AttemptState,
+    AttemptVault, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome,
+    AuthRecord, AuthorizationReason, AutonomousAuditVault, CustomField, DelegatedVault,
+    Destination, GeneratorConfig, HumanCommitError, HumanMetadata, HumanVault, IdempotencyKey,
+    LogicalRecord, LogicalValue, PasswordRecord, PreparedHumanCommand, PrivateKeyFormat,
+    RecordKind, SearchQuery, SourceEncoding, SourceField, StartAttempt, TotpAlgorithm,
 };
 
 use crate::{Failure, take_path};
@@ -122,10 +122,18 @@ struct Profile {
     server_spki: Vec<u8>,
 }
 
+#[derive(Clone)]
 struct VaultService {
     path: std::path::PathBuf,
     device: [u8; 16],
     audit_custody: Arc<AuditDeviceCustody>,
+    provider: Option<ControlledProvider>,
+}
+
+#[derive(Clone)]
+struct ControlledProvider {
+    socket: std::path::PathBuf,
+    uid: u32,
 }
 
 pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
@@ -137,8 +145,10 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("provision-profile") => provision_profile(&mut arguments),
         Some("serve") => serve(&mut arguments),
         Some("serve-vault") => serve_vault(&mut arguments),
+        Some("serve-attempt-lab") => serve_attempt_lab(&mut arguments),
         Some("probe") => probe(&mut arguments),
         Some("agent-discover") => agent_discover(&mut arguments),
+        Some("agent-attempt") => agent_attempt(&mut arguments),
         Some("human-authorization") => human_authorization(&mut arguments),
         Some("human-password-crud") => human_password_crud(&mut arguments),
         Some("human-content-flow") => human_content_flow(&mut arguments),
@@ -261,6 +271,35 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
         path: vault_path,
         device,
         audit_custody: Arc::new(load_or_create_audit_custody(&audit_path)?),
+        provider: None,
+    };
+    serve_loop(
+        &bootstrap_path,
+        &agent_socket,
+        &human_socket,
+        Some(&service),
+    )
+}
+
+fn serve_attempt_lab(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let bootstrap_path = take_path(arguments, "--bootstrap")?;
+    let agent_socket = take_path(arguments, "--agent-socket")?;
+    let human_socket = take_path(arguments, "--human-socket")?;
+    let vault_path = take_path(arguments, "--vault")?;
+    let device_value = take_path(arguments, "--device")?;
+    let provider_socket = take_path(arguments, "--provider-socket")?;
+    let provider_uid = take_u32(arguments, "--provider-uid")?;
+    finish_arguments(arguments)?;
+    let device = decode_hex_16(&device_value)?;
+    let audit_path = std::path::PathBuf::from(format!("{}.audit-custody", vault_path.display()));
+    let service = VaultService {
+        path: vault_path,
+        device,
+        audit_custody: Arc::new(load_or_create_audit_custody(&audit_path)?),
+        provider: Some(ControlledProvider {
+            socket: provider_socket,
+            uid: provider_uid,
+        }),
     };
     serve_loop(
         &bootstrap_path,
@@ -304,6 +343,27 @@ fn serve_loop(
     human_listener
         .set_nonblocking(true)
         .map_err(|_| Failure::Unavailable)?;
+
+    if let Some(service) = vault.filter(|v| v.provider.is_some())
+        && let Ok(delegated) = DelegatedVault::open(
+            &service.path,
+            service.device,
+            Arc::clone(&service.audit_custody),
+        )
+    {
+        AttemptVault::open(delegated)
+            .map_err(|_| Failure::Unavailable)?
+            .recover_inflight()
+            .map_err(|_| Failure::Unavailable)?;
+    }
+    if let Some(service) = vault.filter(|v| v.provider.is_some()).cloned() {
+        std::thread::spawn(move || {
+            loop {
+                let _ = run_provider_once(&service);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+    }
 
     loop {
         accept_one(
@@ -407,6 +467,78 @@ fn agent_discover(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), 
     println!(
         "PASS delegated-discovery count={count} set={}",
         rendered.join(",")
+    );
+    Ok(())
+}
+
+fn agent_attempt(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    let action_flag = arguments.next().ok_or(Failure::Usage)?;
+    let action = arguments.next().ok_or(Failure::Usage)?;
+    if action_flag != "--action" {
+        return Err(Failure::Usage);
+    }
+    let mut request = match action.to_str() {
+        Some("start") => {
+            let item = decode_hex_16(&take_path(arguments, "--item")?)?;
+            let issued = take_path(arguments, "--issued-at")?
+                .to_string_lossy()
+                .parse::<u64>()
+                .map_err(|_| Failure::Usage)?;
+            let nonce = decode_hex_16(&take_path(arguments, "--nonce")?)?;
+            let context = take_path(arguments, "--context")?
+                .to_string_lossy()
+                .as_bytes()
+                .to_vec();
+            let mut r = vec![30];
+            r.extend_from_slice(&item);
+            r.extend_from_slice(&issued.to_be_bytes());
+            r.extend_from_slice(&nonce);
+            push_bytes(&mut r, &context)?;
+            r
+        }
+        Some("get" | "cancel") => {
+            let id = decode_hex_16(&take_path(arguments, "--attempt")?)?;
+            let mut r = vec![if action == "get" { 31 } else { 32 }];
+            r.extend_from_slice(&id);
+            r
+        }
+        _ => return Err(Failure::Usage),
+    };
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Agent {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(AGENT_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    let _discovery = read_frame(&mut tls)?;
+    write_frame(&mut tls, &request)?;
+    request.zeroize();
+    let response = read_frame(&mut tls)?;
+    if response.first() != Some(&0) {
+        println!("DENIED code={}", response.first().copied().unwrap_or(1));
+        return Err(Failure::Unavailable);
+    }
+    let mut c = Cursor::new(&response[1..]);
+    let attempt = c.fixed(16)?;
+    let _item = c.fixed(16)?;
+    let revision = c.fixed(16)?;
+    let state = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
+    let reason = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
+    let result = c.bytes()?;
+    c.finish()?;
+    println!(
+        "PASS attempt id={} revision={} state={} reason={} result={}",
+        hex(attempt),
+        hex(revision),
+        state,
+        reason,
+        String::from_utf8_lossy(&result)
     );
     Ok(())
 }
@@ -1307,28 +1439,130 @@ fn handle_agent_discovery(
         Arc::clone(&service.audit_custody),
     )
     .map_err(|_| Failure::Unavailable)?;
-    let credentials = vault.discover(&peer).map_err(|_| Failure::Unavailable)?;
-    let mut response = vec![0];
-    response.extend_from_slice(
-        &u16::try_from(credentials.len())
-            .map_err(|_| Failure::Unavailable)?
-            .to_be_bytes(),
-    );
-    for credential in credentials {
-        response.extend_from_slice(credential.item_id());
-        response.extend_from_slice(credential.revision_id());
-        push_bytes(
-            &mut response,
-            record_kind_name(credential.kind()).as_bytes(),
-        )?;
-        push_bytes(&mut response, credential.title().as_bytes())?;
-        push_bytes(
-            &mut response,
-            credential.destination().unwrap_or("").as_bytes(),
-        )?;
-        push_bytes(&mut response, credential.account().unwrap_or("").as_bytes())?;
+    let credentials = vault.discover(&peer);
+    let mut response = if credentials.is_ok() {
+        vec![0]
+    } else {
+        vec![1]
+    };
+    let credentials = credentials.unwrap_or_default();
+    if response[0] == 0 {
+        response.extend_from_slice(
+            &u16::try_from(credentials.len())
+                .map_err(|_| Failure::Unavailable)?
+                .to_be_bytes(),
+        );
+        for credential in credentials {
+            response.extend_from_slice(credential.item_id());
+            response.extend_from_slice(credential.revision_id());
+            push_bytes(
+                &mut response,
+                record_kind_name(credential.kind()).as_bytes(),
+            )?;
+            push_bytes(&mut response, credential.title().as_bytes())?;
+            push_bytes(
+                &mut response,
+                credential.destination().unwrap_or("").as_bytes(),
+            )?;
+            push_bytes(&mut response, credential.account().unwrap_or("").as_bytes())?;
+        }
     }
-    write_frame(tls, &response)
+    write_frame(tls, &response)?;
+    loop {
+        let Ok(request) = read_frame(tls) else {
+            return Ok(());
+        };
+        let response = handle_attempt_request(service, &peer, &request)?;
+        write_frame(tls, &response)?;
+    }
+}
+
+fn handle_attempt_request(
+    service: &VaultService,
+    peer: &AgentPeer,
+    request: &[u8],
+) -> Result<Vec<u8>, Failure> {
+    let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
+    let attempts = AttemptVault::open(
+        DelegatedVault::open(
+            &service.path,
+            service.device,
+            Arc::clone(&service.audit_custody),
+        )
+        .map_err(|_| Failure::Unavailable)?,
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let outcome = match opcode {
+        30 => {
+            let mut c = Cursor::new(rest);
+            let item = c.fixed(16)?.try_into().map_err(|_| Failure::Unavailable)?;
+            let issued =
+                u64::from_be_bytes(c.fixed(8)?.try_into().map_err(|_| Failure::Unavailable)?);
+            let issued = i64::try_from(issued).map_err(|_| Failure::Unavailable)?;
+            let nonce = c.fixed(16)?.try_into().map_err(|_| Failure::Unavailable)?;
+            let context = c.bytes()?;
+            c.finish()?;
+            let key = IdempotencyKey::new(issued, nonce).map_err(|_| Failure::Unavailable)?;
+            let start = StartAttempt::new(
+                item,
+                "controlled.external",
+                1,
+                "password",
+                "https://ticket07.invalid/login",
+                context,
+                key,
+            )
+            .map_err(|_| Failure::Unavailable)?;
+            attempts.start(peer, &start)
+        }
+        31 => attempts.get(peer, rest.try_into().map_err(|_| Failure::Unavailable)?),
+        32 => attempts.cancel(peer, rest.try_into().map_err(|_| Failure::Unavailable)?),
+        _ => return Err(Failure::Unavailable),
+    };
+    match outcome {
+        Ok(snapshot) => encode_attempt_snapshot(&snapshot),
+        Err(error) => Ok(vec![attempt_error_status(&error)]),
+    }
+}
+
+fn encode_attempt_snapshot(snapshot: &pm_vault::AttemptSnapshot) -> Result<Vec<u8>, Failure> {
+    let mut out = vec![0];
+    out.extend_from_slice(snapshot.attempt_id());
+    out.extend_from_slice(snapshot.credential_id());
+    out.extend_from_slice(snapshot.revision_id());
+    push_bytes(&mut out, attempt_state_name(snapshot.state()).as_bytes())?;
+    push_bytes(&mut out, snapshot.reason().unwrap_or("").as_bytes())?;
+    push_bytes(&mut out, snapshot.result().unwrap_or(&[]))?;
+    Ok(out)
+}
+fn attempt_state_name(state: AttemptState) -> &'static str {
+    match state {
+        AttemptState::Created => "CREATED",
+        AttemptState::Running => "RUNNING",
+        AttemptState::WaitingForHuman => "WAITING_FOR_HUMAN",
+        AttemptState::Succeeded => "SUCCEEDED",
+        AttemptState::Failed => "FAILED",
+        AttemptState::Cancelled => "CANCELLED",
+        AttemptState::Expired => "EXPIRED",
+        AttemptState::Indeterminate => "INDETERMINATE",
+    }
+}
+fn attempt_error_status(error: &pm_vault::AttemptError) -> u8 {
+    use pm_vault::AttemptError::{
+        AccessSuspended, AgentRevoked, ClockUntrusted, CredentialUnavailable, IdempotencyConflict,
+        IdempotencyExpired, NotFound, RateLimited,
+    };
+    match error {
+        NotFound => 2,
+        IdempotencyConflict => 3,
+        AccessSuspended => 4,
+        AgentRevoked => 5,
+        CredentialUnavailable => 6,
+        ClockUntrusted => 7,
+        RateLimited => 8,
+        IdempotencyExpired => 9,
+        _ => 1,
+    }
 }
 
 fn record_kind_name(kind: RecordKind) -> &'static str {
@@ -1340,6 +1574,74 @@ fn record_kind_name(kind: RecordKind) -> &'static str {
         RecordKind::Token => "token",
         RecordKind::Note => "note",
         RecordKind::File => "file",
+    }
+}
+
+fn run_provider_once(service: &VaultService) -> Result<(), Failure> {
+    let provider = service.provider.as_ref().ok_or(Failure::Unavailable)?;
+    let attempts = AttemptVault::open(
+        DelegatedVault::open(
+            &service.path,
+            service.device,
+            Arc::clone(&service.audit_custody),
+        )
+        .map_err(|_| Failure::Unavailable)?,
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let lease = if let Some(v) = attempts.claim_next().map_err(|_| Failure::Unavailable)? {
+        v
+    } else if let Some(v) = attempts
+        .claim_waiting_for_reconciliation()
+        .map_err(|_| Failure::Unavailable)?
+    {
+        v
+    } else {
+        return Ok(());
+    };
+    let result = call_controlled_provider(provider, &lease);
+    let outcome = match result {
+        Ok(v) => v,
+        Err(()) => AttemptOutcome::Indeterminate,
+    };
+    attempts
+        .settle(&lease, outcome)
+        .map_err(|_| Failure::Unavailable)?;
+    Ok(())
+}
+
+fn call_controlled_provider(
+    provider: &ControlledProvider,
+    lease: &pm_vault::AttemptLease,
+) -> Result<AttemptOutcome, ()> {
+    let mut stream = UnixStream::connect(&provider.socket).map_err(|_| ())?;
+    stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
+    stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
+    if unix_peer_uid(&stream).map_err(|_| ())? != provider.uid {
+        return Err(());
+    }
+    let mut request = vec![if lease.reconciliation_only() { 2 } else { 1 }];
+    request.extend_from_slice(lease.attempt_id());
+    request.extend_from_slice(lease.revision_id());
+    if !lease.reconciliation_only() {
+        push_bytes(&mut request, lease.destination().as_bytes()).map_err(|_| ())?;
+        push_bytes(&mut request, lease.context()).map_err(|_| ())?;
+        push_bytes(&mut request, lease.username().as_bytes()).map_err(|_| ())?;
+        push_bytes(&mut request, lease.password()).map_err(|_| ())?;
+    }
+    write_frame(&mut stream, &request).map_err(|_| ())?;
+    let response = read_frame(&mut stream).map_err(|_| ())?;
+    let mut c = Cursor::new(&response);
+    let status = *c.fixed(1).map_err(|_| ())?.first().ok_or(())?;
+    let value = c.bytes().map_err(|_| ())?;
+    c.finish().map_err(|_| ())?;
+    match status {
+        0 => Ok(AttemptOutcome::Succeeded { result: value }),
+        1 => Ok(AttemptOutcome::WaitingForHuman { challenge: value }),
+        2 => Ok(AttemptOutcome::Failed {
+            reason: "AUTH_REJECTED",
+        }),
+        3 => Ok(AttemptOutcome::Indeterminate),
+        _ => Err(()),
     }
 }
 
