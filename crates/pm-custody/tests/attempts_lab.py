@@ -93,6 +93,11 @@ def mcp_call(binary, uid, env, name, arguments):
     response=json.loads(result.stdout.splitlines()[-1]); return response["result"]
 
 def assert_interface_equivalence(binary, uid, env, item, sid, cancelled, now):
+    cli_cap=interface_process(binary,uid,env,["--json","capabilities"])
+    assert cli_cap.returncode==0 and cli_cap.stderr==b"",(cli_cap.stdout,cli_cap.stderr)
+    mcp_cap=mcp_call(binary,uid,env,"get_capabilities",{})
+    assert mcp_cap["isError"] is False
+    assert mcp_cap["structuredContent"]==json.loads(cli_cap.stdout)["result"],(cli_cap.stdout,mcp_cap)
     cli=interface_process(binary,uid,env,["--json","credentials","list"])
     assert cli.returncode==0 and cli.stderr==b"",(cli.stdout,cli.stderr)
     cli_discovery=json.loads(cli.stdout); assert "result" in cli_discovery,cli.stdout
