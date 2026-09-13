@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-#![allow(clippy::all, clippy::pedantic)]
-
 //! The single, deliberately small contract used by the delegated CLI and MCP
 //! adapters.  This crate contains no vault policy and no provider code: both
 //! adapters hand validated requests to the same engine supplied by the
@@ -10,6 +8,7 @@
 
 use std::{
     fmt,
+    fmt::Write as FmtWrite,
     io::{self, Read, Write},
     path::Path,
     sync::Arc,
@@ -110,6 +109,8 @@ pub struct Request {
     pub params: Json,
 }
 
+/// # Errors
+/// Returns an error when the document violates the bounded JSON grammar.
 pub fn parse_json(bytes: &[u8]) -> Result<Json, ParseError> {
     if bytes.is_empty() {
         return Err(ParseError::Empty);
@@ -127,11 +128,12 @@ pub fn parse_json(bytes: &[u8]) -> Result<Json, ParseError> {
     Ok(value)
 }
 
+/// # Errors
+/// Returns an error for malformed JSON, unsupported fields, or an invalid ID.
 pub fn parse_request(bytes: &[u8]) -> Result<Request, ParseError> {
     let value = parse_json(bytes)?;
-    let object = match value {
-        Json::Object(fields) => fields,
-        _ => return Err(ParseError::InvalidRequest),
+    let Json::Object(object) = value else {
+        return Err(ParseError::InvalidRequest);
     };
     if object
         .iter()
@@ -177,11 +179,12 @@ pub fn parse_request(bytes: &[u8]) -> Result<Request, ParseError> {
 
 /// MCP permits string or number request IDs, unlike the private RPC. Numeric
 /// IDs are retained canonically as text and never converted to floating point.
+/// # Errors
+/// Returns an error for malformed JSON, unsupported fields, or an invalid ID.
 pub fn parse_mcp_request(bytes: &[u8]) -> Result<Request, ParseError> {
     let value = parse_json(bytes)?;
-    let object = match value {
-        Json::Object(fields) => fields,
-        _ => return Err(ParseError::InvalidRequest),
+    let Json::Object(object) = value else {
+        return Err(ParseError::InvalidRequest);
     };
     if object
         .iter()
@@ -199,7 +202,7 @@ pub fn parse_mcp_request(bytes: &[u8]) -> Result<Request, ParseError> {
         return Err(ParseError::InvalidRequest);
     }
     let id = match get("id") {
-        Some(Json::String(value)) | Some(Json::Number(value)) => value.clone(),
+        Some(Json::String(value) | Json::Number(value)) => value.clone(),
         _ => return Err(ParseError::InvalidId),
     };
     if id.is_empty() || id.len() > 64 {
@@ -221,12 +224,15 @@ pub fn parse_mcp_request(bytes: &[u8]) -> Result<Request, ParseError> {
     })
 }
 
+#[must_use]
 pub fn encode_json(value: &Json) -> Vec<u8> {
     let mut output = String::new();
     encode_into(value, &mut output);
     output.into_bytes()
 }
 
+/// # Errors
+/// Returns an I/O or bound error if the frame cannot be read safely.
 pub fn read_frame(input: &mut impl Read) -> io::Result<Vec<u8>> {
     let mut header = [0_u8; 4];
     input.read_exact(&mut header)?;
@@ -242,6 +248,8 @@ pub fn read_frame(input: &mut impl Read) -> io::Result<Vec<u8>> {
     Ok(frame)
 }
 
+/// # Errors
+/// Returns an I/O or bound error if the frame is empty, oversized, or cannot be written.
 pub fn write_frame(output: &mut impl Write, value: &[u8]) -> io::Result<()> {
     if value.is_empty() || value.len() > MAX_FRAME {
         return Err(io::Error::new(
@@ -299,6 +307,10 @@ impl ErrorCode {
 }
 
 pub trait Engine {
+    /// Executes one validated delegated operation.
+    ///
+    /// # Errors
+    /// Returns a public, secret-free error category.
     fn call(&self, method: &str, params: &Json) -> Result<Json, ErrorCode>;
 }
 
@@ -333,6 +345,9 @@ pub struct VaultEngine {
 }
 
 impl VaultEngine {
+    /// # Errors
+    /// Returns `CUSTODY_UNAVAILABLE` if custody or its authenticated package
+    /// cannot be opened.
     pub fn open(
         path: &Path,
         device: [u8; 16],
@@ -371,6 +386,9 @@ impl Engine for VaultEngine {
     }
 }
 
+/// # Errors
+/// This currently returns no runtime error; the result is fallible to keep
+/// the adapter seam uniform with future capability providers.
 pub fn capabilities_result() -> Result<Json, ErrorCode> {
     // controlled.external is the only integration with an executed provider
     // laboratory in this release; designs without evidence are not listed.
@@ -418,24 +436,24 @@ impl VaultEngine {
         if !(1..=100).contains(&limit) {
             return Err(ErrorCode::InvalidArgument);
         }
-        if let Some(cursor) = optional_string(params, "cursor")? {
-            if !cursor.is_empty() || cursor.len() > 512 {
-                return Err(ErrorCode::InvalidArgument);
-            }
+        if let Some(cursor) = optional_string(params, "cursor")?
+            && (!cursor.is_empty() || cursor.len() > 512)
+        {
+            return Err(ErrorCode::InvalidArgument);
         }
         let text = params
             .field("filter")
             .and_then(|v| v.field("text"))
             .and_then(Json::string);
-        if let Some(value) = text {
-            if value.len() > 256 {
-                return Err(ErrorCode::InvalidArgument);
-            }
+        if let Some(value) = text
+            && value.len() > 256
+        {
+            return Err(ErrorCode::InvalidArgument);
         }
         let mut credentials = self
             .delegated
             .discover(&self.peer)
-            .map_err(map_authorization)?;
+            .map_err(|error| map_authorization(&error))?;
         if let Some(filter) = text {
             credentials.retain(|credential| {
                 credential.title().contains(filter)
@@ -444,7 +462,7 @@ impl VaultEngine {
                         .is_some_and(|account| account.contains(filter))
             });
         }
-        credentials.truncate(limit as usize);
+        credentials.truncate(usize::try_from(limit).map_err(|_| ErrorCode::InvalidArgument)?);
         let values = credentials
             .into_iter()
             .map(|credential| {
@@ -529,11 +547,11 @@ impl VaultEngine {
             context,
             IdempotencyKey::new(issued, nonce).map_err(|_| ErrorCode::InvalidArgument)?,
         )
-        .map_err(map_attempt)?;
+        .map_err(|error| map_attempt(&error))?;
         self.attempts
             .start(&self.peer, &request)
-            .map_err(map_attempt)
-            .map(snapshot)
+            .map_err(|error| map_attempt(&error))
+            .map(|value| snapshot(&value))
     }
     fn get(&self, params: &Json) -> Result<Json, ErrorCode> {
         reject_unknown(params, &["attempt_id"])?;
@@ -541,8 +559,8 @@ impl VaultEngine {
             decode_hex(optional_string(params, "attempt_id")?.ok_or(ErrorCode::InvalidArgument)?)?;
         self.attempts
             .get(&self.peer, id)
-            .map_err(map_attempt)
-            .map(snapshot)
+            .map_err(|error| map_attempt(&error))
+            .map(|value| snapshot(&value))
     }
     fn cancel(&self, params: &Json) -> Result<Json, ErrorCode> {
         reject_unknown(params, &["attempt_id"])?;
@@ -550,12 +568,12 @@ impl VaultEngine {
             decode_hex(optional_string(params, "attempt_id")?.ok_or(ErrorCode::InvalidArgument)?)?;
         self.attempts
             .cancel(&self.peer, id)
-            .map_err(map_attempt)
-            .map(snapshot)
+            .map_err(|error| map_attempt(&error))
+            .map(|value| snapshot(&value))
     }
 }
 
-fn snapshot(value: pm_vault::AttemptSnapshot) -> Json {
+fn snapshot(value: &pm_vault::AttemptSnapshot) -> Json {
     Json::Object(vec![
         ("attempt_id".into(), Json::String(hex(value.attempt_id()))),
         (
@@ -629,8 +647,9 @@ fn decode_hex(value: &str) -> Result<[u8; 16], ErrorCode> {
         return Err(ErrorCode::InvalidArgument);
     }
     let mut output = [0_u8; 16];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        output[index] = (hex_digit(chunk[0])? << 4) | hex_digit(chunk[1])?;
+    for (index, output_byte) in output.iter_mut().enumerate() {
+        let chunk = &value.as_bytes()[index * 2..index * 2 + 2];
+        *output_byte = (hex_digit(chunk[0])? << 4) | hex_digit(chunk[1])?;
     }
     Ok(output)
 }
@@ -642,7 +661,11 @@ fn hex_digit(value: u8) -> Result<u8, ErrorCode> {
     }
 }
 fn hex(value: &[u8; 16]) -> String {
-    value.iter().map(|byte| format!("{byte:02x}")).collect()
+    let mut output = String::with_capacity(32);
+    for byte in value {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 fn state(value: pm_vault::AttemptState) -> &'static str {
     match value {
@@ -667,7 +690,7 @@ fn record_type(value: pm_vault::RecordKind) -> &'static str {
         pm_vault::RecordKind::File => "file",
     }
 }
-fn map_attempt(value: AttemptError) -> ErrorCode {
+fn map_attempt(value: &AttemptError) -> ErrorCode {
     match value {
         AttemptError::AccessSuspended => ErrorCode::AccessSuspended,
         AttemptError::AgentRevoked => ErrorCode::AgentRevoked,
@@ -684,7 +707,7 @@ fn map_attempt(value: AttemptError) -> ErrorCode {
         }
     }
 }
-fn map_authorization(value: pm_vault::AuthorizationError) -> ErrorCode {
+fn map_authorization(value: &pm_vault::AuthorizationError) -> ErrorCode {
     match value {
         pm_vault::AuthorizationError::AccessSuspended => ErrorCode::AccessSuspended,
         pm_vault::AuthorizationError::AgentRevoked => ErrorCode::AgentRevoked,
@@ -735,7 +758,9 @@ fn encode_string(value: &str, output: &mut String) {
             '\n' => output.push_str("\\n"),
             '\r' => output.push_str("\\r"),
             '\t' => output.push_str("\\t"),
-            c if c.is_control() => output.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c.is_control() => {
+                let _ = write!(output, "\\u{:04x}", c as u32);
+            }
             c => output.push(c),
         }
     }
@@ -866,8 +891,7 @@ impl Parser<'_> {
                 return Err(ParseError::InvalidJson);
             }
         }
-        Ok(String::from_utf8(self.bytes[start..self.at].to_vec())
-            .map_err(|_| ParseError::InvalidJson)?)
+        String::from_utf8(self.bytes[start..self.at].to_vec()).map_err(|_| ParseError::InvalidJson)
     }
     fn array(&mut self, depth: usize) -> Result<Json, ParseError> {
         self.at += 1;
