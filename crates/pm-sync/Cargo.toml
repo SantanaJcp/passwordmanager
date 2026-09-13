@@ -1,0 +1,24 @@
+[package]
+name = "pm-sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64.workspace = true
+aws-lc-rs.workspace = true
+libc.workspace = true
+minicbor.workspace = true
+pm-crypto.workspace = true
+pm-vault.workspace = true
+rusqlite.workspace = true
+rustls.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

@@ -291,6 +291,7 @@ impl DelegatedVault {
         &self,
         peer: &AgentPeer,
     ) -> Result<Vec<DelegatedCredential>, AuthorizationError> {
+        self.verify_device_not_retired()?;
         let connection = open_connection(&self.path)?;
         self.verify_agent_and_global(&connection, peer)?;
         let mut statement = connection.prepare(
@@ -322,6 +323,7 @@ impl DelegatedVault {
         peer: &AgentPeer,
         item: [u8; 16],
     ) -> Result<DelegatedCredential, AuthorizationError> {
+        self.verify_device_not_retired()?;
         let connection = open_connection(&self.path)?;
         self.verify_agent_and_global(&connection, peer)?;
         let row: Option<CredentialRow> = connection
@@ -540,6 +542,17 @@ impl DelegatedVault {
             return Err(AuthorizationError::Integrity);
         }
         decode_event_header(expected, &event)
+    }
+
+    fn verify_device_not_retired(&self) -> Result<(), AuthorizationError> {
+        let reducer =
+            crate::CausalReducer::open(&self.path).map_err(|_| AuthorizationError::Integrity)?;
+        let view = reducer.view().map_err(|_| AuthorizationError::Integrity)?;
+        if view.device_retired(&self.device) {
+            Err(AuthorizationError::AccessSuspended)
+        } else {
+            Ok(())
+        }
     }
 }
 

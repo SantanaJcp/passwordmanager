@@ -441,6 +441,25 @@ impl CausalReducer {
     /// # Errors
     /// Returns an error without partial insertion when an event is invalid.
     pub fn apply(&mut self, events: &[SignedCausalEvent]) -> Result<ReducedView, ReductionError> {
+        self.apply_internal(events, true)
+    }
+
+    /// Applies remotely received events without echoing them into the local outbox.
+    ///
+    /// # Errors
+    /// Returns an error without partial insertion when an event is invalid.
+    pub fn apply_received(
+        &mut self,
+        events: &[SignedCausalEvent],
+    ) -> Result<ReducedView, ReductionError> {
+        self.apply_internal(events, false)
+    }
+
+    fn apply_internal(
+        &mut self,
+        events: &[SignedCausalEvent],
+        enqueue: bool,
+    ) -> Result<ReducedView, ReductionError> {
         if events.len() > 256 {
             return Err(ReductionError::ResourceLimit);
         }
@@ -466,9 +485,55 @@ impl CausalReducer {
                  VALUES (?1,?2,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
                 params![digest_value.as_slice(), parsed.event_id.as_slice(), parsed.issuer_device.as_slice(), sql_i64(parsed.issuer_generation)?, sql_i64(parsed.seq)?, parsed.previous.as_ref().map(<[u8; 32]>::as_slice), encode_ids32_value(&parsed.parents), parsed.kind.name(), parsed.subject.as_slice(), sql_i64(parsed.subject_generation)?, signed.event, signed.human_signature.as_ref().map(<[u8; 64]>::as_slice), signed.device_signature.as_slice()],
             )?;
+            if enqueue {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO outbox(event_digest,event) VALUES(?1,?2)",
+                    params![digest_value.as_slice(), signed.to_bytes()],
+                )?;
+            }
         }
         transaction.commit()?;
         self.view()
+    }
+
+    /// Returns at most one reducer batch from the durable local outbox.
+    ///
+    /// # Errors
+    /// Returns an error if persisted signatures or bounded fields are corrupt.
+    pub fn pending_outbox(&self) -> Result<Vec<SignedCausalEvent>, ReductionError> {
+        let c = open_connection(&self.path)?;
+        let mut s=c.prepare("SELECT a.event,a.device_signature,a.human_signature FROM outbox o JOIN authority_events a ON a.event_digest=o.event_digest ORDER BY a.event_digest LIMIT 256")?;
+        let rows = s.query_map([], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, Option<Vec<u8>>>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (event, device, human) = row?;
+            out.push(SignedCausalEvent {
+                event,
+                device_signature: fixed(&device)?,
+                human_signature: human.map(|v| fixed(&v)).transpose()?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Removes only remotely published event digests from the durable outbox.
+    ///
+    /// # Errors
+    /// Returns an error without partial acknowledgement on storage failure.
+    pub fn acknowledge_outbox(&self, digests: &[[u8; 32]]) -> Result<(), ReductionError> {
+        let mut c = open_connection(&self.path)?;
+        let tx = c.transaction()?;
+        for id in digests {
+            tx.execute("DELETE FROM outbox WHERE event_digest=?1", [id.as_slice()])?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Recomputes the deterministic view from retained signed headers.
@@ -881,6 +946,68 @@ fn decode_legacy_body(
         return (d.position() == bytes.len())
             .then_some(CausalEventBody::Reason)
             .ok_or(ReductionError::InvalidEvent);
+    }
+    if matches!(
+        kind,
+        CausalEventKind::AgentRevoke | CausalEventKind::Disable | CausalEventKind::Suspend
+    ) {
+        let mut d = Decoder::new(bytes);
+        expect_map(&mut d, 1)?;
+        expect_key(&mut d, "reason_code")?;
+        if !matches!(
+            d.str().map_err(|_| ReductionError::InvalidEvent)?,
+            "owner_request" | "replacement" | "suspected_compromise"
+        ) || d.position() != bytes.len()
+        {
+            return Err(ReductionError::InvalidEvent);
+        }
+        return Ok(CausalEventBody::Reason);
+    }
+    if kind == CausalEventKind::AgentGrant {
+        let mut d = Decoder::new(bytes);
+        expect_map(&mut d, 5)?;
+        expect_key(&mut d, "request_id")?;
+        let _: [u8; 16] = decode_fixed(&mut d)?;
+        expect_key(&mut d, "public_identity")?;
+        expect_map(&mut d, 2)?;
+        expect_key(&mut d, "transport_rpk")?;
+        if d.bytes().map_err(|_| ReductionError::InvalidEvent)?.len() != 44 {
+            return Err(ReductionError::InvalidEvent);
+        }
+        expect_key(&mut d, "label")?;
+        d.str().map_err(|_| ReductionError::InvalidEvent)?;
+        expect_key(&mut d, "predecessor_grants")?;
+        let predecessors = decode_array_fixed(&mut d, 4096)?;
+        expect_key(&mut d, "expires_at")?;
+        d.null().map_err(|_| ReductionError::InvalidEvent)?;
+        expect_key(&mut d, "environment_binding")?;
+        d.str().map_err(|_| ReductionError::InvalidEvent)?;
+        if d.position() != bytes.len() || !strictly_sorted(&predecessors) {
+            return Err(ReductionError::InvalidEvent);
+        }
+        return Ok(CausalEventBody::Positive {
+            prior_positive_events: predecessors.clone(),
+            withdrawals_seen: predecessors,
+        });
+    }
+    if kind == CausalEventKind::Enable {
+        let mut d = Decoder::new(bytes);
+        expect_map(&mut d, 4)?;
+        expect_key(&mut d, "revision_id")?;
+        let _: [u8; 16] = decode_fixed(&mut d)?;
+        expect_key(&mut d, "grant_commitments")?;
+        let _: Vec<[u8; 32]> = decode_array_fixed(&mut d, 4096)?;
+        expect_key(&mut d, "prior_positive_events")?;
+        let prior_positive_events = decode_array_fixed(&mut d, 4096)?;
+        expect_key(&mut d, "withdrawals_seen")?;
+        let withdrawals_seen = decode_array_fixed(&mut d, 4096)?;
+        if d.position() != bytes.len() {
+            return Err(ReductionError::InvalidEvent);
+        }
+        return Ok(CausalEventBody::Positive {
+            prior_positive_events,
+            withdrawals_seen,
+        });
     }
     if !matches!(kind, CausalEventKind::ItemRevision | CausalEventKind::Trash) {
         return Err(ReductionError::InvalidEvent);

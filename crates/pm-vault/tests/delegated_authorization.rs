@@ -16,7 +16,8 @@ use std::{
 use pm_crypto::KdfProfile;
 use pm_vault::{
     AgentEnrollment, AgentPeer, AuditDeviceCustody, AuthorizationError, AuthorizationReason,
-    DelegatedVault, HumanChannel, HumanVault, LogicalRecord, PendingVault, RecordKind,
+    CausalEventBody, CausalEventDraft, CausalEventKind, CausalReducer, DelegatedVault,
+    HumanChannel, HumanVault, LogicalRecord, PendingVault, RecordKind,
 };
 use rusqlite::Connection;
 
@@ -32,6 +33,56 @@ const RPK_B: [u8; 44] = [0x51; 44];
 const SECRET: &[u8] = b"synthetic-ticket-07-secret-canary";
 const TITLE: &str = "Synthetic shared account";
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn a_synced_retirement_of_this_custodian_blocks_the_next_delegated_use() {
+    let directory = TestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let item = commit_create(&mut human, &password_record());
+    enroll(&mut human, &enrollment(AGENT_A, REQUEST_A, &RPK_A), 1);
+    let resume = human.prepare_delegated_resume().unwrap();
+    commit(&mut human, &resume);
+    let enable = human.prepare_enable(item).unwrap();
+    commit(&mut human, &enable);
+    let peer = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
+    let delegated = DelegatedVault::open(&path, DEVICE, Arc::clone(&custody)).unwrap();
+    assert!(delegated.authorize(&peer, item).is_ok());
+    let last = delegated
+        .authority_headers()
+        .unwrap()
+        .into_iter()
+        .max_by_key(pm_vault::AuthorityEventHeader::seq)
+        .unwrap();
+    let retire = human
+        .sign_causal_event(
+            &CausalEventDraft::new(
+                [0x17; 16],
+                1,
+                last.seq() + 1,
+                Some(*last.digest()),
+                vec![*last.digest()],
+                CausalEventKind::DeviceRetire,
+                DEVICE,
+                1,
+                CausalEventBody::Retire {
+                    accepted_prefixes: vec![],
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    CausalReducer::open(&path)
+        .unwrap()
+        .apply_received(&[retire])
+        .unwrap();
+    assert!(matches!(
+        delegated.authorize(&peer, item),
+        Err(AuthorizationError::AccessSuspended)
+    ));
+}
 
 #[test]
 fn two_real_peer_identities_share_one_causal_enabled_set_after_human_lock_and_restart() {

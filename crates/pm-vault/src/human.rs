@@ -295,6 +295,18 @@ pub struct HumanVault {
 }
 
 impl HumanVault {
+    /// Creates human-authorized E2EE pairing material for a pinned sync server.
+    /// The returned secret bundle must remain in native/human custody.
+    ///
+    /// # Errors
+    /// Fails closed unless the human channel remains authenticated.
+    pub fn create_sync_pairing(
+        &self,
+        server_pin: [u8; 44],
+    ) -> Result<pm_crypto::SyncPairing, HumanCommitError> {
+        self.channel.verify()?;
+        Ok(self.root.create_sync_pairing(server_pin)?)
+    }
     /// Signs a canonical causal event with device provenance and, for authority
     /// events, the human root. This does not publish the event.
     ///
