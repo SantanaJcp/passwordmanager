@@ -398,6 +398,8 @@ name = "pm-cli"
 version = "0.1.0"
 dependencies = [
  "pm-crypto",
+ "pm-custody",
+ "pm-interface",
  "pm-process-runner",
  "pm-vault",
 ]
@@ -421,6 +423,13 @@ dependencies = [
  "pm-vault",
  "rustls",
  "zeroize",
+]
+
+[[package]]
+name = "pm-interface"
+version = "0.1.0"
+dependencies = [
+ "pm-vault",
 ]
 
 [[package]]
