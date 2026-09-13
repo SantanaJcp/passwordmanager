@@ -4,13 +4,81 @@
 
 use std::fmt;
 
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[cfg(target_os = "windows")]
+pub use windows::{
+    ConPty, OwnedClipboard, WindowsClientPipe, WindowsServerPipe, dpapi_protect_machine,
+    dpapi_unprotect,
+};
+
+/// One of the two Windows named-pipe endpoints. Roles are fixed by the
+/// installed endpoint rather than supplied by a request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowsEndpoint {
+    Agent,
+    Human,
+}
+
+impl WindowsEndpoint {
+    /// Constructs the fixed local pipe name for an installed vault identifier.
+    ///
+    /// # Errors
+    /// Rejects identifiers outside the closed lowercase hexadecimal form.
+    pub fn pipe_name(self, vault: &str) -> Result<String, ChannelAuthenticationError> {
+        if vault.len() != 32
+            || !vault
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ChannelAuthenticationError);
+        }
+        let role = match self {
+            Self::Agent => "agent",
+            Self::Human => "human",
+        };
+        Ok(format!(r"\\.\pipe\PasswordManager-{vault}-{role}"))
+    }
+}
+
+/// Builds the protected DACL used for one Windows pipe. SYSTEM and the
+/// service SID own/control it; the one configured client SID gets read/write.
+///
+/// # Errors
+/// Rejects aliases, broad principals and malformed SID text.
+pub fn windows_pipe_sddl(
+    service_sid: &str,
+    client_sid: &str,
+) -> Result<String, ChannelAuthenticationError> {
+    if !valid_specific_sid(service_sid, "S-1-5-80-") || !valid_specific_sid(client_sid, "S-1-5-21-")
+    {
+        return Err(ChannelAuthenticationError);
+    }
+    Ok(format!(
+        "O:{service_sid}G:{service_sid}D:P(A;;GA;;;SY)(A;;GA;;;{service_sid})(A;;GRGW;;;{client_sid})"
+    ))
+}
+
+fn valid_specific_sid(value: &str, prefix: &str) -> bool {
+    value.starts_with(prefix)
+        && value.len() > prefix.len()
+        && value
+            .split('-')
+            .skip(1)
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
 #[cfg(unix)]
 use std::os::{fd::AsRawFd, unix::net::UnixStream};
 
 /// A native channel whose peer matches the human endpoint configuration.
 pub struct AuthenticatedHumanChannel {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "windows")))]
     stream: UnixStream,
+    #[cfg(target_os = "windows")]
+    pipe: WindowsServerPipe,
+    #[cfg(all(unix, not(target_os = "windows")))]
     expected_uid: u32,
 }
 
@@ -21,7 +89,7 @@ impl AuthenticatedHumanChannel {
     /// # Errors
     ///
     /// Returns an error if the kernel credential differs from `expected_uid`.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "windows")))]
     pub fn authenticate(
         stream: UnixStream,
         expected_uid: u32,
@@ -35,13 +103,26 @@ impl AuthenticatedHumanChannel {
         })
     }
 
+    /// Accepts and binds the configured Windows human pipe to its
+    /// kernel-observed client SID and process.
+    ///
+    /// # Errors
+    /// Returns an error if connection, impersonation or SID validation fails.
+    #[cfg(target_os = "windows")]
+    pub fn authenticate_windows(
+        mut pipe: WindowsServerPipe,
+    ) -> Result<Self, ChannelAuthenticationError> {
+        pipe.accept()?;
+        Ok(Self { pipe })
+    }
+
     /// Revalidates the bound credential and rejects a disconnected peer.
     ///
     /// # Errors
     ///
     /// Returns an error if the channel is no longer the configured live peer.
     pub fn verify(&self) -> Result<(), ChannelAuthenticationError> {
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "windows")))]
         {
             if unix_peer_uid(&self.stream)? != self.expected_uid || !peer_is_connected(&self.stream)
             {
@@ -49,10 +130,16 @@ impl AuthenticatedHumanChannel {
             }
             Ok(())
         }
-        #[cfg(not(unix))]
+        #[cfg(any(not(unix), target_os = "windows"))]
         {
-            let _ = self.expected_uid;
-            Err(ChannelAuthenticationError)
+            #[cfg(target_os = "windows")]
+            {
+                self.pipe.verify()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Err(ChannelAuthenticationError)
+            }
         }
     }
 }
@@ -108,7 +195,7 @@ pub fn unix_peer_uid(stream: &UnixStream) -> Result<u32, ChannelAuthenticationEr
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(target_os = "windows")))]
 fn peer_is_connected(stream: &UnixStream) -> bool {
     let mut byte = 0_u8;
     let result = unsafe {

@@ -41,4 +41,5 @@ rustls = { version = "=0.23.44", default-features = false, features = ["aws_lc_r
 russh = { version = "=0.63.3", default-features = false, features = ["aws-lc-rs"] }
 tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 zeroize = "=1.9.0"
+windows-sys = { version = "=0.61.2" }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }

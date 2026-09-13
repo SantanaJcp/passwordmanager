@@ -1320,6 +1320,8 @@ name = "pm-native-channel"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

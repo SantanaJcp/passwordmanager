@@ -35,3 +35,9 @@ Pendiente de implementación y evidencia.
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-13 — Claimed por Sol medium para port Windows nativo. Método CI adicional autorizado aporta ejecución Win11 ARM64; Win11 x64, reboot/FDE/humano/firma permanecen en 32/34 sin evidencia. No usar Windows Server/emulación como sustituto.
+
+2026-09-13 — Checkpoint parcial: primitives Win32 de pipe/DACL/SID+PID bilateral,
+SCM, DPAPI, ConPTY y clipboard sequence implementados en `pm-native-channel`,
+con API clipboard coordinada con Darwin. Falta integración `pm-custody`/TLS-RPK,
+servicio y laboratorio Windows real; no se marca aceptación. Evidencia y método
+futuro en [ticket 27](../../../docs/verification/ticket-27.md).
