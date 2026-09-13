@@ -3,7 +3,9 @@
 //! Human-only password mutations through a signed, replay-safe transaction.
 
 use std::{
+    collections::BTreeMap,
     fmt,
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -28,6 +30,7 @@ use crate::migration::{
     self, CsvImportDecision, CsvImportPreview, CsvImportProfile, CsvImportReport, CsvRowStatus,
     IMPORT_PAGE_ITEMS, PreparedCsvImport,
 };
+use crate::onepux::OnePuxImportPreview;
 use crate::{
     AgentEnrollment, AuthRecord, AuthorizationError, AuthorizationReason, CausalEventDraft,
     Destination, GeneratedPassword, GeneratorConfig, HistoryEntry, HumanMetadata, ItemHistory,
@@ -1083,6 +1086,61 @@ impl HumanVault {
         Ok(preview)
     }
 
+    /// Parses and classifies a non-extracted 1PUX v3 archive from a stable human source.
+    ///
+    /// # Errors
+    /// Rejects changed, linked, malformed, hostile, oversized, or non-v3 archives.
+    pub fn preview_1pux(&self, source: &Path) -> Result<OnePuxImportPreview, HumanCommitError> {
+        self.channel.verify()?;
+        let mut preview = crate::onepux::preview(source)?;
+        self.classify_1pux(&mut preview)?;
+        Ok(preview)
+    }
+
+    /// Parses 1PUX v3 from an already-open descriptor transferred by the
+    /// authenticated human process, without weakening private source modes.
+    ///
+    /// # Errors
+    /// Applies the same stable-source and hostile-archive checks as the path seam.
+    pub fn preview_1pux_file(&self, source: File) -> Result<OnePuxImportPreview, HumanCommitError> {
+        self.channel.verify()?;
+        let mut preview = crate::onepux::preview_file(source)?;
+        self.classify_1pux(&mut preview)?;
+        Ok(preview)
+    }
+
+    fn classify_1pux(&self, preview: &mut OnePuxImportPreview) -> Result<(), HumanCommitError> {
+        let connection = open_connection(&self.path)?;
+        let mut statement = connection
+            .prepare("SELECT item_id FROM vault_items WHERE status='active' ORDER BY item_id")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(connection);
+        let mut existing = Vec::with_capacity(ids.len());
+        for id in ids {
+            let id = bytes::<16>(&id)?;
+            existing.push((id, self.read_record(id)?));
+        }
+        for (row, record) in preview.rows.iter_mut().zip(&preview.records) {
+            if let Some((id, _)) = existing
+                .iter()
+                .find(|(_, prior)| crate::onepux::same_import_content(prior, record))
+            {
+                row.status = CsvRowStatus::ExactDuplicate;
+                row.duplicate_item = Some(*id);
+            } else if let Some((id, _)) = existing.iter().find(|(_, prior)| {
+                crate::onepux::same_external_identity(prior, record)
+                    || import_candidate(prior, record)
+            }) {
+                row.status = CsvRowStatus::CandidateDuplicate;
+                row.duplicate_item = Some(*id);
+            }
+        }
+        Ok(())
+    }
+
     /// Encrypts explicitly selected preview rows into one durable signed batch.
     ///
     /// # Errors
@@ -1225,6 +1283,232 @@ impl HumanVault {
         });
         transaction.execute("INSERT INTO human_challenges (challenge,transaction_id,command,body_hash,expected_state,expires_at_us,consumed) VALUES (?1,?2,?3,?4,?5,?6,0)", params![challenge.as_slice(),transaction_id.as_slice(),command,body_hash.as_slice(),expected_state.as_slice(),expires_at_us])?;
         transaction.execute("INSERT INTO human_staging (transaction_id,operation,event_kind,item_id,body) VALUES (?1,'import_commit','import-batch',?2,?3)",params![transaction_id.as_slice(),batch_id.as_slice(),body])?;
+        transaction.commit()?;
+        Ok(PreparedCsvImport {
+            prepared: PreparedHumanCommand {
+                transaction_id,
+                item_id: batch_id,
+                command,
+                body,
+            },
+            report,
+            item_ids,
+        })
+    }
+
+    /// Revalidates a 1PUX preview and stages selected records plus attachment
+    /// streams for the common signed import commit.
+    ///
+    /// # Errors
+    /// Rejects inconsistent decisions, changed archives, invalid streams, or
+    /// any staging failure without publishing a partial item.
+    #[allow(clippy::too_many_lines)]
+    pub fn prepare_1pux_import(
+        &mut self,
+        preview: OnePuxImportPreview,
+        decisions: Vec<CsvImportDecision>,
+    ) -> Result<PreparedCsvImport, HumanCommitError> {
+        self.channel.verify()?;
+        let OnePuxImportPreview {
+            records,
+            rows,
+            attachments,
+            source,
+            identity,
+        } = preview;
+        if records.len() != decisions.len()
+            || rows.len() != decisions.len()
+            || attachments.len() != records.len()
+        {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        crate::onepux::verify_source(&source, &identity)?;
+        let selected_sources = attachments
+            .iter()
+            .zip(&decisions)
+            .filter(|(_, decision)| {
+                !matches!(
+                    decision,
+                    CsvImportDecision::Exclude | CsvImportDecision::SkipExact
+                )
+            })
+            .flat_map(|(sources, _)| sources);
+        let mut logical_bytes = 0_u64;
+        let mut file_count = 0_usize;
+        for source_entry in selected_sources {
+            logical_bytes = logical_bytes
+                .checked_add(source_entry.size)
+                .ok_or(HumanCommitError::InvalidInput)?;
+            file_count = file_count
+                .checked_add(1)
+                .ok_or(HumanCommitError::InvalidInput)?;
+        }
+        crate::onepux::ensure_staging_capacity(&self.path, logical_bytes, file_count)?;
+        let transaction_id = random_id()?;
+        let batch_id = random_id()?;
+        let challenge = random_challenge()?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expected_state = state_digest(&transaction, self.root.vault_id(), 1)?;
+        let mut item_ids = Vec::new();
+        let mut new_items = 0_usize;
+        let mut replaced = 0_usize;
+        let mut skipped_exact = 0_usize;
+        let mut excluded = 0_usize;
+        let preserved_fields = rows.iter().map(|row| row.unknown_fields).sum();
+        for (((record, row), sources), decision) in
+            records.iter().zip(&rows).zip(&attachments).zip(decisions)
+        {
+            let (item, replacement) = match (row.status, decision) {
+                (CsvRowStatus::New, CsvImportDecision::ImportNew | CsvImportDecision::KeepBoth)
+                | (
+                    CsvRowStatus::CandidateDuplicate | CsvRowStatus::ExactDuplicate,
+                    CsvImportDecision::KeepBoth,
+                ) => {
+                    new_items += 1;
+                    (random_id()?, false)
+                }
+                (CsvRowStatus::ExactDuplicate, CsvImportDecision::SkipExact) => {
+                    skipped_exact += 1;
+                    continue;
+                }
+                (_, CsvImportDecision::Exclude) => {
+                    excluded += 1;
+                    continue;
+                }
+                (
+                    CsvRowStatus::CandidateDuplicate | CsvRowStatus::ExactDuplicate,
+                    CsvImportDecision::Replace(target),
+                ) if row.duplicate_item == Some(target) => {
+                    require_active_in(&transaction, target)?;
+                    replaced += 1;
+                    (target, true)
+                }
+                _ => return Err(HumanCommitError::InvalidInput),
+            };
+            if record.attachments().len() != sources.len()
+                || record
+                    .attachments()
+                    .iter()
+                    .zip(sources)
+                    .any(|(descriptor, source)| {
+                        descriptor.id() != &source.id
+                            || descriptor.size() != source.size
+                            || descriptor.sha256() != &source.digest
+                            || !descriptor.content().is_empty()
+                    })
+            {
+                return Err(HumanCommitError::InvalidInput);
+            }
+            let revision = random_id()?;
+            let human = record.encode_human();
+            let auth = record.encode_auth();
+            let package = self
+                .root
+                .seal_revision_package(RevisionPackageInput {
+                    item,
+                    revision,
+                    issuer_device: self.device,
+                    modified_at: now_us()?,
+                    kind: record.kind().crypto(),
+                    human_plaintext: &human,
+                    auth_plaintext: auth.as_deref(),
+                })?
+                .to_bytes();
+            let ordinal = row.ordinal;
+            transaction.execute(
+                "INSERT INTO import_staging_items
+                 (transaction_id,ordinal,item_id,revision_id,item_kind,package,replacement)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    transaction_id.as_slice(),
+                    i64::try_from(ordinal).map_err(|_| HumanCommitError::InvalidInput)?,
+                    item.as_slice(),
+                    revision.as_slice(),
+                    record.kind().name(),
+                    package,
+                    i64::from(replacement),
+                ],
+            )?;
+            for source_entry in sources {
+                let mut sealer = self.root.start_file(source_entry.id, revision)?;
+                let mut digest_state = DigestState::new()?;
+                let mut remaining = source_entry.size;
+                let mut index = 0_i64;
+                crate::onepux::stream_entry(&source, &identity, source_entry, |reader| {
+                    loop {
+                        let count = usize::try_from(remaining.min(1024 * 1024))
+                            .map_err(|_| HumanCommitError::InvalidInput)?;
+                        let mut plaintext = Zeroizing::new(vec![0_u8; count]);
+                        reader.read_exact(&mut plaintext)?;
+                        digest_state.update(&plaintext);
+                        remaining -=
+                            u64::try_from(count).map_err(|_| HumanCommitError::InvalidInput)?;
+                        let final_chunk = remaining == 0;
+                        let frame = sealer.seal_chunk(&plaintext, final_chunk)?;
+                        plaintext.zeroize();
+                        transaction.execute("INSERT INTO import_staging_stream_chunks(transaction_id,ordinal,attachment_id,chunk_index,ciphertext)VALUES(?1,?2,?3,?4,?5)",params![transaction_id.as_slice(),i64::try_from(ordinal).map_err(|_| HumanCommitError::InvalidInput)?,source_entry.id.as_slice(),index,frame])?;
+                        index = index.checked_add(1).ok_or(HumanCommitError::InvalidInput)?;
+                        if final_chunk {
+                            break;
+                        }
+                    }
+                    let mut extra = [0_u8; 1];
+                    if reader.read(&mut extra)? != 0 || digest_state.finish() != source_entry.digest
+                    {
+                        return Err(HumanCommitError::InvalidInput);
+                    }
+                    Ok(())
+                })?;
+                transaction.execute("INSERT INTO import_staging_streams(transaction_id,ordinal,attachment_id,header,chunk_count)VALUES(?1,?2,?3,?4,?5)",params![transaction_id.as_slice(),i64::try_from(ordinal).map_err(|_| HumanCommitError::InvalidInput)?,source_entry.id.as_slice(),sealer.header(),index])?;
+            }
+            item_ids.push(item);
+        }
+        crate::onepux::verify_source(&source, &identity)?;
+        let event_pages = item_ids.len().max(1).div_ceil(IMPORT_PAGE_ITEMS);
+        let object_digest = import_object_digest(&transaction, transaction_id)?;
+        let report = CsvImportReport {
+            total: rows.len(),
+            new_items,
+            replaced,
+            skipped_exact,
+            excluded,
+            preserved_fields,
+            event_pages,
+        };
+        transaction.execute(
+            "INSERT INTO import_staging_batches
+             (transaction_id,batch_id,source,object_digest,total,new_items,replaced,skipped_exact,excluded,preserved_fields,event_pages)
+             VALUES(?1,?2,'1pux',?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                transaction_id.as_slice(), batch_id.as_slice(), object_digest.as_slice(),
+                to_i64(report.total)?, to_i64(report.new_items)?, to_i64(report.replaced)?,
+                to_i64(report.skipped_exact)?, to_i64(report.excluded)?,
+                to_i64(report.preserved_fields)?, to_i64(report.event_pages)?,
+            ],
+        )?;
+        let manifest = encode_import_manifest(batch_id, "1pux", object_digest, &report);
+        let body = encode_body(&Body {
+            transaction_id,
+            events_manifest_digest: digest(&manifest),
+            event_count: u64::try_from(item_ids.len() + report.replaced)
+                .map_err(|_| HumanCommitError::InvalidInput)?,
+            object_manifest_digest: Some(object_digest),
+        });
+        let body_hash = digest(&body);
+        let expires_at_us = now_us()?
+            .checked_add(CHALLENGE_LIFETIME_US)
+            .ok_or(HumanCommitError::InvalidCommand)?;
+        let command = encode_command(&CommandFields {
+            vault: *self.root.vault_id(),
+            challenge,
+            expected_state,
+            operation: "import_commit",
+            body_hash,
+            expires_at_us,
+        });
+        transaction.execute("INSERT INTO human_challenges(challenge,transaction_id,command,body_hash,expected_state,expires_at_us,consumed)VALUES(?1,?2,?3,?4,?5,?6,0)",params![challenge.as_slice(),transaction_id.as_slice(),command,body_hash.as_slice(),expected_state.as_slice(),expires_at_us])?;
+        transaction.execute("INSERT INTO human_staging(transaction_id,operation,event_kind,item_id,body)VALUES(?1,'import_commit','import-batch',?2,?3)",params![transaction_id.as_slice(),batch_id.as_slice(),body])?;
         transaction.commit()?;
         Ok(PreparedCsvImport {
             prepared: PreparedHumanCommand {
@@ -2262,7 +2546,7 @@ fn update_import_object_digest(
     item: [u8; 16],
     revision: [u8; 16],
     kind: &str,
-    package: &[u8],
+    object_digest: [u8; 32],
     replacement: bool,
 ) {
     state.update(&u64::try_from(ordinal).unwrap().to_be_bytes());
@@ -2270,7 +2554,7 @@ fn update_import_object_digest(
     state.update(&revision);
     state.update(&u64::try_from(kind.len()).unwrap().to_be_bytes());
     state.update(kind.as_bytes());
-    state.update(&digest(package));
+    state.update(&object_digest);
     state.update(&[u8::from(replacement)]);
 }
 
@@ -2324,13 +2608,14 @@ fn import_object_digest(
         let mut state = DigestState::new()?;
         state.update(b"pm/import-object-page/v1");
         for item in page {
+            let object_digest = import_item_object_digest(connection, transaction_id, item)?;
             update_import_object_digest(
                 &mut state,
                 item.ordinal,
                 item.item,
                 item.revision,
                 &item.kind,
-                &item.package,
+                object_digest,
                 item.replacement,
             );
         }
@@ -2342,6 +2627,110 @@ fn import_object_digest(
         root.update(&empty.finish());
     }
     Ok(root.finish())
+}
+
+fn import_item_object_digest(
+    connection: &Connection,
+    transaction_id: [u8; 16],
+    item: &ImportItem,
+) -> Result<[u8; 32], HumanCommitError> {
+    let stream_count: i64 = connection.query_row(
+        "SELECT count(*) FROM import_staging_streams WHERE transaction_id=?1 AND ordinal=?2",
+        params![transaction_id.as_slice(), to_i64(item.ordinal)?],
+        |row| row.get(0),
+    )?;
+    if stream_count == 0 {
+        return Ok(digest(&item.package));
+    }
+    let mut state = DigestState::new()?;
+    state.update(b"pm/staged-stream/v1");
+    state.update(
+        &u64::try_from(item.package.len())
+            .map_err(|_| HumanCommitError::InvalidInput)?
+            .to_be_bytes(),
+    );
+    state.update(&item.package);
+    let mut headers = connection.prepare("SELECT attachment_id,header,chunk_count FROM import_staging_streams WHERE transaction_id=?1 AND ordinal=?2 ORDER BY attachment_id")?;
+    let mut rows = headers.query(params![transaction_id.as_slice(), to_i64(item.ordinal)?])?;
+    while let Some(row) = rows.next()? {
+        let id: Vec<u8> = row.get(0)?;
+        let header: Vec<u8> = row.get(1)?;
+        let count: i64 = row.get(2)?;
+        state.update(&id);
+        state.update(
+            &u64::try_from(header.len())
+                .map_err(|_| HumanCommitError::InvalidInput)?
+                .to_be_bytes(),
+        );
+        state.update(&header);
+        state.update(&count.to_be_bytes());
+    }
+    drop(rows);
+    drop(headers);
+    let mut chunks = connection.prepare("SELECT attachment_id,chunk_index,ciphertext FROM import_staging_stream_chunks WHERE transaction_id=?1 AND ordinal=?2 ORDER BY attachment_id,chunk_index")?;
+    let mut rows = chunks.query(params![transaction_id.as_slice(), to_i64(item.ordinal)?])?;
+    while let Some(row) = rows.next()? {
+        let id: Vec<u8> = row.get(0)?;
+        let index: i64 = row.get(1)?;
+        let ciphertext: Vec<u8> = row.get(2)?;
+        state.update(&id);
+        state.update(&index.to_be_bytes());
+        state.update(
+            &u64::try_from(ciphertext.len())
+                .map_err(|_| HumanCommitError::InvalidInput)?
+                .to_be_bytes(),
+        );
+        state.update(&ciphertext);
+    }
+    Ok(state.finish())
+}
+
+fn validate_import_streams(
+    connection: &Connection,
+    transaction_id: [u8; 16],
+    item: &ImportItem,
+    record: &LogicalRecord,
+) -> Result<(), HumanCommitError> {
+    let expected = record
+        .attachments()
+        .iter()
+        .map(|attachment| (*attachment.id(), attachment.content().is_empty()))
+        .collect::<BTreeMap<_, _>>();
+    let mut statement = connection.prepare(
+        "SELECT attachment_id,chunk_count FROM import_staging_streams
+         WHERE transaction_id=?1 AND ordinal=?2 ORDER BY attachment_id",
+    )?;
+    let streams = statement
+        .query_map(
+            params![transaction_id.as_slice(), to_i64(item.ordinal)?],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if streams.len() != expected.len() {
+        return Err(HumanCommitError::BodyChanged);
+    }
+    for (raw_id, chunk_count) in streams {
+        let attachment_id = bytes::<16>(&raw_id)?;
+        if expected.get(&attachment_id) != Some(&true) || chunk_count <= 0 {
+            return Err(HumanCommitError::BodyChanged);
+        }
+        let (count, minimum, maximum): (i64, Option<i64>, Option<i64>) = connection.query_row(
+            "SELECT count(*),min(chunk_index),max(chunk_index)
+             FROM import_staging_stream_chunks
+             WHERE transaction_id=?1 AND ordinal=?2 AND attachment_id=?3",
+            params![
+                transaction_id.as_slice(),
+                to_i64(item.ordinal)?,
+                attachment_id.as_slice()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if count != chunk_count || minimum != Some(0) || maximum != Some(chunk_count - 1) {
+            return Err(HumanCommitError::BodyChanged);
+        }
+    }
+    Ok(())
 }
 
 fn load_import_batch(
@@ -2604,10 +2993,10 @@ fn commit_import_batch(
             || opened.revision() != &item.revision
             || record.kind().name() != item.kind
             || record.kind().crypto() != opened.kind()
-            || !record.attachments().is_empty()
         {
             return Err(HumanCommitError::BodyChanged);
         }
+        validate_import_streams(&transaction, body.transaction_id, item, &record)?;
         if item.replacement {
             require_active_in(&transaction, item.item)?;
         }
@@ -2638,7 +3027,7 @@ fn commit_import_batch(
         let revision_body = encode_import_revision_body(
             item.revision,
             committed_at_us,
-            digest(&item.package),
+            import_item_object_digest(&transaction, body.transaction_id, item)?,
             &revisions,
         );
         let event = encode_g5_event(&G5EventInput {
@@ -2667,6 +3056,26 @@ fn commit_import_batch(
         transaction.execute(
             "INSERT INTO revision_parts (revision_id,item_id,package) VALUES(?1,?2,?3)",
             params![item.revision.as_slice(), item.item.as_slice(), item.package],
+        )?;
+        transaction.execute(
+            "INSERT INTO attachment_streams(attachment_id,revision_id,header,chunk_count)
+             SELECT attachment_id,?3,header,chunk_count FROM import_staging_streams
+             WHERE transaction_id=?1 AND ordinal=?2",
+            params![
+                body.transaction_id.as_slice(),
+                to_i64(item.ordinal)?,
+                item.revision.as_slice()
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO attachment_stream_chunks(attachment_id,revision_id,chunk_index,ciphertext)
+             SELECT attachment_id,?3,chunk_index,ciphertext FROM import_staging_stream_chunks
+             WHERE transaction_id=?1 AND ordinal=?2",
+            params![
+                body.transaction_id.as_slice(),
+                to_i64(item.ordinal)?,
+                item.revision.as_slice()
+            ],
         )?;
         transaction.execute(
             "INSERT INTO vault_items (item_id,visible_revision,kind,status)
@@ -2776,6 +3185,14 @@ fn commit_import_batch(
     )?;
     transaction.execute(
         "DELETE FROM human_staging WHERE transaction_id=?1",
+        [body.transaction_id.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM import_staging_stream_chunks WHERE transaction_id=?1",
+        [body.transaction_id.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM import_staging_streams WHERE transaction_id=?1",
         [body.transaction_id.as_slice()],
     )?;
     transaction.execute(

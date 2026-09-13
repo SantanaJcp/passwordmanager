@@ -471,6 +471,7 @@ dependencies = [
  "pm-native-channel",
  "rusqlite",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

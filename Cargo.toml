@@ -37,3 +37,4 @@ pm-interface = { path = "crates/pm-interface" }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rustls = { version = "=0.23.44", default-features = false, features = ["aws_lc_rs", "std"] }
 zeroize = "=1.9.0"
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }

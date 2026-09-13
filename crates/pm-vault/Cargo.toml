@@ -15,6 +15,7 @@ pm-crypto.workspace = true
 pm-native-channel.workspace = true
 rusqlite.workspace = true
 zeroize.workspace = true
+zip.workspace = true
 
 [lints]
 workspace = true

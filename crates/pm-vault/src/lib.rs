@@ -9,6 +9,7 @@ mod content;
 mod history;
 mod human;
 mod migration;
+mod onepux;
 mod reducer;
 
 pub use attempts::{
@@ -37,6 +38,7 @@ pub use migration::{
     CsvDelimiter, CsvEncoding, CsvField, CsvImportDecision, CsvImportPreview, CsvImportProfile,
     CsvImportReport, CsvMapping, CsvRecordPreview, CsvRowPreview, CsvRowStatus, PreparedCsvImport,
 };
+pub use onepux::{OnePuxImportPreview, OnePuxRecordPreview};
 pub use reducer::{
     AcceptedPrefix, CausalEventBody, CausalEventDraft, CausalEventKind, CausalReducer,
     ItemLifecycle, PurgeScopeKind, ReceivedCiphertextAttachment, ReceivedCiphertextGraph,
@@ -397,7 +399,7 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              CREATE TABLE import_staging_batches (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
                batch_id BLOB NOT NULL UNIQUE CHECK (length(batch_id) = 16),
-               source TEXT NOT NULL CHECK (source IN ('chrome','apple','mappable')),
+               source TEXT NOT NULL CHECK (source IN ('chrome','apple','mappable','1pux')),
                object_digest BLOB NOT NULL CHECK (length(object_digest) = 32),
                total INTEGER NOT NULL CHECK (total >= 0),
                new_items INTEGER NOT NULL CHECK (new_items >= 0),
@@ -412,16 +414,32 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                ordinal INTEGER NOT NULL CHECK (ordinal > 0),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB NOT NULL CHECK (length(revision_id) = 16),
-               item_kind TEXT NOT NULL CHECK (item_kind IN ('password','totp','ssh','token','note')),
+               item_kind TEXT NOT NULL CHECK (item_kind IN ('password','totp','ssh','token','note','file')),
                package BLOB NOT NULL CHECK (length(package) BETWEEN 1 AND 16777216),
                replacement INTEGER NOT NULL CHECK (replacement IN (0,1)),
                PRIMARY KEY (transaction_id, ordinal),
                UNIQUE (transaction_id, item_id)
              ) STRICT;
+             CREATE TABLE import_staging_streams (
+               transaction_id BLOB NOT NULL CHECK (length(transaction_id) = 16),
+               ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+               attachment_id BLOB NOT NULL CHECK (length(attachment_id) = 16),
+               header BLOB NOT NULL CHECK (length(header) BETWEEN 1 AND 16384),
+               chunk_count INTEGER NOT NULL CHECK (chunk_count > 0),
+               PRIMARY KEY (transaction_id,ordinal,attachment_id)
+             ) STRICT;
+             CREATE TABLE import_staging_stream_chunks (
+               transaction_id BLOB NOT NULL CHECK (length(transaction_id) = 16),
+               ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+               attachment_id BLOB NOT NULL CHECK (length(attachment_id) = 16),
+               chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+               ciphertext BLOB NOT NULL CHECK (length(ciphertext) BETWEEN 21 AND 1048597),
+               PRIMARY KEY (transaction_id,ordinal,attachment_id,chunk_index)
+             ) STRICT;
              CREATE TABLE import_reports (
                batch_id BLOB PRIMARY KEY CHECK (length(batch_id) = 16),
                transaction_id BLOB NOT NULL UNIQUE CHECK (length(transaction_id) = 16),
-               source TEXT NOT NULL CHECK (source IN ('chrome','apple','mappable')),
+               source TEXT NOT NULL CHECK (source IN ('chrome','apple','mappable','1pux')),
                total INTEGER NOT NULL CHECK (total >= 0),
                new_items INTEGER NOT NULL CHECK (new_items >= 0),
                replaced INTEGER NOT NULL CHECK (replaced >= 0),
