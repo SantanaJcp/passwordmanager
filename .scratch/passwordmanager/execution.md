@@ -32,6 +32,17 @@ El push ordinario de `01a74a7` anunció una excepción de administrador al rules
 
 Solo Linux x86_64 está observado en este host. El usuario confirmó disponibilidad de este Linux/Omarchy y una Mac Apple Silicon; acceso/ejecución en la Mac aún no verificados. Linux ARM64, macOS Intel y Windows x64/ARM64 no tienen entorno confirmado. El usuario asumirá la validación final del gate 34 y pidió que Astra también verifique todo lo posible: pruebas/review del agente son evidencia técnica, no auditoría externa certificada ni sustitución de la aceptación humana pendiente. Las pruebas nativas, Chromium propio y firma/notarización necesitan sus entornos/artefactos. No simular resultados ni retirar esas puertas del alcance; documentar evidencia real y qué no se ejecutó.
 
+El usuario autorizó preparar el [método CI nativo efímero](../../docs/verification/native-ci.md) y su workflow manual para cinco runners estándar compatibles, sin coste, secrets de firma ni publicación automática. La preparación separa preflight de entorno de validación del producto y no cambia el estado de evidencia anterior. GitHub exige que un workflow con `workflow_dispatch` exista primero en la rama por defecto `master`; integrar este archivo solo en la rama unificada o un PR no habilita todavía su ejecución. Un merger/publicador separado colocará el mismo workflow manual mínimo en `master` y después elegirá el ref confiable que también contiene workflow y scripts, sin fusionar por ello el PR de producto ni cambiar protecciones. No se modifica `master` desde el worktree de preparación.
+
+Después del run 34761618195 fallido, el usuario autorizó explícitamente instalar
+Rust `1.98.1` como etapa obligatoria en los cinco jobs, fijar
+`RUSTUP_AUTO_INSTALL=0` antes de toda llamada a Rustup sin fallback de versión,
+corregir la cardinalidad PowerShell bajo StrictMode y fijar checkout oficial a
+una revisión que declare Node 24. La remediación usa checkout v7.0.1 en
+`3d3c42e5aac5ba805825da76410c181273ba90b1`, verificado contra el tag y
+`action.yml` oficiales. No autoriza caches, artifacts, secrets, larger runners,
+gasto, otros cambios de producto ni el fallback pendiente de TUI 23.
+
 La especificación y contratos están en [spec.md](spec.md). Este documento registra ejecución, no sustituye el estado de diseño de §15 ni redefine contratos.
 
 ## Preparación comprobada

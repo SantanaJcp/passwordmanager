@@ -1,6 +1,8 @@
 # G3 — Autenticación delegada sin exportar secretos
 
-Fecha: 2026-09-12; evidencia P1 acotada añadida 2026-09-13. **G3 cerrada documentalmente para los perfiles declarados. B1–B4 resueltos en la última sección; P1 tiene una ejecución parcial Linux x86_64/CFT y P2–P5 siguen pendientes. La distribución Chromium propia y la matriz nativa no están certificadas.**
+Fecha: 2026-09-12; evidencia de ejecución acotada actualizada 2026-09-13. **G3 cerrada documentalmente para los perfiles declarados. B1–B4 siguen resueltos. P1–P4 tienen recorridos reales de laboratorio Linux x86_64; P5 tiene dobles TLS adversarios, no ejecución contra GitHub real. La distribución Chromium propia y la matriz nativa no están certificadas.**
+
+Evidencia y límites actuales: [P1](../verification/ticket-10.md), [P2](../verification/ticket-11.md), [P3](../verification/ticket-12.md), [P4](../verification/ticket-14.md), [P5 adversario](../verification/ticket-15.md). Las tablas de planificación originales siguientes no reemplazan esos resultados ni acreditan los gates nativos restantes.
 
 ## Pregunta y conclusión
 
