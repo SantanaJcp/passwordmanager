@@ -6,14 +6,17 @@ mod attempts;
 mod audit;
 mod authorization;
 mod content;
+mod history;
 mod human;
 mod migration;
+mod onepux;
 mod passkey;
+
 mod reducer;
 
 pub use attempts::{
     AttemptError, AttemptLease, AttemptOutcome, AttemptSnapshot, AttemptState, AttemptVault,
-    IdempotencyKey, StartAttempt,
+    IdempotencyKey, StartAttempt, TotpLease,
 };
 pub use audit::{
     AuditAction, AuditActorKind, AuditDeviceCustody, AuditDiscontinuity, AuditEvent, AuditOutcome,
@@ -28,6 +31,7 @@ pub use content::{
     HumanMetadata, LogicalRecord, LogicalValue, PasswordRng, PrivateKeyFormat, RecordKind,
     SearchHit, SearchQuery, SourceEncoding, SourceField, TotpAlgorithm,
 };
+pub use history::{HistoryEntry, ItemHistory, ItemPurgeScope, PreparedItemPurge};
 pub use human::{
     AttachmentReader, HumanChannel, HumanCommitError, HumanReceipt, HumanVault, PasswordRecord,
     PreparedHumanCommand,
@@ -36,15 +40,17 @@ pub use migration::{
     CsvDelimiter, CsvEncoding, CsvField, CsvImportDecision, CsvImportPreview, CsvImportProfile,
     CsvImportReport, CsvMapping, CsvRecordPreview, CsvRowPreview, CsvRowStatus, PreparedCsvImport,
 };
+pub use onepux::{OnePuxImportPreview, OnePuxRecordPreview};
 pub use passkey::{
     HumanVerification, PasskeyAssertion, PasskeyError, PasskeyOperation, PasskeyPrompt,
     PasskeyProvider, PasskeyPublicCredential, PasskeyRequest, PasskeyStatus,
     PreparedPasskeyRegistration, UserVerificationRequirement,
 };
+
 pub use reducer::{
     AcceptedPrefix, CausalEventBody, CausalEventDraft, CausalEventKind, CausalReducer,
-    ItemLifecycle, ReceivedCiphertextAttachment, ReceivedCiphertextGraph, ReceivedCiphertextStream,
-    ReducedItem, ReducedView, ReductionError, SignedCausalEvent,
+    ItemLifecycle, PurgeScopeKind, ReceivedCiphertextAttachment, ReceivedCiphertextGraph,
+    ReceivedCiphertextStream, ReducedItem, ReducedView, ReductionError, SignedCausalEvent,
 };
 
 use std::{
@@ -321,6 +327,27 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0), ciphertext BLOB NOT NULL CHECK (length(ciphertext) BETWEEN 21 AND 1048597),
                PRIMARY KEY (attachment_id, revision_id, chunk_index)
              ) STRICT;
+             CREATE TABLE purged_items (
+               item_id BLOB PRIMARY KEY CHECK (length(item_id) = 16),
+               purge_event_digest BLOB NOT NULL CHECK (length(purge_event_digest) = 32),
+               revision_count INTEGER NOT NULL CHECK (revision_count >= 0),
+               attachment_count INTEGER NOT NULL CHECK (attachment_count >= 0),
+               encrypted_bytes INTEGER NOT NULL CHECK (encrypted_bytes >= 0)
+             ) STRICT;
+             CREATE TABLE purged_revisions (
+               revision_id BLOB PRIMARY KEY CHECK (length(revision_id) = 16),
+               item_id BLOB NOT NULL CHECK (length(item_id) = 16),
+               purge_event_digest BLOB NOT NULL CHECK (length(purge_event_digest) = 32)
+             ) STRICT;
+             CREATE TRIGGER reject_purged_item_revision BEFORE INSERT ON revision_parts
+             WHEN EXISTS(SELECT 1 FROM purged_items WHERE item_id=NEW.item_id)
+             BEGIN SELECT RAISE(ABORT,'purged item is terminal'); END;
+             CREATE TRIGGER reject_purged_revision BEFORE INSERT ON revision_parts
+             WHEN EXISTS(SELECT 1 FROM purged_revisions WHERE revision_id=NEW.revision_id)
+             BEGIN SELECT RAISE(ABORT,'purged revision is terminal'); END;
+             CREATE TRIGGER reject_purged_item BEFORE INSERT ON vault_items
+             WHEN EXISTS(SELECT 1 FROM purged_items WHERE item_id=NEW.item_id)
+             BEGIN SELECT RAISE(ABORT,'purged item is terminal'); END;
              CREATE TABLE authority_events (
                event_digest BLOB PRIMARY KEY CHECK (length(event_digest) = 32),
                event_id BLOB NOT NULL UNIQUE CHECK (length(event_id) = 16),
@@ -353,8 +380,8 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              ) STRICT;
              CREATE TABLE human_staging (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
-               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'audit_purge', 'availability_change', 'identity_change', 'import_commit')),
-               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'import-batch')),
+               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'history_restore', 'item_purge', 'audit_purge', 'availability_change', 'identity_change', 'import_commit')),
+               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'restore', 'purge-item', 'purge-revisions', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'import-batch')),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB CHECK (revision_id IS NULL OR length(revision_id) = 16),
                body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144),
@@ -380,7 +407,7 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              CREATE TABLE import_staging_batches (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
                batch_id BLOB NOT NULL UNIQUE CHECK (length(batch_id) = 16),
-               source TEXT NOT NULL CHECK (source IN ('chrome','apple','mappable')),
+               source TEXT NOT NULL CHECK (source IN ('chrome','apple','mappable','1pux')),
                object_digest BLOB NOT NULL CHECK (length(object_digest) = 32),
                total INTEGER NOT NULL CHECK (total >= 0),
                new_items INTEGER NOT NULL CHECK (new_items >= 0),
@@ -395,16 +422,32 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                ordinal INTEGER NOT NULL CHECK (ordinal > 0),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB NOT NULL CHECK (length(revision_id) = 16),
-               item_kind TEXT NOT NULL CHECK (item_kind IN ('password','totp','ssh','token','note')),
+               item_kind TEXT NOT NULL CHECK (item_kind IN ('password','totp','ssh','token','note','file')),
                package BLOB NOT NULL CHECK (length(package) BETWEEN 1 AND 16777216),
                replacement INTEGER NOT NULL CHECK (replacement IN (0,1)),
                PRIMARY KEY (transaction_id, ordinal),
                UNIQUE (transaction_id, item_id)
              ) STRICT;
+             CREATE TABLE import_staging_streams (
+               transaction_id BLOB NOT NULL CHECK (length(transaction_id) = 16),
+               ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+               attachment_id BLOB NOT NULL CHECK (length(attachment_id) = 16),
+               header BLOB NOT NULL CHECK (length(header) BETWEEN 1 AND 16384),
+               chunk_count INTEGER NOT NULL CHECK (chunk_count > 0),
+               PRIMARY KEY (transaction_id,ordinal,attachment_id)
+             ) STRICT;
+             CREATE TABLE import_staging_stream_chunks (
+               transaction_id BLOB NOT NULL CHECK (length(transaction_id) = 16),
+               ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+               attachment_id BLOB NOT NULL CHECK (length(attachment_id) = 16),
+               chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+               ciphertext BLOB NOT NULL CHECK (length(ciphertext) BETWEEN 21 AND 1048597),
+               PRIMARY KEY (transaction_id,ordinal,attachment_id,chunk_index)
+             ) STRICT;
              CREATE TABLE import_reports (
                batch_id BLOB PRIMARY KEY CHECK (length(batch_id) = 16),
                transaction_id BLOB NOT NULL UNIQUE CHECK (length(transaction_id) = 16),
-               source TEXT NOT NULL CHECK (source IN ('chrome','apple','mappable')),
+               source TEXT NOT NULL CHECK (source IN ('chrome','apple','mappable','1pux')),
                total INTEGER NOT NULL CHECK (total >= 0),
                new_items INTEGER NOT NULL CHECK (new_items >= 0),
                replaced INTEGER NOT NULL CHECK (replaced >= 0),

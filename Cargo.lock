@@ -472,6 +472,19 @@ dependencies = [
  "pm-native-channel",
  "rusqlite",
  "zeroize",
+ "zip",
+]
+
+[[package]]
+name = "pm-web-auth"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64",
+ "libc",
+ "pm-interface",
+ "rustls",
+ "zeroize",
 ]
 
 [[package]]

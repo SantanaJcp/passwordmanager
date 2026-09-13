@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 use crate::{
     AgentIdentity, AgentPeer, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent,
     AuditOutcome, AuthorizationError, DelegatedVault, HumanVault, HumanVerification, PasskeyError,
-    PasskeyOperation, PasskeyRequest, PasskeyStatus, RecordKind, audit,
+    PasskeyOperation, PasskeyRequest, PasskeyStatus, RecordKind, TotpAlgorithm, audit,
 };
 
 const ATTEMPT_LIFETIME_US: i64 = 24 * 60 * 60 * 1_000_000;
@@ -259,8 +259,11 @@ pub struct AttemptLease {
     revision_id: [u8; 16],
     destination: String,
     context: Vec<u8>,
+    integration_id: String,
+    method: String,
     username: String,
     password: Zeroizing<Vec<u8>>,
+    totp: Option<TotpLease>,
     reconciliation: bool,
 }
 impl AttemptLease {
@@ -279,14 +282,49 @@ impl AttemptLease {
     pub fn context(&self) -> &[u8] {
         &self.context
     }
+    pub fn integration_id(&self) -> &str {
+        &self.integration_id
+    }
+    pub fn method(&self) -> &str {
+        &self.method
+    }
     pub fn username(&self) -> &str {
         &self.username
     }
     pub fn password(&self) -> &[u8] {
         &self.password
     }
+    pub const fn totp(&self) -> Option<&TotpLease> {
+        self.totp.as_ref()
+    }
     pub const fn reconciliation_only(&self) -> bool {
         self.reconciliation
+    }
+}
+
+pub struct TotpLease {
+    secret: Zeroizing<Vec<u8>>,
+    algorithm: TotpAlgorithm,
+    digits: u8,
+    period: u16,
+    t0: u64,
+}
+
+impl TotpLease {
+    pub fn secret(&self) -> &[u8] {
+        &self.secret
+    }
+    pub const fn algorithm(&self) -> TotpAlgorithm {
+        self.algorithm
+    }
+    pub const fn digits(&self) -> u8 {
+        self.digits
+    }
+    pub const fn period(&self) -> u16 {
+        self.period
+    }
+    pub const fn t0(&self) -> u64 {
+        self.t0
     }
 }
 
@@ -389,14 +427,17 @@ impl AttemptVault {
                 PasskeyError::InvalidRequest
             });
         }
-        let (destination, context) = decode_execution(&self.custody.open_attempt_state(
+        let (destination, context, method) = decode_execution(&self.custody.open_attempt_state(
             &package,
             *self.trusted.vault_id(),
             self.device,
             self.generation,
             attempt,
         )?)?;
-        if destination != request.origin() || context != b"keycloak-webauthn/1" {
+        if destination != request.origin()
+            || context != b"keycloak-webauthn/1"
+            || method != "webauthn"
+        {
             return Err(PasskeyError::InvalidRequest);
         }
         let operational = self
@@ -445,7 +486,7 @@ impl AttemptVault {
             self.device,
             self.generation,
             &snapshot,
-            Some((&destination, &context)),
+            Some((&destination, &context, &method)),
             now,
         )?;
         append_audit(
@@ -546,7 +587,7 @@ impl AttemptVault {
         let result = PasskeyStatus::Assertion(assertion);
         let response = crate::passkey::encode_status(&result);
         let response_package = self.seal_passkey_blob(request_id, &response)?;
-        let (destination, context) = decode_execution(&self.custody.open_attempt_state(
+        let (destination, context, method) = decode_execution(&self.custody.open_attempt_state(
             &package,
             *self.trusted.vault_id(),
             self.device,
@@ -563,7 +604,7 @@ impl AttemptVault {
             self.device,
             self.generation,
             &snapshot,
-            Some((&destination, &context)),
+            Some((&destination, &context, &method)),
             now,
         )?;
         tx.execute(
@@ -617,9 +658,15 @@ impl AttemptVault {
             request.credential_id,
         )?;
         let password_profile = op.descriptor.kind() == RecordKind::Password
-            && request.method == "password"
-            && request.integration_id == "controlled.external"
-            && request.integration_version == 1;
+            && request.integration_version == 1
+            && match request.integration_id.as_str() {
+                "controlled.external" => request.method == "password",
+                "keycloak-browser-oidc" => {
+                    matches!(request.method.as_str(), "password" | "password_totp")
+                        && request.context == request.destination.as_bytes()
+                }
+                _ => false,
+            };
         let passkey_profile = op.descriptor.kind() == RecordKind::Passkey
             && request.method == "webauthn"
             && request.integration_id == "vault-webauthn-provider"
@@ -654,7 +701,10 @@ impl AttemptVault {
             self.device,
             self.generation,
             attempt,
-            &encode_snapshot(&snap, Some((&request.destination, &request.context))),
+            &encode_snapshot(
+                &snap,
+                Some((&request.destination, &request.context, &request.method)),
+            ),
         )?;
         tx.execute("INSERT INTO authentication_attempts(attempt_id,item_id,revision_id,owner_subject,owner_generation,state,created_at_us,expires_at_us,scope_digest,params_digest,state_package) VALUES(?1,?2,?3,?4,?5,'created',?6,?7,?8,?9,?10)",params![attempt.as_slice(),request.credential_id.as_slice(),op.descriptor.revision_id().as_slice(),identity.subject().as_slice(),i64::try_from(identity.generation()).map_err(|_|AttemptError::Integrity)?,now,expires,scope_digest.as_slice(),params_digest.as_slice(),package])?;
         append_audit(
@@ -836,17 +886,21 @@ impl AttemptVault {
         if snap.revision_id != *op.descriptor.revision_id() {
             return Err(AttemptError::CredentialUnavailable);
         }
-        let (destination, context) = decode_execution(&self.custody.open_attempt_state(
+        let (destination, context, method) = decode_execution(&self.custody.open_attempt_state(
             &package,
             *self.trusted.vault_id(),
             self.device,
             self.generation,
             attempt,
         )?)?;
-        let (username, password) = if reconcile {
-            (String::new(), Zeroizing::new(Vec::new()))
+        let material = if reconcile {
+            CredentialMaterial {
+                username: String::new(),
+                password: Zeroizing::new(Vec::new()),
+                totp: None,
+            }
         } else {
-            password_material(&op.auth)?
+            password_material(&op.auth, &method)?
         };
         let token = random_id().map_err(|_| AttemptError::Integrity)?;
         snap.state = AttemptState::Running;
@@ -856,7 +910,7 @@ impl AttemptVault {
             self.device,
             self.generation,
             attempt,
-            &encode_snapshot(&snap, Some((&destination, &context))),
+            &encode_snapshot(&snap, Some((&destination, &context, &method))),
         )?;
         let update = if reconcile {
             "UPDATE authentication_attempts SET state='running',state_package=?2,lease_token=?3,claimed_at_us=?4,provider_sent=1 WHERE attempt_id=?1 AND state IN ('waiting_for_human','indeterminate')"
@@ -888,8 +942,11 @@ impl AttemptVault {
             revision_id: snap.revision_id,
             destination,
             context,
-            username,
-            password,
+            integration_id: snap.integration_id,
+            method,
+            username: material.username,
+            password: material.password,
+            totp: material.totp,
             reconciliation: reconcile,
         }))
     }
@@ -910,13 +967,16 @@ impl AttemptVault {
             self.generation,
             lease.attempt_id,
         )?)?;
-        let (destination, context) = decode_execution(&self.custody.open_attempt_state(
+        let (destination, context, method) = decode_execution(&self.custody.open_attempt_state(
             &package,
             *self.trusted.vault_id(),
             self.device,
             self.generation,
             lease.attempt_id,
         )?)?;
+        if method != lease.method {
+            return Err(AttemptError::Integrity);
+        }
         let (audit_outcome, terminal) = match outcome {
             AttemptOutcome::Succeeded { result } => {
                 if result.len() > MAX_CONTEXT {
@@ -952,7 +1012,7 @@ impl AttemptVault {
             self.device,
             self.generation,
             lease.attempt_id,
-            &encode_snapshot(&snap, Some((&destination, &context))),
+            &encode_snapshot(&snap, Some((&destination, &context, &lease.method))),
         )?;
         tx.execute("UPDATE authentication_attempts SET state=?2,state_package=?3,lease_token=NULL,terminal_at_us=?4,claimed_at_us=?5 WHERE attempt_id=?1",params![lease.attempt_id.as_slice(),snap.state.name(),replacement,if terminal{Some(now)}else{None},now])?;
         append_audit(
@@ -1006,7 +1066,7 @@ impl AttemptVault {
                     self.device,
                     self.generation,
                     id,
-                    &encode_snapshot(&snap, Some((&execution.0, &execution.1))),
+                    &encode_snapshot(&snap, Some((&execution.0, &execution.1, &execution.2))),
                 )?;
                 tx.execute("UPDATE authentication_attempts SET state='indeterminate',state_package=?2,lease_token=NULL WHERE attempt_id=?1",params![id.as_slice(),replacement])?;
                 append_audit(
@@ -1099,41 +1159,50 @@ fn scope_digest(
         .unwrap();
     digest(&e.into_writer())
 }
-fn encode_snapshot(s: &AttemptSnapshot, execution: Option<(&str, &[u8])>) -> Vec<u8> {
-    let mut e = Encoder::new(Vec::new());
-    e.array(12)
+fn encode_snapshot(snapshot: &AttemptSnapshot, execution: Option<(&str, &[u8], &str)>) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder
+        .array(12)
         .unwrap()
         .u8(1)
         .unwrap()
-        .bytes(&s.attempt_id)
+        .bytes(&snapshot.attempt_id)
         .unwrap()
-        .bytes(&s.credential_id)
+        .bytes(&snapshot.credential_id)
         .unwrap()
-        .bytes(&s.revision_id)
+        .bytes(&snapshot.revision_id)
         .unwrap()
-        .str(&s.integration_id)
+        .str(&snapshot.integration_id)
         .unwrap()
-        .u32(s.integration_version)
+        .u32(snapshot.integration_version)
         .unwrap()
-        .str(s.state.name())
+        .str(snapshot.state.name())
         .unwrap()
-        .i64(s.created_at_us)
+        .i64(snapshot.created_at_us)
         .unwrap()
-        .i64(s.expires_at_us)
+        .i64(snapshot.expires_at_us)
         .unwrap();
-    match &s.reason {
-        Some(v) => e.str(v).unwrap(),
-        None => e.null().unwrap(),
+    match &snapshot.reason {
+        Some(value) => encoder.str(value).unwrap(),
+        None => encoder.null().unwrap(),
     };
-    match &s.result {
-        Some(v) => e.bytes(v).unwrap(),
-        None => e.null().unwrap(),
+    match &snapshot.result {
+        Some(value) => encoder.bytes(value).unwrap(),
+        None => encoder.null().unwrap(),
     };
     match execution {
-        Some((d, c)) => e.array(2).unwrap().str(d).unwrap().bytes(c).unwrap(),
-        None => e.null().unwrap(),
+        Some((destination, context, method)) => encoder
+            .array(3)
+            .unwrap()
+            .str(destination)
+            .unwrap()
+            .bytes(context)
+            .unwrap()
+            .str(method)
+            .unwrap(),
+        None => encoder.null().unwrap(),
     };
-    e.into_writer()
+    encoder.into_writer()
 }
 fn decode_snapshot(bytes: &[u8]) -> Result<AttemptSnapshot, AttemptError> {
     let mut d = Decoder::new(bytes);
@@ -1181,28 +1250,55 @@ fn decode_snapshot(bytes: &[u8]) -> Result<AttemptSnapshot, AttemptError> {
         result,
     })
 }
-fn decode_execution(bytes: &[u8]) -> Result<(String, Vec<u8>), AttemptError> {
+fn decode_execution(bytes: &[u8]) -> Result<(String, Vec<u8>, String), AttemptError> {
     let mut d = Decoder::new(bytes);
     if d.array().map_err(|_| AttemptError::Integrity)? != Some(12) {
         return Err(AttemptError::Integrity);
     }
-    for _ in 0..11 {
+    for _ in 0..4 {
         d.skip().map_err(|_| AttemptError::Integrity)?;
     }
-    if d.array().map_err(|_| AttemptError::Integrity)? != Some(2) {
+    let integration = d.str().map_err(|_| AttemptError::Integrity)?;
+    for _ in 0..6 {
+        d.skip().map_err(|_| AttemptError::Integrity)?;
+    }
+    let fields = d
+        .array()
+        .map_err(|_| AttemptError::Integrity)?
+        .ok_or(AttemptError::Integrity)?;
+    let destination = d.str().map_err(|_| AttemptError::Integrity)?.into();
+    let context = d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec();
+    let method = match fields {
+        3 => d.str().map_err(|_| AttemptError::Integrity)?.into(),
+        // Ticket 08 persisted only destination/context. That schema can only
+        // represent its single closed method and remains readable after 10.
+        2 if integration == "controlled.external" => "password".into(),
+        _ => return Err(AttemptError::Integrity),
+    };
+    if d.position() != bytes.len() {
         return Err(AttemptError::Integrity);
     }
-    Ok((
-        d.str().map_err(|_| AttemptError::Integrity)?.into(),
-        d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec(),
-    ))
+    Ok((destination, context, method))
 }
-fn password_material(auth: &[u8]) -> Result<(String, Zeroizing<Vec<u8>>), AttemptError> {
+
+struct CredentialMaterial {
+    username: String,
+    password: Zeroizing<Vec<u8>>,
+    totp: Option<TotpLease>,
+}
+
+fn password_material(
+    auth: &[u8],
+    requested_method: &str,
+) -> Result<CredentialMaterial, AttemptError> {
     let mut d = Decoder::new(auth);
     let n = d
         .array()
         .map_err(|_| AttemptError::Integrity)?
         .ok_or(AttemptError::Integrity)?;
+    let mut username = None;
+    let mut password = None;
+    let mut totp = None;
     for _ in 0..n {
         let fields = d
             .map()
@@ -1211,6 +1307,12 @@ fn password_material(auth: &[u8]) -> Result<(String, Zeroizing<Vec<u8>>), Attemp
         let mut method = None;
         let mut user = None;
         let mut pass = None;
+        let mut secret = None;
+        let mut algorithm = None;
+        let mut digits = None;
+        let mut period = None;
+        let mut t0 = None;
+        let mut account = None;
         for _ in 0..fields {
             match d.str().map_err(|_| AttemptError::Integrity)? {
                 "method" => method = Some(d.str().map_err(|_| AttemptError::Integrity)?.to_owned()),
@@ -1220,17 +1322,60 @@ fn password_material(auth: &[u8]) -> Result<(String, Zeroizing<Vec<u8>>), Attemp
                         d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec(),
                     ));
                 }
+                "secret" => {
+                    secret = Some(Zeroizing::new(
+                        d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec(),
+                    ));
+                }
+                "algorithm" => {
+                    algorithm = Some(match d.str().map_err(|_| AttemptError::Integrity)? {
+                        "SHA1" => TotpAlgorithm::Sha1,
+                        "SHA256" => TotpAlgorithm::Sha256,
+                        "SHA512" => TotpAlgorithm::Sha512,
+                        _ => return Err(AttemptError::Integrity),
+                    });
+                }
+                "digits" => digits = Some(d.u8().map_err(|_| AttemptError::Integrity)?),
+                "period" => period = Some(d.u16().map_err(|_| AttemptError::Integrity)?),
+                "t0" => t0 = Some(d.u64().map_err(|_| AttemptError::Integrity)?),
+                "account" => {
+                    account = Some(d.str().map_err(|_| AttemptError::Integrity)?.to_owned());
+                }
                 _ => d.skip().map_err(|_| AttemptError::Integrity)?,
             }
         }
         if method.as_deref() == Some("password") {
-            return Ok((
-                user.ok_or(AttemptError::Integrity)?,
-                pass.ok_or(AttemptError::Integrity)?,
+            username = Some(user.ok_or(AttemptError::Integrity)?);
+            password = Some(pass.ok_or(AttemptError::Integrity)?);
+        } else if method.as_deref() == Some("totp") {
+            totp = Some((
+                account.ok_or(AttemptError::Integrity)?,
+                TotpLease {
+                    secret: secret.ok_or(AttemptError::Integrity)?,
+                    algorithm: algorithm.ok_or(AttemptError::Integrity)?,
+                    digits: digits.ok_or(AttemptError::Integrity)?,
+                    period: period.ok_or(AttemptError::Integrity)?,
+                    t0: t0.ok_or(AttemptError::Integrity)?,
+                },
             ));
         }
     }
-    Err(AttemptError::CredentialUnavailable)
+    let username = username.ok_or(AttemptError::CredentialUnavailable)?;
+    let password = password.ok_or(AttemptError::CredentialUnavailable)?;
+    let totp = if requested_method == "password_totp" {
+        let (account, material) = totp.ok_or(AttemptError::CredentialUnavailable)?;
+        if account != username {
+            return Err(AttemptError::CredentialUnavailable);
+        }
+        Some(material)
+    } else {
+        None
+    };
+    Ok(CredentialMaterial {
+        username,
+        password,
+        totp,
+    })
 }
 
 struct PasskeyMaterial {
@@ -1328,7 +1473,7 @@ fn update_snapshot(
     device: [u8; 16],
     generation: u64,
     s: &AttemptSnapshot,
-    execution: Option<(&str, &[u8])>,
+    execution: Option<(&str, &[u8], &str)>,
     now: i64,
 ) -> Result<(), AttemptError> {
     let old: Vec<u8> = tx.query_row(
@@ -1342,7 +1487,7 @@ fn update_snapshot(
         Some(v)
     } else {
         owned = decode_execution(&old_plain)?;
-        Some((owned.0.as_str(), owned.1.as_slice()))
+        Some((owned.0.as_str(), owned.1.as_slice(), owned.2.as_str()))
     };
     let package = custody.update_attempt_state(
         &old,

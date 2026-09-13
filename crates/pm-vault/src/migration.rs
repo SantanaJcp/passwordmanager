@@ -641,7 +641,7 @@ fn push_field(row: &mut Vec<String>, field: &mut Vec<u8>) -> Result<(), HumanCom
     Ok(())
 }
 
-fn parse_totp(uri: &str, refs: &[u16]) -> Result<AuthRecord, HumanCommitError> {
+pub(crate) fn parse_totp(uri: &str, refs: &[u16]) -> Result<AuthRecord, HumanCommitError> {
     let rest = uri
         .strip_prefix("otpauth://totp/")
         .ok_or(HumanCommitError::InvalidInput)?;
