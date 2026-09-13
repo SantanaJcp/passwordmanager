@@ -102,17 +102,35 @@ segment/query/purge work owned by tickets 06 and later.
   DAG reduction, `SK_SD` device signatures and sync are deliberately not
   claimed by ticket 04 and remain owned by later G5 tickets.
 
-## Final quality commands
+## Final integration quality commands
 
-To be recorded on the candidate commit:
+Observed by the merger on unified branch merge
+`4a190ecaa2d08f7469a60d2fb3484588d9897fcb`; its 16 ticket paths matched
+candidate `04d434c424c2441385ccf4d32e62af7710c08f5a` exactly before this evidence
+update:
 
 ```text
-./scripts/cargo-local.sh test -p pm-vault --all-targets --locked --offline
-./scripts/test-linux-human-transaction-lab.sh
-./scripts/check.sh
 ./scripts/clean-offline-build.sh
+# pinned inputs passed; clean locked/offline workspace build passed; exit 0
+
+./scripts/check.sh
+# pinned inputs, fmt, workspace/all-target check, 26 tests and clippy passed; exit 0
+
+./scripts/test-linux-custody-lab.sh
+# existing multi-UID/RPK/ACL/process-restart laboratory passed; exit 0
+
+./scripts/test-linux-human-transaction-lab.sh
+# composed multi-UID TLS human CRUD/atomic audit/replay/recovery laboratory passed; exit 0
 ```
 
+The first laboratory observed bootstrap SHA-256
+`65eff10a7d4787e7bac4daff19d2333b38a43c84f2bf5a15568bf2d05cd1511e`.
+The composed human laboratory independently generated bootstrap SHA-256
+`3b384610ab6cb649143bbf32af7ad29198c3aad73302a520b6318b232767a408`
+and printed the two `PASS human_*` lines shown above. Both printed
+`LIMIT reboot_host=NOT_RUN production_systemd_fde=NOT_RUN`; no custodian
+process remained after either harness.
+
 Formal Astra review remains deferred until all tickets, as required by the
-execution contract. The merger must still integrate and independently verify
-this candidate before resolving ticket 04.
+execution contract. This evidence is integration verification, not that final
+review.
