@@ -32,15 +32,16 @@ def main():
   listed=run(B,[sync,"list",*common(keys[1][0])]).stdout;assert digest.encode() in listed
   fetched=run(C,[sync,"get",*common(keys[2][0]),"--hash",digest]).stdout;assert base64.b64encode(opaque) in fetched
   denied=run(ROGUE,[sync,"list",*common(keys[3][0])],False);assert denied.returncode==4 and denied.stderr==b"SYNC_UNAVAILABLE\n"
-  missing="aa"*32;assert run(B,[sync,"publish",*common(keys[1][0]),"--hash",missing],False).returncode==4
+  missing="aa"*32;assert run(B,[sync,"publish",*common(keys[1][0]),"--hash",missing],False).returncode==5
   server.send_signal(signal.SIGTERM);server.communicate(timeout=5);assert server.returncode==-signal.SIGTERM
+  old_socket_inode=socket.stat().st_ino
   database=sqlite3.connect(db);database.execute("update blocks set bytes=? where hash=?",(b"altered",bytes.fromhex(digest)));database.commit();database.close()
   server=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,preexec_fn=identity(SERVER));deadline=time.monotonic()+10
-  while not socket.exists():
+  while not socket.exists() or socket.stat().st_ino==old_socket_inode:
    if server.poll() is not None:raise AssertionError(server.communicate())
    if time.monotonic()>deadline:raise AssertionError("sync restart timeout")
    time.sleep(.02)
-  tampered=run(C,[sync,"get",*common(keys[2][0]),"--hash",digest],False);assert tampered.returncode==4 and tampered.stderr==b"SYNC_UNAVAILABLE\n"
+  tampered=run(C,[sync,"get",*common(keys[2][0]),"--hash",digest],False);assert tampered.returncode==7,(tampered.returncode,tampered.stdout,tampered.stderr)
   server.send_signal(signal.SIGTERM);server.communicate(timeout=5);assert server.returncode==-signal.SIGTERM
   raw=b''.join(p.read_bytes() for p in dirs[0].glob("opaque.sqlite3*"));assert b"synthetic-ticket17-secret-canary" not in raw
   print("PASS sync-e2e custodians=3 server=opaque put=idempotent list=roots get=hash-bound partial=rejected hostile-tamper=rejected")

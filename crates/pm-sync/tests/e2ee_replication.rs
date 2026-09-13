@@ -3,12 +3,175 @@
 
 use pm_crypto::{KdfProfile, SyncPairing};
 use pm_sync::{
-    MAX_BLOCK_BYTES, OpaqueSyncStore, ProcessTlsTransport, SyncError, SyncReplica, SyncTransport,
+    MAX_BLOCK_BYTES, MAX_OBJECT_BYTES, OpaqueSyncStore, ProcessTlsTransport, SyncError,
+    SyncReplica, SyncTransport,
 };
 use pm_vault::{
-    AuditDeviceCustody, CausalEventBody, CausalEventDraft, CausalEventKind, CausalReducer,
-    HumanChannel, HumanVault, PendingVault, open_vault,
+    Attachment, AttachmentReader, AuditDeviceCustody, CausalEventBody, CausalEventDraft,
+    CausalEventKind, CausalReducer, HumanChannel, HumanMetadata, HumanVault, LogicalRecord,
+    PendingVault, ReceivedCiphertextAttachment, RecordKind, open_vault,
 };
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn human_streaming_attachment_graph_is_complete_before_atomic_activation() {
+    let dir = TestDir::new();
+    let seed = dir.path("graph-seed.sqlite3");
+    persist(&seed);
+    let sender = dir.path("graph-a.sqlite3");
+    let receiver = dir.path("graph-b.sqlite3");
+    fs::copy(&seed, &sender).unwrap();
+    let (mut human, _peer) = human(&sender, [0xf1; 16]);
+    let pairing = human.create_sync_pairing([0x51; 44]).unwrap();
+    let protected = pairing.to_protected_bytes();
+    let _device_package = human
+        .sign_causal_event(&revision([0xfe; 16], [0xfd; 16], 1))
+        .unwrap();
+    let trusted = *open_vault(&sender, MASTER).unwrap().trusted_root();
+    rusqlite::Connection::open(&sender)
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    fs::copy(&sender, &receiver).unwrap();
+    let payload = vec![0x6d; 2 * 1024 * 1024 + 37];
+    let attachment = Attachment::descriptor(
+        [0x88; 16],
+        "large.bin",
+        "application/octet-stream",
+        payload.len() as u64,
+        pm_crypto::digest(&payload),
+    )
+    .unwrap();
+    let record = LogicalRecord::new_streaming(
+        RecordKind::File,
+        HumanMetadata {
+            title: "Graph".into(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![attachment],
+    )
+    .unwrap();
+    let mut cursor = std::io::Cursor::new(payload.clone());
+    let mut sources = [AttachmentReader::new([0x88; 16], &mut cursor)];
+    let prepared = human
+        .prepare_create_record_streaming(&record, &mut sources)
+        .unwrap();
+    human
+        .commit(
+            prepared.command(),
+            &human.sign(&prepared).unwrap(),
+            prepared.body(),
+        )
+        .unwrap();
+    let malicious_receiver = dir.path("graph-malicious.sqlite3");
+    fs::copy(&receiver, &malicious_receiver).unwrap();
+    let reducer = CausalReducer::open(&sender).unwrap();
+    let event = reducer.pending_outbox().unwrap().remove(0);
+    let graph_stage = dir.path("mixed-graph-stage");
+    let mut mixed = reducer
+        .export_ciphertext_graph(&event, &graph_stage)
+        .unwrap()
+        .unwrap();
+    mixed.attachments.push(ReceivedCiphertextAttachment {
+        id: [0x99; 16],
+        package: mixed.package.clone(),
+    });
+    assert!(matches!(
+        CausalReducer::open(&malicious_receiver)
+            .unwrap()
+            .apply_received_package(&[event], &[mixed]),
+        Err(pm_vault::ReductionError::Integrity)
+    ));
+    assert_eq!(
+        rusqlite::Connection::open(&malicious_receiver)
+            .unwrap()
+            .query_row("SELECT count(*) FROM revision_parts", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let server_path = dir.path("graph-server.sqlite3");
+    let server = OpaqueSyncStore::create(&server_path).unwrap();
+    let rpk = [0x81; 44];
+    let namespace = *pairing.namespace();
+    server.authorize(namespace, &rpk).unwrap();
+    let mut tx = SyncReplica::new(&sender, pairing, rpk, [0x51; 44]).unwrap();
+    let mut rx = SyncReplica::new(
+        &receiver,
+        SyncPairing::from_protected_bytes(&protected, &trusted).unwrap(),
+        rpk,
+        [0x51; 44],
+    )
+    .unwrap();
+    assert_eq!(tx.push(&(&server, &rpk[..])).unwrap(), 1);
+    let db = rusqlite::Connection::open(&server_path).unwrap();
+    let(hash,bytes):(Vec<u8>,Vec<u8>)=db.query_row("SELECT hash,bytes FROM blocks WHERE hash NOT IN(SELECT hash FROM roots) ORDER BY length(bytes) DESC LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    db.execute("DELETE FROM blocks WHERE hash=?1", [&hash])
+        .unwrap();
+    assert!(rx.pull(&(&server, &rpk[..])).is_err());
+    assert_eq!(
+        rusqlite::Connection::open(&receiver)
+            .unwrap()
+            .query_row("SELECT count(*) FROM vault_items", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    db.execute(
+        "INSERT INTO blocks(namespace,hash,bytes)VALUES(?1,?2,?3)",
+        rusqlite::params![namespace.as_slice(), hash, bytes],
+    )
+    .unwrap();
+    drop(db);
+    let fault = rusqlite::Connection::open(&receiver).unwrap();
+    fault.execute_batch("CREATE TRIGGER fail_sync_graph BEFORE INSERT ON attachment_stream_chunks BEGIN SELECT RAISE(ABORT,'synthetic crash'); END;").unwrap();
+    assert!(rx.pull(&(&server, &rpk[..])).is_err());
+    assert_eq!(
+        fault
+            .query_row("SELECT count(*) FROM revision_parts", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fault
+            .query_row("SELECT count(*) FROM authority_events", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    fault.execute_batch("DROP TRIGGER fail_sync_graph").unwrap();
+    drop(fault);
+    assert_eq!(rx.pull(&(&server, &rpk[..])).unwrap(), 1);
+    let (channel, peer) = UnixStream::pair().unwrap();
+    let reader = HumanVault::unlock(
+        &receiver,
+        MASTER,
+        [0xf1; 16],
+        HumanChannel::authenticate(channel, unsafe { libc::geteuid() }).unwrap(),
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    reader
+        .read_attachment_to(*prepared.item_id(), [0x88; 16], &mut output)
+        .unwrap();
+    assert_eq!(output, payload);
+    let mut raw = Vec::new();
+    for suffix in ["", "-wal"] {
+        let path = PathBuf::from(format!("{}{}", server_path.display(), suffix));
+        if path.exists() {
+            raw.extend_from_slice(&fs::read(path).unwrap());
+        }
+    }
+    assert!(!contains(&raw, &payload[..64]));
+    drop(peer);
+}
 use std::{
     fs,
     os::unix::net::UnixStream,
@@ -21,6 +184,7 @@ use std::{
 };
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn replica_push_and_pull_cross_the_real_tls_rpc_process() {
     use std::{
         os::unix::fs::PermissionsExt,
@@ -36,11 +200,11 @@ fn replica_push_and_pull_cross_the_real_tls_rpc_process() {
     let sender = dir.path("tls-a.sqlite3");
     let receiver = dir.path("tls-b.sqlite3");
     fs::copy(&seed, &sender).unwrap();
-    let (human, _peer) = human(&sender, [0xe1; 16]);
+    let (mut human, _peer) = human(&sender, [0xe1; 16]);
     let pairing = human.create_sync_pairing(pin).unwrap();
     let protected = pairing.to_protected_bytes();
     let namespace = *pairing.namespace();
-    let event = human
+    let _device_package = human
         .sign_causal_event(&revision([9; 16], [8; 16], 8))
         .unwrap();
     let trusted = *open_vault(&sender, MASTER).unwrap().trusted_root();
@@ -49,9 +213,37 @@ fn replica_push_and_pull_cross_the_real_tls_rpc_process() {
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
         .unwrap();
     fs::copy(&sender, &receiver).unwrap();
-    CausalReducer::open(&sender)
-        .unwrap()
-        .apply(&[event])
+    let tls_attachment = vec![0x4b; 2 * 1024 * 1024 + 17];
+    let record = LogicalRecord::new(
+        RecordKind::File,
+        HumanMetadata {
+            title: "TLS graph".into(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![
+            Attachment::new(
+                [0x89; 16],
+                "tls.bin",
+                "application/octet-stream",
+                &tls_attachment,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let prepared = human.prepare_create_record(&record).unwrap();
+    human
+        .commit(
+            prepared.command(),
+            &human.sign(&prepared).unwrap(),
+            prepared.body(),
+        )
         .unwrap();
     let socket = dir.path("sync.sock");
     let database = dir.path("opaque.sqlite3");
@@ -103,18 +295,69 @@ fn replica_push_and_pull_cross_the_real_tls_rpc_process() {
     assert_eq!(tx.push(&flaky).unwrap(), 1);
     assert!(retry_started.elapsed() >= Duration::from_secs(1));
     assert_eq!(rx.pull(&transport).unwrap(), 1);
+    let inspect = rusqlite::Connection::open(&receiver).unwrap();
     assert_eq!(
-        rx.reducer()
-            .unwrap()
-            .view()
-            .unwrap()
-            .item(&ITEM)
-            .unwrap()
-            .visible_revision(),
-        Some(&[8; 16])
+        inspect
+            .query_row("SELECT count(*) FROM vault_items", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
     );
+    assert_eq!(
+        inspect
+            .query_row("SELECT count(*) FROM attachment_parts", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    drop(inspect);
+    let (channel, peer) = UnixStream::pair().unwrap();
+    let reader = HumanVault::unlock(
+        &receiver,
+        MASTER,
+        [0xe1; 16],
+        HumanChannel::authenticate(channel, unsafe { libc::geteuid() }).unwrap(),
+    )
+    .unwrap();
+    let opened_record = reader.read_record(*prepared.item_id()).unwrap();
+    assert_eq!(opened_record.attachments()[0].content(), tls_attachment);
+    drop(peer);
+    let large = dir.path("large-ciphertext.bin");
+    let mut bytes = Vec::with_capacity(2 * 1024 * 1024 + 17);
+    while bytes.len() < 2 * 1024 * 1024 + 17 {
+        bytes.extend_from_slice(b"synthetic-ticket17-large-graph-canary|");
+    }
+    bytes.truncate(2 * 1024 * 1024 + 17);
+    fs::write(&large, &bytes).unwrap();
+    let object_root = tx.upload_paged_file(&transport, &large).unwrap();
+    let restored = dir.path("restored-ciphertext.bin");
+    rx.download_paged_file(&transport, object_root, &restored)
+        .unwrap();
+    assert_eq!(fs::read(&restored).unwrap(), bytes);
+    let oversized = dir.path("oversized-sparse");
+    let sparse = fs::File::create(&oversized).unwrap();
+    sparse.set_len(MAX_OBJECT_BYTES + 1).unwrap();
+    assert!(matches!(
+        tx.upload_paged_file(&transport, &oversized),
+        Err(SyncError::Backpressure)
+    ));
+    let symlink = dir.path("ciphertext-symlink");
+    std::os::unix::fs::symlink(&large, &symlink).unwrap();
+    assert!(matches!(
+        tx.upload_paged_file(&transport, &symlink),
+        Err(SyncError::InvalidRequest)
+    ));
     child.kill().unwrap();
     child.wait().unwrap();
+    let mut raw = Vec::new();
+    for suffix in ["", "-wal", "-shm"] {
+        let path = PathBuf::from(format!("{}{suffix}", database.display()));
+        if path.exists() {
+            raw.extend_from_slice(&fs::read(path).unwrap());
+        }
+    }
+    assert!(!contains(&raw, &tls_attachment[..64]));
+    assert!(!contains(&raw, b"synthetic-ticket17-large-graph-canary"));
 }
 
 struct LostFirstPut<'a> {

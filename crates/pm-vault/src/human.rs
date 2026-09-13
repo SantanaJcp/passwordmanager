@@ -1364,6 +1364,7 @@ impl HumanVault {
         for (id, plaintext) in record.attachment_inputs() {
             attachments.push((id, self.root.seal_file(id, revision, plaintext)?.to_bytes()));
         }
+        attachments.sort_by_key(|(id, _)| *id);
         let attachments = encode_staged_attachments(&attachments);
         self.prepare(
             "item_write",

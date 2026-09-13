@@ -9,14 +9,12 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+libc.workspace = true
 minicbor.workspace = true
 pm-crypto.workspace = true
 pm-native-channel.workspace = true
 rusqlite.workspace = true
 zeroize.workspace = true
-
-[dev-dependencies]
-libc.workspace = true
 
 [lints]
 workspace = true

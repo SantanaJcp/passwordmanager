@@ -3,7 +3,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use pm_crypto::digest;
-use pm_sync::OpaqueSyncStore;
+use pm_sync::{OpaqueSyncStore, SyncError};
 use rustls::{
     CertificateError, DigitallySignedStruct, DistinguishedName, Error as TlsError, SignatureScheme,
     client::{
@@ -152,21 +152,26 @@ fn dispatch(store: &OpaqueSyncStore, rpk: &[u8], json: &str) -> Result<String, (
         "sync.put" => {
             let hash = hex32s(&field(json, "hash")?)?;
             let bytes = STANDARD.decode(field(json, "bytes")?).map_err(|_| ())?;
-            store.put(ns, rpk, hash, &bytes).map_err(|_| ())?;
+            if let Err(error) = store.put(ns, rpk, hash, &bytes) {
+                return Ok(failure(&error));
+            }
             Ok(ok())
         }
         "sync.get" => {
             let hash = hex32s(&field(json, "hash")?)?;
-            let bytes = store.get(ns, rpk, hash).map_err(|_| ())?;
+            let bytes = match store.get(ns, rpk, hash) {
+                Ok(bytes) => bytes,
+                Err(error) => return Ok(failure(&error)),
+            };
             Ok(format!(
                 "{{\"ok\":true,\"bytes\":\"{}\"}}",
                 STANDARD.encode(bytes)
             ))
         }
         "sync.publish" => {
-            store
-                .publish(ns, rpk, hex32s(&field(json, "root_hash")?)?)
-                .map_err(|_| ())?;
+            if let Err(error) = store.publish(ns, rpk, hex32s(&field(json, "root_hash")?)?) {
+                return Ok(failure(&error));
+            }
             Ok(ok())
         }
         "sync.list" => {
@@ -174,7 +179,10 @@ fn dispatch(store: &OpaqueSyncStore, rpk: &[u8], json: &str) -> Result<String, (
                 .map(|value| value.parse::<u64>().map_err(|_| ()))
                 .transpose()?;
             let limit = optional_number(json, "limit")?.unwrap_or(128);
-            let roots = store.list(ns, rpk, cursor, limit).map_err(|_| ())?;
+            let roots = match store.list(ns, rpk, cursor, limit) {
+                Ok(roots) => roots,
+                Err(error) => return Ok(failure(&error)),
+            };
             let joined = roots
                 .iter()
                 .map(|(cursor, hash)| {
@@ -192,7 +200,9 @@ fn dispatch(store: &OpaqueSyncStore, rpk: &[u8], json: &str) -> Result<String, (
                 .iter()
                 .map(|value| hex32s(value))
                 .collect::<Result<Vec<_>, _>>()?;
-            store.delete(ns, rpk, &hashes).map_err(|_| ())?;
+            if let Err(error) = store.delete(ns, rpk, &hashes) {
+                return Ok(failure(&error));
+            }
             Ok(ok())
         }
         _ => Err(()),
@@ -200,6 +210,15 @@ fn dispatch(store: &OpaqueSyncStore, rpk: &[u8], json: &str) -> Result<String, (
 }
 fn ok() -> String {
     "{\"ok\":true}".to_owned()
+}
+fn failure(error: &SyncError) -> String {
+    let code = match error {
+        SyncError::Missing => "missing",
+        SyncError::Backpressure => "backpressure",
+        SyncError::Integrity | SyncError::InvalidRequest => "integrity",
+        _ => "unavailable",
+    };
+    format!("{{\"ok\":false,\"code\":\"{code}\"}}")
 }
 fn field(json: &str, name: &str) -> Result<String, ()> {
     optional_field(json, name).ok_or(())
@@ -249,6 +268,7 @@ fn string_array_field(json: &str, name: &str) -> Result<Vec<String>, ()> {
         .collect()
 }
 
+#[allow(clippy::too_many_lines)]
 fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Result<(), ()> {
     let socket = take(a, "--socket")?;
     let key = read_key(&take(a, "--client-key")?)?;
@@ -343,7 +363,16 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
     let response = read_frame(&mut tls)?;
     let response = String::from_utf8(response).map_err(|_| ())?;
     if !response.starts_with("{\"ok\":true") {
-        return Err(());
+        let code = if response.contains("\"code\":\"missing\"") {
+            5
+        } else if response.contains("\"code\":\"backpressure\"") {
+            6
+        } else if response.contains("\"code\":\"integrity\"") {
+            7
+        } else {
+            4
+        };
+        std::process::exit(code);
     }
     println!("{response}");
     Ok(())

@@ -4,7 +4,9 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    fmt,
+    fmt, fs,
+    io::{Read, Write},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -20,6 +22,25 @@ use crate::{
     audit::AuditDeviceCustody,
     authorization::{G5EventInput, encode_g5_event},
 };
+
+/// Authenticated ciphertext graph staged by sync before atomic activation.
+pub struct ReceivedCiphertextGraph {
+    pub item: [u8; 16],
+    pub revision: [u8; 16],
+    pub kind: String,
+    pub package: PathBuf,
+    pub attachments: Vec<ReceivedCiphertextAttachment>,
+    pub streams: Vec<ReceivedCiphertextStream>,
+}
+pub struct ReceivedCiphertextAttachment {
+    pub id: [u8; 16],
+    pub package: PathBuf,
+}
+pub struct ReceivedCiphertextStream {
+    pub id: [u8; 16],
+    pub header: Vec<u8>,
+    pub chunks: Vec<PathBuf>,
+}
 
 /// One device-generation prefix accepted by a human device retirement.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -455,6 +476,93 @@ impl CausalReducer {
         self.apply_internal(events, false)
     }
 
+    /// Validates complete staged ciphertext graphs and publishes them with their
+    /// signed events in one SQLite transaction.
+    ///
+    /// # Errors
+    /// Rejects missing, altered, oversized, or event-unbound graph parts atomically.
+    pub fn apply_received_package(
+        &mut self,
+        events: &[SignedCausalEvent],
+        graphs: &[ReceivedCiphertextGraph],
+    ) -> Result<ReducedView, ReductionError> {
+        if events.len() > 256 || graphs.len() > 256 {
+            return Err(ReductionError::ResourceLimit);
+        }
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction()?;
+        for event in events {
+            let parsed = decode_event(&event.event)?;
+            if parsed.bound_graph {
+                let CausalEventBody::Revision {
+                    revision_id: revision,
+                    ..
+                } = parsed.body
+                else {
+                    return Err(ReductionError::Integrity);
+                };
+                if graphs
+                    .iter()
+                    .filter(|g| g.item == parsed.subject && g.revision == revision)
+                    .count()
+                    != 1
+                {
+                    return Err(ReductionError::Integrity);
+                }
+            }
+        }
+        for graph in graphs {
+            insert_graph(&transaction, graph)?;
+        }
+        Self::insert_events(&transaction, &self.trusted, events, false)?;
+        for graph in graphs {
+            let expected = events
+                .iter()
+                .filter_map(|event| decode_event(&event.event).ok())
+                .find_map(|parsed| match parsed.body {
+                    CausalEventBody::Revision {
+                        revision_id,
+                        manifest_digest,
+                        ..
+                    } if parsed.subject == graph.item && revision_id == graph.revision => {
+                        Some(manifest_digest)
+                    }
+                    _ => None,
+                })
+                .ok_or(ReductionError::Integrity)?;
+            if graph_digest(graph)? != expected {
+                return Err(ReductionError::Integrity);
+            }
+        }
+        let view = view_connection(&transaction, &self.trusted)?;
+        let items: BTreeSet<_> = graphs.iter().map(|g| g.item).collect();
+        for item in items {
+            let reduced = view.item(&item).ok_or(ReductionError::Integrity)?;
+            let revision = *reduced
+                .visible_revision()
+                .ok_or(ReductionError::Integrity)?;
+            let kind = graphs
+                .iter()
+                .find(|g| g.item == item && g.revision == revision)
+                .map(|g| g.kind.as_str())
+                .or_else(|| {
+                    graphs
+                        .iter()
+                        .find(|g| g.item == item)
+                        .map(|g| g.kind.as_str())
+                })
+                .ok_or(ReductionError::Integrity)?;
+            let status = if reduced.lifecycle() == ItemLifecycle::Trash {
+                "trash"
+            } else {
+                "active"
+            };
+            transaction.execute("INSERT INTO vault_items(item_id,visible_revision,kind,status)VALUES(?1,?2,?3,?4) ON CONFLICT(item_id) DO UPDATE SET visible_revision=excluded.visible_revision,kind=excluded.kind,status=excluded.status",params![item.as_slice(),revision.as_slice(),kind,status])?;
+        }
+        transaction.commit()?;
+        self.view()
+    }
+
     fn apply_internal(
         &mut self,
         events: &[SignedCausalEvent],
@@ -465,9 +573,20 @@ impl CausalReducer {
         }
         let mut connection = open_connection(&self.path)?;
         let transaction = connection.transaction()?;
+        Self::insert_events(&transaction, &self.trusted, events, enqueue)?;
+        transaction.commit()?;
+        self.view()
+    }
+
+    fn insert_events(
+        transaction: &rusqlite::Transaction<'_>,
+        trusted: &TrustedRoot,
+        events: &[SignedCausalEvent],
+        enqueue: bool,
+    ) -> Result<(), ReductionError> {
         for signed in events {
             let parsed = decode_event(&signed.event)?;
-            verify_signed(&transaction, &self.trusted, signed, &parsed)?;
+            verify_signed(transaction, trusted, signed, &parsed)?;
             let digest_value = digest(&signed.event);
             let conflicting: Option<Vec<u8>> = transaction
                 .query_row(
@@ -492,8 +611,7 @@ impl CausalReducer {
                 )?;
             }
         }
-        transaction.commit()?;
-        self.view()
+        Ok(())
     }
 
     /// Returns at most one reducer batch from the durable local outbox.
@@ -522,6 +640,81 @@ impl CausalReducer {
         Ok(out)
     }
 
+    /// Exports the ciphertext graph cryptographically bound by one local revision event.
+    ///
+    /// # Errors
+    /// Rejects non-revision, missing, corrupt, or digest-mismatched local state.
+    pub fn export_ciphertext_graph(
+        &self,
+        event: &SignedCausalEvent,
+        directory: &Path,
+    ) -> Result<Option<ReceivedCiphertextGraph>, ReductionError> {
+        let parsed = decode_event(&event.event)?;
+        if !parsed.bound_graph {
+            return Ok(None);
+        }
+        let CausalEventBody::Revision {
+            revision_id: revision,
+            manifest_digest: expected,
+            ..
+        } = parsed.body
+        else {
+            return Err(ReductionError::InvalidEvent);
+        };
+        fs::create_dir_all(directory).map_err(|_| ReductionError::Integrity)?;
+        let c = open_connection(&self.path)?;
+        let (kind,package):(String,Vec<u8>)=c.query_row("SELECT i.kind,r.package FROM revision_parts r JOIN vault_items i ON i.item_id=r.item_id WHERE r.item_id=?1 AND r.revision_id=?2",params![parsed.subject.as_slice(),revision.as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        let package_path = write_stage(directory, "revision", &package)?;
+        let mut attachments = Vec::new();
+        let mut statement=c.prepare("SELECT attachment_id,package FROM attachment_parts WHERE revision_id=?1 ORDER BY attachment_id")?;
+        let rows = statement.query_map([revision.as_slice()], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in rows {
+            let (id, bytes) = row?;
+            let id: [u8; 16] = id.try_into().map_err(|_| ReductionError::Integrity)?;
+            attachments.push(ReceivedCiphertextAttachment {
+                id,
+                package: write_stage(directory, &format!("attachment-{}", hex_id(&id)), &bytes)?,
+            });
+        }
+        let mut streams = Vec::new();
+        let mut statement=c.prepare("SELECT attachment_id,header,chunk_count FROM attachment_streams WHERE revision_id=?1 ORDER BY attachment_id")?;
+        let rows = statement.query_map([revision.as_slice()], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, header, count) = row?;
+            let id: [u8; 16] = id.try_into().map_err(|_| ReductionError::Integrity)?;
+            let mut chunks = Vec::new();
+            for index in 0..count {
+                let bytes:Vec<u8>=c.query_row("SELECT ciphertext FROM attachment_stream_chunks WHERE attachment_id=?1 AND revision_id=?2 AND chunk_index=?3",params![id.as_slice(),revision.as_slice(),index],|r|r.get(0))?;
+                chunks.push(write_stage(
+                    directory,
+                    &format!("stream-{}-{index}", hex_id(&id)),
+                    &bytes,
+                )?);
+            }
+            streams.push(ReceivedCiphertextStream { id, header, chunks });
+        }
+        let graph = ReceivedCiphertextGraph {
+            item: parsed.subject,
+            revision,
+            kind,
+            package: package_path,
+            attachments,
+            streams,
+        };
+        if graph_digest(&graph)? != expected {
+            return Err(ReductionError::Integrity);
+        }
+        Ok(Some(graph))
+    }
+
     /// Removes only remotely published event digests from the durable outbox.
     ///
     /// # Errors
@@ -542,27 +735,35 @@ impl CausalReducer {
     /// Returns an error for corrupted persisted evidence.
     pub fn view(&self) -> Result<ReducedView, ReductionError> {
         let connection = open_connection(&self.path)?;
-        let mut statement = connection.prepare("SELECT event,human_signature,device_signature FROM authority_events ORDER BY event_digest")?;
-        let mut rows = statement.query([])?;
-        let mut events = BTreeMap::new();
-        while let Some(row) = rows.next()? {
-            let event: Vec<u8> = row.get(0)?;
-            let human_signature = row
-                .get::<_, Option<Vec<u8>>>(1)?
-                .map(|v| fixed::<64>(&v))
-                .transpose()?;
-            let device_signature = fixed::<64>(&row.get::<_, Vec<u8>>(2)?)?;
-            let signed = SignedCausalEvent {
-                event,
-                device_signature,
-                human_signature,
-            };
-            let parsed = decode_event(&signed.event)?;
-            verify_signed(&connection, &self.trusted, &signed, &parsed)?;
-            events.insert(digest(&signed.event), parsed);
-        }
-        reduce(&events)
+        view_connection(&connection, &self.trusted)
     }
+}
+fn view_connection(
+    connection: &rusqlite::Connection,
+    trusted: &TrustedRoot,
+) -> Result<ReducedView, ReductionError> {
+    let mut statement = connection.prepare(
+        "SELECT event,human_signature,device_signature FROM authority_events ORDER BY event_digest",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut events = BTreeMap::new();
+    while let Some(row) = rows.next()? {
+        let event: Vec<u8> = row.get(0)?;
+        let human_signature = row
+            .get::<_, Option<Vec<u8>>>(1)?
+            .map(|v| fixed::<64>(&v))
+            .transpose()?;
+        let device_signature = fixed::<64>(&row.get::<_, Vec<u8>>(2)?)?;
+        let signed = SignedCausalEvent {
+            event,
+            device_signature,
+            human_signature,
+        };
+        let parsed = decode_event(&signed.event)?;
+        verify_signed(connection, trusted, &signed, &parsed)?;
+        events.insert(digest(&signed.event), parsed);
+    }
+    reduce(&events)
 }
 
 /// Stable failures at the signed reducer boundary.
@@ -574,6 +775,171 @@ pub enum ReductionError {
     Storage(rusqlite::Error),
     Vault(VaultError),
     Human(HumanCommitError),
+}
+
+fn staged_file(path: &Path, max: usize) -> Result<Vec<u8>, ReductionError> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| ReductionError::Integrity)?;
+    let metadata = file.metadata().map_err(|_| ReductionError::Integrity)?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > max as u64 {
+        return Err(ReductionError::ResourceLimit);
+    }
+    let capacity = usize::try_from(metadata.len()).map_err(|_| ReductionError::ResourceLimit)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.read_to_end(&mut bytes)
+        .map_err(|_| ReductionError::Integrity)?;
+    if bytes.len() as u64 != metadata.len() || bytes.len() > max {
+        return Err(ReductionError::Integrity);
+    }
+    Ok(bytes)
+}
+fn write_stage(directory: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, ReductionError> {
+    let path = directory.join(name);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|_| ReductionError::Integrity)?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| ReductionError::Integrity)?;
+    Ok(path)
+}
+fn hex_id(id: &[u8; 16]) -> String {
+    const D: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::new();
+    for b in id {
+        out.push(char::from(D[usize::from(b >> 4)]));
+        out.push(char::from(D[usize::from(b & 15)]));
+    }
+    out
+}
+fn insert_graph(
+    tx: &rusqlite::Transaction<'_>,
+    g: &ReceivedCiphertextGraph,
+) -> Result<(), ReductionError> {
+    if !g.attachments.is_empty() && !g.streams.is_empty() {
+        return Err(ReductionError::Integrity);
+    }
+    let mut attachment_ids = BTreeSet::new();
+    if !g
+        .attachments
+        .iter()
+        .map(|attachment| attachment.id)
+        .chain(g.streams.iter().map(|stream| stream.id))
+        .all(|id| attachment_ids.insert(id))
+    {
+        return Err(ReductionError::Integrity);
+    }
+    let package = staged_file(&g.package, 16 * 1024 * 1024)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO revision_parts(revision_id,item_id,package)VALUES(?1,?2,?3)",
+        params![g.revision.as_slice(), g.item.as_slice(), &package],
+    )?;
+    let actual: (Vec<u8>, Vec<u8>) = tx.query_row(
+        "SELECT item_id,package FROM revision_parts WHERE revision_id=?1",
+        [g.revision.as_slice()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if actual.0 != g.item || actual.1 != package {
+        return Err(ReductionError::Integrity);
+    }
+    for a in &g.attachments {
+        let bytes = staged_file(&a.package, 17 * 1024 * 1024)?;
+        tx.execute("INSERT OR IGNORE INTO attachment_parts(attachment_id,revision_id,package)VALUES(?1,?2,?3)",params![a.id.as_slice(),g.revision.as_slice(),&bytes])?;
+        let actual: Vec<u8> = tx.query_row(
+            "SELECT package FROM attachment_parts WHERE attachment_id=?1 AND revision_id=?2",
+            params![a.id.as_slice(), g.revision.as_slice()],
+            |r| r.get(0),
+        )?;
+        if actual != bytes {
+            return Err(ReductionError::Integrity);
+        }
+    }
+    for s in &g.streams {
+        if s.header.is_empty() || s.header.len() > 16384 || s.chunks.is_empty() {
+            return Err(ReductionError::ResourceLimit);
+        }
+        let count = i64::try_from(s.chunks.len()).map_err(|_| ReductionError::ResourceLimit)?;
+        tx.execute("INSERT OR IGNORE INTO attachment_streams(attachment_id,revision_id,header,chunk_count)VALUES(?1,?2,?3,?4)",params![s.id.as_slice(),g.revision.as_slice(),&s.header,count])?;
+        let actual:(Vec<u8>,i64)=tx.query_row("SELECT header,chunk_count FROM attachment_streams WHERE attachment_id=?1 AND revision_id=?2",params![s.id.as_slice(),g.revision.as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        if actual != (s.header.clone(), count) {
+            return Err(ReductionError::Integrity);
+        }
+        for (index, path) in s.chunks.iter().enumerate() {
+            let bytes = staged_file(path, 1_048_597)?;
+            let index = i64::try_from(index).map_err(|_| ReductionError::ResourceLimit)?;
+            tx.execute("INSERT OR IGNORE INTO attachment_stream_chunks(attachment_id,revision_id,chunk_index,ciphertext)VALUES(?1,?2,?3,?4)",params![s.id.as_slice(),g.revision.as_slice(),index,&bytes])?;
+            let actual:Vec<u8>=tx.query_row("SELECT ciphertext FROM attachment_stream_chunks WHERE attachment_id=?1 AND revision_id=?2 AND chunk_index=?3",params![s.id.as_slice(),g.revision.as_slice(),index],|r|r.get(0))?;
+            if actual != bytes {
+                return Err(ReductionError::Integrity);
+            }
+        }
+    }
+    Ok(())
+}
+fn graph_digest(g: &ReceivedCiphertextGraph) -> Result<[u8; 32], ReductionError> {
+    use pm_crypto::DigestState;
+    let package = staged_file(&g.package, 16 * 1024 * 1024)?;
+    if g.streams.is_empty() {
+        let mut sorted: Vec<_> = g.attachments.iter().collect();
+        sorted.sort_by_key(|a| a.id);
+        let mut e = Encoder::new(Vec::new());
+        e.array(u64::try_from(sorted.len()).map_err(|_| ReductionError::ResourceLimit)?)
+            .unwrap();
+        for a in sorted {
+            let bytes = staged_file(&a.package, 17 * 1024 * 1024)?;
+            e.map(2)
+                .unwrap()
+                .str("id")
+                .unwrap()
+                .bytes(&a.id)
+                .unwrap()
+                .str("package")
+                .unwrap()
+                .bytes(&bytes)
+                .unwrap();
+        }
+        let values = e.into_writer();
+        let mut e = Encoder::new(Vec::new());
+        e.array(2).unwrap().bytes(&package).unwrap();
+        e.bytes(&values).unwrap();
+        return Ok(digest(&e.into_writer()));
+    }
+    let mut state = DigestState::new().map_err(|_| ReductionError::Integrity)?;
+    state.update(b"pm/staged-stream/v1");
+    state.update(&(package.len() as u64).to_be_bytes());
+    state.update(&package);
+    let mut streams: Vec<_> = g.streams.iter().collect();
+    streams.sort_by_key(|s| s.id);
+    for s in &streams {
+        state.update(&s.id);
+        state.update(&(s.header.len() as u64).to_be_bytes());
+        state.update(&s.header);
+        state.update(
+            &i64::try_from(s.chunks.len())
+                .map_err(|_| ReductionError::ResourceLimit)?
+                .to_be_bytes(),
+        );
+    }
+    for s in streams {
+        for (index, path) in s.chunks.iter().enumerate() {
+            let bytes = staged_file(path, 1_048_597)?;
+            state.update(&s.id);
+            state.update(
+                &i64::try_from(index)
+                    .map_err(|_| ReductionError::ResourceLimit)?
+                    .to_be_bytes(),
+            );
+            state.update(&(bytes.len() as u64).to_be_bytes());
+            state.update(&bytes);
+        }
+    }
+    Ok(state.finish())
 }
 
 impl fmt::Display for ReductionError {
@@ -721,6 +1087,7 @@ struct ParsedEvent {
     subject: [u8; 16],
     subject_generation: u64,
     body: CausalEventBody,
+    bound_graph: bool,
 }
 
 fn decode_event(bytes: &[u8]) -> Result<ParsedEvent, ReductionError> {
@@ -758,6 +1125,8 @@ fn decode_event(bytes: &[u8]) -> Result<ParsedEvent, ReductionError> {
     let body_start = d.position();
     d.skip().map_err(|_| ReductionError::InvalidEvent)?;
     let raw_body = &bytes[body_start..d.position()];
+    let bound_graph =
+        kind == CausalEventKind::ItemRevision && Decoder::new(raw_body).map().ok() == Some(Some(5));
     let mut body_decoder = Decoder::new(raw_body);
     let body = match decode_body(&mut body_decoder, kind) {
         Ok(value)
@@ -808,6 +1177,7 @@ fn decode_event(bytes: &[u8]) -> Result<ParsedEvent, ReductionError> {
         subject,
         subject_generation,
         body,
+        bound_graph,
     })
 }
 
@@ -936,6 +1306,7 @@ fn decode_body(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn decode_legacy_body(
     bytes: &[u8],
     kind: CausalEventKind,
