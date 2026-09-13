@@ -14,7 +14,7 @@ use std::{
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{Profile, browser};
+use crate::{ExchangeProfile, Profile, browser, exchange};
 
 const MAX_FRAME: usize = 128 * 1024;
 
@@ -46,7 +46,11 @@ pub fn serve(
     custodian_uid: u32,
 ) -> Result<(), ServeError> {
     let bytes = read_private(profile_path)?;
-    let profile = Profile::parse(&bytes).map_err(|_| ())?;
+    let profile = match (Profile::parse(&bytes), ExchangeProfile::parse(&bytes)) {
+        (Ok(profile), Err(_)) => InstalledProfile::Browser(profile),
+        (Err(_), Ok(profile)) => InstalledProfile::Exchange(profile),
+        _ => return Err(ServeError),
+    };
     let parent = socket_path.parent().ok_or(())?;
     let metadata = fs::symlink_metadata(parent).map_err(|_| ())?;
     // The adapter owns its private runtime directory. The public socket is
@@ -81,14 +85,19 @@ pub fn serve(
         let Ok(mut request) = read_frame(&mut stream) else {
             continue;
         };
-        let response = handle(&profile, &request, &mut waiting);
+        let response = Zeroizing::new(handle(&profile, &request, &mut waiting));
         request.zeroize();
         let _ = write_frame(&mut stream, &response);
     }
     Err(ServeError)
 }
 
-fn handle(profile: &Profile, request: &[u8], waiting: &mut BTreeSet<[u8; 16]>) -> Vec<u8> {
+enum InstalledProfile {
+    Browser(Profile),
+    Exchange(ExchangeProfile),
+}
+
+fn handle(profile: &InstalledProfile, request: &[u8], waiting: &mut BTreeSet<[u8; 16]>) -> Vec<u8> {
     let mut cursor = Cursor::new(request);
     let Ok(opcode) = cursor.byte() else {
         return response(4, b"");
@@ -100,15 +109,30 @@ fn handle(profile: &Profile, request: &[u8], waiting: &mut BTreeSet<[u8; 16]>) -
         return response(4, b"");
     };
     if opcode == 2 {
-        return if cursor.finish().is_ok() && waiting.contains(&attempt) {
+        return if matches!(profile, InstalledProfile::Browser(_))
+            && cursor.finish().is_ok()
+            && waiting.contains(&attempt)
+        {
             response(1, b"KEYCLOAK_HUMAN_REQUIRED")
         } else {
             response(3, b"")
         };
     }
-    if opcode != 3 {
-        return response(4, b"");
+    match (profile, opcode) {
+        (InstalledProfile::Browser(profile), 3) => {
+            handle_browser(profile, cursor, attempt, waiting)
+        }
+        (InstalledProfile::Exchange(profile), 4) => handle_exchange(profile, cursor),
+        _ => response(4, b""),
     }
+}
+
+fn handle_browser(
+    profile: &Profile,
+    mut cursor: Cursor<'_>,
+    attempt: [u8; 16],
+    waiting: &mut BTreeSet<[u8; 16]>,
+) -> Vec<u8> {
     let parsed = (|| {
         let integration = cursor.text()?;
         let method = cursor.text()?;
@@ -172,6 +196,51 @@ fn handle(profile: &Profile, request: &[u8], waiting: &mut BTreeSet<[u8; 16]>) -
         Ok(browser::BrowserOutcome::Rejected) => response(2, b""),
         Ok(browser::BrowserOutcome::IntegrityFailure) => response(5, b""),
         Err(()) => response(4, b""),
+    }
+}
+
+fn handle_exchange(profile: &ExchangeProfile, mut cursor: Cursor<'_>) -> Vec<u8> {
+    let parsed = (|| {
+        let integration = cursor.text()?;
+        let method = cursor.text()?;
+        let destination = cursor.text()?;
+        let context = cursor.text()?;
+        let requester_client_id = cursor.text()?.to_owned();
+        let requester_client_secret = Zeroizing::new(cursor.bytes()?.to_vec());
+        let subject_token = Zeroizing::new(cursor.bytes()?.to_vec());
+        cursor.finish()?;
+        if integration != "keycloak-token-exchange"
+            || method != "token_exchange"
+            || destination != profile.profile_id()
+            || context != profile.profile_id()
+            || requester_client_id != profile.requester_client_id()
+        {
+            return Err(());
+        }
+        Ok((requester_client_id, requester_client_secret, subject_token))
+    })();
+    let Ok((requester_client_id, requester_client_secret, subject_token)) = parsed else {
+        return response(4, b"");
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|value| i64::try_from(value.as_secs()).ok());
+    let Some(now) = now else {
+        return response(3, b"");
+    };
+    let credential = exchange::ExchangeCredential {
+        subject_token: &subject_token,
+        requester_client_id: &requester_client_id,
+        requester_client_secret: &requester_client_secret,
+    };
+    match exchange::perform(profile, &credential, now) {
+        Ok(result) => response(0, &result.encode()),
+        Err(exchange::ExchangeError::Network) => response(3, b""),
+        Err(exchange::ExchangeError::InvalidResponse) => response(2, b""),
+        Err(exchange::ExchangeError::InvalidToken | exchange::ExchangeError::SecretReflection) => {
+            response(5, b"")
+        }
     }
 }
 

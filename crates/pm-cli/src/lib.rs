@@ -420,6 +420,8 @@ fn credential_integrations(destination: &[u8]) -> Json {
         integrations.push(Json::String("linux-system-ssh".into()));
     } else if destination == b"keycloak-lab" {
         integrations.push(Json::String("keycloak-browser-oidc".into()));
+    } else if destination == b"keycloak-exchange-lab" {
+        integrations.push(Json::String("keycloak-token-exchange".into()));
     }
     Json::Array(integrations)
 }

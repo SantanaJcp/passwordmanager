@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use pm_web_auth::{Profile, ProfileError};
+use pm_web_auth::{ExchangeProfile, Profile, ProfileError};
 
 const VALID: &str = concat!(
     "version=1\n",
@@ -22,6 +22,20 @@ const VALID: &str = concat!(
     "ca_der=/opt/pm-lab/ca.der\n",
     "callback_cert=/opt/pm-lab/callback.der\n",
     "callback_key=/opt/pm-lab/callback.key.der\n",
+);
+
+const EXCHANGE: &str = concat!(
+    "version=1\n",
+    "profile_id=keycloak-exchange-lab\n",
+    "integration_id=keycloak-token-exchange\n",
+    "issuer=https://auth.test:18443/realms/pm\n",
+    "token_endpoint=https://auth.test:18443/realms/pm/protocol/openid-connect/token\n",
+    "jwks_uri=https://auth.test:18443/realms/pm/protocol/openid-connect/certs\n",
+    "requester_client_id=pm-exchanger\n",
+    "expected_subject=11111111-1111-1111-1111-111111111111\n",
+    "audience=pm-target\n",
+    "scopes=target.read\n",
+    "ca_der=/opt/pm-lab/ca.der\n",
 );
 
 #[test]
@@ -62,6 +76,42 @@ fn rejects_unpinned_or_wrong_browser_artifact() {
     let relative = VALID.replace("browser_path=/opt/pm-lab/chrome", "browser_path=chrome");
     assert_eq!(
         Profile::parse(relative.as_bytes()),
+        Err(ProfileError::Invalid)
+    );
+}
+
+#[test]
+fn accepts_only_a_closed_standard_v2_exchange_profile() {
+    let profile = ExchangeProfile::parse(EXCHANGE.as_bytes()).unwrap();
+    assert_eq!(profile.profile_id(), "keycloak-exchange-lab");
+    assert_eq!(profile.requester_client_id(), "pm-exchanger");
+    assert_eq!(profile.audience(), "pm-target");
+    assert_eq!(profile.scopes(), "target.read");
+
+    assert_eq!(
+        ExchangeProfile::parse(
+            EXCHANGE
+                .replace(
+                    "integration_id=keycloak-token-exchange",
+                    "integration_id=legacy"
+                )
+                .as_bytes()
+        ),
+        Err(ProfileError::Invalid)
+    );
+    assert_eq!(
+        ExchangeProfile::parse(
+            EXCHANGE
+                .replace(
+                    "token_endpoint=https://auth.test",
+                    "token_endpoint=https://evil.test"
+                )
+                .as_bytes()
+        ),
+        Err(ProfileError::Invalid)
+    );
+    assert_eq!(
+        ExchangeProfile::parse(format!("{EXCHANGE}resource=https://agent.invalid\n").as_bytes()),
         Err(ProfileError::Invalid)
     );
 }

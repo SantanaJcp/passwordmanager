@@ -627,7 +627,7 @@ struct Callback {
 
 impl Callback {
     fn start(profile: &Profile, state: &str) -> Result<Self, ()> {
-        let url = profile.url("redirect_uri").map_err(|_| ())?.clone();
+        let url = profile.url("redirect_uri").map_err(|_| ())?;
         let cert = fs::read(profile.value("callback_cert")).map_err(|_| ())?;
         let key = Zeroizing::new(fs::read(profile.value("callback_key")).map_err(|_| ())?);
         let provider = rustls::crypto::aws_lc_rs::default_provider();

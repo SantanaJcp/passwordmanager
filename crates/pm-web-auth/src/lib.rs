@@ -6,6 +6,7 @@
 use std::{collections::BTreeMap, path::Path};
 
 mod browser;
+mod exchange;
 mod oidc;
 mod provider;
 
@@ -34,6 +35,20 @@ const PROFILE_KEYS: [&str; 19] = [
     "callback_key",
 ];
 
+const EXCHANGE_PROFILE_KEYS: [&str; 11] = [
+    "version",
+    "profile_id",
+    "integration_id",
+    "issuer",
+    "token_endpoint",
+    "jwks_uri",
+    "requester_client_id",
+    "expected_subject",
+    "audience",
+    "scopes",
+    "ca_der",
+];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProfileError {
     Invalid,
@@ -42,6 +57,90 @@ pub enum ProfileError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Profile {
     values: BTreeMap<String, String>,
+}
+
+/// Installed, human-owned configuration for one Keycloak Standard Token
+/// Exchange v2 relationship. Requests can select only `profile_id`; endpoints,
+/// requester, subject, audience and scopes are fixed here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExchangeProfile {
+    values: BTreeMap<String, String>,
+}
+
+impl ExchangeProfile {
+    /// Parses the closed `keycloak-token-exchange/1` installed profile.
+    ///
+    /// # Errors
+    /// Returns [`ProfileError::Invalid`] for unknown/duplicate fields, a
+    /// non-HTTPS or cross-origin endpoint, or an unbounded profile value.
+    pub fn parse(bytes: &[u8]) -> Result<Self, ProfileError> {
+        let text = std::str::from_utf8(bytes).map_err(|_| ProfileError::Invalid)?;
+        if text.len() > 16 * 1024 || !text.ends_with('\n') {
+            return Err(ProfileError::Invalid);
+        }
+        let mut values = BTreeMap::new();
+        for line in text.lines() {
+            let (key, value) = line.split_once('=').ok_or(ProfileError::Invalid)?;
+            if !EXCHANGE_PROFILE_KEYS.contains(&key)
+                || value.is_empty()
+                || values.insert(key.to_owned(), value.to_owned()).is_some()
+            {
+                return Err(ProfileError::Invalid);
+            }
+        }
+        if values.len() != EXCHANGE_PROFILE_KEYS.len()
+            || get(&values, "version")? != "1"
+            || get(&values, "integration_id")? != "keycloak-token-exchange"
+            || !is_identifier(get(&values, "profile_id")?, 128)
+            || !is_identifier(get(&values, "requester_client_id")?, 128)
+            || !is_identifier(get(&values, "audience")?, 128)
+            || !is_subject(get(&values, "expected_subject")?)
+            || !valid_exchange_scopes(get(&values, "scopes")?)
+            || !Path::new(get(&values, "ca_der")?).is_absolute()
+        {
+            return Err(ProfileError::Invalid);
+        }
+        let issuer = HttpsUrl::parse(get(&values, "issuer")?)?;
+        if issuer.query.is_some() || issuer.path == "/" {
+            return Err(ProfileError::Invalid);
+        }
+        for key in ["token_endpoint", "jwks_uri"] {
+            let endpoint = HttpsUrl::parse(get(&values, key)?)?;
+            if endpoint.origin() != issuer.origin() || endpoint.query.is_some() {
+                return Err(ProfileError::Invalid);
+            }
+        }
+        Ok(Self { values })
+    }
+
+    #[must_use]
+    pub fn profile_id(&self) -> &str {
+        self.value("profile_id")
+    }
+
+    #[must_use]
+    pub fn requester_client_id(&self) -> &str {
+        self.value("requester_client_id")
+    }
+
+    #[must_use]
+    pub fn audience(&self) -> &str {
+        self.value("audience")
+    }
+
+    #[must_use]
+    pub fn scopes(&self) -> &str {
+        self.value("scopes")
+    }
+
+    #[must_use]
+    pub fn value(&self, key: &str) -> &str {
+        self.values.get(key).map_or("", String::as_str)
+    }
+
+    pub(crate) fn url(&self, key: &str) -> Result<HttpsUrl<'_>, ProfileError> {
+        HttpsUrl::parse(self.value(key))
+    }
 }
 
 impl Profile {
@@ -158,6 +257,17 @@ fn valid_scopes(value: &str) -> bool {
         && value.split(' ').all(|scope| is_identifier(scope, 64))
 }
 
+fn valid_exchange_scopes(value: &str) -> bool {
+    value.len() <= 512
+        && !value.is_empty()
+        && value.split(' ').all(|scope| is_identifier(scope, 64))
+        && {
+            let mut scopes: Vec<_> = value.split(' ').collect();
+            scopes.sort_unstable();
+            scopes.windows(2).all(|pair| pair[0] != pair[1])
+        }
+}
+
 fn is_sha256(value: &str) -> bool {
     value.len() == 64
         && value
@@ -165,7 +275,7 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HttpsUrl<'a> {
     host: &'a str,
     port: u16,
