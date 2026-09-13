@@ -463,6 +463,34 @@ pub struct CreatedRoot {
     recovery_code: RecoveryCode,
 }
 
+/// A recovery-path replacement held in memory until the new external code is
+/// reintroduced. The previous durable bundle remains valid until the caller
+/// atomically publishes the confirmed replacement.
+pub struct PendingRecoveryRotation {
+    bundle: RootBundle,
+    recovery_code: RecoveryCode,
+}
+
+impl PendingRecoveryRotation {
+    #[must_use]
+    pub const fn recovery_code(&self) -> &RecoveryCode {
+        &self.recovery_code
+    }
+
+    /// # Errors
+    /// Returns authentication failure unless the newly issued code is
+    /// reintroduced exactly.
+    pub fn into_bundle_after_recovery_confirmation(
+        self,
+        reintroduced: &RecoveryCode,
+    ) -> Result<RootBundle, CryptoError> {
+        if self.recovery_code != *reintroduced {
+            return Err(CryptoError::Authentication);
+        }
+        Ok(self.bundle)
+    }
+}
+
 impl CreatedRoot {
     #[must_use]
     pub const fn bundle(&self) -> &RootBundle {
@@ -556,6 +584,79 @@ pub struct UnlockedRoot {
 }
 
 impl UnlockedRoot {
+    /// Replaces only the password wrapper around the existing human root.
+    /// Human authority and the independent recovery path are unchanged.
+    ///
+    /// # Errors
+    /// Rejects a foreign bundle, invalid password/KDF, or unavailable crypto.
+    pub fn rewrap_password(
+        &self,
+        bundle: &RootBundle,
+        new_password: &[u8],
+        profile: KdfProfile,
+    ) -> Result<RootBundle, CryptoError> {
+        validate_rotation_source(self, bundle)?;
+        validate_password(new_password)?;
+        profile.validate()?;
+        let target = root_target(bundle)?;
+        let salt = random_array()?;
+        let password_key = derive_password(new_password, &salt, profile)?;
+        let password_header = wrapping_header(
+            self.vault,
+            random_array()?,
+            [0; ID_BYTES],
+            Purpose::RootPassword,
+            &target,
+            Some(KdfFields { salt, profile }),
+        );
+        Ok(RootBundle {
+            trusted_root: bundle.trusted_root,
+            password_envelope: seal_key(&password_key, &self.human_root, &target, password_header)?,
+            recovery_envelope: bundle.recovery_envelope.clone(),
+            authority_envelope: bundle.authority_envelope.clone(),
+        })
+    }
+
+    /// Generates a fresh independent recovery key and wrapper without changing
+    /// the password path or human signing authority.
+    ///
+    /// # Errors
+    /// Rejects a foreign bundle or unavailable cryptographic randomness.
+    pub fn rotate_recovery(
+        &self,
+        bundle: &RootBundle,
+    ) -> Result<PendingRecoveryRotation, CryptoError> {
+        validate_rotation_source(self, bundle)?;
+        let target = root_target(bundle)?;
+        let recovery_key = Secret::random()?;
+        let recovery_header = wrapping_header(
+            self.vault,
+            random_array()?,
+            [0; ID_BYTES],
+            Purpose::RootRecovery,
+            &target,
+            None,
+        );
+        Ok(PendingRecoveryRotation {
+            bundle: RootBundle {
+                trusted_root: bundle.trusted_root,
+                password_envelope: bundle.password_envelope.clone(),
+                recovery_envelope: seal_key(
+                    &recovery_key,
+                    &self.human_root,
+                    &target,
+                    recovery_header,
+                )?,
+                authority_envelope: bundle.authority_envelope.clone(),
+            },
+            recovery_code: RecoveryCode {
+                vault: self.vault,
+                generation: bundle.password_envelope.header.key_generation,
+                key: recovery_key,
+            },
+        })
+    }
+
     /// Creates a fresh namespace/key and binds the server pin with `SK_H`.
     ///
     /// # Errors
@@ -1164,6 +1265,38 @@ impl UnlockedRoot {
             authority_event,
         )
     }
+}
+
+fn root_target(bundle: &RootBundle) -> Result<Header, CryptoError> {
+    let password = &bundle.password_envelope.header;
+    let recovery = &bundle.recovery_envelope.header;
+    if password.target_object != recovery.target_object
+        || password.wrapped_purpose != Purpose::KeyWrap
+        || recovery.wrapped_purpose != Purpose::KeyWrap
+    {
+        return Err(CryptoError::InvalidFormat);
+    }
+    Ok(target_header(
+        bundle.trusted_root.vault_id,
+        password.target_object,
+        [0; ID_BYTES],
+        Purpose::KeyWrap,
+        password.key_generation,
+    ))
+}
+
+fn validate_rotation_source(root: &UnlockedRoot, bundle: &RootBundle) -> Result<(), CryptoError> {
+    validate_bundle(bundle)?;
+    if bundle.trusted_root != root.trusted_root() {
+        return Err(CryptoError::Authentication);
+    }
+    let (seed, target) = open_key(&root.human_root, &bundle.authority_envelope)?;
+    if target.purpose != Purpose::Control
+        || !constant_time_equal(&seed.0, &root.human_signing_seed.0)
+    {
+        return Err(CryptoError::Authentication);
+    }
+    Ok(())
 }
 
 /// Public and encrypted material needed to activate a per-device audit key.
