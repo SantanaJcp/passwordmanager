@@ -402,72 +402,112 @@ impl UnlockedRoot {
         )
     }
 
-    /// Encrypts one minimal audit record with a per-device audit key. If no
-    /// key envelope exists, a fresh key and its envelope under `K_H` are
-    /// created together for the caller to persist atomically.
+    /// Creates one independent audit key with both a human-root envelope and
+    /// a sealed device-custody envelope, then binds the complete package with
+    /// the human authority signature.
     ///
     /// # Errors
     ///
-    /// Returns an error for an invalid key envelope, wrong device/generation,
-    /// an oversized record, or unavailable native cryptography.
-    pub fn seal_audit_record(
+    /// Returns an error for generation zero or unavailable native cryptography.
+    pub fn provision_audit_key(
         &self,
-        key_envelope: Option<&[u8]>,
         device: [u8; ID_BYTES],
         generation: u64,
-        event_id: [u8; ID_BYTES],
-        revision: [u8; ID_BYTES],
-        plaintext: &[u8],
-    ) -> Result<AuditCiphertext, CryptoError> {
-        if plaintext.len() > 4 * 1024 || generation == 0 {
+        encryption_public_key: [u8; KEY_BYTES],
+        signing_public_key: [u8; KEY_BYTES],
+    ) -> Result<AuditKeyPackage, CryptoError> {
+        if generation == 0 {
             return Err(CryptoError::InvalidFormat);
         }
-        let (key, persisted_envelope) = if let Some(bytes) = key_envelope {
-            let envelope = decode_envelope(bytes)?;
-            if encode_envelope(&envelope) != bytes {
-                return Err(CryptoError::InvalidFormat);
-            }
-            let (key, target) = open_key(&self.human_root, &envelope)?;
-            if target.vault != self.vault
-                || target.object != device
-                || target.revision != device
-                || target.purpose != Purpose::AuditRecord
-                || target.key_generation != generation
-            {
-                return Err(CryptoError::Authentication);
-            }
-            (key, None)
-        } else {
-            let key = Secret::random()?;
-            let target =
-                target_header(self.vault, device, device, Purpose::AuditRecord, generation);
-            let envelope = seal_key(
-                &self.human_root,
-                &key,
-                &target,
-                wrapping_header(
-                    self.vault,
-                    random_array()?,
-                    device,
-                    Purpose::KeyWrap,
-                    &target,
-                    None,
-                ),
-            )?;
-            (key, Some(encode_envelope(&envelope)))
-        };
-        let header = target_header(
+        let key = Secret::random()?;
+        let target = target_header(self.vault, device, device, Purpose::AuditRecord, generation);
+        let mut human_wrapping = wrapping_header(
             self.vault,
-            event_id,
-            revision,
-            Purpose::AuditRecord,
-            generation,
+            random_array()?,
+            device,
+            Purpose::KeyWrap,
+            &target,
+            None,
         );
-        let record = seal(&key, header, plaintext)?;
-        Ok(AuditCiphertext {
-            key_envelope: persisted_envelope,
-            record: encode_envelope(&record),
+        human_wrapping.key_generation = generation;
+        let human_envelope =
+            encode_envelope(&seal_key(&self.human_root, &key, &target, human_wrapping)?);
+        let mut plaintext = encode_sealed_key(&key, &target, &device, generation);
+        let mut device_envelope = vec![0_u8; plaintext.len() + 48];
+        if unsafe {
+            // SAFETY: sealed-box buffers and recipient public key have exact lengths.
+            libsodium_sys::crypto_box_seal(
+                device_envelope.as_mut_ptr(),
+                plaintext.as_ptr(),
+                plaintext.len() as u64,
+                encryption_public_key.as_ptr(),
+            )
+        } != 0
+        {
+            wipe_vec(&mut plaintext);
+            return Err(CryptoError::RandomUnavailable);
+        }
+        wipe_vec(&mut plaintext);
+        let mut package = AuditKeyPackage {
+            vault: self.vault,
+            device,
+            generation,
+            encryption_public_key,
+            signing_public_key,
+            human_envelope,
+            device_envelope,
+            human_signature: [0_u8; 64],
+        };
+        package.human_signature = sign_detached(
+            &self.human_signing_seed,
+            &domain_message(b"pm/audit-key/v1", &package.unsigned_bytes()),
+        )?;
+        Ok(package)
+    }
+
+    /// Opens only a human audit-key envelope with its exact device/generation context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed, altered, or context-mismatched envelopes.
+    pub fn open_audit_key(
+        &self,
+        human_envelope: &[u8],
+        device: [u8; ID_BYTES],
+        generation: u64,
+    ) -> Result<AuditKey, CryptoError> {
+        let envelope = decode_envelope(human_envelope)?;
+        if encode_envelope(&envelope) != human_envelope {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let (key, target) = open_key(&self.human_root, &envelope)?;
+        validate_audit_target(&target, self.vault, device, generation)?;
+        Ok(AuditKey {
+            vault: self.vault,
+            generation,
+            key,
         })
+    }
+
+    /// Verifies the complete human-authorized audit package before opening its
+    /// human envelope. This binds both device public keys to `KAUD[d,g]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a forged package, mismatched vault, or invalid envelope.
+    pub fn open_audit_key_package(
+        &self,
+        package: &AuditKeyPackage,
+    ) -> Result<AuditKey, CryptoError> {
+        if package.vault != self.vault {
+            return Err(CryptoError::Authentication);
+        }
+        verify_human_signature(
+            &self.trusted_root(),
+            &domain_message(b"pm/audit-key/v1", &package.unsigned_bytes()),
+            &package.human_signature,
+        )?;
+        self.open_audit_key(&package.human_envelope, package.device, package.generation)
     }
 
     /// Encrypts a complete revision-format vector and its independent external
@@ -793,23 +833,430 @@ impl UnlockedRoot {
     }
 }
 
-/// Opaque encrypted audit material. A present key envelope must be persisted
-/// in the same transaction as the first record that uses it.
-pub struct AuditCiphertext {
-    key_envelope: Option<Vec<u8>>,
-    record: Vec<u8>,
+/// Public and encrypted material needed to activate a per-device audit key.
+/// Neither envelope is itself a plaintext key.
+pub struct AuditKeyPackage {
+    vault: [u8; ID_BYTES],
+    device: [u8; ID_BYTES],
+    generation: u64,
+    encryption_public_key: [u8; KEY_BYTES],
+    signing_public_key: [u8; KEY_BYTES],
+    human_envelope: Vec<u8>,
+    device_envelope: Vec<u8>,
+    human_signature: [u8; 64],
 }
 
-impl AuditCiphertext {
-    #[must_use]
-    pub fn key_envelope(&self) -> Option<&[u8]> {
-        self.key_envelope.as_deref()
+impl AuditKeyPackage {
+    /// Reconstructs a package loaded from bounded persistent fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for generation zero or invalid envelope lengths.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        vault: [u8; ID_BYTES],
+        device: [u8; ID_BYTES],
+        generation: u64,
+        encryption_public_key: [u8; KEY_BYTES],
+        signing_public_key: [u8; KEY_BYTES],
+        human_envelope: Vec<u8>,
+        device_envelope: Vec<u8>,
+        human_signature: [u8; 64],
+    ) -> Result<Self, CryptoError> {
+        if generation == 0 || human_envelope.is_empty() || device_envelope.len() < 48 {
+            return Err(CryptoError::InvalidFormat);
+        }
+        Ok(Self {
+            vault,
+            device,
+            generation,
+            encryption_public_key,
+            signing_public_key,
+            human_envelope,
+            device_envelope,
+            human_signature,
+        })
     }
 
     #[must_use]
-    pub fn record(&self) -> &[u8] {
-        &self.record
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
+    #[must_use]
+    pub fn human_envelope(&self) -> &[u8] {
+        &self.human_envelope
+    }
+    #[must_use]
+    pub fn device_envelope(&self) -> &[u8] {
+        &self.device_envelope
+    }
+    #[must_use]
+    pub const fn encryption_public_key(&self) -> &[u8; KEY_BYTES] {
+        &self.encryption_public_key
+    }
+    #[must_use]
+    pub const fn signing_public_key(&self) -> &[u8; KEY_BYTES] {
+        &self.signing_public_key
+    }
+    #[must_use]
+    pub const fn human_signature(&self) -> &[u8; 64] {
+        &self.human_signature
+    }
+
+    fn unsigned_bytes(&self) -> Vec<u8> {
+        let mut encoder = Encoder::new(Vec::new());
+        encoder.array(8).expect("Vec writes cannot fail");
+        encoder
+            .str("pm/audit-key-package/v1")
+            .expect("Vec writes cannot fail");
+        encoder.bytes(&self.vault).expect("Vec writes cannot fail");
+        encoder.bytes(&self.device).expect("Vec writes cannot fail");
+        encoder
+            .u64(self.generation)
+            .expect("Vec writes cannot fail");
+        encoder
+            .bytes(&self.encryption_public_key)
+            .expect("Vec writes cannot fail");
+        encoder
+            .bytes(&self.signing_public_key)
+            .expect("Vec writes cannot fail");
+        encoder
+            .bytes(&self.human_envelope)
+            .expect("Vec writes cannot fail");
+        encoder
+            .bytes(&self.device_envelope)
+            .expect("Vec writes cannot fail");
+        encoder.into_writer()
+    }
+}
+
+/// Device-held X25519 envelope key plus independent Ed25519 audit provenance seed.
+pub struct AuditDeviceKeyPair {
+    encryption_public_key: [u8; KEY_BYTES],
+    encryption_private_key: Secret,
+    signing_public_key: [u8; KEY_BYTES],
+    signing_seed: Secret,
+}
+
+impl AuditDeviceKeyPair {
+    /// Generates independent device encryption and signing keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when native randomness or key generation is unavailable.
+    pub fn generate() -> Result<Self, CryptoError> {
+        sodium()?;
+        let mut encryption_public_key = [0_u8; KEY_BYTES];
+        let mut encryption_private_key = Secret([0_u8; KEY_BYTES]);
+        if unsafe {
+            // SAFETY: crypto_box key buffers have their documented exact lengths.
+            libsodium_sys::crypto_box_keypair(
+                encryption_public_key.as_mut_ptr(),
+                encryption_private_key.0.as_mut_ptr(),
+            )
+        } != 0
+        {
+            return Err(CryptoError::RandomUnavailable);
+        }
+        let signing_seed = Secret::random()?;
+        let mut signing_public_key = [0_u8; KEY_BYTES];
+        let mut expanded = [0_u8; 64];
+        if unsafe {
+            // SAFETY: Ed25519 key buffers have their documented exact lengths.
+            libsodium_sys::crypto_sign_seed_keypair(
+                signing_public_key.as_mut_ptr(),
+                expanded.as_mut_ptr(),
+                signing_seed.0.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(CryptoError::RandomUnavailable);
+        }
+        // SAFETY: expanded secret is no longer needed.
+        unsafe { libsodium_sys::sodium_memzero(expanded.as_mut_ptr().cast(), expanded.len()) };
+        Ok(Self {
+            encryption_public_key,
+            encryption_private_key,
+            signing_public_key,
+            signing_seed,
+        })
+    }
+
+    /// Encodes the device-private custody bundle for a caller-owned protected file.
+    #[must_use]
+    pub fn to_protected_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(133);
+        bytes.extend_from_slice(b"PMAD1");
+        bytes.extend_from_slice(&self.encryption_public_key);
+        bytes.extend_from_slice(&self.encryption_private_key.0);
+        bytes.extend_from_slice(&self.signing_public_key);
+        bytes.extend_from_slice(&self.signing_seed.0);
+        bytes
+    }
+
+    /// Decodes and validates a device-private custody bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong length/magic or mismatched public/private keys.
+    pub fn from_protected_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        sodium()?;
+        if bytes.len() != 133 || &bytes[..5] != b"PMAD1" {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let encryption_public_key = bytes[5..37]
+            .try_into()
+            .map_err(|_| CryptoError::InvalidFormat)?;
+        let encryption_private_key = Secret(
+            bytes[37..69]
+                .try_into()
+                .map_err(|_| CryptoError::InvalidFormat)?,
+        );
+        let signing_public_key = bytes[69..101]
+            .try_into()
+            .map_err(|_| CryptoError::InvalidFormat)?;
+        let signing_seed = Secret(
+            bytes[101..133]
+                .try_into()
+                .map_err(|_| CryptoError::InvalidFormat)?,
+        );
+        let mut derived_encryption = [0_u8; KEY_BYTES];
+        if unsafe {
+            // SAFETY: X25519 public/private buffers have their documented exact lengths.
+            libsodium_sys::crypto_scalarmult_base(
+                derived_encryption.as_mut_ptr(),
+                encryption_private_key.0.as_ptr(),
+            )
+        } != 0
+            || derived_encryption != encryption_public_key
+        {
+            return Err(CryptoError::Authentication);
+        }
+        let mut derived_signing = [0_u8; KEY_BYTES];
+        let mut expanded = [0_u8; 64];
+        let result = unsafe {
+            // SAFETY: Ed25519 key buffers have their documented exact lengths.
+            libsodium_sys::crypto_sign_seed_keypair(
+                derived_signing.as_mut_ptr(),
+                expanded.as_mut_ptr(),
+                signing_seed.0.as_ptr(),
+            )
+        };
+        // SAFETY: expanded secret is no longer needed.
+        unsafe { libsodium_sys::sodium_memzero(expanded.as_mut_ptr().cast(), expanded.len()) };
+        if result != 0 || derived_signing != signing_public_key {
+            return Err(CryptoError::Authentication);
+        }
+        Ok(Self {
+            encryption_public_key,
+            encryption_private_key,
+            signing_public_key,
+            signing_seed,
+        })
+    }
+
+    #[must_use]
+    pub const fn encryption_public_key(&self) -> &[u8; KEY_BYTES] {
+        &self.encryption_public_key
+    }
+    #[must_use]
+    pub const fn signing_public_key(&self) -> &[u8; KEY_BYTES] {
+        &self.signing_public_key
+    }
+
+    /// Verifies the human-bound package and opens its sealed device key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a wrong recipient, signature, context, or sealed box.
+    pub fn open_audit_key(
+        &self,
+        package: &AuditKeyPackage,
+        trusted_root: &TrustedRoot,
+        device: [u8; ID_BYTES],
+        generation: u64,
+    ) -> Result<AuditKey, CryptoError> {
+        if package.vault != trusted_root.vault_id
+            || package.device != device
+            || package.generation != generation
+            || package.encryption_public_key != self.encryption_public_key
+            || package.signing_public_key != self.signing_public_key
+        {
+            return Err(CryptoError::Authentication);
+        }
+        verify_human_signature(
+            trusted_root,
+            &domain_message(b"pm/audit-key/v1", &package.unsigned_bytes()),
+            &package.human_signature,
+        )?;
+        if package.device_envelope.len() < 48 {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let mut plaintext = vec![0_u8; package.device_envelope.len() - 48];
+        if unsafe {
+            // SAFETY: key and message buffers have exact declared lengths.
+            libsodium_sys::crypto_box_seal_open(
+                plaintext.as_mut_ptr(),
+                package.device_envelope.as_ptr(),
+                package.device_envelope.len() as u64,
+                self.encryption_public_key.as_ptr(),
+                self.encryption_private_key.0.as_ptr(),
+            )
+        } != 0
+        {
+            wipe_vec(&mut plaintext);
+            return Err(CryptoError::Authentication);
+        }
+        let decoded = decode_sealed_audit_key(&plaintext);
+        wipe_vec(&mut plaintext);
+        let (key, target, recipient, decoded_generation) = decoded?;
+        if recipient != device || decoded_generation != generation {
+            return Err(CryptoError::Authentication);
+        }
+        validate_audit_target(&target, package.vault, device, generation)?;
+        Ok(AuditKey {
+            vault: package.vault,
+            generation,
+            key,
+        })
+    }
+
+    /// Signs an already-encrypted audit envelope in the `SK_SD` domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native Ed25519 signing fails.
+    pub fn sign_audit_record(&self, envelope: &[u8]) -> Result<[u8; 64], CryptoError> {
+        sign_detached(
+            &self.signing_seed,
+            &domain_message(b"pm/audit-record/v1", envelope),
+        )
+    }
+}
+
+/// Per-device audit encryption key. It exposes only typed audit operations.
+pub struct AuditKey {
+    vault: [u8; ID_BYTES],
+    generation: u64,
+    key: Secret,
+}
+
+impl AuditKey {
+    /// Encrypts a bounded audit record with typed audit-record AAD.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for oversized plaintext or unavailable cryptography.
+    pub fn seal_record(
+        &self,
+        event_id: [u8; ID_BYTES],
+        revision: [u8; ID_BYTES],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        if plaintext.len() > 4 * 1024 {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let header = target_header(
+            self.vault,
+            event_id,
+            revision,
+            Purpose::AuditRecord,
+            self.generation,
+        );
+        Ok(encode_envelope(&seal(&self.key, header, plaintext)?))
+    }
+
+    /// Authenticates and decrypts an exact audit-record envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed, altered, or context-mismatched bytes.
+    pub fn open_record(
+        &self,
+        event_id: [u8; ID_BYTES],
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let envelope = decode_envelope(bytes)?;
+        if encode_envelope(&envelope) != bytes
+            || envelope.header.vault != self.vault
+            || envelope.header.object != event_id
+            || envelope.header.purpose != Purpose::AuditRecord
+            || envelope.header.key_generation != self.generation
+        {
+            return Err(CryptoError::Authentication);
+        }
+        open(&self.key, &envelope)
+    }
+
+    /// Encrypts an audit manifest with typed audit-manifest AAD.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for oversized plaintext or unavailable cryptography.
+    pub fn seal_manifest(
+        &self,
+        manifest_id: [u8; ID_BYTES],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let header = target_header(
+            self.vault,
+            manifest_id,
+            manifest_id,
+            Purpose::AuditManifest,
+            self.generation,
+        );
+        Ok(encode_envelope(&seal(&self.key, header, plaintext)?))
+    }
+
+    /// Authenticates and decrypts an exact audit-manifest envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed, altered, or context-mismatched bytes.
+    pub fn open_manifest(
+        &self,
+        manifest_id: [u8; ID_BYTES],
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let envelope = decode_envelope(bytes)?;
+        if encode_envelope(&envelope) != bytes
+            || envelope.header.vault != self.vault
+            || envelope.header.object != manifest_id
+            || envelope.header.revision != manifest_id
+            || envelope.header.purpose != Purpose::AuditManifest
+            || envelope.header.key_generation != self.generation
+        {
+            return Err(CryptoError::Authentication);
+        }
+        open(&self.key, &envelope)
+    }
+}
+
+/// Verifies an `SK_SD` signature over the fixed audit-record domain.
+///
+/// # Errors
+///
+/// Returns an error for an invalid signature or unavailable cryptography.
+pub fn verify_audit_signature(
+    public_key: &[u8; KEY_BYTES],
+    envelope: &[u8],
+    signature: &[u8; 64],
+) -> Result<(), CryptoError> {
+    sodium()?;
+    let message = domain_message(b"pm/audit-record/v1", envelope);
+    if unsafe {
+        // SAFETY: signature/public key sizes and message buffer are valid.
+        libsodium_sys::crypto_sign_verify_detached(
+            signature.as_ptr(),
+            message.as_ptr(),
+            message.len() as u64,
+            public_key.as_ptr(),
+        )
+    } != 0
+    {
+        return Err(CryptoError::Authentication);
+    }
+    Ok(())
 }
 
 /// Logical item type used only to validate revision-format membership.
@@ -2059,6 +2506,42 @@ fn decode_sealed_key_context(bytes: &[u8]) -> Result<(Header, [u8; 16], u64), Cr
         return Err(CryptoError::InvalidFormat);
     }
     Ok((target, recipient, generation))
+}
+
+fn decode_sealed_audit_key(bytes: &[u8]) -> Result<(Secret, Header, [u8; 16], u64), CryptoError> {
+    let mut decoder = Decoder::new(bytes);
+    expect_map(&mut decoder, 4)?;
+    expect_key(&mut decoder, "key")?;
+    let key = Secret(decode_bytes(&mut decoder)?);
+    expect_key(&mut decoder, "recipient")?;
+    let recipient = decode_bytes(&mut decoder)?;
+    expect_key(&mut decoder, "target_header")?;
+    let target = decode_header(&mut decoder)?;
+    expect_key(&mut decoder, "authorization_generation")?;
+    let generation = decoder.u64().map_err(invalid)?;
+    if decoder.position() != bytes.len()
+        || encode_sealed_key(&key, &target, &recipient, generation) != bytes
+    {
+        return Err(CryptoError::InvalidFormat);
+    }
+    Ok((key, target, recipient, generation))
+}
+
+fn validate_audit_target(
+    target: &Header,
+    vault: [u8; ID_BYTES],
+    device: [u8; ID_BYTES],
+    generation: u64,
+) -> Result<(), CryptoError> {
+    if target.vault != vault
+        || target.object != device
+        || target.revision != device
+        || target.purpose != Purpose::AuditRecord
+        || target.key_generation != generation
+    {
+        return Err(CryptoError::Authentication);
+    }
+    Ok(())
 }
 
 fn encode_grant_fields(fields: &GrantFields) -> Vec<u8> {

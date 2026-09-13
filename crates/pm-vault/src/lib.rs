@@ -2,9 +2,14 @@
 
 //! Atomic persistence for already-encrypted vault objects.
 
+mod audit;
 mod content;
 mod human;
 
+pub use audit::{
+    AuditAction, AuditActorKind, AuditDeviceCustody, AuditDiscontinuity, AuditEvent, AuditOutcome,
+    AuditPurgeScope, AuditQuery, AuditRecordView, AutonomousAuditVault, PreparedAuditPurge,
+};
 pub use content::{
     Attachment, AuthRecord, CustomField, Destination, GeneratedPassword, GeneratorConfig,
     HumanMetadata, LogicalRecord, LogicalValue, PasswordRng, PrivateKeyFormat, RecordKind,
@@ -300,14 +305,16 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              ) STRICT;
              CREATE TABLE human_staging (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
-               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle')),
-               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash')),
+               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'audit_purge')),
+               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'audit-purge')),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB CHECK (revision_id IS NULL OR length(revision_id) = 16),
                body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144),
                package BLOB CHECK (package IS NULL OR length(package) BETWEEN 1 AND 16777216),
                item_kind TEXT CHECK (item_kind IS NULL OR item_kind IN ('password','totp','passkey','ssh','token','note','file')),
-               attachments BLOB CHECK (attachments IS NULL OR length(attachments) BETWEEN 1 AND 18874368)
+               attachments BLOB CHECK (attachments IS NULL OR length(attachments) BETWEEN 1 AND 18874368),
+               audit_generation INTEGER CHECK (audit_generation IS NULL OR audit_generation > 0),
+               audit_through_seq INTEGER CHECK (audit_through_seq IS NULL OR audit_through_seq > 0)
              ) STRICT;
              CREATE TABLE human_receipts (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
@@ -319,7 +326,11 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              CREATE TABLE audit_keys (
                device_id BLOB NOT NULL CHECK (length(device_id) = 16),
                generation INTEGER NOT NULL CHECK (generation > 0),
-               envelope BLOB NOT NULL CHECK (length(envelope) BETWEEN 1 AND 16777216),
+               human_envelope BLOB NOT NULL CHECK (length(human_envelope) BETWEEN 1 AND 16777216),
+               device_envelope BLOB NOT NULL CHECK (length(device_envelope) BETWEEN 49 AND 16777216),
+               encryption_public_key BLOB NOT NULL CHECK (length(encryption_public_key) = 32),
+               signing_public_key BLOB NOT NULL CHECK (length(signing_public_key) = 32),
+               human_signature BLOB NOT NULL CHECK (length(human_signature) = 64),
                PRIMARY KEY (device_id, generation)
              ) STRICT;
              CREATE TABLE audit_state (
@@ -333,8 +344,39 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                generation INTEGER NOT NULL CHECK (generation > 0),
                seq INTEGER NOT NULL CHECK (seq > 0),
                event_id BLOB NOT NULL UNIQUE CHECK (length(event_id) = 16),
+               segment_id BLOB NOT NULL CHECK (length(segment_id) = 16),
                record BLOB NOT NULL CHECK (length(record) BETWEEN 1 AND 8192),
+               signature BLOB NOT NULL CHECK (length(signature) = 64),
+               record_hash BLOB NOT NULL CHECK (length(record_hash) = 32),
                PRIMARY KEY (device_id, generation, seq)
+             ) STRICT;
+             CREATE TABLE audit_segments (
+               segment_id BLOB PRIMARY KEY CHECK (length(segment_id) = 16),
+               device_id BLOB NOT NULL CHECK (length(device_id) = 16),
+               generation INTEGER NOT NULL CHECK (generation > 0),
+               first_seq INTEGER NOT NULL CHECK (first_seq > 0),
+               last_seq INTEGER NOT NULL CHECK (last_seq >= first_seq),
+               previous_hash BLOB NOT NULL CHECK (length(previous_hash) = 32),
+               last_hash BLOB NOT NULL CHECK (length(last_hash) = 32),
+               record_count INTEGER NOT NULL CHECK (record_count BETWEEN 0 AND 256),
+               stored_bytes INTEGER NOT NULL CHECK (stored_bytes BETWEEN 0 AND 1048576),
+               closed INTEGER NOT NULL CHECK (closed IN (0,1))
+             ) STRICT;
+             CREATE UNIQUE INDEX one_open_audit_segment ON audit_segments(device_id,generation) WHERE closed=0;
+             CREATE TABLE audit_manifests (
+               device_id BLOB NOT NULL CHECK (length(device_id) = 16),
+               generation INTEGER NOT NULL CHECK (generation > 0),
+               manifest_id BLOB NOT NULL CHECK (length(manifest_id) = 16),
+               envelope BLOB NOT NULL CHECK (length(envelope) BETWEEN 1 AND 16777216),
+               PRIMARY KEY (device_id,generation)
+             ) STRICT;
+             CREATE TABLE audit_purge_ranges (
+               device_id BLOB NOT NULL CHECK (length(device_id) = 16),
+               generation INTEGER NOT NULL CHECK (generation > 0),
+               first_seq INTEGER NOT NULL CHECK (first_seq > 0),
+               last_seq INTEGER NOT NULL CHECK (last_seq >= first_seq),
+               purge_event_id BLOB NOT NULL CHECK (length(purge_event_id) = 16),
+               PRIMARY KEY (device_id,generation,first_seq,last_seq)
              ) STRICT;",
         )?;
         let transaction = connection.transaction()?;
