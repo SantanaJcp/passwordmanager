@@ -1,7 +1,7 @@
 # 09 — CLI delegada y MCP stdio equivalentes
 
 Type: task
-Status: claimed
+Status: resolved
 Owner: luna-09
 Blocked by: 08
 Spec: ../spec.md
@@ -22,16 +22,30 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [Tracker](../../../docs/agents/issue-tracker.md).
 
 ## Acceptance criteria
-- [ ] Las cinco operaciones CLI/MCP usan el mismo motor por TLS/RPK y pasan comparación de schemas/estados/errores.
-- [ ] frame privado 1MiB, límites, versión, JSON malicioso y diagnóstico separado se comprueban.
-- [ ] ningún comando humano/reveal/export/generic-sign es invocable por identidad agente. Capabilities solo incluye evidencia disponible, no catálogo entero.
-- [ ] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
-- [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
+- [x] Las cinco operaciones CLI/MCP usan el mismo motor por TLS/RPK y pasan comparación de schemas/estados/errores.
+- [x] frame privado 1MiB, límites, versión, JSON malicioso y diagnóstico separado se comprueban.
+- [x] ningún comando humano/reveal/export/generic-sign es invocable por identidad agente. Capabilities solo incluye evidencia disponible, no catálogo entero.
+- [x] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
+- [x] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
 ## Answer
-Pendiente de implementación y evidencia.
+Resuelto por el candidato completo
+`7399b039d8308f19186f5f2153fe13ea9d2bfb10` y el correctivo de gates
+`8429cdb86e36f210494bc30cc4b02cf97a5472b1`, ambos descendientes del
+trabajo iniciado en `0868cb96a0b02cc5a2dff17b50c40918a7ab7ac9`.
+La historia quedó preservada mediante los merges
+`88f469f90fea3af1b5f89f053c134fa11e54640c` y
+`9577040850919cdee10c4fe57023b3315ae95e9f`. La evidencia exacta está en
+[`docs/verification/ticket-09.md`](../../../docs/verification/ticket-09.md).
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-13 — Reclamado para Luna después de08 integrado; interfacesCLI/MCP sobrecontratos reales existentes.
+
+2026-09-12 — Merger rechazó inicialmente las supresiones globales de Clippy;
+sin ellas el gate detectó 22 errores en `pm-interface`. Luna entregó el
+correctivo, se repitieron los gates sin esas supresiones y pasaron 53 pruebas,
+los cinco laboratorios Linux y el build limpio offline, todos con exit 0. No
+se ejecutó revisión formal Astra ni se añadió superficie humana o de tickets
+10+.
