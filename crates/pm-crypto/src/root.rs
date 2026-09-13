@@ -351,6 +351,7 @@ impl FromStr for RecoveryCode {
 /// Unlocked human root. Secret bytes remain confined to this crate and are wiped on drop.
 pub struct UnlockedRoot {
     vault: [u8; ID_BYTES],
+    authority_epoch: u64,
     human_public_key: [u8; KEY_BYTES],
     human_root: Secret,
     human_signing_seed: Secret,
@@ -365,6 +366,108 @@ impl UnlockedRoot {
     #[must_use]
     pub const fn human_public_key(&self) -> &[u8; KEY_BYTES] {
         &self.human_public_key
+    }
+
+    #[must_use]
+    pub const fn trusted_root(&self) -> TrustedRoot {
+        TrustedRoot {
+            vault_id: self.vault,
+            epoch: self.authority_epoch,
+            public_key: self.human_public_key,
+        }
+    }
+
+    /// Signs only the fixed human-command domain; this is not a generic
+    /// signing interface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native Ed25519 signing fails.
+    pub fn sign_human_command(&self, command: &[u8]) -> Result<[u8; 64], CryptoError> {
+        sign_detached(
+            &self.human_signing_seed,
+            &domain_message(b"pm/human-command/v1", command),
+        )
+    }
+
+    /// Signs only the fixed human authority-event domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native Ed25519 signing fails.
+    pub fn sign_human_event(&self, event: &[u8]) -> Result<[u8; 64], CryptoError> {
+        sign_detached(
+            &self.human_signing_seed,
+            &domain_message(b"pm/human-event/v1", event),
+        )
+    }
+
+    /// Encrypts one minimal audit record with a per-device audit key. If no
+    /// key envelope exists, a fresh key and its envelope under `K_H` are
+    /// created together for the caller to persist atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid key envelope, wrong device/generation,
+    /// an oversized record, or unavailable native cryptography.
+    pub fn seal_audit_record(
+        &self,
+        key_envelope: Option<&[u8]>,
+        device: [u8; ID_BYTES],
+        generation: u64,
+        event_id: [u8; ID_BYTES],
+        revision: [u8; ID_BYTES],
+        plaintext: &[u8],
+    ) -> Result<AuditCiphertext, CryptoError> {
+        if plaintext.len() > 4 * 1024 || generation == 0 {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let (key, persisted_envelope) = if let Some(bytes) = key_envelope {
+            let envelope = decode_envelope(bytes)?;
+            if encode_envelope(&envelope) != bytes {
+                return Err(CryptoError::InvalidFormat);
+            }
+            let (key, target) = open_key(&self.human_root, &envelope)?;
+            if target.vault != self.vault
+                || target.object != device
+                || target.revision != device
+                || target.purpose != Purpose::AuditRecord
+                || target.key_generation != generation
+            {
+                return Err(CryptoError::Authentication);
+            }
+            (key, None)
+        } else {
+            let key = Secret::random()?;
+            let target =
+                target_header(self.vault, device, device, Purpose::AuditRecord, generation);
+            let envelope = seal_key(
+                &self.human_root,
+                &key,
+                &target,
+                wrapping_header(
+                    self.vault,
+                    random_array()?,
+                    device,
+                    Purpose::KeyWrap,
+                    &target,
+                    None,
+                ),
+            )?;
+            (key, Some(encode_envelope(&envelope)))
+        };
+        let header = target_header(
+            self.vault,
+            event_id,
+            revision,
+            Purpose::AuditRecord,
+            generation,
+        );
+        let record = seal(&key, header, plaintext)?;
+        Ok(AuditCiphertext {
+            key_envelope: persisted_envelope,
+            record: encode_envelope(&record),
+        })
     }
 
     /// Encrypts a complete revision-format vector and its independent external
@@ -609,6 +712,25 @@ impl UnlockedRoot {
             commitment: pending.commitment,
             signature,
         })
+    }
+}
+
+/// Opaque encrypted audit material. A present key envelope must be persisted
+/// in the same transaction as the first record that uses it.
+pub struct AuditCiphertext {
+    key_envelope: Option<Vec<u8>>,
+    record: Vec<u8>,
+}
+
+impl AuditCiphertext {
+    #[must_use]
+    pub fn key_envelope(&self) -> Option<&[u8]> {
+        self.key_envelope.as_deref()
+    }
+
+    #[must_use]
+    pub fn record(&self) -> &[u8] {
+        &self.record
     }
 }
 
@@ -1098,6 +1220,56 @@ pub fn recover_human_root(
     unlock_with_key(bundle, &code.key, &bundle.recovery_envelope)
 }
 
+/// Generates a cryptographically random 16-byte object identifier.
+///
+/// # Errors
+///
+/// Returns an error when the native random source is unavailable.
+pub fn random_id() -> Result<[u8; ID_BYTES], CryptoError> {
+    sodium()?;
+    random_array()
+}
+
+/// Computes SHA-256 through the repository's single native crypto boundary.
+#[must_use]
+pub fn digest(bytes: &[u8]) -> [u8; 32] {
+    sha256(bytes)
+}
+
+/// Verifies a signature in the fixed human-command domain.
+///
+/// # Errors
+///
+/// Returns authentication failure for a wrong root, signature, or command.
+pub fn verify_human_command(
+    trusted_root: &TrustedRoot,
+    command: &[u8],
+    signature: &[u8; 64],
+) -> Result<(), CryptoError> {
+    verify_human_signature(
+        trusted_root,
+        &domain_message(b"pm/human-command/v1", command),
+        signature,
+    )
+}
+
+/// Verifies a signature in the fixed human-event domain.
+///
+/// # Errors
+///
+/// Returns authentication failure for a wrong root, signature, or event.
+pub fn verify_human_event(
+    trusted_root: &TrustedRoot,
+    event: &[u8],
+    signature: &[u8; 64],
+) -> Result<(), CryptoError> {
+    verify_human_signature(
+        trusted_root,
+        &domain_message(b"pm/human-event/v1", event),
+        signature,
+    )
+}
+
 fn unlock_with_key(
     bundle: &RootBundle,
     wrapping_key: &Secret,
@@ -1133,6 +1305,7 @@ fn unlock_with_key(
     }
     Ok(UnlockedRoot {
         vault: bundle.trusted_root.vault_id,
+        authority_epoch: bundle.trusted_root.epoch,
         human_public_key: derived_public,
         human_root,
         human_signing_seed: signing_seed,
@@ -1943,6 +2116,37 @@ fn sign_detached(seed: &Secret, message: &[u8]) -> Result<[u8; 64], CryptoError>
         return Err(CryptoError::Authentication);
     }
     Ok(signature)
+}
+
+fn domain_message(domain: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.array(2).expect("Vec writes cannot fail");
+    encoder
+        .str(std::str::from_utf8(domain).expect("fixed ASCII domain"))
+        .expect("Vec writes cannot fail");
+    encoder.writer_mut().extend_from_slice(payload);
+    encoder.into_writer()
+}
+
+fn verify_human_signature(
+    trusted_root: &TrustedRoot,
+    message: &[u8],
+    signature: &[u8; 64],
+) -> Result<(), CryptoError> {
+    sodium()?;
+    if unsafe {
+        // SAFETY: signature, message and public-key buffers have declared sizes.
+        libsodium_sys::crypto_sign_verify_detached(
+            signature.as_ptr(),
+            message.as_ptr(),
+            message.len() as u64,
+            trusted_root.public_key.as_ptr(),
+        )
+    } != 0
+    {
+        return Err(CryptoError::Authentication);
+    }
+    Ok(())
 }
 
 fn seal_pmf1(key: &Secret, header: &Header, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {

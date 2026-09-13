@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 
-"""Disposable multi-UID acceptance harness for ticket 03.
+"""Disposable multi-UID acceptance harness for tickets 03 and 04.
 
 This harness only orchestrates public pm-custody commands. The peer identities
 are kernel credentials from the caller-provided user namespace, never fields
@@ -13,6 +13,7 @@ import os
 import pathlib
 import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -24,7 +25,7 @@ HUMAN = 2
 AGENT = 3
 
 
-def as_uid(uid, command, *, check=True):
+def as_uid(uid, command, *, check=True, input=None):
     def change_identity():
         os.setgroups([])
         os.setgid(uid)
@@ -34,6 +35,7 @@ def as_uid(uid, command, *, check=True):
         command,
         check=check,
         capture_output=True,
+        input=input,
         preexec_fn=change_identity,
         timeout=15,
     )
@@ -79,15 +81,61 @@ def stop(process):
     assert stderr == b"", stderr
 
 
+def create_vault(cli, path):
+    password = b"synthetic ticket 04 e2e master"
+
+    def change_identity():
+        os.setgroups([])
+        os.setgid(CUSTODIAN)
+        os.setuid(CUSTODIAN)
+
+    process = subprocess.Popen(
+        [cli, "vault", "create", path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        preexec_fn=change_identity,
+    )
+    assert process.stdout.readline() == b"Master password (read from stdin):\n"
+    process.stdin.write(password + b"\n")
+    process.stdin.flush()
+    assert process.stdout.readline() == b"Confirm master password:\n"
+    process.stdin.write(password + b"\n")
+    process.stdin.flush()
+    recovery = process.stdout.readline()
+    assert recovery.startswith(b"Recovery code (store externally): PMR1-")
+    assert process.stdout.readline() == b"Reintroduce recovery code to confirm the external copy:\n"
+    process.stdin.write(recovery.split(b": ", 1)[1])
+    process.stdin.close()
+    stdout = process.stdout.read()
+    stderr = process.stderr.read()
+    assert process.wait(timeout=15) == 0, (stdout, stderr)
+    assert stdout.startswith(b"Vault created: ") and stderr == b""
+    return password
+
+
+def wire_fields(values):
+    encoded = bytearray()
+    for value in values:
+        encoded.extend(len(value).to_bytes(4, "big"))
+        encoded.extend(value)
+    return bytes(encoded)
+
+
 def main():
     assert os.geteuid() == 0, "harness must be root only inside the disposable user namespace"
     source_binary = pathlib.Path(sys.argv[1]).resolve()
+    source_cli = pathlib.Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else None
     root = pathlib.Path(tempfile.mkdtemp(prefix="pm-custody-linux-lab-"))
     try:
         os.chmod(root, 0o711)
         binary = root / "pm-custody"
         shutil.copyfile(source_binary, binary)
         os.chmod(binary, 0o755)
+        cli = root / "pm"
+        if source_cli is not None:
+            shutil.copyfile(source_cli, cli)
+            os.chmod(cli, 0o755)
         state = root / "state"
         runtime = root / "run"
         agent_home = root / "agent"
@@ -188,7 +236,7 @@ def main():
         human_socket = runtime / "human.sock"
         serve = [
             binary,
-            "serve",
+            "serve-vault" if source_cli is not None else "serve",
             "--bootstrap",
             bootstrap,
             "--agent-socket",
@@ -196,6 +244,10 @@ def main():
             "--human-socket",
             human_socket,
         ]
+        vault = state / "vault.sqlite3"
+        if source_cli is not None:
+            master = create_vault(cli, vault)
+            serve.extend(["--vault", vault, "--device", "44444444444444444444444444444444"])
         daemon = start_as(CUSTODIAN, serve)
         wait_for_sockets(daemon, [agent_socket, human_socket])
 
@@ -214,6 +266,82 @@ def main():
         )
         assert human_ok.stdout == b"READY role=human peer_uid=1 tls=1.3 rpk=pinned alpn=pm-human/1\n"
         assert human_ok.stderr == b""
+
+        if source_cli is not None:
+            title = b"Synthetic E2E account"
+            username = b"synthetic-e2e-user"
+            secret_one = b"synthetic e2e secret one"
+            destination = b"https://e2e.invalid/login"
+            notes = b"synthetic e2e note"
+            edited_title = b"Synthetic E2E account edited"
+            secret_two = b"synthetic e2e secret two"
+            crud_command = [
+                binary,
+                "human-password-crud",
+                "--profile",
+                human_profile,
+                "--private",
+                human_private,
+                "--socket",
+                human_socket,
+            ]
+            crud_input = wire_fields(
+                [master, title, username, secret_one, destination, notes, edited_title, secret_two]
+            )
+
+            # Force the encrypted audit insert to fail inside the real commit
+            # reached over TLS. The failed client reconnects for a receipt and
+            # observes the permitted no-op outcome; no production test hook is
+            # involved.
+            database = sqlite3.connect(vault)
+            database.execute(
+                "CREATE TRIGGER lab_reject_audit BEFORE INSERT ON encrypted_audit_records "
+                "BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END"
+            )
+            database.commit()
+            database.close()
+            atomic_failure = as_uid(
+                HUMAN, crud_command, check=False, input=crud_input
+            )
+            expect_unavailable(atomic_failure)
+            database = sqlite3.connect(vault)
+            for table in [
+                "vault_items",
+                "revision_parts",
+                "authority_events",
+                "outbox",
+                "human_receipts",
+                "audit_keys",
+                "audit_state",
+                "encrypted_audit_records",
+            ]:
+                assert database.execute(f"select count(*) from {table}").fetchone() == (0,)
+            assert database.execute(
+                "select count(*) from human_challenges where consumed=1"
+            ).fetchone() == (0,)
+            assert database.execute(
+                "select count(*) from human_challenges where consumed=0"
+            ).fetchone() == (1,)
+            assert database.execute("select count(*) from human_staging").fetchone() == (1,)
+            database.execute("DROP TRIGGER lab_reject_audit")
+            database.commit()
+            database.close()
+
+            crud = as_uid(HUMAN, crud_command, input=crud_input)
+            assert crud.stdout == b"PASS human-crud-e2e receipts=3 replay=1 body-change=rejected\n"
+            assert crud.stderr == b""
+            persisted = vault.read_bytes()
+            assert secret_one not in persisted and secret_two not in persisted
+            database = sqlite3.connect(vault)
+            assert database.execute("select count(*) from human_receipts").fetchone() == (3,)
+            assert database.execute("select count(*) from authority_events").fetchone() == (3,)
+            assert database.execute("select count(*) from outbox").fetchone() == (3,)
+            assert database.execute("select count(*) from encrypted_audit_records").fetchone() == (3,)
+            assert database.execute("select count(*) from human_challenges where consumed=1").fetchone() == (3,)
+            assert database.execute("select count(*) from human_challenges where consumed=0").fetchone() == (1,)
+            assert database.execute("select count(*) from human_staging").fetchone() == (1,)
+            assert database.execute("select status from vault_items").fetchone() == ("trash",)
+            database.close()
 
         os.chmod(agent_private, 0o600)
         key_acl_fault = as_uid(
@@ -252,6 +380,12 @@ def main():
         print(f"PASS uid_map={pathlib.Path('/proc/self/uid_map').read_text().strip()!r}")
         print(f"PASS custody_uid={CUSTODIAN} human_uid={HUMAN} agent_uid={AGENT}")
         print(f"PASS bootstrap_sha256={before} restart=process tls=1.3 rpk=mutual alpn=role-specific")
+        if source_cli is not None:
+            print("PASS human_crud=prepare-commit-receipt tls=1.3 rpk=mutual alpn=pm-human/1")
+            print(
+                "PASS human_negatives=wrong-role,body-change,audit-failure "
+                "atomicity=no-partial replay=receipt response-loss=recovered"
+            )
         print("LIMIT reboot_host=NOT_RUN production_systemd_fde=NOT_RUN")
     finally:
         shutil.rmtree(root, ignore_errors=True)

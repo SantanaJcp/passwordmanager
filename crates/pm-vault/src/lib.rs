@@ -2,6 +2,12 @@
 
 //! Atomic persistence for already-encrypted vault objects.
 
+mod human;
+
+pub use human::{
+    HumanChannel, HumanCommitError, HumanReceipt, HumanVault, PasswordRecord, PreparedHumanCommand,
+};
+
 use std::{
     fmt,
     fs::{self, File, OpenOptions},
@@ -10,8 +16,8 @@ use std::{
 };
 
 use pm_crypto::{
-    CreatedRoot, CryptoError, KdfProfile, RecoveryCode, RootBundle, TrustedRoot, create_human_root,
-    open_human_root,
+    CreatedRoot, CryptoError, KdfProfile, RecoveryCode, RootBundle, TrustedRoot, UnlockedRoot,
+    create_human_root, open_human_root,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
@@ -132,7 +138,19 @@ impl OpenedVault {
 pub fn open_vault(path: &Path, password: &[u8]) -> Result<OpenedVault, VaultError> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
+    let (bundle, trusted_root) = load_and_validate_bundle(&connection)?;
+    let unlocked = open_human_root(&bundle, password)?;
+    if unlocked.vault_id() != trusted_root.vault_id()
+        || unlocked.human_public_key() != trusted_root.public_key()
+    {
+        return Err(VaultError::InvalidFormat);
+    }
+    Ok(OpenedVault { trusted_root })
+}
 
+fn load_and_validate_bundle(
+    connection: &Connection,
+) -> Result<(RootBundle, TrustedRoot), VaultError> {
     let metadata = connection
         .query_row(
             "SELECT format_version, suite, vault_id, authority_epoch, human_public_key \
@@ -185,17 +203,22 @@ pub fn open_vault(path: &Path, password: &[u8]) -> Result<OpenedVault, VaultErro
     {
         return Err(VaultError::InvalidFormat);
     }
+    let trusted_root = *bundle.trusted_root();
+    Ok((bundle, trusted_root))
+}
+
+fn unlock_root(connection: &Connection, password: &[u8]) -> Result<UnlockedRoot, VaultError> {
+    let (bundle, trusted_root) = load_and_validate_bundle(connection)?;
     let unlocked = open_human_root(&bundle, password)?;
-    if unlocked.vault_id() != bundle.trusted_root().vault_id()
-        || unlocked.human_public_key() != bundle.trusted_root().public_key()
+    if unlocked.vault_id() != trusted_root.vault_id()
+        || unlocked.human_public_key() != trusted_root.public_key()
     {
         return Err(VaultError::InvalidFormat);
     }
-    Ok(OpenedVault {
-        trusted_root: *bundle.trusted_root(),
-    })
+    Ok(unlocked)
 }
 
+#[allow(clippy::too_many_lines)]
 fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
     if path.exists() {
         return Err(VaultError::AlreadyExists);
@@ -231,6 +254,72 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              CREATE TABLE encrypted_objects (
                kind TEXT PRIMARY KEY,
                value BLOB NOT NULL CHECK (length(value) BETWEEN 1 AND 16777216)
+             ) STRICT;
+             CREATE TABLE vault_items (
+               item_id BLOB PRIMARY KEY CHECK (length(item_id) = 16),
+               visible_revision BLOB NOT NULL CHECK (length(visible_revision) = 16),
+               status TEXT NOT NULL CHECK (status IN ('active', 'trash'))
+             ) STRICT;
+             CREATE TABLE revision_parts (
+               revision_id BLOB PRIMARY KEY CHECK (length(revision_id) = 16),
+               item_id BLOB NOT NULL CHECK (length(item_id) = 16),
+               package BLOB NOT NULL CHECK (length(package) BETWEEN 1 AND 16777216)
+             ) STRICT;
+             CREATE TABLE authority_events (
+               event_digest BLOB PRIMARY KEY CHECK (length(event_digest) = 32),
+               event_id BLOB NOT NULL UNIQUE CHECK (length(event_id) = 16),
+               transaction_id BLOB NOT NULL UNIQUE CHECK (length(transaction_id) = 16),
+               event BLOB NOT NULL CHECK (length(event) BETWEEN 1 AND 262144),
+               human_signature BLOB NOT NULL CHECK (length(human_signature) = 64)
+             ) STRICT;
+             CREATE TABLE outbox (
+               event_digest BLOB PRIMARY KEY CHECK (length(event_digest) = 32),
+               event BLOB NOT NULL CHECK (length(event) BETWEEN 1 AND 262144)
+             ) STRICT;
+             CREATE TABLE human_challenges (
+               challenge BLOB PRIMARY KEY CHECK (length(challenge) = 32),
+               transaction_id BLOB NOT NULL UNIQUE CHECK (length(transaction_id) = 16),
+               command BLOB NOT NULL CHECK (length(command) BETWEEN 1 AND 262144),
+               body_hash BLOB NOT NULL CHECK (length(body_hash) = 32),
+               expected_state BLOB NOT NULL CHECK (length(expected_state) = 32),
+               expires_at_us INTEGER NOT NULL,
+               consumed INTEGER NOT NULL DEFAULT 0 CHECK (consumed IN (0, 1))
+             ) STRICT;
+             CREATE TABLE human_staging (
+               transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
+               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle')),
+               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash')),
+               item_id BLOB NOT NULL CHECK (length(item_id) = 16),
+               revision_id BLOB CHECK (revision_id IS NULL OR length(revision_id) = 16),
+               body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144),
+               package BLOB CHECK (package IS NULL OR length(package) BETWEEN 1 AND 16777216)
+             ) STRICT;
+             CREATE TABLE human_receipts (
+               transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
+               body_hash BLOB NOT NULL CHECK (length(body_hash) = 32),
+               committed_heads BLOB NOT NULL CHECK (length(committed_heads) BETWEEN 2 AND 262144),
+               committed_at_us INTEGER NOT NULL,
+               outcome TEXT NOT NULL CHECK (outcome = 'committed')
+             ) STRICT;
+             CREATE TABLE audit_keys (
+               device_id BLOB NOT NULL CHECK (length(device_id) = 16),
+               generation INTEGER NOT NULL CHECK (generation > 0),
+               envelope BLOB NOT NULL CHECK (length(envelope) BETWEEN 1 AND 16777216),
+               PRIMARY KEY (device_id, generation)
+             ) STRICT;
+             CREATE TABLE audit_state (
+               device_id BLOB PRIMARY KEY CHECK (length(device_id) = 16),
+               generation INTEGER NOT NULL CHECK (generation > 0),
+               seq INTEGER NOT NULL CHECK (seq > 0),
+               last_hash BLOB NOT NULL CHECK (length(last_hash) = 32)
+             ) STRICT;
+             CREATE TABLE encrypted_audit_records (
+               device_id BLOB NOT NULL CHECK (length(device_id) = 16),
+               generation INTEGER NOT NULL CHECK (generation > 0),
+               seq INTEGER NOT NULL CHECK (seq > 0),
+               event_id BLOB NOT NULL UNIQUE CHECK (length(event_id) = 16),
+               record BLOB NOT NULL CHECK (length(record) BETWEEN 1 AND 8192),
+               PRIMARY KEY (device_id, generation, seq)
              ) STRICT;",
         )?;
         let transaction = connection.transaction()?;
