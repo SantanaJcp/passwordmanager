@@ -1,0 +1,57 @@
+name: macOS custody acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_AUTO_INSTALL: '0'
+
+jobs:
+  native-macos-custody:
+    name: Custody ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-intel
+            runner: macos-15-intel
+            machine: x86_64
+            runner_arch: X64
+            rust_host: x86_64-apple-darwin
+          - target: macos-apple-silicon
+            runner: macos-15
+            machine: arm64
+            runner_arch: ARM64
+            rust_host: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      RUSTUP_HOME: ${{ github.workspace }}/.toolchain/rustup
+      CARGO_HOME: ${{ github.workspace }}/.toolchain/cargo
+      RUSTUP_TOOLCHAIN: 1.98.1-${{ matrix.rust_host }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          persist-credentials: false
+      - name: Install exact native Rust toolchain in repository homes
+        shell: bash
+        run: |
+          mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+      - name: Verify native macOS environment
+        shell: bash
+        run: >-
+          ./scripts/ci/native-preflight-unix.sh
+          macos
+          '${{ matrix.machine }}'
+          '${{ matrix.runner_arch }}'
+          '${{ matrix.rust_host }}'
+      - name: Fetch locked product dependencies
+        shell: bash
+        run: ./scripts/fetch-dependencies.sh
+      - name: Run native macOS custody product laboratory offline
+        shell: bash
+        run: PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh

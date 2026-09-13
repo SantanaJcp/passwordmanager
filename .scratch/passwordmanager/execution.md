@@ -43,6 +43,15 @@ una revisión que declare Node 24. La remediación usa checkout v7.0.1 en
 `action.yml` oficiales. No autoriza caches, artifacts, secrets, larger runners,
 gasto, otros cambios de producto ni el fallback pendiente de TUI 23.
 
+Para el port 26 se preparó, sin publicar ni ejecutar, un workflow manual de
+aceptación limitado a `macos-15-intel` y `macos-15`. Usa Rust 1.98.1 exacto en
+homes `<repo>/.toolchain`, preflight nativo, una fase separada
+`fetch-dependencies.sh` y después el laboratorio macOS con build/tests
+locked/offline. Comprueba arquitectura de artefactos y el proceso real de
+launchd; no usa preflight como evidencia de producto, cache/artifacts/secrets,
+runners pagos ni fallback. La publicación, dispatch y evidencia observada
+siguen pendientes del coordinador; no resuelve el ticket 26.
+
 La especificación y contratos están en [spec.md](spec.md). Este documento registra ejecución, no sustituye el estado de diseño de §15 ni redefine contratos.
 
 ## Preparación comprobada

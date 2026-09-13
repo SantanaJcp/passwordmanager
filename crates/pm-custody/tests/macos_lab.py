@@ -222,6 +222,8 @@ def main():
         pid = int(re.search(r"\bpid = (\d+)", service).group(1))
         process_user = run(["ps", "-o", "user=", "-p", str(pid)]).stdout.decode().strip()
         assert process_user == CUSTODIAN, (pid, process_user)
+        process_command = run(["ps", "-o", "command=", "-p", str(pid)]).stdout.decode().strip()
+        assert process_command.split()[0] == str(INSTALL / "pm-custody"), process_command
 
         for path, uid, mode in [(INSTALL / "pm-custody", 0, 0o755),
                                 (PLIST, 0, 0o644), (bootstrap, custodian_uid, 0o400)]:

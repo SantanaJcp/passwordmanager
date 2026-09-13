@@ -38,28 +38,40 @@ documentation.
 
 ## Authorized ephemeral native method
 
-The only authorized native entry point is:
+The manual
+[macOS custody acceptance workflow](../../.github/workflows/macos-custody-acceptance.yml)
+orchestrates exactly the two standard runners `macos-15-intel` and `macos-15`.
+It is prepared but has not been published or executed. Its only product entry
+point is:
 
 ```text
 PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh
 ```
 
 Prerequisites are a fresh macOS 13-or-newer Intel or Apple-silicon CI runner,
-the repository-pinned Rust 1.98.1 toolchain/cache, Xcode command-line tools,
+the repository-pinned Rust 1.98.1 toolchain, Xcode command-line tools,
 Python 3, a logged-in non-root console user, and passwordless `sudo`. The
 runner must not already contain the three synthetic accounts or any of the
 canonical product paths. A collision is a hard failure, never permission to
 replace existing host state.
 
+The workflow fixes `RUSTUP_AUTO_INSTALL=0` before every Rustup invocation and
+installs only the exact fully qualified 1.98.1 host toolchain into
+`<repo>/.toolchain`. It runs the environment preflight, fetches the locked
+dependency graph in a separate network-enabled step, then invokes the product
+laboratory whose build and tests are locked/offline. There is no dependency
+cache or artifact upload and a preflight PASS cannot bypass a product failure.
+
 The shell gate performs the locked/offline native build, native unit tests and
-`plutil` validation. Its Python harness then:
+`plutil` validation. It requires each `pm`/`pm-custody` artifact to be a
+single-architecture Mach-O exactly matching `uname -m`. Its Python harness then:
 
 1. creates `_passwordmanager`, `_pmagent26` and `_pmother26` with unused real
    Darwin UIDs/groups;
 2. installs a root-owned binary and plist, creates custody-owned state/runtime,
    generates only synthetic RPKs, and bootstraps a fresh synthetic vault;
 3. bootstraps the LaunchDaemon in the system domain and proves its live PID is
-   `_passwordmanager`;
+   `_passwordmanager` running the installed, architecture-checked binary;
 4. exercises successful agent and human TLS/RPK channels, then gives the wrong
    UID a correct copied synthetic agent key and requires kernel-peer rejection;
 5. proves an agent UID cannot use the human endpoint, establishes authorization,
@@ -70,7 +82,7 @@ The shell gate performs the locked/offline native build, native unit tests and
 7. boots the job out and removes only the collision-checked paths/accounts it
    created, even on failure.
 
-Success requires every assertion and command to exit zero and all five `PASS`
+Success requires every assertion and command to exit zero and all four final `PASS`
 lines to be present. A skip, cross-build, Linux execution, missing pasteboard
 session, missing sudo privilege, pre-existing path/account, or cleanup failure
 is not acceptance. The harness intentionally does not claim reboot, FileVault,
@@ -85,6 +97,29 @@ custody binary returned `CUSTODY_UNAVAILABLE`, and `OwnedClipboard` did not
 exist. It must be recorded on the native runner rather than inferred here.
 The green is the exact same native test/laboratory command after this patch.
 Until those two observed native records exist, the ticket must remain claimed.
+
+The acceptance-workflow checker was written before the workflow existed:
+
+```text
+./scripts/verify-macos-custody-ci-config.sh
+# RED exit 1: required macOS custody CI workflow was absent
+```
+
+After adding the workflow and architecture checks, the same checker must pass.
+It verifies only the two standard macOS labels, manual trigger, read-only
+permissions, fixed Node-24 checkout SHA, repository toolchain homes, exact
+Rust install, ordered preflight/fetch/offline-lab phases, and absence of
+secrets, cache, artifacts, paid runners, emulation and success substitution.
+
+```text
+./scripts/verify-macos-custody-ci-config.sh
+./scripts/verify-native-ci-config.sh
+# GREEN: exit 0
+
+# PyYAML 6.0.3: jobs=1, targets=2, steps=5
+./scripts/check.sh
+# PASS after merging the CI remediation and adding the acceptance workflow
+```
 
 Observed on the Linux x86_64 development host:
 

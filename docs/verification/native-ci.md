@@ -142,11 +142,15 @@ sintaxis YAML se comprueba además con un parser local disponible, sin instalar
 dependencias; esto no sustituye el parser de GitHub, que solo será observado
 tras la integración en `master` y el dispatch autorizado.
 
-## Futura aceptación de producto
+## Aceptación de producto por ticket
 
-No se crea ahora un workflow de aceptación porque los ports y entrypoints de
-26/27 aún no existen. Cuando cada ticket entregue su laboratorio real y su
-nombre quede documentado, el workflow de aceptación deberá:
+El port 26 ya entrega un entrypoint documentado y el
+[workflow manual de aceptación macOS](../../.github/workflows/macos-custody-acceptance.yml)
+lo ejecuta únicamente en `macos-15-intel` y `macos-15`. Sigue siendo una
+preparación no ejecutada: publicarlo y despacharlo requieren los pasos
+separados autorizados. Los demás tickets solo pueden añadir su workflow cuando
+entreguen un laboratorio real y su nombre quede documentado. Cada workflow de
+aceptación debe:
 
 1. comprobar que el entrypoint requerido existe y es ejecutable; si falta,
    terminar en error antes de anunciar ninguna prueba;
@@ -160,6 +164,14 @@ nombre quede documentado, el workflow de aceptación deberá:
    sintéticos;
 5. fallar ante falta de puerto, herramienta, identidad restringida o resultado,
    sin skip, mock, inspección estática como sustituto ni cambio de plataforma.
+
+El workflow 26 fija el toolchain completo 1.98.1 por host dentro de
+`<repo>/.toolchain`, comprueba primero el entorno nativo, ejecuta
+`fetch-dependencies.sh` como única fase de red del producto y después ejecuta
+el laboratorio con builds/tests `--locked --offline`. La arquitectura de los
+dos binarios debe coincidir exactamente con `uname -m`; el harness comprueba
+que el PID real de launchd ejecuta ese `pm-custody` instalado. No usa el
+preflight como sustituto del laboratorio.
 
 Esta clase CI nunca contará como evidencia de `install -> reboot FDE`, TTY
 humano auténtico, Ghostty/Terminal.app/Windows Terminal, clipboard humano
