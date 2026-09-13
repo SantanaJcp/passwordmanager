@@ -675,9 +675,11 @@ impl AttemptVault {
             };
         let passkey_profile = op.descriptor.kind() == RecordKind::Passkey
             && request.method == "webauthn"
-            && request.integration_id == "vault-webauthn-provider"
             && request.integration_version == 1
-            && request.context == b"keycloak-webauthn/1";
+            && ((request.integration_id == "vault-webauthn-provider"
+                && request.context == b"keycloak-webauthn/1")
+                || (request.integration_id == "keycloak-webauthn"
+                    && is_profile_id(&request.context)));
         if op.descriptor.destination() != Some(request.destination.as_str())
             || !(password_profile || passkey_profile)
         {
@@ -899,15 +901,7 @@ impl AttemptVault {
             self.generation,
             attempt,
         )?)?;
-        let material = if reconcile {
-            CredentialMaterial {
-                username: String::new(),
-                password: Zeroizing::new(Vec::new()),
-                totp: None,
-            }
-        } else {
-            password_material(&op.auth, &method)?
-        };
+        let material = credential_material(&op.auth, &method, reconcile)?;
         let token = random_id().map_err(|_| AttemptError::Integrity)?;
         snap.state = AttemptState::Running;
         let replacement = self.custody.update_attempt_state(
@@ -1388,6 +1382,36 @@ struct PasskeyMaterial {
     rp_id: String,
     credential_id: Vec<u8>,
     user_name: String,
+}
+
+fn credential_material(
+    auth: &[u8],
+    method: &str,
+    reconcile: bool,
+) -> Result<CredentialMaterial, AttemptError> {
+    if reconcile {
+        return Ok(CredentialMaterial {
+            username: String::new(),
+            password: Zeroizing::new(Vec::new()),
+            totp: None,
+        });
+    }
+    if method == "webauthn" {
+        return Ok(CredentialMaterial {
+            username: passkey_material(auth)?.user_name,
+            password: Zeroizing::new(Vec::new()),
+            totp: None,
+        });
+    }
+    password_material(auth, method)
+}
+
+fn is_profile_id(value: &[u8]) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn passkey_material(auth: &[u8]) -> Result<PasskeyMaterial, AttemptError> {

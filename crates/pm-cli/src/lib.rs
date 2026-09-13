@@ -405,7 +405,10 @@ fn decode_discovery(raw: &[u8]) -> Result<Json, ErrorCode> {
                 "account".into(),
                 Json::String(String::from_utf8_lossy(account).into()),
             ),
-            ("integrations".into(), credential_integrations(destination)),
+            (
+                "integrations".into(),
+                credential_integrations(kind, destination),
+            ),
         ]));
     }
     Ok(Json::Object(vec![
@@ -446,7 +449,9 @@ fn decode_attempt(raw: &[u8]) -> Result<Json, ErrorCode> {
         return Err(ErrorCode::Internal);
     }
     let integration = std::str::from_utf8(integration).map_err(|_| ErrorCode::Internal)?;
-    let public_result = if integration == "keycloak-browser-oidc" && !result.is_empty() {
+    let public_result = if matches!(integration, "keycloak-browser-oidc" | "keycloak-webauthn")
+        && !result.is_empty()
+    {
         public_attempt_result(integration, Some(result))?
     } else {
         Json::Null
@@ -478,10 +483,13 @@ fn decode_attempt(raw: &[u8]) -> Result<Json, ErrorCode> {
     ]))
 }
 
-fn credential_integrations(destination: &[u8]) -> Json {
+fn credential_integrations(kind: &[u8], destination: &[u8]) -> Json {
     let mut values = vec![Json::String("controlled.external".into())];
     if destination == b"keycloak-lab" {
         values.push(Json::String("keycloak-browser-oidc".into()));
+    }
+    if kind == b"passkey" {
+        values.push(Json::String("keycloak-webauthn".into()));
     }
     Json::Array(values)
 }

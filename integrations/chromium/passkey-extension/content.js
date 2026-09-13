@@ -6,6 +6,7 @@ const REQUEST_EVENT = "pm-passkey-request-v1";
 const RESPONSE_EVENT = "pm-passkey-response-v1";
 
 if (window === window.top && location.origin === EXACT_ORIGIN) {
+  chrome.runtime.sendMessage({type: "install-passkey-adapter"});
   window.addEventListener(REQUEST_EVENT, async (event) => {
     if (!(event instanceof CustomEvent) || event.target !== window || !event.detail) return;
     const request = structuredClone(event.detail);
@@ -14,7 +15,7 @@ if (window === window.top && location.origin === EXACT_ORIGIN) {
       window.dispatchEvent(new CustomEvent(RESPONSE_EVENT, {detail: response}));
     } catch (_error) {
       window.dispatchEvent(new CustomEvent(RESPONSE_EVENT, {
-        detail: {ok: false, error: "NOT_ALLOWED"}
+        detail: {ok: false, error: "NOT_ALLOWED", requestId: request.requestId}
       }));
     }
   });
