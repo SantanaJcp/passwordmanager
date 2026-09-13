@@ -46,6 +46,8 @@ use zeroize::{Zeroize, Zeroizing};
 use pm_crypto::{KdfProfile, RecoveryCode};
 
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
+#[cfg(target_os = "macos")]
+use pm_native_channel::OwnedClipboard;
 use pm_vault::{
     AgentEnrollment, AgentPeer, Attachment, AttachmentReader, AttemptOutcome, AttemptState,
     AttemptVault, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome,
@@ -149,6 +151,7 @@ struct ControlledProvider {
 }
 
 pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
+    configure_macos_process()?;
     let mut arguments = arguments.into_iter();
     let command = arguments.next().ok_or(Failure::Usage)?;
     match command.to_str() {
@@ -181,8 +184,64 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-recovery-restore") => human_recovery_restore(&mut arguments),
         Some("human-master-rotate") => human_master_rotate(&mut arguments),
         Some("human-recovery-rotate") => human_recovery_rotate(&mut arguments),
+        #[cfg(target_os = "macos")]
+        Some("macos-native-probe") => macos_native_probe(&mut arguments),
         _ => Err(Failure::Usage),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_native_probe(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    finish_arguments(arguments)?;
+    let tty = File::open("/dev/tty").map_err(|_| Failure::Unavailable)?;
+    if unsafe { libc::isatty(tty.as_raw_fd()) } != 1 {
+        return Err(Failure::Unavailable);
+    }
+    let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrlimit(libc::RLIMIT_CORE, &raw mut limit) } != 0
+        || limit.rlim_cur != 0
+        || limit.rlim_max != 0
+    {
+        return Err(Failure::Unavailable);
+    }
+    let first = OwnedClipboard::copy(b"ticket26-first-synthetic-canary")
+        .map_err(|_| Failure::Unavailable)?;
+    let second = OwnedClipboard::copy(b"ticket26-new-owner-synthetic-canary")
+        .map_err(|_| Failure::Unavailable)?;
+    if first.clear_if_owned().map_err(|_| Failure::Unavailable)?
+        || !second.clear_if_owned().map_err(|_| Failure::Unavailable)?
+    {
+        return Err(Failure::Unavailable);
+    }
+    println!("PASS macos-native tty=real rlimit-core=0 clipboard=AppKit-changeCount");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_process() -> Result<(), Failure> {
+    let limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let result = unsafe {
+        // SAFETY: limit is a valid immutable rlimit and RLIMIT_CORE is a
+        // process-local resource setting applied before reading key material.
+        libc::setrlimit(libc::RLIMIT_CORE, &raw const limit)
+    };
+    if result != 0 {
+        return Err(Failure::Unavailable);
+    }
+    unsafe {
+        // SAFETY: umask has no pointer arguments and affects only this process.
+        libc::umask(0o077);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::unnecessary_wraps)]
+const fn configure_macos_process() -> Result<(), Failure> {
+    Ok(())
 }
 
 fn human_ssh_lab_setup(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
@@ -287,6 +346,7 @@ pub fn agent_rpc(
     socket_path: &Path,
     request: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
+    configure_macos_process().map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())?;
     let profile = read_profile(profile_path).map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())?;
     if profile.role != Role::Agent {
         return Err("UNAUTHORIZED".to_owned());
@@ -542,6 +602,7 @@ fn probe(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> 
     let key = read_key(&private_path, current_uid())?;
 
     let stream = UnixStream::connect(socket_path).map_err(|_| Failure::Unavailable)?;
+    configure_unix_stream(&stream)?;
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
         .map_err(|_| Failure::Unavailable)?;
@@ -2569,6 +2630,7 @@ fn connect(
     socket_path: &Path,
 ) -> Result<rustls::StreamOwned<ClientConnection, UnixStream>, Failure> {
     let stream = UnixStream::connect(socket_path).map_err(|_| Failure::Unavailable)?;
+    configure_unix_stream(&stream)?;
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
         .map_err(|_| Failure::Unavailable)?;
@@ -3164,6 +3226,7 @@ fn call_controlled_provider(
         return call_ssh_provider(provider, lease);
     }
     let mut stream = UnixStream::connect(&provider.socket).map_err(|_| ())?;
+    configure_unix_stream(&stream).map_err(|_| ())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|_| ())?;
@@ -3262,6 +3325,7 @@ fn call_ssh_provider(
         });
     }
     let mut stream = UnixStream::connect(&provider.socket).map_err(|_| ())?;
+    configure_unix_stream(&stream).map_err(|_| ())?;
     stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     if unix_peer_uid(&stream).map_err(|_| ())? != provider.uid {
@@ -4690,7 +4754,35 @@ fn accept_one(
     let Ok((stream, _)) = listener.accept() else {
         return;
     };
+    if configure_unix_stream(&stream).is_err() {
+        return;
+    }
     let _ = handle_connection(stream, expected_uid, role, config, vault, peer_rpk);
+}
+
+#[cfg(target_os = "macos")]
+fn configure_unix_stream(stream: &UnixStream) -> Result<(), Failure> {
+    let enabled: libc::c_int = 1;
+    let result = unsafe {
+        // SAFETY: enabled is a valid immutable integer option value and stream
+        // owns a live Unix socket. Darwin SO_NOSIGPIPE prevents process-wide
+        // SIGPIPE without changing the protocol.
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            (&raw const enabled).cast(),
+            libc::socklen_t::try_from(std::mem::size_of_val(&enabled))
+                .map_err(|_| Failure::Unavailable)?,
+        )
+    };
+    (result == 0).then_some(()).ok_or(Failure::Unavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::unnecessary_wraps)]
+const fn configure_unix_stream(_stream: &UnixStream) -> Result<(), Failure> {
+    Ok(())
 }
 
 fn handle_connection(
@@ -5115,8 +5207,7 @@ fn receive_file_descriptor(socket: &UnixStream) -> Result<File, Failure> {
         iov_len: 1,
     };
     let mut control = [0_usize; 4];
-    // SAFETY: recvmsg owns valid aligned buffers for the duration of the call;
-    // MSG_CMSG_CLOEXEC closes the inheritance race before File assumes ownership.
+    // SAFETY: recvmsg owns valid aligned buffers for the duration of the call.
     let (received, flags, descriptors, extra) = unsafe {
         let mut message: libc::msghdr = mem::zeroed();
         message.msg_iov = &raw mut vector;
@@ -5126,7 +5217,7 @@ fn receive_file_descriptor(socket: &UnixStream) -> Result<File, Failure> {
             u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?,
         ))
         .map_err(|_| Failure::Unavailable)?;
-        let received = libc::recvmsg(socket.as_raw_fd(), &raw mut message, libc::MSG_CMSG_CLOEXEC);
+        let received = libc::recvmsg(socket.as_raw_fd(), &raw mut message, receive_fd_flags());
         let header = libc::CMSG_FIRSTHDR(&raw const message);
         let mut descriptors = Vec::new();
         let mut extra = false;
@@ -5151,10 +5242,24 @@ fn receive_file_descriptor(socket: &UnixStream) -> Result<File, Failure> {
         .into_iter()
         .filter(|descriptor| *descriptor >= 0)
         .map(|descriptor| {
+            #[cfg(target_os = "macos")]
+            if unsafe {
+                // SAFETY: descriptor was received above and is still owned by
+                // this process. Darwin lacks MSG_CMSG_CLOEXEC, so mark it
+                // before constructing or exposing the File.
+                libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC)
+            } != 0
+            {
+                unsafe {
+                    // SAFETY: failure leaves this received descriptor owned.
+                    libc::close(descriptor);
+                }
+                return Err(Failure::Unavailable);
+            }
             // SAFETY: every SCM_RIGHTS descriptor is newly owned by this process.
-            unsafe { File::from_raw_fd(descriptor) }
+            Ok(unsafe { File::from_raw_fd(descriptor) })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, Failure>>()?;
     if received != 1
         || carrier != 0x20
         || flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0
@@ -5164,6 +5269,16 @@ fn receive_file_descriptor(socket: &UnixStream) -> Result<File, Failure> {
         return Err(Failure::Unavailable);
     }
     files.pop().ok_or(Failure::Unavailable)
+}
+
+#[cfg(target_os = "linux")]
+const fn receive_fd_flags() -> libc::c_int {
+    libc::MSG_CMSG_CLOEXEC
+}
+
+#[cfg(target_os = "macos")]
+const fn receive_fd_flags() -> libc::c_int {
+    0
 }
 
 fn read_regular(

@@ -4,6 +4,62 @@
 
 use std::fmt;
 
+#[cfg(target_os = "macos")]
+mod macos_clipboard {
+    unsafe extern "C" {
+        fn pm_macos_clipboard_copy(bytes: *const u8, length: usize, change_count: *mut i64) -> i32;
+        fn pm_macos_clipboard_clear_if_owned(change_count: i64) -> i32;
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct OwnedClipboard {
+        change_count: i64,
+    }
+
+    impl OwnedClipboard {
+        /// Copies explicit UTF-8 bytes to the macOS general pasteboard and
+        /// records AppKit ownership through its change count.
+        ///
+        /// # Errors
+        /// Rejects empty/invalid UTF-8 or an unavailable pasteboard.
+        pub fn copy(value: &[u8]) -> Result<Self, super::ChannelAuthenticationError> {
+            if value.is_empty() || std::str::from_utf8(value).is_err() {
+                return Err(super::ChannelAuthenticationError);
+            }
+            let mut change_count = 0_i64;
+            let result = unsafe {
+                // SAFETY: value remains live for the synchronous bridge call
+                // and change_count is a valid writable output.
+                pm_macos_clipboard_copy(value.as_ptr(), value.len(), &raw mut change_count)
+            };
+            if result != 0 {
+                return Err(super::ChannelAuthenticationError);
+            }
+            Ok(Self { change_count })
+        }
+
+        /// Clears the pasteboard only while this lease still owns it.
+        ///
+        /// # Errors
+        /// Returns an error if AppKit cannot inspect or clear the pasteboard.
+        pub fn clear_if_owned(self) -> Result<bool, super::ChannelAuthenticationError> {
+            let result = unsafe {
+                // SAFETY: the bridge accepts the scalar change count captured
+                // from the same public NSPasteboard instance.
+                pm_macos_clipboard_clear_if_owned(self.change_count)
+            };
+            match result {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(super::ChannelAuthenticationError),
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use macos_clipboard::OwnedClipboard;
+
 #[cfg(unix)]
 use std::os::{fd::AsRawFd, unix::net::UnixStream};
 
@@ -101,14 +157,29 @@ pub fn unix_peer_uid(stream: &UnixStream) -> Result<u32, ChannelAuthenticationEr
         }
         Ok(credentials.uid)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        let result = unsafe {
+            // SAFETY: uid and gid are valid writable outputs and the descriptor
+            // belongs to a connected Unix stream. getpeereid returns the
+            // effective credentials captured by the Darwin kernel.
+            libc::getpeereid(stream.as_raw_fd(), &raw mut uid, &raw mut gid)
+        };
+        if result != 0 {
+            return Err(ChannelAuthenticationError);
+        }
+        Ok(uid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = stream;
         Err(ChannelAuthenticationError)
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn peer_is_connected(stream: &UnixStream) -> bool {
     let mut byte = 0_u8;
     let result = unsafe {
@@ -127,7 +198,25 @@ fn peer_is_connected(stream: &UnixStream) -> bool {
     result < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn peer_is_connected(_stream: &UnixStream) -> bool {
     false
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn getpeereid_is_bilateral_and_clipboard_clear_respects_new_owner() {
+        let (left, right) = UnixStream::pair().unwrap();
+        let uid = unsafe { libc::geteuid() };
+        assert_eq!(unix_peer_uid(&left).unwrap(), uid);
+        assert_eq!(unix_peer_uid(&right).unwrap(), uid);
+        let first = OwnedClipboard::copy(b"ticket26-first-synthetic-canary").unwrap();
+        let second = OwnedClipboard::copy(b"ticket26-new-owner-synthetic-canary").unwrap();
+        assert!(!first.clear_if_owned().unwrap());
+        assert!(second.clear_if_owned().unwrap());
+    }
 }

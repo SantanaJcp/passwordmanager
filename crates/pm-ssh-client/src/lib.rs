@@ -478,22 +478,40 @@ fn prepare_socket(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 fn peer_uid(stream: &UnixStream) -> Result<u32, Error> {
-    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut len =
-        libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).map_err(|_| Error::Io)?;
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut cred).cast(),
-            &raw mut len,
-        )
-    };
-    if rc != 0 || len as usize != std::mem::size_of::<libc::ucred>() {
-        return Err(Error::Io);
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len =
+            libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).map_err(|_| Error::Io)?;
+        let rc = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&raw mut cred).cast(),
+                &raw mut len,
+            )
+        };
+        if rc != 0 || len as usize != std::mem::size_of::<libc::ucred>() {
+            return Err(Error::Io);
+        }
+        Ok(cred.uid)
     }
-    Ok(cred.uid)
+    #[cfg(target_os = "macos")]
+    {
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        let rc = unsafe {
+            // SAFETY: outputs are valid and stream is a connected Unix socket.
+            libc::getpeereid(stream.as_raw_fd(), &raw mut uid, &raw mut gid)
+        };
+        (rc == 0).then_some(uid).ok_or(Error::Io)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = stream;
+        Err(Error::Io)
+    }
 }
 async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, Error> {
     let len = stream.read_u32().await? as usize;

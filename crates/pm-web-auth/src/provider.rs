@@ -395,27 +395,49 @@ fn current_uid() -> u32 {
 }
 
 fn peer_uid(stream: &UnixStream) -> Result<u32, ()> {
-    let mut credential = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut length =
-        libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).map_err(|_| ())?;
-    // SAFETY: credential and length are valid writable buffers for SO_PEERCRED.
-    let result = unsafe {
-        libc::getsockopt(
-            std::os::fd::AsRawFd::as_raw_fd(stream),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            std::ptr::addr_of_mut!(credential).cast(),
-            std::ptr::addr_of_mut!(length),
-        )
-    };
-    if result != 0 || length as usize != std::mem::size_of::<libc::ucred>() {
-        return Err(());
+    #[cfg(target_os = "linux")]
+    {
+        let mut credential = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut length =
+            libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).map_err(|_| ())?;
+        // SAFETY: credential and length are valid writable buffers for SO_PEERCRED.
+        let result = unsafe {
+            libc::getsockopt(
+                std::os::fd::AsRawFd::as_raw_fd(stream),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                std::ptr::addr_of_mut!(credential).cast(),
+                std::ptr::addr_of_mut!(length),
+            )
+        };
+        if result != 0 || length as usize != std::mem::size_of::<libc::ucred>() {
+            return Err(());
+        }
+        Ok(credential.uid)
     }
-    Ok(credential.uid)
+    #[cfg(target_os = "macos")]
+    {
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        let result = unsafe {
+            // SAFETY: outputs are valid and stream is a connected Unix socket.
+            libc::getpeereid(
+                std::os::fd::AsRawFd::as_raw_fd(stream),
+                &raw mut uid,
+                &raw mut gid,
+            )
+        };
+        (result == 0).then_some(uid).ok_or(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = stream;
+        Err(())
+    }
 }
 
 fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, ()> {

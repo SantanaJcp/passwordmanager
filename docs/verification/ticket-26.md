@@ -1,0 +1,123 @@
+# Ticket 26 verification method and checkpoint
+
+Date: 2026-09-13. Requirements: R01, R02, R09, R10, R11. This document is
+the written verification method for the macOS custody port. The current state
+is an **implementation checkpoint, not native acceptance evidence**: this
+Linux host cannot execute Darwin kernel, launchd, AppKit or ACL behavior.
+
+## Native contract under test
+
+The port keeps the existing vault engine, binary request framing, TLS 1.3 RPK
+pinning and role-specific ALPN. macOS selects platform implementations only at
+the existing boundaries:
+
+- `getpeereid(2)` supplies the effective UID of the connected peer on both
+  ends of the Unix stream. No request field supplies identity and an
+  unimplemented target returns an explicit channel error.
+- The custody process sets `RLIMIT_CORE` to zero before loading keys, uses a
+  `077` umask and sets `SO_NOSIGPIPE` on connected/accepted Darwin sockets.
+  Received descriptors get `FD_CLOEXEC` immediately because Darwin has no
+  Linux `MSG_CMSG_CLOEXEC` path.
+- Every writable vault connection enables and reads back SQLite `fullfsync`
+  and `checkpoint_fullfsync`; a value other than one is an error. Linux keeps
+  its existing durability configuration unchanged.
+- The clipboard seam uses AppKit `NSPasteboard`, records its `changeCount`, and
+  clears only if the same lease still owns the pasteboard. `/dev/tty` and
+  `isatty` are tested as real native terminal primitives. No shell clipboard,
+  OSC52, generic Unix peer stub or second vault engine is used.
+- The shipped LaunchDaemon has a fixed `_passwordmanager` user/group, fixed
+  root-owned program path, state/runtime paths, core limits and umask. It does
+  not daemonize itself or accept identity through its request body.
+
+Primary platform references used for these narrow primitives are Apple's
+archived [`getpeereid(2)` manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/getpeereid.2.html),
+[`setrlimit(2)` manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/setrlimit.2.html),
+[`launchd` job guidance](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html),
+and current [`NSPasteboard`](https://developer.apple.com/documentation/appkit/nspasteboard)
+documentation.
+
+## Authorized ephemeral native method
+
+The only authorized native entry point is:
+
+```text
+PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh
+```
+
+Prerequisites are a fresh macOS 13-or-newer Intel or Apple-silicon CI runner,
+the repository-pinned Rust 1.98.1 toolchain/cache, Xcode command-line tools,
+Python 3, a logged-in non-root console user, and passwordless `sudo`. The
+runner must not already contain the three synthetic accounts or any of the
+canonical product paths. A collision is a hard failure, never permission to
+replace existing host state.
+
+The shell gate performs the locked/offline native build, native unit tests and
+`plutil` validation. Its Python harness then:
+
+1. creates `_passwordmanager`, `_pmagent26` and `_pmother26` with unused real
+   Darwin UIDs/groups;
+2. installs a root-owned binary and plist, creates custody-owned state/runtime,
+   generates only synthetic RPKs, and bootstraps a fresh synthetic vault;
+3. bootstraps the LaunchDaemon in the system domain and proves its live PID is
+   `_passwordmanager`;
+4. exercises successful agent and human TLS/RPK channels, then gives the wrong
+   UID a correct copied synthetic agent key and requires kernel-peer rejection;
+5. proves an agent UID cannot use the human endpoint, establishes authorization,
+   suspends it, kills/restarts the real launchd job, and requires delegated
+   discovery to remain denied;
+6. runs the native clipboard ownership race, real `/dev/tty`/`isatty`, and
+   zero-core-limit probe from the logged-in user session;
+7. boots the job out and removes only the collision-checked paths/accounts it
+   created, even on failure.
+
+Success requires every assertion and command to exit zero and all five `PASS`
+lines to be present. A skip, cross-build, Linux execution, missing pasteboard
+session, missing sudo privilege, pre-existing path/account, or cleanup failure
+is not acceptance. The harness intentionally does not claim reboot, FileVault,
+Intel+Apple-silicon coverage, signing, notarization or a human's daily machine;
+those gates remain Tickets 31 and 34.
+
+## TDD and current evidence
+
+The intended red is the native test/laboratory run against the pre-port public
+seams: Darwin `unix_peer_uid` returned the explicit unsupported error, the
+custody binary returned `CUSTODY_UNAVAILABLE`, and `OwnedClipboard` did not
+exist. It must be recorded on the native runner rather than inferred here.
+The green is the exact same native test/laboratory command after this patch.
+Until those two observed native records exist, the ticket must remain claimed.
+
+Observed on the Linux x86_64 development host:
+
+```text
+./scripts/cargo-local.sh check -p pm-native-channel -p pm-vault \
+  -p pm-custody -p pm-web-auth -p pm-ssh-client --locked --offline
+# PASS
+
+python3 -m py_compile crates/pm-custody/tests/macos_lab.py
+bash -n scripts/test-macos-custody-lab.sh
+git diff --check
+# PASS
+```
+
+An attempted `--target aarch64-apple-darwin` check failed before compiling the
+project because that Rust standard-library target is not installed in the
+pinned local toolchain. It is not counted as a behavioral red, a native build,
+or macOS evidence. Linux repository gates and all current Linux laboratories
+must also pass on the eventual integrated candidate; those preserve the
+existing provider, backup, passkey, recovery, SSH and web flows but cannot
+replace the native method above.
+
+## Remaining acceptance work
+
+- Execute the red record on the pre-port revision and the green record on both
+  authorized ephemeral macOS architectures after the CI bootstrap is
+  published.
+- Record exact runner versions, command output and cleanup result here.
+- Run the repository `check.sh`, clean offline build and every current sorted
+  `scripts/test-linux-*-lab.sh` on the integrated candidate.
+- Have the separate merger integrate and verify before resolving Ticket 26.
+
+No existing fallback was changed. The previously unsupported non-Linux path
+failed explicitly; this patch replaces that explicit failure only for macOS
+with native primitives. Other unimplemented targets continue to fail
+explicitly.

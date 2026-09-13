@@ -265,6 +265,27 @@ fn unlock_root(connection: &Connection, password: &[u8]) -> Result<UnlockedRoot,
     Ok(unlocked)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_wraps))]
+pub(crate) fn configure_platform_durability(connection: &Connection) -> rusqlite::Result<()> {
+    #[cfg(target_os = "macos")]
+    configure_apple_durability(connection)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = connection;
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn configure_apple_durability(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch("PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON;")?;
+    let fullfsync: i64 = connection.query_row("PRAGMA fullfsync", [], |row| row.get(0))?;
+    let checkpoint: i64 =
+        connection.query_row("PRAGMA checkpoint_fullfsync", [], |row| row.get(0))?;
+    if fullfsync != 1 || checkpoint != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
     if path.exists() {
@@ -281,6 +302,7 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
         drop(temporary_file);
         let mut connection =
             Connection::open_with_flags(&temporary_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        configure_platform_durability(&connection)?;
         let journal_mode: String =
             connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         if journal_mode != "wal" {
@@ -721,4 +743,17 @@ fn create_temporary(parent: &Path, target: &Path) -> Result<(PathBuf, File), Vau
         std::io::ErrorKind::AlreadyExists,
         "could not allocate vault temporary file",
     )))
+}
+
+#[cfg(test)]
+mod macos_tests {
+    #[test]
+    fn fullfsync_and_checkpoint_fullfsync_are_observed_enabled() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        super::configure_apple_durability(&connection).unwrap();
+        for pragma in ["PRAGMA fullfsync", "PRAGMA checkpoint_fullfsync"] {
+            let enabled: i64 = connection.query_row(pragma, [], |row| row.get(0)).unwrap();
+            assert_eq!(enabled, 1);
+        }
+    }
 }

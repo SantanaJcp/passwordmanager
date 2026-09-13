@@ -3366,6 +3366,7 @@ fn load_import_batch(
 
 fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
     let connection = Connection::open(path)?;
+    crate::configure_platform_durability(&connection)?;
     connection.execute_batch(
         "PRAGMA synchronous=FULL;
          PRAGMA foreign_keys=ON;

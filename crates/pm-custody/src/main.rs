@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#![cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod linux;
 
 const CUSTODY_UNAVAILABLE: &str = "CUSTODY_UNAVAILABLE";
@@ -30,11 +30,11 @@ enum Failure {
 }
 
 fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         linux::run(arguments)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = arguments;
         Err(Failure::Unavailable)

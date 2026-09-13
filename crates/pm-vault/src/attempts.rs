@@ -1168,6 +1168,7 @@ impl AttemptVault {
 
 fn open(path: &std::path::Path) -> Result<Connection, AttemptError> {
     let c = Connection::open(path)?;
+    crate::configure_platform_durability(&c)?;
     c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")?;
     Ok(c)
 }

@@ -867,6 +867,7 @@ fn decode_event_header(
 
 fn open_connection(path: &Path) -> Result<Connection, AuthorizationError> {
     let c = Connection::open(path)?;
+    crate::configure_platform_durability(&c)?;
     c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")?;
     Ok(c)
 }

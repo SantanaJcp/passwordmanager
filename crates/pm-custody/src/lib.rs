@@ -8,17 +8,17 @@ extern crate self as pm_custody;
 
 pub use pm_native_channel::{AuthenticatedHumanChannel, ChannelAuthenticationError, unix_peer_uid};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod linux;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy)]
 enum Failure {
     Usage,
     Unavailable,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn take_path(
     arguments: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &str,
@@ -36,7 +36,7 @@ fn take_path(
 /// # Errors
 /// Returns a stable public category when profile, key, TLS, framing, or peer
 /// authentication validation fails.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn agent_rpc(
     profile: &std::path::Path,
     private: &std::path::Path,
