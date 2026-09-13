@@ -1,8 +1,8 @@
 # 10 — Password/TOTP Chromium privado + Keycloak OIDC
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-10
 Blocked by: 08
 Spec: ../spec.md
 Requirements: R03,R08,R09,R13,R14
@@ -34,3 +34,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-13 — Reclamado por Sol para integraciónweb real; no sustituir perfil privado/proveedor por mocks ni declarar P1 sin ejecución.
