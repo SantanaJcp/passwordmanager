@@ -426,6 +426,18 @@ pub fn capabilities_result() -> Result<Json, ErrorCode> {
                         Json::Object(vec![("kind".into(), Json::String("oidc_tokens".into()))]),
                     ),
                 ]),
+                integration_capability(
+                    "ssh-server",
+                    &["publickey"],
+                    "verified-linux",
+                    "ssh_authenticated_connection",
+                ),
+                integration_capability(
+                    "linux-system-ssh",
+                    &["password"],
+                    "verified-linux",
+                    "ssh_authenticated_connection",
+                ),
             ]),
         ),
         (
@@ -437,6 +449,28 @@ pub fn capabilities_result() -> Result<Json, ErrorCode> {
             ]),
         ),
     ]))
+}
+
+fn integration_capability(id: &str, methods: &[&str], availability: &str, result: &str) -> Json {
+    Json::Object(vec![
+        ("id".into(), Json::String(id.into())),
+        ("version".into(), Json::Number("1".into())),
+        (
+            "methods".into(),
+            Json::Array(
+                methods
+                    .iter()
+                    .map(|value| Json::String((*value).into()))
+                    .collect(),
+            ),
+        ),
+        ("availability".into(), Json::String(availability.into())),
+        ("input_schema".into(), schema_start()),
+        (
+            "result_schema".into(),
+            Json::Object(vec![("kind".into(), Json::String(result.into()))]),
+        ),
+    ])
 }
 
 fn schema_start() -> Json {
@@ -594,6 +628,9 @@ fn discovery_integrations(destination: Option<&str>) -> Json {
     let mut values = vec![Json::String("controlled.external".into())];
     if destination == Some("keycloak-lab") {
         values.push(Json::String("keycloak-browser-oidc".into()));
+    } else if destination == Some("ssh-lab") {
+        values.push(Json::String("ssh-server".into()));
+        values.push(Json::String("linux-system-ssh".into()));
     }
     Json::Array(values)
 }
@@ -643,6 +680,18 @@ pub fn public_attempt_result(
     integration_id: &str,
     result: Option<&[u8]>,
 ) -> Result<Json, ErrorCode> {
+    let Some(result) = result else {
+        return Ok(Json::Null);
+    };
+    let value = parse_json(result).map_err(|_| ErrorCode::Internal)?;
+    match integration_id {
+        "keycloak-browser-oidc" => validate_oidc_result(value),
+        "ssh-server" | "linux-system-ssh" => validate_ssh_result(value),
+        _ => Ok(Json::Null),
+    }
+}
+
+fn validate_oidc_result(value: Json) -> Result<Json, ErrorCode> {
     const REQUIRED: [&str; 10] = [
         "kind",
         "issuer",
@@ -655,13 +704,6 @@ pub fn public_attempt_result(
         "expires_at",
         "scope",
     ];
-    if integration_id != "keycloak-browser-oidc" {
-        return Ok(Json::Null);
-    }
-    let Some(result) = result else {
-        return Ok(Json::Null);
-    };
-    let value = parse_json(result).map_err(|_| ErrorCode::Internal)?;
     let Json::Object(fields) = &value else {
         return Err(ErrorCode::Internal);
     };
@@ -679,6 +721,44 @@ pub fn public_attempt_result(
             .field("id_token")
             .and_then(Json::string)
             .is_none_or(str::is_empty)
+    {
+        return Err(ErrorCode::Internal);
+    }
+    Ok(value)
+}
+
+fn validate_ssh_result(value: Json) -> Result<Json, ErrorCode> {
+    const REQUIRED: [&str; 4] = ["kind", "consumer_ref", "host_key_sha256", "username"];
+    let Json::Object(fields) = &value else {
+        return Err(ErrorCode::Internal);
+    };
+    let reference = value
+        .field("consumer_ref")
+        .and_then(Json::string)
+        .unwrap_or("");
+    let host_key = value
+        .field("host_key_sha256")
+        .and_then(Json::string)
+        .unwrap_or("");
+    let username = value.field("username").and_then(Json::string).unwrap_or("");
+    if fields.len() != REQUIRED.len()
+        || fields
+            .iter()
+            .any(|(key, item)| !REQUIRED.contains(&key.as_str()) || item.string().is_none())
+        || value.field("kind").and_then(Json::string) != Some("ssh_authenticated_connection")
+        || reference.len() != 43
+        || !reference
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || host_key.len() != 64
+        || !host_key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || username.is_empty()
+        || username.len() > 64
+        || !username
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
         return Err(ErrorCode::Internal);
     }
@@ -1074,6 +1154,26 @@ mod tests {
         assert_eq!(
             public_attempt_result("unknown", Some(valid)).unwrap(),
             Json::Null
+        );
+    }
+    #[test]
+    fn ssh_result_is_closed_and_rejects_secret_shaped_extensions() {
+        let good = br#"{"kind":"ssh_authenticated_connection","consumer_ref":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","host_key_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","username":"pmssh"}"#;
+        assert_eq!(
+            public_attempt_result("ssh-server", Some(good))
+                .unwrap()
+                .field("username")
+                .and_then(Json::string),
+            Some("pmssh")
+        );
+        let extended = br#"{"kind":"ssh_authenticated_connection","consumer_ref":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","host_key_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","username":"pmssh","password":"forbidden"}"#;
+        assert_eq!(
+            public_attempt_result("ssh-server", Some(extended)),
+            Err(ErrorCode::Internal)
+        );
+        assert_eq!(
+            public_attempt_result("ssh-server", Some(b"{}")),
+            Err(ErrorCode::Internal)
         );
     }
 }

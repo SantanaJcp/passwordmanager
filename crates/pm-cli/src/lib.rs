@@ -413,6 +413,16 @@ fn decode_discovery(raw: &[u8]) -> Result<Json, ErrorCode> {
         ("next_cursor".into(), Json::Null),
     ]))
 }
+fn credential_integrations(destination: &[u8]) -> Json {
+    let mut integrations = vec![Json::String("controlled.external".into())];
+    if destination == b"ssh-lab" {
+        integrations.push(Json::String("ssh-server".into()));
+        integrations.push(Json::String("linux-system-ssh".into()));
+    } else if destination == b"keycloak-lab" {
+        integrations.push(Json::String("keycloak-browser-oidc".into()));
+    }
+    Json::Array(integrations)
+}
 fn decode_attempt(raw: &[u8]) -> Result<Json, ErrorCode> {
     if raw.first() != Some(&0) {
         return Err(match raw.first().copied().unwrap_or(1) {
@@ -446,11 +456,7 @@ fn decode_attempt(raw: &[u8]) -> Result<Json, ErrorCode> {
         return Err(ErrorCode::Internal);
     }
     let integration = std::str::from_utf8(integration).map_err(|_| ErrorCode::Internal)?;
-    let public_result = if integration == "keycloak-browser-oidc" && !result.is_empty() {
-        public_attempt_result(integration, Some(result))?
-    } else {
-        Json::Null
-    };
+    let public_result = public_attempt_result(integration, (!result.is_empty()).then_some(result))?;
     Ok(Json::Object(vec![
         ("attempt_id".into(), Json::String(hex(attempt))),
         ("credential_id".into(), Json::String(hex(credential))),
@@ -478,13 +484,6 @@ fn decode_attempt(raw: &[u8]) -> Result<Json, ErrorCode> {
     ]))
 }
 
-fn credential_integrations(destination: &[u8]) -> Json {
-    let mut values = vec![Json::String("controlled.external".into())];
-    if destination == b"keycloak-lab" {
-        values.push(Json::String("keycloak-browser-oidc".into()));
-    }
-    Json::Array(values)
-}
 fn take_fixed<'a>(raw: &'a [u8], at: &mut usize) -> Result<&'a [u8], ErrorCode> {
     let end = at.checked_add(16).ok_or(ErrorCode::Internal)?;
     let value = raw.get(*at..end).ok_or(ErrorCode::Internal)?;

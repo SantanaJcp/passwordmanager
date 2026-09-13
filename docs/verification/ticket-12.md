@@ -1,0 +1,41 @@
+# Evidencia de verificación — ticket 12
+
+Fecha: 2026-09-13. Plataforma ejecutada: Linux x86_64 dentro de user namespace + mount namespace descartables.
+
+## Corte entregado
+
+`pm-ssh-client` es el cliente confiable russh 0.63.3: crea TCP/SSH, valida la hostkey instalada sin TOFU, observa `AuthResult::Success` y conserva el mismo `Handle`. Custodia solo entrega password tras el READY posterior a KEX/hostkey, o firma un payload RFC 4252 estrictamente ligado a session-ID/usuario/servicio/método/algoritmo/clave del intento. El resultado cerrado contiene solamente `kind`, `consumer_ref` aleatorio de 256 bits, `host_key_sha256` y `username`.
+
+El socket de consumo comprueba `SO_PEERCRED` contra el UID instalado; conocer el reference no basta. El consumidor abre y cierra un canal `session` sobre el `Handle` autenticado. No existen opcodes para bytes de canal, `exec`, shell, PTY, SFTP, forwarding, reconexión o administración de sesiones.
+
+## Fuentes primarias y versiones fijadas
+
+- [russh `Handle::authenticate_publickey_with` 0.63.3](https://docs.rs/russh/0.63.3/russh/client/struct.Handle.html#method.authenticate_publickey_with), [`authenticate_password`](https://docs.rs/russh/0.63.3/russh/client/struct.Handle.html#method.authenticate_password) y [`channel_open_session`](https://docs.rs/russh/0.63.3/russh/client/struct.Handle.html#method.channel_open_session).
+- [russh `AuthResult` 0.63.3](https://docs.rs/russh/0.63.3/russh/client/enum.AuthResult.html): éxito separado de failure/partial-success.
+- [RFC 4252 §7](https://www.rfc-editor.org/rfc/rfc4252.html#section-7): payload y firma de autenticación publickey.
+- [OpenSSH 10.5 release](https://www.openssh.org/txt/release-10.5) y [`sshd_config` `AuthenticationMethods`](https://man.openbsd.org/sshd_config#AuthenticationMethods).
+
+Dependencias repo-local exactas: `russh = 0.63.3` con `aws-lc-rs`, `tokio = 1.53.1`, `signature = 3.0.0`; lockfile completo. La expansión observada del registro Cargo durante preflight fue `169,024,178` bytes. Instrumento del host: `/usr/bin/sshd` reportó `OpenSSH_10.5p1, OpenSSL 3.6.4 25 Aug 2026`; SHA-256 del binario `c60ee743ec0452f3e34b78dce26706e3288d2faab9397ac60ce7afd4f1df208e`.
+
+## TDD y pruebas negativas
+
+RED conservado en el historial de ejecución antes del código: `cargo test -p pm-vault --test delegated_authorization ssh_attempts_bind...` falló por ausencia de getters/integración SSH de `AttemptLease`; `cargo test -p pm-ssh-client --test profile` falló porque `Profile` no existía. GREEN focalizado: 1/1 y 2/2 respectivamente.
+
+El laboratorio `./scripts/test-linux-ssh-lab.sh` construye offline, superpone `/etc/passwd`, `shadow`, `group` y `gshadow` solo dentro del mount namespace, y ejecuta una cuenta `pmssh` sintética contra `sshd` real. No crea usuarios/servicios/configuración del host, no usa sudo ni contenedores privilegiados. Resultado exacto:
+
+```text
+PASS ssh-e2e russh=0.63.3 openssh=10.5p1 auth=publickey+password AuthResult=Success post-auth-channel=opened-and-closed
+PASS ssh-boundaries hostkey=reject-before-secret username=installed signing=rfc4252-only consumer=uid-bound ownership=hidden revoke=pre-provider challenge=cancelled
+```
+
+Casos observados: Ed25519 y password exitosos; canal posterior sobre ambas conexiones; reference aleatorio incorrecto y mismo reference desde UID impostor rechazados; hostkey incorrecta rechazada antes de READY/secret; usuario instalado incorrecto rechazado; payload RFC4252 bien formado pero ligado a usuario/clave incorrectos desde proveedor hostil termina sin firma; intento de otro owner queda `NOT_FOUND`; revocación previa devuelve `AGENT_REVOKED` sin conexión al proveedor; `AuthenticationMethods publickey,password` produce partial-success, `WAITING_FOR_HUMAN` y cancelación terminal. Los canarios de password/clave no aparecen en stdout, stderr o entorno del agente, ni en el resultado público.
+
+## Gates ejecutados
+
+- `./scripts/check.sh`: verify-build-inputs, fmt, check/test/clippy workspace, all-targets, locked+offline — PASS.
+- `./scripts/clean-offline-build.sh`: árbol limpio de build y recompilación offline — PASS.
+- Laboratorios Linux ejecutados y PASS: custody, human-transaction, content, authorization, attempts, sync, CSV import, history, 1PUX import y SSH.
+
+## Límites explícitos
+
+Evidencia solo para Linux x86_64, OpenSSH 10.5p1, Ed25519 y password, en laboratorio descartable. macOS Remote Login, Windows OpenSSH, otros targets/algoritmos y empaquetado permanecen en ticket 33. No se afirma que russh zeroice internamente el `String` recibido por `authenticate_password`; la garantía observada es que vive en el proceso UID confiable y nunca en recursos/log/env del agente. La revocación impide una autenticación nueva; por contrato no mata conexiones ya autenticadas.

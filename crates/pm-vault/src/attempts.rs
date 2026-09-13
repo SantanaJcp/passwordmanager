@@ -18,7 +18,8 @@ use zeroize::Zeroizing;
 use crate::{
     AgentIdentity, AgentPeer, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent,
     AuditOutcome, AuthorizationError, DelegatedVault, HumanVault, HumanVerification, PasskeyError,
-    PasskeyOperation, PasskeyRequest, PasskeyStatus, RecordKind, TotpAlgorithm, audit,
+    PasskeyOperation, PasskeyRequest, PasskeyStatus, PrivateKeyFormat, RecordKind, TotpAlgorithm,
+    audit,
 };
 
 const ATTEMPT_LIFETIME_US: i64 = 24 * 60 * 60 * 1_000_000;
@@ -261,11 +262,36 @@ pub struct AttemptLease {
     context: Vec<u8>,
     integration_id: String,
     method: String,
+    owner: AgentIdentity,
     username: String,
     password: Zeroizing<Vec<u8>>,
     totp: Option<TotpLease>,
+    ssh: Option<SshLease>,
     reconciliation: bool,
 }
+
+pub struct SshLease {
+    private_format: PrivateKeyFormat,
+    private_key: Zeroizing<Vec<u8>>,
+    public_key: Vec<u8>,
+    passphrase: Option<Zeroizing<Vec<u8>>>,
+}
+
+impl SshLease {
+    pub const fn private_format(&self) -> PrivateKeyFormat {
+        self.private_format
+    }
+    pub fn private_key(&self) -> &[u8] {
+        &self.private_key
+    }
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
+    }
+    pub fn passphrase(&self) -> Option<&[u8]> {
+        self.passphrase.as_ref().map(|value| value.as_slice())
+    }
+}
+
 impl AttemptLease {
     pub const fn attempt_id(&self) -> &[u8; 16] {
         &self.attempt_id
@@ -288,6 +314,12 @@ impl AttemptLease {
     pub fn method(&self) -> &str {
         &self.method
     }
+    pub const fn owner_subject(&self) -> &[u8; 16] {
+        self.owner.subject()
+    }
+    pub const fn owner_generation(&self) -> u64 {
+        self.owner.generation()
+    }
     pub fn username(&self) -> &str {
         &self.username
     }
@@ -296,6 +328,9 @@ impl AttemptLease {
     }
     pub const fn totp(&self) -> Option<&TotpLease> {
         self.totp.as_ref()
+    }
+    pub const fn ssh(&self) -> Option<&SshLease> {
+        self.ssh.as_ref()
     }
     pub const fn reconciliation_only(&self) -> bool {
         self.reconciliation
@@ -678,8 +713,19 @@ impl AttemptVault {
             && request.integration_id == "vault-webauthn-provider"
             && request.integration_version == 1
             && request.context == b"keycloak-webauthn/1";
+        let ssh_profile = request.integration_version == 1
+            && request.context == request.destination.as_bytes()
+            && match (request.integration_id.as_str(), request.method.as_str()) {
+                ("ssh-server" | "linux-system-ssh", "password") => {
+                    op.descriptor.kind() == RecordKind::Password
+                }
+                ("ssh-server" | "linux-system-ssh", "publickey") => {
+                    op.descriptor.kind() == RecordKind::Ssh
+                }
+                _ => false,
+            };
         if op.descriptor.destination() != Some(request.destination.as_str())
-            || !(password_profile || passkey_profile)
+            || !(password_profile || passkey_profile || ssh_profile)
         {
             return Err(AttemptError::CredentialUnavailable);
         }
@@ -900,11 +946,7 @@ impl AttemptVault {
             attempt,
         )?)?;
         let material = if reconcile {
-            CredentialMaterial {
-                username: String::new(),
-                password: Zeroizing::new(Vec::new()),
-                totp: None,
-            }
+            CredentialMaterial::empty()
         } else {
             password_material(&op.auth, &method)?
         };
@@ -950,9 +992,11 @@ impl AttemptVault {
             context,
             integration_id: snap.integration_id,
             method,
+            owner: identity,
             username: material.username,
             password: material.password,
             totp: material.totp,
+            ssh: material.ssh,
             reconciliation: reconcile,
         }))
     }
@@ -1291,6 +1335,151 @@ struct CredentialMaterial {
     username: String,
     password: Zeroizing<Vec<u8>>,
     totp: Option<TotpLease>,
+    ssh: Option<SshLease>,
+}
+
+impl CredentialMaterial {
+    fn empty() -> Self {
+        Self {
+            username: String::new(),
+            password: Zeroizing::new(Vec::new()),
+            totp: None,
+            ssh: None,
+        }
+    }
+}
+
+#[derive(Default)]
+enum DecodedPassphrase {
+    #[default]
+    Absent,
+    Present(Option<Zeroizing<Vec<u8>>>),
+}
+
+#[derive(Default)]
+struct DecodedAuthMethod {
+    method: Option<String>,
+    username: Option<String>,
+    password: Option<Zeroizing<Vec<u8>>>,
+    secret: Option<Zeroizing<Vec<u8>>>,
+    algorithm: Option<TotpAlgorithm>,
+    digits: Option<u8>,
+    period: Option<u16>,
+    t0: Option<u64>,
+    account: Option<String>,
+    private_format: Option<PrivateKeyFormat>,
+    private_key: Option<Zeroizing<Vec<u8>>>,
+    public_key: Option<Vec<u8>>,
+    passphrase: DecodedPassphrase,
+}
+
+fn decode_auth_method(
+    decoder: &mut Decoder<'_>,
+    fields: u64,
+) -> Result<DecodedAuthMethod, AttemptError> {
+    let mut parsed = DecodedAuthMethod::default();
+    for _ in 0..fields {
+        match decoder.str().map_err(|_| AttemptError::Integrity)? {
+            "method" => {
+                parsed.method = Some(
+                    decoder
+                        .str()
+                        .map_err(|_| AttemptError::Integrity)?
+                        .to_owned(),
+                );
+            }
+            "username" => {
+                parsed.username = Some(
+                    decoder
+                        .str()
+                        .map_err(|_| AttemptError::Integrity)?
+                        .to_owned(),
+                );
+            }
+            "password" => {
+                parsed.password = Some(Zeroizing::new(
+                    decoder
+                        .bytes()
+                        .map_err(|_| AttemptError::Integrity)?
+                        .to_vec(),
+                ));
+            }
+            "secret" => {
+                parsed.secret = Some(Zeroizing::new(
+                    decoder
+                        .bytes()
+                        .map_err(|_| AttemptError::Integrity)?
+                        .to_vec(),
+                ));
+            }
+            "algorithm" => parsed.algorithm = Some(decode_totp_algorithm(decoder)?),
+            "digits" => parsed.digits = Some(decoder.u8().map_err(|_| AttemptError::Integrity)?),
+            "period" => {
+                parsed.period = Some(decoder.u16().map_err(|_| AttemptError::Integrity)?);
+            }
+            "t0" => parsed.t0 = Some(decoder.u64().map_err(|_| AttemptError::Integrity)?),
+            "account" => {
+                parsed.account = Some(
+                    decoder
+                        .str()
+                        .map_err(|_| AttemptError::Integrity)?
+                        .to_owned(),
+                );
+            }
+            "private_format" => {
+                parsed.private_format =
+                    Some(match decoder.str().map_err(|_| AttemptError::Integrity)? {
+                        "openssh" => PrivateKeyFormat::OpenSsh,
+                        "pkcs8" => PrivateKeyFormat::Pkcs8,
+                        _ => return Err(AttemptError::Integrity),
+                    });
+            }
+            "private_key" => {
+                parsed.private_key = Some(Zeroizing::new(
+                    decoder
+                        .bytes()
+                        .map_err(|_| AttemptError::Integrity)?
+                        .to_vec(),
+                ));
+            }
+            "public_key" => {
+                parsed.public_key = Some(
+                    decoder
+                        .bytes()
+                        .map_err(|_| AttemptError::Integrity)?
+                        .to_vec(),
+                );
+            }
+            "passphrase" => {
+                parsed.passphrase = DecodedPassphrase::Present(
+                    if decoder.datatype().map_err(|_| AttemptError::Integrity)?
+                        == minicbor::data::Type::Null
+                    {
+                        decoder.null().map_err(|_| AttemptError::Integrity)?;
+                        None
+                    } else {
+                        Some(Zeroizing::new(
+                            decoder
+                                .bytes()
+                                .map_err(|_| AttemptError::Integrity)?
+                                .to_vec(),
+                        ))
+                    },
+                );
+            }
+            _ => decoder.skip().map_err(|_| AttemptError::Integrity)?,
+        }
+    }
+    Ok(parsed)
+}
+
+fn decode_totp_algorithm(decoder: &mut Decoder<'_>) -> Result<TotpAlgorithm, AttemptError> {
+    match decoder.str().map_err(|_| AttemptError::Integrity)? {
+        "SHA1" => Ok(TotpAlgorithm::Sha1),
+        "SHA256" => Ok(TotpAlgorithm::Sha256),
+        "SHA512" => Ok(TotpAlgorithm::Sha512),
+        _ => Err(AttemptError::Integrity),
+    }
 }
 
 fn password_material(
@@ -1310,60 +1499,36 @@ fn password_material(
             .map()
             .map_err(|_| AttemptError::Integrity)?
             .ok_or(AttemptError::Integrity)?;
-        let mut method = None;
-        let mut user = None;
-        let mut pass = None;
-        let mut secret = None;
-        let mut algorithm = None;
-        let mut digits = None;
-        let mut period = None;
-        let mut t0 = None;
-        let mut account = None;
-        for _ in 0..fields {
-            match d.str().map_err(|_| AttemptError::Integrity)? {
-                "method" => method = Some(d.str().map_err(|_| AttemptError::Integrity)?.to_owned()),
-                "username" => user = Some(d.str().map_err(|_| AttemptError::Integrity)?.to_owned()),
-                "password" => {
-                    pass = Some(Zeroizing::new(
-                        d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec(),
-                    ));
-                }
-                "secret" => {
-                    secret = Some(Zeroizing::new(
-                        d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec(),
-                    ));
-                }
-                "algorithm" => {
-                    algorithm = Some(match d.str().map_err(|_| AttemptError::Integrity)? {
-                        "SHA1" => TotpAlgorithm::Sha1,
-                        "SHA256" => TotpAlgorithm::Sha256,
-                        "SHA512" => TotpAlgorithm::Sha512,
-                        _ => return Err(AttemptError::Integrity),
-                    });
-                }
-                "digits" => digits = Some(d.u8().map_err(|_| AttemptError::Integrity)?),
-                "period" => period = Some(d.u16().map_err(|_| AttemptError::Integrity)?),
-                "t0" => t0 = Some(d.u64().map_err(|_| AttemptError::Integrity)?),
-                "account" => {
-                    account = Some(d.str().map_err(|_| AttemptError::Integrity)?.to_owned());
-                }
-                _ => d.skip().map_err(|_| AttemptError::Integrity)?,
-            }
-        }
-        if method.as_deref() == Some("password") {
-            username = Some(user.ok_or(AttemptError::Integrity)?);
-            password = Some(pass.ok_or(AttemptError::Integrity)?);
-        } else if method.as_deref() == Some("totp") {
+        let decoded = decode_auth_method(&mut d, fields)?;
+        if decoded.method.as_deref() == Some("password") {
+            username = Some(decoded.username.ok_or(AttemptError::Integrity)?);
+            password = Some(decoded.password.ok_or(AttemptError::Integrity)?);
+        } else if decoded.method.as_deref() == Some("totp") {
             totp = Some((
-                account.ok_or(AttemptError::Integrity)?,
+                decoded.account.ok_or(AttemptError::Integrity)?,
                 TotpLease {
-                    secret: secret.ok_or(AttemptError::Integrity)?,
-                    algorithm: algorithm.ok_or(AttemptError::Integrity)?,
-                    digits: digits.ok_or(AttemptError::Integrity)?,
-                    period: period.ok_or(AttemptError::Integrity)?,
-                    t0: t0.ok_or(AttemptError::Integrity)?,
+                    secret: decoded.secret.ok_or(AttemptError::Integrity)?,
+                    algorithm: decoded.algorithm.ok_or(AttemptError::Integrity)?,
+                    digits: decoded.digits.ok_or(AttemptError::Integrity)?,
+                    period: decoded.period.ok_or(AttemptError::Integrity)?,
+                    t0: decoded.t0.ok_or(AttemptError::Integrity)?,
                 },
             ));
+        } else if decoded.method.as_deref() == Some("ssh") && requested_method == "publickey" {
+            return Ok(CredentialMaterial {
+                username: decoded.username.ok_or(AttemptError::Integrity)?,
+                password: Zeroizing::new(Vec::new()),
+                totp: None,
+                ssh: Some(SshLease {
+                    private_format: decoded.private_format.ok_or(AttemptError::Integrity)?,
+                    private_key: decoded.private_key.ok_or(AttemptError::Integrity)?,
+                    public_key: decoded.public_key.ok_or(AttemptError::Integrity)?,
+                    passphrase: match decoded.passphrase {
+                        DecodedPassphrase::Present(value) => value,
+                        DecodedPassphrase::Absent => return Err(AttemptError::Integrity),
+                    },
+                }),
+            });
         }
     }
     let username = username.ok_or(AttemptError::CredentialUnavailable)?;
@@ -1381,6 +1546,7 @@ fn password_material(
         username,
         password,
         totp,
+        ssh: None,
     })
 }
 

@@ -9,6 +9,7 @@ members = [
     "crates/pm-vault",
     "crates/pm-interface",
     "crates/pm-web-auth",
+    "crates/pm-ssh-client",
 ]
 resolver = "3"
 
@@ -37,5 +38,7 @@ pm-vault = { path = "crates/pm-vault" }
 pm-interface = { path = "crates/pm-interface" }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rustls = { version = "=0.23.44", default-features = false, features = ["aws_lc_rs", "std"] }
+russh = { version = "=0.63.3", default-features = false, features = ["aws-lc-rs"] }
+tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 zeroize = "=1.9.0"
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }

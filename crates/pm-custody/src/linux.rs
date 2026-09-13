@@ -40,6 +40,7 @@ use rustls::{
     sign::CertifiedKey,
     version,
 };
+use signature::Signer as _;
 use zeroize::{Zeroize, Zeroizing};
 
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
@@ -170,8 +171,48 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-1pux-import") => human_1pux_import(&mut arguments),
         Some("human-backup-exercise") => human_backup_exercise(&mut arguments),
         Some("human-backup-restore") => human_backup_restore(&mut arguments),
+        Some("human-ssh-lab-setup") => human_ssh_lab_setup(&mut arguments),
         _ => Err(Failure::Usage),
     }
+}
+
+fn human_ssh_lab_setup(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let ssh_private = Zeroizing::new(read_wire_field(&mut input, 16 * 1024)?);
+    let ssh_public = read_wire_field(&mut input, 16 * 1024)?;
+    let account_password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    let mut request = vec![45];
+    push_bytes(&mut request, &ssh_private)?;
+    push_bytes(&mut request, &ssh_public)?;
+    push_bytes(&mut request, &account_password)?;
+    write_frame(&mut tls, &request)?;
+    request.zeroize();
+    let response = read_frame(&mut tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let key_item = cursor.fixed(16)?;
+    let password_item = cursor.fixed(16)?;
+    cursor.finish()?;
+    println!(
+        "PASS human-ssh-lab-setup key={} password={}",
+        hex(key_item),
+        hex(password_item)
+    );
+    Ok(())
 }
 
 /// Authenticated client seam shared by delegated adapters. The initial
@@ -2888,6 +2929,9 @@ fn call_controlled_provider(
     provider: &ControlledProvider,
     lease: &pm_vault::AttemptLease,
 ) -> Result<AttemptOutcome, ()> {
+    if matches!(lease.integration_id(), "ssh-server" | "linux-system-ssh") {
+        return call_ssh_provider(provider, lease);
+    }
     let mut stream = UnixStream::connect(&provider.socket).map_err(|_| ())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -2956,6 +3000,175 @@ fn call_controlled_provider(
             reason: "INTEGRITY_FAILURE",
         }),
         _ => Err(()),
+    }
+}
+
+fn call_ssh_provider(
+    provider: &ControlledProvider,
+    lease: &pm_vault::AttemptLease,
+) -> Result<AttemptOutcome, ()> {
+    if lease.reconciliation_only() {
+        return Ok(AttemptOutcome::WaitingForHuman {
+            challenge: b"additional_factor_required".to_vec(),
+        });
+    }
+    let mut stream = UnixStream::connect(&provider.socket).map_err(|_| ())?;
+    stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
+    stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
+    if unix_peer_uid(&stream).map_err(|_| ())? != provider.uid {
+        return Err(());
+    }
+    let public = lease.ssh().map_or(&[][..], pm_vault::SshLease::public_key);
+    let mut request = vec![4];
+    request.extend_from_slice(lease.attempt_id());
+    request.extend_from_slice(lease.revision_id());
+    push_bytes(&mut request, lease.integration_id().as_bytes()).map_err(|_| ())?;
+    push_bytes(&mut request, lease.method().as_bytes()).map_err(|_| ())?;
+    push_bytes(&mut request, lease.destination().as_bytes()).map_err(|_| ())?;
+    push_bytes(&mut request, lease.context()).map_err(|_| ())?;
+    push_bytes(&mut request, lease.username().as_bytes()).map_err(|_| ())?;
+    push_bytes(&mut request, public).map_err(|_| ())?;
+    request.extend_from_slice(lease.owner_subject());
+    request.extend_from_slice(&lease.owner_generation().to_be_bytes());
+    write_frame(&mut stream, &request).map_err(|_| ())?;
+
+    let ready = read_frame(&mut stream).map_err(|_| ())?;
+    let mut cursor = Cursor::new(&ready);
+    let status = *cursor.fixed(1).map_err(|_| ())?.first().ok_or(())?;
+    let value = cursor.bytes().map_err(|_| ())?;
+    cursor.finish().map_err(|_| ())?;
+    match status {
+        5 if value.is_empty() => {}
+        2 | 4 => {
+            return Ok(AttemptOutcome::Failed {
+                reason: "AUTH_REJECTED",
+            });
+        }
+        3 => return Ok(AttemptOutcome::Indeterminate),
+        _ => return Err(()),
+    }
+    if lease.method() == "password" {
+        let mut secret = vec![5];
+        push_bytes(&mut secret, lease.password()).map_err(|_| ())?;
+        write_frame(&mut stream, &secret).map_err(|_| ())?;
+        secret.zeroize();
+    }
+    let mut signed = false;
+    loop {
+        let response = read_frame(&mut stream).map_err(|_| ())?;
+        let mut cursor = Cursor::new(&response);
+        let status = *cursor.fixed(1).map_err(|_| ())?.first().ok_or(())?;
+        let value = cursor.bytes().map_err(|_| ())?;
+        cursor.finish().map_err(|_| ())?;
+        match status {
+            0 => {
+                return Ok(AttemptOutcome::Succeeded { result: value });
+            }
+            1 => {
+                return Ok(AttemptOutcome::WaitingForHuman { challenge: value });
+            }
+            2 | 4 => {
+                return Ok(AttemptOutcome::Failed {
+                    reason: "AUTH_REJECTED",
+                });
+            }
+            3 => return Ok(AttemptOutcome::Indeterminate),
+            6 if lease.method() == "publickey" && !signed => {
+                let Ok(signature) = sign_ssh_auth_payload(lease, &value) else {
+                    return Ok(AttemptOutcome::Failed {
+                        reason: "INTEGRITY_FAILURE",
+                    });
+                };
+                signed = true;
+                let mut answer = vec![7];
+                push_bytes(&mut answer, &signature).map_err(|_| ())?;
+                write_frame(&mut stream, &answer).map_err(|_| ())?;
+            }
+            _ => return Err(()),
+        }
+    }
+}
+
+/// Signs only the exact RFC 4252 public-key user-authentication payload bound
+/// to this lease. An arbitrary signing oracle is deliberately not exposed.
+fn sign_ssh_auth_payload(lease: &pm_vault::AttemptLease, payload: &[u8]) -> Result<Vec<u8>, ()> {
+    let ssh = lease.ssh().ok_or(())?;
+    if ssh.private_format() != PrivateKeyFormat::OpenSsh || payload.len() > 16 * 1024 {
+        return Err(());
+    }
+    let public_text = std::str::from_utf8(ssh.public_key()).map_err(|_| ())?;
+    let public = russh::keys::PublicKey::from_openssh(public_text).map_err(|_| ())?;
+    if public.algorithm().as_str() != "ssh-ed25519" {
+        return Err(());
+    }
+    let public_blob = public.to_bytes().map_err(|_| ())?;
+    let mut cursor = SshCursor::new(payload);
+    let session_id = cursor.string()?;
+    if session_id.is_empty() || session_id.len() > 64 || cursor.byte()? != 50 {
+        return Err(());
+    }
+    if cursor.string()? != lease.username().as_bytes()
+        || cursor.string()? != b"ssh-connection"
+        || cursor.string()? != b"publickey"
+        || cursor.byte()? != 1
+        || cursor.string()? != b"ssh-ed25519"
+        || cursor.string()? != public_blob
+        || !cursor.finished()
+    {
+        return Err(());
+    }
+    let private_text = std::str::from_utf8(ssh.private_key()).map_err(|_| ())?;
+    let mut private = russh::keys::PrivateKey::from_openssh(private_text).map_err(|_| ())?;
+    if private.is_encrypted() {
+        private = private
+            .decrypt(ssh.passphrase().ok_or(())?)
+            .map_err(|_| ())?;
+    } else if ssh.passphrase().is_some_and(|value| !value.is_empty()) {
+        return Err(());
+    }
+    if private.algorithm().as_str() != "ssh-ed25519" || private.public_key() != &public {
+        return Err(());
+    }
+    let signature = private.try_sign(payload).map_err(|_| ())?;
+    if signature.as_ref().len() != 64 {
+        return Err(());
+    }
+    let mut encoded = Vec::with_capacity(4 + 11 + 4 + 64);
+    push_bytes(&mut encoded, b"ssh-ed25519").map_err(|_| ())?;
+    push_bytes(&mut encoded, signature.as_ref()).map_err(|_| ())?;
+    Ok(encoded)
+}
+
+struct SshCursor<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+impl<'a> SshCursor<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, at: 0 }
+    }
+    fn byte(&mut self) -> Result<u8, ()> {
+        let value = *self.bytes.get(self.at).ok_or(())?;
+        self.at += 1;
+        Ok(value)
+    }
+    fn string(&mut self) -> Result<&'a [u8], ()> {
+        let end = self.at.checked_add(4).ok_or(())?;
+        let length = u32::from_be_bytes(
+            self.bytes
+                .get(self.at..end)
+                .ok_or(())?
+                .try_into()
+                .map_err(|_| ())?,
+        ) as usize;
+        self.at = end;
+        let end = self.at.checked_add(length).ok_or(())?;
+        let value = self.bytes.get(self.at..end).ok_or(())?;
+        self.at = end;
+        Ok(value)
+    }
+    const fn finished(&self) -> bool {
+        self.at == self.bytes.len()
     }
 }
 
@@ -3908,6 +4121,68 @@ fn handle_human_request(
             Ok(vec![0])
         }
 
+        45 => {
+            let mut cursor = Cursor::new(rest);
+            let ssh_private = Zeroizing::new(cursor.bytes()?);
+            let ssh_public = cursor.bytes()?;
+            let account_password = Zeroizing::new(cursor.bytes()?);
+            cursor.finish()?;
+            let ssh = LogicalRecord::new(
+                RecordKind::Ssh,
+                HumanMetadata {
+                    title: "Synthetic SSH key".into(),
+                    destinations: vec![Destination {
+                        label: "SSH lab".into(),
+                        value: "ssh-lab".into(),
+                    }],
+                    tags: vec!["synthetic".into()],
+                    favorite: false,
+                    notes: String::new(),
+                    fields: Vec::new(),
+                    source_fields: Vec::new(),
+                },
+                vec![AuthRecord::Ssh {
+                    private_format: PrivateKeyFormat::OpenSsh,
+                    private_key: ssh_private.to_vec(),
+                    public_key: ssh_public,
+                    username: "pmssh".into(),
+                    destination_refs: vec![0],
+                    passphrase: None,
+                }],
+                Vec::new(),
+            )
+            .map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_create_record(&ssh)
+                .map_err(|_| Failure::Unavailable)?;
+            let key_item = *prepared.item_id();
+            commit_authority(vault, &prepared)?;
+            let enable = vault
+                .prepare_enable(key_item)
+                .map_err(|_| Failure::Unavailable)?;
+            commit_authority(vault, &enable)?;
+            let password = PasswordRecord::new(
+                "Synthetic Linux system account",
+                "pmssh",
+                &account_password,
+                "ssh-lab",
+                "",
+            )
+            .map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_create(&password)
+                .map_err(|_| Failure::Unavailable)?;
+            let password_item = *prepared.item_id();
+            commit_authority(vault, &prepared)?;
+            let enable = vault
+                .prepare_enable(password_item)
+                .map_err(|_| Failure::Unavailable)?;
+            commit_authority(vault, &enable)?;
+            let mut response = vec![0];
+            response.extend_from_slice(&key_item);
+            response.extend_from_slice(&password_item);
+            Ok(response)
+        }
         _ => Err(Failure::Unavailable),
     }
 }
