@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     AgentIdentity, AgentPeer, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent,
-    AuditOutcome, AuthorizationError, DelegatedVault, RecordKind, audit,
+    AuditOutcome, AuthorizationError, DelegatedVault, PrivateKeyFormat, RecordKind, audit,
 };
 
 const ATTEMPT_LIFETIME_US: i64 = 24 * 60 * 60 * 1_000_000;
@@ -256,12 +256,39 @@ pub struct AttemptLease {
     lease_token: [u8; 16],
     credential_id: [u8; 16],
     revision_id: [u8; 16],
+    integration_id: String,
+    method: String,
     destination: String,
     context: Vec<u8>,
+    owner: AgentIdentity,
     username: String,
     password: Zeroizing<Vec<u8>>,
+    ssh: Option<SshLease>,
     reconciliation: bool,
 }
+
+pub struct SshLease {
+    private_format: PrivateKeyFormat,
+    private_key: Zeroizing<Vec<u8>>,
+    public_key: Vec<u8>,
+    passphrase: Option<Zeroizing<Vec<u8>>>,
+}
+
+impl SshLease {
+    pub const fn private_format(&self) -> PrivateKeyFormat {
+        self.private_format
+    }
+    pub fn private_key(&self) -> &[u8] {
+        &self.private_key
+    }
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
+    }
+    pub fn passphrase(&self) -> Option<&[u8]> {
+        self.passphrase.as_deref().map(AsRef::as_ref)
+    }
+}
+
 impl AttemptLease {
     pub const fn attempt_id(&self) -> &[u8; 16] {
         &self.attempt_id
@@ -272,17 +299,32 @@ impl AttemptLease {
     pub const fn revision_id(&self) -> &[u8; 16] {
         &self.revision_id
     }
+    pub fn integration_id(&self) -> &str {
+        &self.integration_id
+    }
+    pub fn method(&self) -> &str {
+        &self.method
+    }
     pub fn destination(&self) -> &str {
         &self.destination
     }
     pub fn context(&self) -> &[u8] {
         &self.context
     }
+    pub const fn owner_subject(&self) -> &[u8; 16] {
+        self.owner.subject()
+    }
+    pub const fn owner_generation(&self) -> u64 {
+        self.owner.generation()
+    }
     pub fn username(&self) -> &str {
         &self.username
     }
     pub fn password(&self) -> &[u8] {
         &self.password
+    }
+    pub const fn ssh(&self) -> Option<&SshLease> {
+        self.ssh.as_ref()
     }
     pub const fn reconciliation_only(&self) -> bool {
         self.reconciliation
@@ -348,11 +390,21 @@ impl AttemptVault {
         let op = self
             .delegated
             .operational_credential(peer, request.credential_id)?;
-        if op.descriptor.kind() != RecordKind::Password
-            || op.descriptor.destination() != Some(request.destination.as_str())
-            || request.method != "password"
-            || request.integration_id != "controlled.external"
+        let supported = match (request.integration_id.as_str(), request.method.as_str()) {
+            ("controlled.external", "password") => op.descriptor.kind() == RecordKind::Password,
+            ("ssh-server" | "linux-system-ssh", "password") => {
+                op.descriptor.kind() == RecordKind::Password
+                    && request.context == request.destination.as_bytes()
+            }
+            ("ssh-server" | "linux-system-ssh", "publickey") => {
+                op.descriptor.kind() == RecordKind::Ssh
+                    && request.context == request.destination.as_bytes()
+            }
+            _ => false,
+        };
+        if !supported
             || request.integration_version != 1
+            || op.descriptor.destination() != Some(request.destination.as_str())
         {
             return Err(AttemptError::CredentialUnavailable);
         }
@@ -380,7 +432,10 @@ impl AttemptVault {
             self.device,
             self.generation,
             attempt,
-            &encode_snapshot(&snap, Some((&request.destination, &request.context))),
+            &encode_snapshot(
+                &snap,
+                Some((&request.method, &request.destination, &request.context)),
+            ),
         )?;
         tx.execute("INSERT INTO authentication_attempts(attempt_id,item_id,revision_id,owner_subject,owner_generation,state,created_at_us,expires_at_us,scope_digest,params_digest,state_package) VALUES(?1,?2,?3,?4,?5,'created',?6,?7,?8,?9,?10)",params![attempt.as_slice(),request.credential_id.as_slice(),op.descriptor.revision_id().as_slice(),identity.subject().as_slice(),i64::try_from(identity.generation()).map_err(|_|AttemptError::Integrity)?,now,expires,scope_digest.as_slice(),params_digest.as_slice(),package])?;
         append_audit(
@@ -562,17 +617,17 @@ impl AttemptVault {
         if snap.revision_id != *op.descriptor.revision_id() {
             return Err(AttemptError::CredentialUnavailable);
         }
-        let (destination, context) = decode_execution(&self.custody.open_attempt_state(
+        let (method, destination, context) = decode_execution(&self.custody.open_attempt_state(
             &package,
             *self.trusted.vault_id(),
             self.device,
             self.generation,
             attempt,
         )?)?;
-        let (username, password) = if reconcile {
-            (String::new(), Zeroizing::new(Vec::new()))
+        let (username, password, ssh) = if reconcile {
+            (String::new(), Zeroizing::new(Vec::new()), None)
         } else {
-            password_material(&op.auth)?
+            credential_material(&op.auth, &method)?
         };
         let token = random_id().map_err(|_| AttemptError::Integrity)?;
         snap.state = AttemptState::Running;
@@ -582,7 +637,7 @@ impl AttemptVault {
             self.device,
             self.generation,
             attempt,
-            &encode_snapshot(&snap, Some((&destination, &context))),
+            &encode_snapshot(&snap, Some((&method, &destination, &context))),
         )?;
         let update = if reconcile {
             "UPDATE authentication_attempts SET state='running',state_package=?2,lease_token=?3,claimed_at_us=?4,provider_sent=1 WHERE attempt_id=?1 AND state IN ('waiting_for_human','indeterminate')"
@@ -612,10 +667,14 @@ impl AttemptVault {
             lease_token: token,
             credential_id: snap.credential_id,
             revision_id: snap.revision_id,
+            integration_id: snap.integration_id,
+            method,
             destination,
             context,
+            owner: identity,
             username,
             password,
+            ssh,
             reconciliation: reconcile,
         }))
     }
@@ -636,7 +695,7 @@ impl AttemptVault {
             self.generation,
             lease.attempt_id,
         )?)?;
-        let (destination, context) = decode_execution(&self.custody.open_attempt_state(
+        let (method, destination, context) = decode_execution(&self.custody.open_attempt_state(
             &package,
             *self.trusted.vault_id(),
             self.device,
@@ -678,7 +737,7 @@ impl AttemptVault {
             self.device,
             self.generation,
             lease.attempt_id,
-            &encode_snapshot(&snap, Some((&destination, &context))),
+            &encode_snapshot(&snap, Some((&method, &destination, &context))),
         )?;
         tx.execute("UPDATE authentication_attempts SET state=?2,state_package=?3,lease_token=NULL,terminal_at_us=?4,claimed_at_us=?5 WHERE attempt_id=?1",params![lease.attempt_id.as_slice(),snap.state.name(),replacement,if terminal{Some(now)}else{None},now])?;
         append_audit(
@@ -732,7 +791,7 @@ impl AttemptVault {
                     self.device,
                     self.generation,
                     id,
-                    &encode_snapshot(&snap, Some((&execution.0, &execution.1))),
+                    &encode_snapshot(&snap, Some((&execution.0, &execution.1, &execution.2))),
                 )?;
                 tx.execute("UPDATE authentication_attempts SET state='indeterminate',state_package=?2,lease_token=NULL WHERE attempt_id=?1",params![id.as_slice(),replacement])?;
                 append_audit(
@@ -825,41 +884,50 @@ fn scope_digest(
         .unwrap();
     digest(&e.into_writer())
 }
-fn encode_snapshot(s: &AttemptSnapshot, execution: Option<(&str, &[u8])>) -> Vec<u8> {
-    let mut e = Encoder::new(Vec::new());
-    e.array(12)
+fn encode_snapshot(snapshot: &AttemptSnapshot, execution: Option<(&str, &str, &[u8])>) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder
+        .array(12)
         .unwrap()
         .u8(1)
         .unwrap()
-        .bytes(&s.attempt_id)
+        .bytes(&snapshot.attempt_id)
         .unwrap()
-        .bytes(&s.credential_id)
+        .bytes(&snapshot.credential_id)
         .unwrap()
-        .bytes(&s.revision_id)
+        .bytes(&snapshot.revision_id)
         .unwrap()
-        .str(&s.integration_id)
+        .str(&snapshot.integration_id)
         .unwrap()
-        .u32(s.integration_version)
+        .u32(snapshot.integration_version)
         .unwrap()
-        .str(s.state.name())
+        .str(snapshot.state.name())
         .unwrap()
-        .i64(s.created_at_us)
+        .i64(snapshot.created_at_us)
         .unwrap()
-        .i64(s.expires_at_us)
+        .i64(snapshot.expires_at_us)
         .unwrap();
-    match &s.reason {
-        Some(v) => e.str(v).unwrap(),
-        None => e.null().unwrap(),
+    match &snapshot.reason {
+        Some(value) => encoder.str(value).unwrap(),
+        None => encoder.null().unwrap(),
     };
-    match &s.result {
-        Some(v) => e.bytes(v).unwrap(),
-        None => e.null().unwrap(),
+    match &snapshot.result {
+        Some(value) => encoder.bytes(value).unwrap(),
+        None => encoder.null().unwrap(),
     };
     match execution {
-        Some((d, c)) => e.array(2).unwrap().str(d).unwrap().bytes(c).unwrap(),
-        None => e.null().unwrap(),
+        Some((method, destination, context)) => encoder
+            .array(3)
+            .unwrap()
+            .str(method)
+            .unwrap()
+            .str(destination)
+            .unwrap()
+            .bytes(context)
+            .unwrap(),
+        None => encoder.null().unwrap(),
     };
-    e.into_writer()
+    encoder.into_writer()
 }
 fn decode_snapshot(bytes: &[u8]) -> Result<AttemptSnapshot, AttemptError> {
     let mut d = Decoder::new(bytes);
@@ -907,7 +975,7 @@ fn decode_snapshot(bytes: &[u8]) -> Result<AttemptSnapshot, AttemptError> {
         result,
     })
 }
-fn decode_execution(bytes: &[u8]) -> Result<(String, Vec<u8>), AttemptError> {
+fn decode_execution(bytes: &[u8]) -> Result<(String, String, Vec<u8>), AttemptError> {
     let mut d = Decoder::new(bytes);
     if d.array().map_err(|_| AttemptError::Integrity)? != Some(12) {
         return Err(AttemptError::Integrity);
@@ -915,15 +983,24 @@ fn decode_execution(bytes: &[u8]) -> Result<(String, Vec<u8>), AttemptError> {
     for _ in 0..11 {
         d.skip().map_err(|_| AttemptError::Integrity)?;
     }
-    if d.array().map_err(|_| AttemptError::Integrity)? != Some(2) {
-        return Err(AttemptError::Integrity);
+    match d.array().map_err(|_| AttemptError::Integrity)? {
+        Some(2) => Ok((
+            "password".into(),
+            d.str().map_err(|_| AttemptError::Integrity)?.into(),
+            d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec(),
+        )),
+        Some(3) => Ok((
+            d.str().map_err(|_| AttemptError::Integrity)?.into(),
+            d.str().map_err(|_| AttemptError::Integrity)?.into(),
+            d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec(),
+        )),
+        _ => Err(AttemptError::Integrity),
     }
-    Ok((
-        d.str().map_err(|_| AttemptError::Integrity)?.into(),
-        d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec(),
-    ))
 }
-fn password_material(auth: &[u8]) -> Result<(String, Zeroizing<Vec<u8>>), AttemptError> {
+fn credential_material(
+    auth: &[u8],
+    expected_method: &str,
+) -> Result<(String, Zeroizing<Vec<u8>>, Option<SshLease>), AttemptError> {
     let mut d = Decoder::new(auth);
     let n = d
         .array()
@@ -937,6 +1014,10 @@ fn password_material(auth: &[u8]) -> Result<(String, Zeroizing<Vec<u8>>), Attemp
         let mut method = None;
         let mut user = None;
         let mut pass = None;
+        let mut private_format = None;
+        let mut private_key = None;
+        let mut public_key = None;
+        let mut passphrase = None;
         for _ in 0..fields {
             match d.str().map_err(|_| AttemptError::Integrity)? {
                 "method" => method = Some(d.str().map_err(|_| AttemptError::Integrity)?.to_owned()),
@@ -946,13 +1027,53 @@ fn password_material(auth: &[u8]) -> Result<(String, Zeroizing<Vec<u8>>), Attemp
                         d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec(),
                     ));
                 }
+                "private_format" => {
+                    private_format = Some(match d.str().map_err(|_| AttemptError::Integrity)? {
+                        "openssh" => PrivateKeyFormat::OpenSsh,
+                        "pkcs8" => PrivateKeyFormat::Pkcs8,
+                        _ => return Err(AttemptError::Integrity),
+                    });
+                }
+                "private_key" => {
+                    private_key = Some(Zeroizing::new(
+                        d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec(),
+                    ));
+                }
+                "public_key" => {
+                    public_key = Some(d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec());
+                }
+                "passphrase" => {
+                    passphrase = if d.datatype().map_err(|_| AttemptError::Integrity)?
+                        == minicbor::data::Type::Null
+                    {
+                        d.null().map_err(|_| AttemptError::Integrity)?;
+                        Some(None)
+                    } else {
+                        Some(Some(Zeroizing::new(
+                            d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec(),
+                        )))
+                    };
+                }
                 _ => d.skip().map_err(|_| AttemptError::Integrity)?,
             }
         }
-        if method.as_deref() == Some("password") {
+        if method.as_deref() == Some("password") && expected_method == "password" {
             return Ok((
                 user.ok_or(AttemptError::Integrity)?,
                 pass.ok_or(AttemptError::Integrity)?,
+                None,
+            ));
+        }
+        if method.as_deref() == Some("ssh") && expected_method == "publickey" {
+            return Ok((
+                user.ok_or(AttemptError::Integrity)?,
+                Zeroizing::new(Vec::new()),
+                Some(SshLease {
+                    private_format: private_format.ok_or(AttemptError::Integrity)?,
+                    private_key: private_key.ok_or(AttemptError::Integrity)?,
+                    public_key: public_key.ok_or(AttemptError::Integrity)?,
+                    passphrase: passphrase.ok_or(AttemptError::Integrity)?,
+                }),
             ));
         }
     }
@@ -985,7 +1106,7 @@ fn update_snapshot(
     device: [u8; 16],
     generation: u64,
     s: &AttemptSnapshot,
-    execution: Option<(&str, &[u8])>,
+    execution: Option<(&str, &str, &[u8])>,
     now: i64,
 ) -> Result<(), AttemptError> {
     let old: Vec<u8> = tx.query_row(
@@ -999,7 +1120,7 @@ fn update_snapshot(
         Some(v)
     } else {
         owned = decode_execution(&old_plain)?;
-        Some((owned.0.as_str(), owned.1.as_slice()))
+        Some((owned.0.as_str(), owned.1.as_str(), owned.2.as_slice()))
     };
     let package = custody.update_attempt_state(
         &old,

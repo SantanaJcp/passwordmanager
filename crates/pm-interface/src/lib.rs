@@ -390,26 +390,25 @@ impl Engine for VaultEngine {
 /// This currently returns no runtime error; the result is fallible to keep
 /// the adapter seam uniform with future capability providers.
 pub fn capabilities_result() -> Result<Json, ErrorCode> {
-    // controlled.external is the only integration with an executed provider
-    // laboratory in this release; designs without evidence are not listed.
     Ok(Json::Object(vec![
         ("protocol".into(), Json::Number("1".into())),
         (
             "integrations".into(),
-            Json::Array(vec![Json::Object(vec![
-                ("id".into(), Json::String("controlled.external".into())),
-                ("version".into(), Json::Number("1".into())),
-                (
-                    "methods".into(),
-                    Json::Array(vec![Json::String("password".into())]),
+            Json::Array(vec![
+                integration_capability("controlled.external", &["password"], "verified", "object"),
+                integration_capability(
+                    "ssh-server",
+                    &["publickey"],
+                    "verified-linux",
+                    "ssh_authenticated_connection",
                 ),
-                ("availability".into(), Json::String("verified".into())),
-                ("input_schema".into(), schema_start()),
-                (
-                    "result_schema".into(),
-                    Json::Object(vec![("type".into(), Json::String("object".into()))]),
+                integration_capability(
+                    "linux-system-ssh",
+                    &["password"],
+                    "verified-linux",
+                    "ssh_authenticated_connection",
                 ),
-            ])]),
+            ]),
         ),
         (
             "limits".into(),
@@ -420,6 +419,28 @@ pub fn capabilities_result() -> Result<Json, ErrorCode> {
             ]),
         ),
     ]))
+}
+
+fn integration_capability(id: &str, methods: &[&str], availability: &str, result: &str) -> Json {
+    Json::Object(vec![
+        ("id".into(), Json::String(id.into())),
+        ("version".into(), Json::Number("1".into())),
+        (
+            "methods".into(),
+            Json::Array(
+                methods
+                    .iter()
+                    .map(|value| Json::String((*value).into()))
+                    .collect(),
+            ),
+        ),
+        ("availability".into(), Json::String(availability.into())),
+        ("input_schema".into(), schema_start()),
+        (
+            "result_schema".into(),
+            Json::Object(vec![("kind".into(), Json::String(result.into()))]),
+        ),
+    ])
 }
 
 fn schema_start() -> Json {
@@ -487,7 +508,7 @@ impl VaultEngine {
                     ),
                     (
                         "integrations".into(),
-                        Json::Array(vec![Json::String("controlled.external".into())]),
+                        credential_integrations(credential.destination()),
                     ),
                 ])
             })
@@ -551,7 +572,7 @@ impl VaultEngine {
         self.attempts
             .start(&self.peer, &request)
             .map_err(|error| map_attempt(&error))
-            .map(|value| snapshot(&value))
+            .and_then(|value| snapshot(&value))
     }
     fn get(&self, params: &Json) -> Result<Json, ErrorCode> {
         reject_unknown(params, &["attempt_id"])?;
@@ -560,7 +581,7 @@ impl VaultEngine {
         self.attempts
             .get(&self.peer, id)
             .map_err(|error| map_attempt(&error))
-            .map(|value| snapshot(&value))
+            .and_then(|value| snapshot(&value))
     }
     fn cancel(&self, params: &Json) -> Result<Json, ErrorCode> {
         reject_unknown(params, &["attempt_id"])?;
@@ -569,12 +590,22 @@ impl VaultEngine {
         self.attempts
             .cancel(&self.peer, id)
             .map_err(|error| map_attempt(&error))
-            .map(|value| snapshot(&value))
+            .and_then(|value| snapshot(&value))
     }
 }
 
-fn snapshot(value: &pm_vault::AttemptSnapshot) -> Json {
-    Json::Object(vec![
+fn credential_integrations(destination: Option<&str>) -> Json {
+    let mut integrations = vec![Json::String("controlled.external".into())];
+    if destination == Some("ssh-lab") {
+        integrations.push(Json::String("ssh-server".into()));
+        integrations.push(Json::String("linux-system-ssh".into()));
+    }
+    Json::Array(integrations)
+}
+
+fn snapshot(value: &pm_vault::AttemptSnapshot) -> Result<Json, ErrorCode> {
+    let result = public_attempt_result(value.integration_id(), value.result())?;
+    Ok(Json::Object(vec![
         ("attempt_id".into(), Json::String(hex(value.attempt_id()))),
         (
             "credential_id".into(),
@@ -604,9 +635,59 @@ fn snapshot(value: &pm_vault::AttemptSnapshot) -> Json {
                 .reason()
                 .map_or(Json::Null, |v| Json::String(v.into())),
         ),
-        // Provider bytes never cross the delegated interface without a typed G3 schema.
-        ("result".into(), Json::Null),
-    ])
+        ("result".into(), result),
+    ]))
+}
+
+/// Decodes only closed, integration-specific public result schemas.
+/// # Errors
+/// Rejects provider bytes that do not exactly match the selected schema.
+pub fn public_attempt_result(
+    integration_id: &str,
+    result: Option<&[u8]>,
+) -> Result<Json, ErrorCode> {
+    const REQUIRED: [&str; 4] = ["kind", "consumer_ref", "host_key_sha256", "username"];
+    if !matches!(integration_id, "ssh-server" | "linux-system-ssh") {
+        return Ok(Json::Null);
+    }
+    let Some(result) = result else {
+        return Ok(Json::Null);
+    };
+    let value = parse_json(result).map_err(|_| ErrorCode::Internal)?;
+    let Json::Object(fields) = &value else {
+        return Err(ErrorCode::Internal);
+    };
+    let reference = value
+        .field("consumer_ref")
+        .and_then(Json::string)
+        .unwrap_or("");
+    let host_key = value
+        .field("host_key_sha256")
+        .and_then(Json::string)
+        .unwrap_or("");
+    let username = value.field("username").and_then(Json::string).unwrap_or("");
+    if fields.len() != REQUIRED.len()
+        || fields
+            .iter()
+            .any(|(key, item)| !REQUIRED.contains(&key.as_str()) || item.string().is_none())
+        || value.field("kind").and_then(Json::string) != Some("ssh_authenticated_connection")
+        || reference.len() != 43
+        || !reference
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || host_key.len() != 64
+        || !host_key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || username.is_empty()
+        || username.len() > 64
+        || !username
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(ErrorCode::Internal);
+    }
+    Ok(value)
 }
 
 fn optional_string<'a>(params: &'a Json, name: &str) -> Result<Option<&'a str>, ErrorCode> {
@@ -981,5 +1062,25 @@ mod tests {
                 Err(ParseError::DuplicateKey | ParseError::InvalidJson | ParseError::TrailingBytes)
             ));
         }
+    }
+    #[test]
+    fn ssh_result_is_closed_and_rejects_secret_shaped_extensions() {
+        let good = br#"{"kind":"ssh_authenticated_connection","consumer_ref":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","host_key_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","username":"pmssh"}"#;
+        assert_eq!(
+            public_attempt_result("ssh-server", Some(good))
+                .unwrap()
+                .field("username")
+                .and_then(Json::string),
+            Some("pmssh")
+        );
+        let extended = br#"{"kind":"ssh_authenticated_connection","consumer_ref":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","host_key_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","username":"pmssh","password":"forbidden"}"#;
+        assert_eq!(
+            public_attempt_result("ssh-server", Some(extended)),
+            Err(ErrorCode::Internal)
+        );
+        assert_eq!(
+            public_attempt_result("ssh-server", Some(b"{}")),
+            Err(ErrorCode::Internal)
+        );
     }
 }

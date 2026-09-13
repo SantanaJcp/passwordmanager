@@ -5,7 +5,8 @@
 use pm_crypto::{KdfProfile, RecoveryCode};
 use pm_custody::agent_rpc;
 use pm_interface::{
-    Engine, ErrorCode, Json, Request, capabilities_result, dispatch, encode_json, parse_mcp_request,
+    Engine, ErrorCode, Json, Request, capabilities_result, dispatch, encode_json,
+    parse_mcp_request, public_attempt_result,
 };
 use pm_vault::{PendingVault, open_vault};
 use std::{
@@ -329,14 +330,43 @@ fn start_request(params: &Json) -> Result<Vec<u8>, ErrorCode> {
         .and_then(Json::string)
         .unwrap_or("")
         .as_bytes();
-    let mut value = vec![30];
+    let integration = params
+        .field("integration_id")
+        .and_then(Json::string)
+        .ok_or(ErrorCode::InvalidArgument)?;
+    let version = params
+        .field("integration_version")
+        .and_then(Json::number)
+        .ok_or(ErrorCode::InvalidArgument)?
+        .parse::<u32>()
+        .map_err(|_| ErrorCode::InvalidArgument)?;
+    let method = params
+        .field("method")
+        .and_then(Json::string)
+        .ok_or(ErrorCode::InvalidArgument)?;
+    let destination = params
+        .field("destination")
+        .and_then(Json::string)
+        .ok_or(ErrorCode::InvalidArgument)?;
+    let mut value = vec![33];
     value.extend_from_slice(&item);
     value.extend_from_slice(&issued.to_be_bytes());
     value.extend_from_slice(&nonce);
-    let len = u32::try_from(context.len()).map_err(|_| ErrorCode::InvalidArgument)?;
-    value.extend_from_slice(&len.to_be_bytes());
-    value.extend_from_slice(context);
+    push_wire_bytes(&mut value, integration.as_bytes())?;
+    value.extend_from_slice(&version.to_be_bytes());
+    push_wire_bytes(&mut value, method.as_bytes())?;
+    push_wire_bytes(&mut value, destination.as_bytes())?;
+    push_wire_bytes(&mut value, context)?;
     Ok(value)
+}
+fn push_wire_bytes(value: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ErrorCode> {
+    value.extend_from_slice(
+        &u32::try_from(bytes.len())
+            .map_err(|_| ErrorCode::InvalidArgument)?
+            .to_be_bytes(),
+    );
+    value.extend_from_slice(bytes);
+    Ok(())
 }
 fn decode_discovery(raw: &[u8]) -> Result<Json, ErrorCode> {
     if raw.first() != Some(&0) {
@@ -377,16 +407,21 @@ fn decode_discovery(raw: &[u8]) -> Result<Json, ErrorCode> {
                 "account".into(),
                 Json::String(String::from_utf8_lossy(account).into()),
             ),
-            (
-                "integrations".into(),
-                Json::Array(vec![Json::String("controlled.external".into())]),
-            ),
+            ("integrations".into(), credential_integrations(destination)),
         ]));
     }
     Ok(Json::Object(vec![
         ("credentials".into(), Json::Array(values)),
         ("next_cursor".into(), Json::Null),
     ]))
+}
+fn credential_integrations(destination: &[u8]) -> Json {
+    let mut integrations = vec![Json::String("controlled.external".into())];
+    if destination == b"ssh-lab" {
+        integrations.push(Json::String("ssh-server".into()));
+        integrations.push(Json::String("linux-system-ssh".into()));
+    }
+    Json::Array(integrations)
 }
 fn decode_attempt(raw: &[u8]) -> Result<Json, ErrorCode> {
     if raw.first() != Some(&0) {
@@ -408,11 +443,30 @@ fn decode_attempt(raw: &[u8]) -> Result<Json, ErrorCode> {
     let revision = take_fixed(raw, &mut at)?;
     let state = take_bytes(raw, &mut at)?;
     let reason = take_bytes(raw, &mut at)?;
-    let _result = take_bytes(raw, &mut at)?;
+    let result = take_bytes(raw, &mut at)?;
+    let integration =
+        std::str::from_utf8(take_bytes(raw, &mut at)?).map_err(|_| ErrorCode::Internal)?;
+    let end = at.checked_add(4).ok_or(ErrorCode::Internal)?;
+    let version = u32::from_be_bytes(
+        raw.get(at..end)
+            .ok_or(ErrorCode::Internal)?
+            .try_into()
+            .map_err(|_| ErrorCode::Internal)?,
+    );
+    at = end;
+    if at != raw.len() {
+        return Err(ErrorCode::Internal);
+    }
+    let public = public_attempt_result(integration, (!result.is_empty()).then_some(result))?;
     Ok(Json::Object(vec![
         ("attempt_id".into(), Json::String(hex(attempt))),
         ("credential_id".into(), Json::String(hex(credential))),
         ("revision_id".into(), Json::String(hex(revision))),
+        ("integration_id".into(), Json::String(integration.into())),
+        (
+            "integration_version".into(),
+            Json::Number(version.to_string()),
+        ),
         (
             "state".into(),
             Json::String(String::from_utf8_lossy(state).into()),
@@ -427,7 +481,7 @@ fn decode_attempt(raw: &[u8]) -> Result<Json, ErrorCode> {
                 Json::String(String::from_utf8_lossy(reason).into())
             },
         ),
-        ("result".into(), Json::Null),
+        ("result".into(), public),
     ]))
 }
 fn take_fixed<'a>(raw: &'a [u8], at: &mut usize) -> Result<&'a [u8], ErrorCode> {

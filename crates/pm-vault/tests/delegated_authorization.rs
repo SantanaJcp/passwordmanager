@@ -243,6 +243,96 @@ fn trusted_outcomes_pause_only_one_attempt_and_cancel_is_terminal() {
         Some(b"synthetic evidence".as_slice())
     );
 }
+
+#[test]
+fn ssh_attempts_bind_installed_destination_and_keep_private_signing_material_custodial() {
+    let directory = TestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let key_item = commit_create(&mut human, &ssh_record());
+    let password_item = commit_create(&mut human, &system_password_record());
+    enroll(&mut human, &enrollment(AGENT_A, REQUEST_A, &RPK_A), 1);
+    let prepared = human.prepare_delegated_resume().unwrap();
+    commit(&mut human, &prepared);
+    let prepared = human.prepare_enable(key_item).unwrap();
+    commit(&mut human, &prepared);
+    let prepared = human.prepare_enable(password_item).unwrap();
+    commit(&mut human, &prepared);
+    drop(human);
+
+    let peer = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
+    let attempts =
+        AttemptVault::open(DelegatedVault::open(&path, DEVICE, custody).unwrap()).unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
+    )
+    .unwrap();
+    let key_request = StartAttempt::new(
+        key_item,
+        "ssh-server",
+        1,
+        "publickey",
+        "ssh-lab",
+        b"ssh-lab".to_vec(),
+        IdempotencyKey::new(now, [0x12; 16]).unwrap(),
+    )
+    .unwrap();
+    attempts.start(&peer, &key_request).unwrap();
+    let key_lease = attempts.claim_next().unwrap().unwrap();
+    assert_eq!(key_lease.integration_id(), "ssh-server");
+    assert_eq!(key_lease.method(), "publickey");
+    assert_eq!(key_lease.username(), "pmssh");
+    assert_eq!(key_lease.owner_subject(), &AGENT_A);
+    assert_eq!(key_lease.owner_generation(), 1);
+    assert!(key_lease.password().is_empty());
+    let ssh = key_lease.ssh().unwrap();
+    assert_eq!(ssh.private_key(), b"synthetic-openssh-private");
+    assert_eq!(ssh.public_key(), b"ssh-ed25519 synthetic-public");
+    assert_eq!(ssh.passphrase(), Some(b"synthetic-passphrase".as_slice()));
+
+    let password_request = StartAttempt::new(
+        password_item,
+        "linux-system-ssh",
+        1,
+        "password",
+        "ssh-lab",
+        b"ssh-lab".to_vec(),
+        IdempotencyKey::new(now, [0x13; 16]).unwrap(),
+    )
+    .unwrap();
+    attempts.start(&peer, &password_request).unwrap();
+    let password_lease = attempts.claim_next().unwrap().unwrap();
+    assert_eq!(password_lease.integration_id(), "linux-system-ssh");
+    assert_eq!(password_lease.method(), "password");
+    assert_eq!(password_lease.username(), "pmssh");
+    assert_eq!(password_lease.password(), b"synthetic-system-password");
+    assert!(password_lease.ssh().is_none());
+
+    for (destination, context) in [
+        ("wrong-profile", b"wrong-profile".to_vec()),
+        ("ssh-lab", b"wrong-context".to_vec()),
+    ] {
+        let request = StartAttempt::new(
+            password_item,
+            "linux-system-ssh",
+            1,
+            "password",
+            destination,
+            context,
+            IdempotencyKey::new(now, [u8::try_from(destination.len()).unwrap(); 16]).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            attempts.start(&peer, &request),
+            Err(AttemptError::CredentialUnavailable)
+        ));
+    }
+}
 use rusqlite::Connection;
 
 const MASTER: &[u8] = b"synthetic ticket 07 master";
@@ -576,6 +666,61 @@ fn password_record() -> LogicalRecord {
             username: "synthetic-ticket-07-user".to_owned(),
             password: SECRET.to_vec(),
             destination_refs: vec![0],
+        }],
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+fn system_password_record() -> LogicalRecord {
+    use pm_vault::{AuthRecord, Destination, HumanMetadata};
+    LogicalRecord::new(
+        RecordKind::Password,
+        HumanMetadata {
+            title: "Synthetic Linux system account".to_owned(),
+            destinations: vec![Destination {
+                label: "installed-profile".to_owned(),
+                value: "ssh-lab".to_owned(),
+            }],
+            tags: Vec::new(),
+            favorite: false,
+            notes: String::new(),
+            fields: Vec::new(),
+            source_fields: Vec::new(),
+        },
+        vec![AuthRecord::Password {
+            username: "pmssh".to_owned(),
+            password: b"synthetic-system-password".to_vec(),
+            destination_refs: vec![0],
+        }],
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+fn ssh_record() -> LogicalRecord {
+    use pm_vault::{AuthRecord, Destination, HumanMetadata, PrivateKeyFormat};
+    LogicalRecord::new(
+        RecordKind::Ssh,
+        HumanMetadata {
+            title: "Synthetic custodial SSH key".to_owned(),
+            destinations: vec![Destination {
+                label: "installed-profile".to_owned(),
+                value: "ssh-lab".to_owned(),
+            }],
+            tags: Vec::new(),
+            favorite: false,
+            notes: String::new(),
+            fields: Vec::new(),
+            source_fields: Vec::new(),
+        },
+        vec![AuthRecord::Ssh {
+            private_format: PrivateKeyFormat::OpenSsh,
+            private_key: b"synthetic-openssh-private".to_vec(),
+            public_key: b"ssh-ed25519 synthetic-public".to_vec(),
+            username: "pmssh".to_owned(),
+            destination_refs: vec![0],
+            passphrase: Some(b"synthetic-passphrase".to_vec()),
         }],
         Vec::new(),
     )
