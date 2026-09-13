@@ -2,6 +2,8 @@
 
 //! Selected G6 logical records. Native bytes use one closed canonical CBOR schema.
 
+use std::collections::BTreeMap;
+
 use minicbor::{Decoder, Encoder, data::Type};
 use pm_crypto::{ItemKind, digest};
 use zeroize::Zeroize;
@@ -710,6 +712,24 @@ impl LogicalRecord {
             return Err(HumanCommitError::InvalidCommand);
         }
         attachment.content = content;
+        Ok(())
+    }
+
+    pub(crate) fn remap_attachment_ids(
+        &mut self,
+        replacements: &BTreeMap<[u8; 16], [u8; 16]>,
+    ) -> Result<(), HumanCommitError> {
+        if replacements.len() != self.attachments.len() {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        for attachment in &mut self.attachments {
+            attachment.id = *replacements
+                .get(&attachment.id)
+                .ok_or(HumanCommitError::InvalidInput)?;
+        }
+        if has_duplicate_attachment_ids(&self.attachments) {
+            return Err(HumanCommitError::InvalidInput);
+        }
         Ok(())
     }
 

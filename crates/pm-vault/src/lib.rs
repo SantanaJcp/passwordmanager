@@ -5,6 +5,7 @@
 mod attempts;
 mod audit;
 mod authorization;
+mod backup;
 mod content;
 mod history;
 mod human;
@@ -23,6 +24,7 @@ pub use authorization::{
     AgentEnrollment, AgentIdentity, AgentPeer, AuthorityEventHeader, AuthorizationError,
     AuthorizationReason, DelegatedCredential, DelegatedVault, PreparedAgentEnrollment,
 };
+pub use backup::{BackupArchive, BackupSummary, PreparedBackupRestore};
 pub use content::{
     Attachment, AuthRecord, CustomField, Destination, GeneratedPassword, GeneratorConfig,
     HumanMetadata, LogicalRecord, LogicalValue, PasswordRng, PrivateKeyFormat, RecordKind,
@@ -370,8 +372,8 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              ) STRICT;
              CREATE TABLE human_staging (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
-               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'history_restore', 'item_purge', 'audit_purge', 'availability_change', 'identity_change', 'import_commit')),
-               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'restore', 'purge-item', 'purge-revisions', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'import-batch')),
+               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'history_restore', 'item_purge', 'audit_purge', 'availability_change', 'identity_change', 'import_commit', 'backup_restore')),
+               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'restore', 'purge-item', 'purge-revisions', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'import-batch', 'backup-restore')),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB CHECK (revision_id IS NULL OR length(revision_id) = 16),
                body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144),
@@ -430,6 +432,73 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                preserved_fields INTEGER NOT NULL CHECK (preserved_fields >= 0),
                event_pages INTEGER NOT NULL CHECK (event_pages > 0),
                committed_at_us INTEGER NOT NULL
+             ) STRICT;
+             CREATE TABLE backup_restore_batches (
+               transaction_id BLOB PRIMARY KEY CHECK(length(transaction_id)=16),
+               backup_id BLOB NOT NULL CHECK(length(backup_id)=16),
+               source_vault BLOB NOT NULL CHECK(length(source_vault)=16),
+               object_digest BLOB NOT NULL CHECK(length(object_digest)=32),
+               item_count INTEGER NOT NULL CHECK(item_count>=0),
+               revision_count INTEGER NOT NULL CHECK(revision_count>=0),
+               attachment_count INTEGER NOT NULL CHECK(attachment_count>=0),
+               attachment_bytes INTEGER NOT NULL CHECK(attachment_bytes>=0),
+               audit_bundles INTEGER NOT NULL CHECK(audit_bundles>=0),
+               authority_events INTEGER NOT NULL CHECK(authority_events>=0),
+               identity_metadata INTEGER NOT NULL CHECK(identity_metadata>=0)
+             ) STRICT;
+             CREATE TABLE backup_restore_items (
+               transaction_id BLOB NOT NULL CHECK(length(transaction_id)=16),
+               source_item BLOB NOT NULL CHECK(length(source_item)=16),
+               target_item BLOB NOT NULL CHECK(length(target_item)=16),
+               source_visible_revision BLOB NOT NULL CHECK(length(source_visible_revision)=16),
+               target_visible_revision BLOB CHECK(target_visible_revision IS NULL OR length(target_visible_revision)=16),
+               item_kind TEXT NOT NULL CHECK(item_kind IN ('password','totp','passkey','ssh','token','note','file')),
+               status TEXT NOT NULL CHECK(status IN ('active','trash')),
+               PRIMARY KEY(transaction_id,source_item), UNIQUE(transaction_id,target_item)
+             ) STRICT;
+             CREATE TABLE backup_restore_revisions (
+               transaction_id BLOB NOT NULL CHECK(length(transaction_id)=16),
+               source_revision BLOB NOT NULL CHECK(length(source_revision)=16),
+               target_revision BLOB NOT NULL CHECK(length(target_revision)=16),
+               target_item BLOB NOT NULL CHECK(length(target_item)=16),
+               modified_at_us INTEGER NOT NULL,
+               item_kind TEXT NOT NULL CHECK(item_kind IN ('password','totp','passkey','ssh','token','note','file')),
+               package BLOB NOT NULL CHECK(length(package) BETWEEN 1 AND 16777216),
+               object_digest BLOB NOT NULL CHECK(length(object_digest)=32),
+               PRIMARY KEY(transaction_id,source_revision), UNIQUE(transaction_id,target_revision)
+             ) STRICT;
+             CREATE TABLE backup_restore_streams (
+               transaction_id BLOB NOT NULL CHECK(length(transaction_id)=16),
+               source_revision BLOB NOT NULL CHECK(length(source_revision)=16),
+               source_attachment BLOB NOT NULL CHECK(length(source_attachment)=16),
+               target_revision BLOB NOT NULL CHECK(length(target_revision)=16),
+               target_attachment BLOB NOT NULL CHECK(length(target_attachment)=16),
+               header BLOB NOT NULL CHECK(length(header) BETWEEN 1 AND 16384),
+               chunk_count INTEGER NOT NULL CHECK(chunk_count>0),
+               PRIMARY KEY(transaction_id,source_revision,source_attachment)
+             ) STRICT;
+             CREATE TABLE backup_restore_stream_chunks (
+               transaction_id BLOB NOT NULL CHECK(length(transaction_id)=16),
+               source_revision BLOB NOT NULL CHECK(length(source_revision)=16),
+               source_attachment BLOB NOT NULL CHECK(length(source_attachment)=16),
+               chunk_index INTEGER NOT NULL CHECK(chunk_index>=0),
+               ciphertext BLOB NOT NULL CHECK(length(ciphertext) BETWEEN 21 AND 1048597),
+               PRIMARY KEY(transaction_id,source_revision,source_attachment,chunk_index)
+             ) STRICT;
+             CREATE TABLE backup_restore_history (
+               transaction_id BLOB NOT NULL CHECK(length(transaction_id)=16),
+               record_type TEXT NOT NULL CHECK(record_type IN ('organization','settings','audit_bundle','authority_history','identity_metadata','partial_history')),
+               record_id BLOB NOT NULL CHECK(length(record_id)=16),
+               package BLOB NOT NULL CHECK(length(package) BETWEEN 1 AND 17825792),
+               PRIMARY KEY(transaction_id,record_type,record_id)
+             ) STRICT;
+             CREATE TABLE imported_backup_history (
+               source_vault BLOB NOT NULL CHECK(length(source_vault)=16),
+               backup_id BLOB NOT NULL CHECK(length(backup_id)=16),
+               record_type TEXT NOT NULL CHECK(record_type IN ('organization','settings','audit_bundle','authority_history','identity_metadata','partial_history')),
+               record_id BLOB NOT NULL CHECK(length(record_id)=16),
+               package BLOB NOT NULL CHECK(length(package) BETWEEN 1 AND 17825792),
+               PRIMARY KEY(source_vault,backup_id,record_type,record_id)
              ) STRICT;
              CREATE TABLE human_receipts (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
