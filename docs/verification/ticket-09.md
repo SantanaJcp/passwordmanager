@@ -36,8 +36,8 @@ this seam for discover/start/get/cancel when `PM_PROFILE`, `PM_PRIVATE`, and
 
 The composed Linux laboratory also drives both front doors against the same
 real custody/provider process. It launches separate UID processes, performs
-the TLS/RPK `pm-agent/1` handshake, and compares discover, start (idempotent
-replay), get, and cancel structured results plus a not-found error:
+the TLS/RPK `pm-agent/1` handshake, and compares capabilities, discover, start
+(idempotent replay), get, and cancel structured results plus a not-found error:
 
 ```text
 ./scripts/test-linux-attempts-lab.sh
