@@ -93,11 +93,34 @@ Observed on the Linux x86_64 development host:
   -p pm-custody -p pm-web-auth -p pm-ssh-client --locked --offline
 # PASS
 
+./scripts/check.sh
+# PASS: pinned inputs, fmt, workspace check/tests and clippy
+
+./scripts/clean-offline-build.sh
+# PASS: removed 17608 files / 5.1 GiB; locked offline rebuild 1m48s
+
 python3 -m py_compile crates/pm-custody/tests/macos_lab.py
 bash -n scripts/test-macos-custody-lab.sh
 git diff --check
 # PASS
 ```
+
+The final sorted Linux regression run also passed all 17 current laboratories:
+
+```text
+export PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3
+export PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64
+for lab in $(find scripts -maxdepth 1 -name 'test-linux-*-lab.sh' | sort); do
+  "$lab"
+done
+# LAB_COUNT=17 ALL_LABS_EXIT=0
+```
+
+This includes the real multi-UID Linux custody, all content/import/history,
+authorization/attempt, backup/recovery, SSH, synchronization, GitHub bearer,
+Keycloak exchange, passkey and CFT/Keycloak web laboratories. It establishes
+that the Darwin cfg additions did not regress those existing Linux flows; it
+does not establish macOS behavior.
 
 An attempted `--target aarch64-apple-darwin` check failed before compiling the
 project because that Rust standard-library target is not installed in the
@@ -113,8 +136,8 @@ replace the native method above.
   authorized ephemeral macOS architectures after the CI bootstrap is
   published.
 - Record exact runner versions, command output and cleanup result here.
-- Run the repository `check.sh`, clean offline build and every current sorted
-  `scripts/test-linux-*-lab.sh` on the integrated candidate.
+- Repeat the repository and Linux gates on the integrated candidate after the
+  separate merger incorporates the native CI configuration.
 - Have the separate merger integrate and verify before resolving Ticket 26.
 
 No existing fallback was changed. The previously unsupported non-Linux path
