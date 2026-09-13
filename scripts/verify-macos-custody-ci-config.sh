@@ -6,9 +6,10 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 workflow="$root/.github/workflows/macos-custody-acceptance.yml"
 method="$root/docs/verification/ticket-26.md"
 lab="$root/scripts/test-macos-custody-lab.sh"
+harness="$root/crates/pm-custody/tests/macos_lab.py"
 fetch="$root/scripts/fetch-dependencies.sh"
 
-for file in "$workflow" "$method" "$lab" "$fetch"; do
+for file in "$workflow" "$method" "$lab" "$harness" "$fetch"; do
     test -f "$file" || {
         echo "required macOS custody CI file is absent: $file" >&2
         exit 1
@@ -81,3 +82,10 @@ require_literal '[macOS custody acceptance workflow](../../.github/workflows/mac
 require_literal 'fetch --locked' "$fetch"
 require_literal '--locked --offline' "$lab"
 require_literal 'lipo -archs' "$lab"
+require_literal 'runner_temp = os.environ.get("RUNNER_TEMP")' "$harness"
+require_literal 'scratch.mkdir(mode=0o711)' "$harness"
+require_literal 'synthetic keygen failed' "$harness"
+if grep -Fq 'os.environ.get("RUNNER_TEMP",' "$harness"; then
+    echo 'macOS custody laboratory contains a forbidden RUNNER_TEMP fallback' >&2
+    exit 1
+fi

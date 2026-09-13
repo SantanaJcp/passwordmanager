@@ -52,8 +52,10 @@ Prerequisites are a fresh macOS 13-or-newer Intel or Apple-silicon CI runner,
 the repository-pinned Rust 1.98.1 toolchain, Xcode command-line tools,
 Python 3, a logged-in non-root console user, and passwordless `sudo`. The
 runner must not already contain the three synthetic accounts or any of the
-canonical product paths. A collision is a hard failure, never permission to
-replace existing host state.
+canonical product paths. `RUNNER_TEMP` must name an existing absolute
+directory traversable by the synthetic UIDs; absence or failed traversal is an
+explicit prerequisite failure. A collision is a hard failure, never
+permission to replace existing host state.
 
 The workflow fixes `RUSTUP_AUTO_INSTALL=0` before every Rustup invocation and
 installs only the exact fully qualified 1.98.1 host toolchain into
@@ -66,8 +68,11 @@ The shell gate performs the locked/offline native build, native unit tests and
 `plutil` validation. It requires each `pm`/`pm-custody` artifact to be a
 single-architecture Mach-O exactly matching `uname -m`. Its Python harness then:
 
-1. creates `_passwordmanager`, `_pmagent26` and `_pmother26` with unused real
-   Darwin UIDs/groups;
+1. creates a collision-guarded, runner-owned `0711` fixture root below the
+   required `RUNNER_TEMP`, then `_passwordmanager`, `_pmagent26` and
+   `_pmother26` with unused real Darwin UIDs/groups; its private per-identity
+   directories remain `0700`, bilateral denial is probed, and only synthetic
+   public RPKs are copied into a root-owned `0444` publication directory;
 2. installs a root-owned binary and plist, creates custody-owned state/runtime,
    generates only synthetic RPKs, and bootstraps a fresh synthetic vault;
 3. bootstraps the LaunchDaemon in the system domain and proves its live PID is
@@ -127,6 +132,25 @@ rejects truncated, malformed, additional or multiple-descriptor messages, and
 owns every received descriptor before later validation so every failure path
 closes it. This remains native compile evidence only; another two-target run
 of the unchanged entry point is required.
+
+The third native product run
+[`34764564812`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34764564812)
+on checkpoint `45af206` compiled the product and native tests successfully on
+both targets, including the AppKit/getpeereid and fullfsync tests, and verified
+single-architecture `arm64` and `x86_64` Mach-O artifacts. Both jobs then
+failed before service bootstrap when `_pmagent26` key generation returned the
+explicit unavailable status. Inspection of the exact fixture construction
+identified the cause: the runner-owned `pm-ticket26` parent was created mode
+`0700`, so the real agent UID could not traverse to its own `0700` child.
+Captured stdout/stderr were hidden by `check=True`, and the later bootstrap
+and authorization steps would also have crossed private `0700` directories to
+read public RPKs. The corrected harness makes synthetic keygen failures report
+bounded return-code/stdout/stderr metadata, requires `RUNNER_TEMP` without a
+substitute path, uses only a `0711` collision-guarded fixture root, proves
+private-subdirectory denials, publishes only public RPKs through a root-owned
+`0444` area, and obtains privileged metadata through the administrative test
+observer. It never broadens a private directory or changes the runner parent.
+This is still a runtime fixture RED, not native acceptance.
 
 The acceptance-workflow checker was written before the workflow existed:
 

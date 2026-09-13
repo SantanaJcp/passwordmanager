@@ -9,7 +9,6 @@ import pwd
 import re
 import shutil
 import socket
-import stat
 import subprocess
 import sys
 import time
@@ -78,7 +77,37 @@ def unused_ids(count):
 
 
 def keygen(binary, user, private, public):
-    sudo([binary, "keygen", "--private", private, "--public", public], user=user)
+    command = [binary, "keygen", "--private", private, "--public", public]
+    result = run(command, check=False) if user is None else sudo(
+        command, user=user, check=False,
+    )
+    identity = "runner" if user is None else user
+    if result.returncode != 0:
+        raise AssertionError(
+            f"synthetic keygen failed for {identity}: returncode={result.returncode}, "
+            f"stdout={result.stdout[:1024]!r}, stderr={result.stderr[:1024]!r}"
+        )
+
+
+def owner_mode(path):
+    result = sudo(["stat", "-f", "%u %Lp", path])
+    owner, mode = result.stdout.decode().strip().split()
+    return int(owner), int(mode, 8)
+
+
+def require_traversal(user, path):
+    result = sudo(["test", "-x", path], user=user, check=False)
+    assert result.returncode == 0, (
+        f"fixture traversal prerequisite failed: user={user}, path={path}, "
+        f"returncode={result.returncode}, stdout={result.stdout[:1024]!r}, "
+        f"stderr={result.stderr[:1024]!r}"
+    )
+
+
+def publish_rpk(source, destination):
+    sudo(["install", "-o", "root", "-g", "wheel", "-m", "0444", source, destination])
+    assert owner_mode(destination) == (0, 0o444), destination
+    assert sudo(["cmp", "-s", source, destination], check=False).returncode == 0
 
 
 def create_vault(cli, path):
@@ -168,13 +197,22 @@ def main():
 
     created = []
     bootstrapped = False
-    scratch = pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "pm-ticket26"
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    assert runner_temp, "RUNNER_TEMP is required for the collision-guarded native fixture"
+    runner_temp = pathlib.Path(runner_temp)
+    assert runner_temp.is_absolute() and runner_temp.is_dir(), runner_temp
+    scratch = runner_temp / "pm-ticket26"
     assert not scratch.exists(), f"refusing to replace pre-existing scratch path: {scratch}"
     try:
-        scratch.mkdir(mode=0o700)
+        scratch.mkdir(mode=0o711)
+        scratch.chmod(0o711)
+        assert owner_mode(scratch) == (os.getuid(), 0o711)
         custodian_uid, agent_uid, other_uid = unused_ids(3)
         for name, uid in [(CUSTODIAN, custodian_uid), (AGENT, agent_uid), (OTHER, other_uid)]:
             created.append(name); create_account(name, uid)
+        for name in (CUSTODIAN, AGENT, OTHER):
+            require_traversal(name, runner_temp)
+            require_traversal(name, scratch)
 
         sudo(["mkdir", "-p", INSTALL, STATE, RUNTIME])
         sudo(["install", "-o", "root", "-g", "wheel", "-m", "0755", binary, INSTALL / "pm-custody"])
@@ -183,29 +221,45 @@ def main():
         sudo(["chmod", "0700", STATE]); sudo(["chmod", "0755", RUNTIME])
 
         human = scratch / "human"; profiles = scratch / "profiles"
-        sudo(["mkdir", "-p", human, profiles])
+        publics = scratch / "public-rpks"
+        sudo(["mkdir", "-p", human, profiles, publics])
         sudo(["chown", f"{os.getuid()}:{os.getgid()}", human]); sudo(["chmod", "0700", human])
+        sudo(["chown", "root:wheel", profiles, publics])
+        sudo(["chmod", "0755", profiles, publics])
         agent = scratch / "agent"; other = scratch / "other"
         impostor = scratch / "impostor"
         sudo(["mkdir", "-p", agent, other, impostor])
         sudo(["chown", f"{AGENT}:{AGENT}", agent]); sudo(["chmod", "0700", agent])
         sudo(["chown", f"{OTHER}:{OTHER}", other]); sudo(["chmod", "0700", other])
         sudo(["chown", f"{OTHER}:{OTHER}", impostor]); sudo(["chmod", "0755", impostor])
+        for user, private in [(AGENT, human), (OTHER, human),
+                              (CUSTODIAN, agent), (OTHER, agent),
+                              (CUSTODIAN, other), (AGENT, other)]:
+            denied = sudo(["test", "-r", private], user=user, check=False)
+            assert denied.returncode != 0 and denied.stdout == b"", (user, private)
 
         server_key, server_pub = STATE / "server.key", STATE / "server.pub"
         human_key, human_pub = human / "human.key", human / "human.pub"
         agent_key, agent_pub = agent / "agent.key", agent / "agent.pub"
         other_key, other_pub = other / "other.key", other / "other.pub"
         keygen(INSTALL / "pm-custody", CUSTODIAN, server_key, server_pub)
-        run([INSTALL / "pm-custody", "keygen", "--private", human_key, "--public", human_pub])
+        keygen(INSTALL / "pm-custody", None, human_key, human_pub)
         keygen(INSTALL / "pm-custody", AGENT, agent_key, agent_pub)
         keygen(INSTALL / "pm-custody", OTHER, other_key, other_pub)
+        published_human_pub = publics / "human.pub"
+        published_agent_pub = publics / "agent.pub"
+        published_other_pub = publics / "other.pub"
+        for source, destination in [(human_pub, published_human_pub),
+                                    (agent_pub, published_agent_pub),
+                                    (other_pub, published_other_pub)]:
+            publish_rpk(source, destination)
 
         bootstrap = STATE / "bootstrap"
         sudo([INSTALL / "pm-custody", "provision-bootstrap", "--path", bootstrap,
               "--server-private", server_key, "--server-public", server_pub,
-              "--agent-public", agent_pub, "--agent-uid", str(agent_uid),
-              "--human-public", human_pub, "--human-uid", str(os.getuid())], user=CUSTODIAN)
+              "--agent-public", published_agent_pub, "--agent-uid", str(agent_uid),
+              "--human-public", published_human_pub, "--human-uid", str(os.getuid())],
+             user=CUSTODIAN)
         agent_profile, human_profile = profiles / "agent.profile", profiles / "human.profile"
         for role, profile in [("agent", agent_profile), ("human", human_profile)]:
             sudo([INSTALL / "pm-custody", "provision-profile", "--path", profile,
@@ -227,8 +281,7 @@ def main():
 
         for path, uid, mode in [(INSTALL / "pm-custody", 0, 0o755),
                                 (PLIST, 0, 0o644), (bootstrap, custodian_uid, 0o400)]:
-            metadata = path.stat()
-            assert metadata.st_uid == uid and stat.S_IMODE(metadata.st_mode) == mode
+            assert owner_mode(path) == (uid, mode), path
         probe(INSTALL / "pm-custody", AGENT, agent_profile, agent_key, RUNTIME / "agent.sock")
         probe(INSTALL / "pm-custody", pwd.getpwuid(os.getuid()).pw_name,
               human_profile, human_key, RUNTIME / "human.sock")
@@ -284,7 +337,8 @@ def main():
 
         setup = run([INSTALL / "pm-custody", "human-authorization", "--profile", human_profile,
                      "--private", human_key, "--socket", RUNTIME / "human.sock", "--action", "setup"],
-                    input=wire_fields([PASSWORD, agent_pub.read_bytes(), other_pub.read_bytes()]))
+                    input=wire_fields([PASSWORD, published_agent_pub.read_bytes(),
+                                       published_other_pub.read_bytes()]))
         assert setup.stdout == b"PASS human-authorization action=setup\n" and setup.stderr == b""
         suspend = run([INSTALL / "pm-custody", "human-authorization", "--profile", human_profile,
                        "--private", human_key, "--socket", RUNTIME / "human.sock", "--action", "suspend"],
