@@ -7,6 +7,7 @@ members = [
     "crates/pm-process-runner",
     "crates/pm-vault",
     "crates/pm-interface",
+    "crates/pm-web-auth",
 ]
 resolver = "3"
 
@@ -23,6 +24,7 @@ pedantic = { level = "deny", priority = -1 }
 
 [workspace.dependencies]
 aws-lc-rs = "=1.18.1"
+base64 = "=0.23.1"
 libc = "=0.2.189"
 libsodium-sys-stable = { version = "=1.24.0", default-features = false }
 minicbor = { version = "=2.3.0", features = ["std"] }

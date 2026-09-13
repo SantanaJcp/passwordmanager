@@ -11,7 +11,7 @@ mod reducer;
 
 pub use attempts::{
     AttemptError, AttemptLease, AttemptOutcome, AttemptSnapshot, AttemptState, AttemptVault,
-    IdempotencyKey, StartAttempt,
+    IdempotencyKey, StartAttempt, TotpLease,
 };
 pub use audit::{
     AuditAction, AuditActorKind, AuditDeviceCustody, AuditDiscontinuity, AuditEvent, AuditOutcome,

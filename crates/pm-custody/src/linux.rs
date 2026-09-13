@@ -560,6 +560,8 @@ fn agent_attempt(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), F
     let state = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
     let reason = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
     let result = c.bytes()?;
+    let _integration = c.bytes()?;
+    let _version = c.fixed(4)?;
     c.finish()?;
     println!(
         "PASS attempt id={} revision={} state={} reason={} result={}",
@@ -594,6 +596,7 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
         Some("suspend") => (20, vec![20]),
         Some("resume-revoke-a") => (21, vec![21]),
         Some("reenroll-a") => (22, vec![22]),
+        Some("add-keycloak") => (23, vec![23]),
         _ => return Err(Failure::Usage),
     };
     if matches!(opcode, 19 | 22) {
@@ -1544,6 +1547,33 @@ fn handle_attempt_request(
             .map_err(|_| Failure::Unavailable)?;
             attempts.start(peer, &start)
         }
+        33 => {
+            let mut c = Cursor::new(rest);
+            let item = c.fixed(16)?.try_into().map_err(|_| Failure::Unavailable)?;
+            let issued =
+                u64::from_be_bytes(c.fixed(8)?.try_into().map_err(|_| Failure::Unavailable)?);
+            let issued = i64::try_from(issued).map_err(|_| Failure::Unavailable)?;
+            let nonce = c.fixed(16)?.try_into().map_err(|_| Failure::Unavailable)?;
+            let integration = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
+            let version =
+                u32::from_be_bytes(c.fixed(4)?.try_into().map_err(|_| Failure::Unavailable)?);
+            let method = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
+            let destination = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
+            let context = c.bytes()?;
+            c.finish()?;
+            let key = IdempotencyKey::new(issued, nonce).map_err(|_| Failure::Unavailable)?;
+            let start = StartAttempt::new(
+                item,
+                &integration,
+                version,
+                &method,
+                &destination,
+                context,
+                key,
+            )
+            .map_err(|_| Failure::Unavailable)?;
+            attempts.start(peer, &start)
+        }
         31 => attempts.get(peer, rest.try_into().map_err(|_| Failure::Unavailable)?),
         32 => attempts.cancel(peer, rest.try_into().map_err(|_| Failure::Unavailable)?),
         _ => return Err(Failure::Unavailable),
@@ -1562,6 +1592,8 @@ fn encode_attempt_snapshot(snapshot: &pm_vault::AttemptSnapshot) -> Result<Vec<u
     push_bytes(&mut out, attempt_state_name(snapshot.state()).as_bytes())?;
     push_bytes(&mut out, snapshot.reason().unwrap_or("").as_bytes())?;
     push_bytes(&mut out, snapshot.result().unwrap_or(&[]))?;
+    push_bytes(&mut out, snapshot.integration_id().as_bytes())?;
+    out.extend_from_slice(&snapshot.integration_version().to_be_bytes());
     Ok(out)
 }
 fn attempt_state_name(state: AttemptState) -> &'static str {
@@ -1643,19 +1675,52 @@ fn call_controlled_provider(
     lease: &pm_vault::AttemptLease,
 ) -> Result<AttemptOutcome, ()> {
     let mut stream = UnixStream::connect(&provider.socket).map_err(|_| ())?;
-    stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|_| ())?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     if unix_peer_uid(&stream).map_err(|_| ())? != provider.uid {
         return Err(());
     }
-    let mut request = vec![if lease.reconciliation_only() { 2 } else { 1 }];
+    let opcode = if lease.reconciliation_only() {
+        2
+    } else if lease.integration_id() == "keycloak-browser-oidc" {
+        3
+    } else {
+        1
+    };
+    let mut request = vec![opcode];
     request.extend_from_slice(lease.attempt_id());
     request.extend_from_slice(lease.revision_id());
     if !lease.reconciliation_only() {
+        if opcode == 3 {
+            push_bytes(&mut request, lease.integration_id().as_bytes()).map_err(|_| ())?;
+            push_bytes(&mut request, lease.method().as_bytes()).map_err(|_| ())?;
+        }
         push_bytes(&mut request, lease.destination().as_bytes()).map_err(|_| ())?;
         push_bytes(&mut request, lease.context()).map_err(|_| ())?;
         push_bytes(&mut request, lease.username().as_bytes()).map_err(|_| ())?;
         push_bytes(&mut request, lease.password()).map_err(|_| ())?;
+        if opcode == 3 {
+            if let Some(totp) = lease.totp() {
+                push_bytes(&mut request, totp.secret()).map_err(|_| ())?;
+                let algorithm = match totp.algorithm() {
+                    TotpAlgorithm::Sha1 => "SHA1",
+                    TotpAlgorithm::Sha256 => "SHA256",
+                    TotpAlgorithm::Sha512 => "SHA512",
+                };
+                push_bytes(&mut request, algorithm.as_bytes()).map_err(|_| ())?;
+                request.push(totp.digits());
+                request.extend_from_slice(&totp.period().to_be_bytes());
+                request.extend_from_slice(&totp.t0().to_be_bytes());
+            } else {
+                push_bytes(&mut request, &[]).map_err(|_| ())?;
+                push_bytes(&mut request, &[]).map_err(|_| ())?;
+                request.push(0);
+                request.extend_from_slice(&0_u16.to_be_bytes());
+                request.extend_from_slice(&0_u64.to_be_bytes());
+            }
+        }
     }
     write_frame(&mut stream, &request).map_err(|_| ())?;
     let response = read_frame(&mut stream).map_err(|_| ())?;
@@ -1670,6 +1735,12 @@ fn call_controlled_provider(
             reason: "AUTH_REJECTED",
         }),
         3 => Ok(AttemptOutcome::Indeterminate),
+        4 => Ok(AttemptOutcome::Failed {
+            reason: "UNSUPPORTED_INTEGRATION",
+        }),
+        5 => Ok(AttemptOutcome::Failed {
+            reason: "INTEGRITY_FAILURE",
+        }),
         _ => Err(()),
     }
 }
@@ -1787,6 +1858,79 @@ fn authorization_reenroll(vault: &mut HumanVault, rpk: &[u8]) -> Result<(), Fail
         return Err(Failure::Unavailable);
     }
     commit_authority(vault, prepared.prepared())
+}
+
+fn authorization_add_keycloak(vault: &mut HumanVault) -> Result<(), Failure> {
+    let alice = LogicalRecord::new(
+        RecordKind::Password,
+        HumanMetadata {
+            title: "Synthetic Keycloak P1 account".to_owned(),
+            destinations: vec![Destination {
+                label: "installed profile".to_owned(),
+                value: "keycloak-lab".to_owned(),
+            }],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![
+            AuthRecord::Password {
+                username: "alice".to_owned(),
+                password: b"ticket10-password-canary".to_vec(),
+                destination_refs: vec![0],
+            },
+            AuthRecord::Totp {
+                secret: b"12345678901234567890".to_vec(),
+                algorithm: TotpAlgorithm::Sha1,
+                digits: 6,
+                period: 30,
+                t0: 0,
+                issuer: "pm".to_owned(),
+                account: "alice".to_owned(),
+                destination_refs: vec![0],
+            },
+        ],
+        vec![],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    create_and_enable(vault, &alice)?;
+    let charlie = LogicalRecord::new(
+        RecordKind::Password,
+        HumanMetadata {
+            title: "Synthetic Keycloak challenge account".to_owned(),
+            destinations: vec![Destination {
+                label: "installed profile".to_owned(),
+                value: "keycloak-lab".to_owned(),
+            }],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![AuthRecord::Password {
+            username: "charlie".to_owned(),
+            password: b"ticket10-challenge-password".to_vec(),
+            destination_refs: vec![0],
+        }],
+        vec![],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    create_and_enable(vault, &charlie)
+}
+
+fn create_and_enable(vault: &mut HumanVault, record: &LogicalRecord) -> Result<(), Failure> {
+    let prepared = vault
+        .prepare_create_record(record)
+        .map_err(|_| Failure::Unavailable)?;
+    let item = *prepared.item_id();
+    commit_authority(vault, &prepared)?;
+    let prepared = vault
+        .prepare_enable(item)
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)
 }
 
 fn handle_stream_upload(
@@ -2137,6 +2281,13 @@ fn handle_human_request(
                 return Err(Failure::Unavailable);
             }
             authorization_reenroll(vault, rest)?;
+            Ok(vec![0])
+        }
+        23 => {
+            if !rest.is_empty() {
+                return Err(Failure::Unavailable);
+            }
+            authorization_add_keycloak(vault)?;
             Ok(vec![0])
         }
         _ => Err(Failure::Unavailable),
