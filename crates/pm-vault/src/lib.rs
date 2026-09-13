@@ -6,6 +6,7 @@ mod audit;
 mod authorization;
 mod content;
 mod human;
+mod reducer;
 
 pub use audit::{
     AuditAction, AuditActorKind, AuditDeviceCustody, AuditDiscontinuity, AuditEvent, AuditOutcome,
@@ -23,6 +24,10 @@ pub use content::{
 pub use human::{
     AttachmentReader, HumanChannel, HumanCommitError, HumanReceipt, HumanVault, PasswordRecord,
     PreparedHumanCommand,
+};
+pub use reducer::{
+    AcceptedPrefix, CausalEventBody, CausalEventDraft, CausalEventKind, CausalReducer,
+    ItemLifecycle, ReducedItem, ReducedView, ReductionError, SignedCausalEvent,
 };
 
 use std::{
@@ -312,10 +317,10 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                subject BLOB NOT NULL CHECK (length(subject) = 16),
                subject_generation INTEGER NOT NULL CHECK (subject_generation > 0),
                event BLOB NOT NULL CHECK (length(event) BETWEEN 1 AND 262144),
-               human_signature BLOB NOT NULL CHECK (length(human_signature) = 64),
-               device_signature BLOB NOT NULL CHECK (length(device_signature) = 64),
-               UNIQUE (issuer_device,issuer_generation,seq)
+               human_signature BLOB CHECK (human_signature IS NULL OR length(human_signature) = 64),
+               device_signature BLOB NOT NULL CHECK (length(device_signature) = 64)
              ) STRICT;
+             CREATE INDEX authority_event_slot ON authority_events(issuer_device,issuer_generation,seq);
              CREATE TABLE outbox (
                event_digest BLOB PRIMARY KEY CHECK (length(event_digest) = 32),
                event BLOB NOT NULL CHECK (length(event) BETWEEN 1 AND 262144)

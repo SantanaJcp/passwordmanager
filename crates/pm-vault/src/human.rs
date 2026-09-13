@@ -25,8 +25,8 @@ use crate::audit::{
 };
 use crate::authorization::{G5EventInput, encode_credential, encode_g5_event, new_credential};
 use crate::{
-    AgentEnrollment, AuthRecord, AuthorizationError, AuthorizationReason, Destination,
-    GeneratedPassword, GeneratorConfig, HumanMetadata, LogicalRecord, PasswordRng,
+    AgentEnrollment, AuthRecord, AuthorizationError, AuthorizationReason, CausalEventDraft,
+    Destination, GeneratedPassword, GeneratorConfig, HumanMetadata, LogicalRecord, PasswordRng,
     PreparedAgentEnrollment, RecordKind, SearchHit, SearchQuery, VaultError, content, unlock_root,
 };
 
@@ -295,6 +295,40 @@ pub struct HumanVault {
 }
 
 impl HumanVault {
+    /// Signs a canonical causal event with device provenance and, for authority
+    /// events, the human root. This does not publish the event.
+    ///
+    /// # Errors
+    /// Returns an error if the device key cannot be human-bound or signing fails.
+    pub fn sign_causal_event(
+        &self,
+        draft: &CausalEventDraft,
+    ) -> Result<crate::SignedCausalEvent, crate::ReductionError> {
+        self.channel
+            .verify()
+            .map_err(|_| crate::ReductionError::InvalidEvent)?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let package = audit::ensure_package(
+            &transaction,
+            &self.trusted_root,
+            Some(&self.root),
+            self.device,
+            &self.audit_custody,
+        )?;
+        if package.generation() != draft.issuer_generation {
+            return Err(crate::ReductionError::InvalidEvent);
+        }
+        transaction.commit()?;
+        crate::reducer::sign_draft(
+            self.root.vault_id(),
+            self.device,
+            &self.root,
+            &self.audit_custody,
+            draft,
+        )
+    }
+
     /// Opens an existing vault and retains `K_H`/`SK_H` only in this human session.
     ///
     /// # Errors

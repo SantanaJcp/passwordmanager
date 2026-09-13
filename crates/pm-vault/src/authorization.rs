@@ -9,7 +9,9 @@ use std::{
 };
 
 use minicbor::{Decoder, Encoder, data::Type};
-use pm_crypto::{TrustedRoot, digest, verify_device_event, verify_human_event};
+use pm_crypto::{
+    TrustedRoot, digest, verify_audit_key_package, verify_device_event, verify_human_event,
+};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::audit;
@@ -357,25 +359,46 @@ impl DelegatedVault {
     /// Returns an error if any stored event/signature/device chain is invalid.
     pub fn authority_headers(&self) -> Result<Vec<AuthorityEventHeader>, AuthorizationError> {
         let connection = open_connection(&self.path)?;
-        let signing_key = self.verified_signing_key(&connection)?;
         let mut statement = connection.prepare(
-            "SELECT event_digest,event,human_signature,device_signature FROM authority_events ORDER BY issuer_generation,seq"
+            "SELECT event_digest,event,human_signature,device_signature,issuer_device,issuer_generation FROM authority_events ORDER BY issuer_generation,seq,event_digest"
         )?;
         let mut rows = statement.query([])?;
         let mut result = Vec::new();
         while let Some(row) = rows.next()? {
             let digest_value = fixed_sql(&row.get::<_, Vec<u8>>(0)?)?;
             let event: Vec<u8> = row.get(1)?;
-            let human = fixed_sql(&row.get::<_, Vec<u8>>(2)?)?;
+            let human = row
+                .get::<_, Option<Vec<u8>>>(2)?
+                .map(|v| fixed_sql(&v))
+                .transpose()?;
             let device_signature = fixed_sql(&row.get::<_, Vec<u8>>(3)?)?;
-            verify_human_event(&self.trusted, &event, &human)
+            let issuer = fixed_sql(&row.get::<_, Vec<u8>>(4)?)?;
+            let generation =
+                u64::try_from(row.get::<_, i64>(5)?).map_err(|_| AuthorizationError::Integrity)?;
+            let package =
+                audit::load_package(&connection, *self.trusted.vault_id(), issuer, generation)
+                    .map_err(|_| AuthorizationError::Integrity)?;
+            verify_audit_key_package(&self.trusted, &package, issuer, generation)
                 .map_err(|_| AuthorizationError::Integrity)?;
-            verify_device_event(&signing_key, &event, &device_signature)
+            verify_device_event(package.signing_public_key(), &event, &device_signature)
                 .map_err(|_| AuthorizationError::Integrity)?;
             if digest(&event) != digest_value {
                 return Err(AuthorizationError::Integrity);
             }
-            result.push(decode_event_header(digest_value, &event)?);
+            let header = decode_event_header(digest_value, &event)?;
+            if matches!(header.kind.as_str(), "join" | "checkpoint-cache") {
+                if human.is_some() {
+                    return Err(AuthorizationError::Integrity);
+                }
+            } else {
+                verify_human_event(
+                    &self.trusted,
+                    &event,
+                    human.as_ref().ok_or(AuthorizationError::Integrity)?,
+                )
+                .map_err(|_| AuthorizationError::Integrity)?;
+            }
+            result.push(header);
         }
         Ok(result)
     }
@@ -499,32 +522,24 @@ impl DelegatedVault {
         connection: &Connection,
         expected: [u8; 32],
     ) -> Result<AuthorityEventHeader, AuthorizationError> {
-        let (event,human,device): (Vec<u8>,Vec<u8>,Vec<u8>) = connection.query_row(
-            "SELECT event,human_signature,device_signature FROM authority_events WHERE event_digest=?1",
-            [expected.as_slice()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        let (event,human,device,issuer,generation): (Vec<u8>,Vec<u8>,Vec<u8>,Vec<u8>,i64) = connection.query_row(
+            "SELECT event,human_signature,device_signature,issuer_device,issuer_generation FROM authority_events WHERE event_digest=?1",
+            [expected.as_slice()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
         ).optional()?.ok_or(AuthorizationError::Integrity)?;
-        let signing = self.verified_signing_key(connection)?;
+        let issuer = fixed_sql(&issuer)?;
+        let generation = u64::try_from(generation).map_err(|_| AuthorizationError::Integrity)?;
+        let package = audit::load_package(connection, *self.trusted.vault_id(), issuer, generation)
+            .map_err(|_| AuthorizationError::Integrity)?;
+        verify_audit_key_package(&self.trusted, &package, issuer, generation)
+            .map_err(|_| AuthorizationError::Integrity)?;
         verify_human_event(&self.trusted, &event, &fixed_sql(&human)?)
             .map_err(|_| AuthorizationError::Integrity)?;
-        verify_device_event(&signing, &event, &fixed_sql(&device)?)
+        verify_device_event(package.signing_public_key(), &event, &fixed_sql(&device)?)
             .map_err(|_| AuthorizationError::Integrity)?;
         if digest(&event) != expected {
             return Err(AuthorizationError::Integrity);
         }
         decode_event_header(expected, &event)
-    }
-
-    fn verified_signing_key(
-        &self,
-        connection: &Connection,
-    ) -> Result<[u8; 32], AuthorizationError> {
-        let package =
-            audit::load_matching_package(connection, &self.trusted, self.device, &self.custody)
-                .map_err(|_| AuthorizationError::Integrity)?;
-        self.custody
-            .validate_package(&package, &self.trusted, self.device)
-            .map_err(|_| AuthorizationError::Integrity)?;
-        Ok(*self.custody.signing_public_key())
     }
 }
 

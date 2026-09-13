@@ -230,11 +230,6 @@ impl AuditDeviceCustody {
         self.keys.encryption_public_key()
     }
 
-    #[must_use]
-    pub(crate) const fn signing_public_key(&self) -> &[u8; 32] {
-        self.keys.signing_public_key()
-    }
-
     pub(crate) fn sign_device_event(&self, event: &[u8]) -> Result<[u8; 64], HumanCommitError> {
         Ok(self.keys.sign_device_event(event)?)
     }
@@ -735,7 +730,7 @@ pub(crate) fn purge(
     rebuild_manifest(transaction, device, generation, &key)
 }
 
-fn ensure_package(
+pub(crate) fn ensure_package(
     transaction: &Transaction<'_>,
     trusted: &TrustedRoot,
     root: Option<&UnlockedRoot>,
@@ -795,7 +790,7 @@ pub(crate) fn load_matching_package(
     )
 }
 
-fn load_package(
+pub(crate) fn load_package(
     connection: &Connection,
     vault: [u8; 16],
     device: [u8; 16],
