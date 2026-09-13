@@ -23,6 +23,10 @@ test "${CI:-}" = true || {
     echo 'CI=true is required' >&2
     exit 1
 }
+test "${RUSTUP_AUTO_INSTALL:-}" = 0 || {
+    echo 'RUSTUP_AUTO_INSTALL=0 is required before invoking rustup' >&2
+    exit 1
+}
 test "${RUNNER_ARCH:-}" = "$expected_runner_arch" || {
     echo "runner architecture mismatch: expected $expected_runner_arch, got ${RUNNER_ARCH:-unset}" >&2
     exit 1
@@ -122,7 +126,7 @@ esac
 
 toolchain="1.98.1-$expected_rust_host"
 if ! rustup toolchain list | awk -v expected="$toolchain" '$1 == expected { found = 1 } END { exit !found }'; then
-    echo "required native Rust toolchain is not already installed: $toolchain" >&2
+    echo "required explicitly installed native Rust toolchain is absent: $toolchain" >&2
     exit 1
 fi
 export RUSTUP_TOOLCHAIN=$toolchain
