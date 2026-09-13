@@ -6,7 +6,9 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
+    mem,
     net::Shutdown,
+    os::fd::{AsRawFd, FromRawFd, RawFd},
     os::unix::{
         fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
         net::{UnixListener, UnixStream},
@@ -159,6 +161,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-streaming-file") => human_streaming_file(&mut arguments),
         Some("human-streaming-stall") => human_streaming_stall(&mut arguments),
         Some("human-csv-import") => human_csv_import(&mut arguments),
+        Some("human-1pux-import") => human_1pux_import(&mut arguments),
         _ => Err(Failure::Usage),
     }
 }
@@ -752,6 +755,108 @@ fn human_csv_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<()
         item_ids.len(),
         u8::from(response_loss),
         u8::from(enable_after),
+        u8::from(replace_candidates),
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn human_1pux_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    let source_path = take_path(arguments, "--source")?;
+    if arguments.next().ok_or(Failure::Usage)? != "--confirm" {
+        return Err(Failure::Usage);
+    }
+    let mut response_loss = false;
+    let mut replace_candidates = false;
+    for value in arguments.by_ref() {
+        match value.to_str() {
+            Some("--simulate-response-loss") if !response_loss => response_loss = true,
+            Some("--replace-candidates") if !replace_candidates => replace_candidates = true,
+            _ => return Err(Failure::Usage),
+        }
+    }
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    let source = open_1pux_source(&source_path)?;
+    let request = [31, u8::from(replace_candidates)];
+    write_frame(&mut tls, &request)?;
+    expect_status(&read_frame(&mut tls)?, 0)?;
+    send_file_descriptor(&tls.sock, source.as_raw_fd())?;
+    let response = read_frame(&mut tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let total = cursor.u64()?;
+    let new_items = cursor.u64()?;
+    let replaced = cursor.u64()?;
+    let skipped = cursor.u64()?;
+    let excluded = cursor.u64()?;
+    let preserved = cursor.u64()?;
+    let pages = cursor.u64()?;
+    let count = usize::try_from(cursor.u32()?).map_err(|_| Failure::Unavailable)?;
+    for _ in 0..count {
+        cursor.fixed(16)?;
+    }
+    let prepared = WirePrepared {
+        transaction_id: cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+        item_id: cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+        command: cursor.bytes()?,
+        body: cursor.bytes()?,
+        signature: cursor
+            .fixed(64)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    };
+    cursor.finish()?;
+    let committed = if response_loss {
+        write_frame(
+            &mut tls,
+            &encode_commit_request(8, &prepared, &prepared.body)?,
+        )?;
+        if read_frame(&mut tls).is_ok() {
+            return Err(Failure::Unavailable);
+        }
+        drop(tls);
+        let mut recovered = connect(&profile, &key, &socket_path)?;
+        recovered
+            .write_all(HUMAN_MAGIC)
+            .map_err(|_| Failure::Unavailable)?;
+        rpc_unlock(&mut recovered, &password)?;
+        let receipt = rpc_receipt(&mut recovered, prepared.transaction_id)?;
+        if rpc_commit(&mut recovered, &prepared)? != receipt {
+            return Err(Failure::Unavailable);
+        }
+        tls = recovered;
+        receipt
+    } else {
+        rpc_commit(&mut tls, &prepared)?
+    };
+    if rpc_commit(&mut tls, &prepared)? != committed
+        || rpc_receipt(&mut tls, prepared.transaction_id)? != committed
+    {
+        return Err(Failure::Unavailable);
+    }
+    println!(
+        "PASS 1pux-import version=3 total={total} new={new_items} replaced={replaced} skipped_exact={skipped} excluded={excluded} preserved_fields={preserved} pages={pages} items={count} tls-rpk=1 alpn=pm-human/1 signed=1 receipt-replay=1 response-loss={} replace-candidates={} source-unchanged=1 streamed-attachments=1 source-fd=scm-rights private-source=0400 auto-enable=0",
+        u8::from(response_loss),
         u8::from(replace_candidates),
     );
     Ok(())
@@ -1585,6 +1690,10 @@ fn handle_human_rpc(
             handle_stream_upload(&mut vault, tls, &request[1..])?;
             continue;
         }
+        if request.first() == Some(&31) {
+            handle_1pux_import(&mut vault, tls, &request[1..])?;
+            continue;
+        }
         if request.first() == Some(&18) {
             handle_stream_download(&vault, tls, &request[1..])?;
             continue;
@@ -2024,6 +2133,79 @@ impl Write for FrameWriter<'_> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.tls.flush()
     }
+}
+
+#[allow(clippy::too_many_lines)]
+fn handle_1pux_import(
+    vault: &mut HumanVault,
+    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
+    request: &[u8],
+) -> Result<(), Failure> {
+    let replace_candidates = match request {
+        [0] => false,
+        [1] => true,
+        _ => return Err(Failure::Unavailable),
+    };
+    write_frame(tls, &[0])?;
+    let source = receive_file_descriptor(&tls.sock)?;
+    let preview = vault
+        .preview_1pux_file(source)
+        .map_err(|_| Failure::Unavailable)?;
+    let mut decisions = Vec::with_capacity(preview.total());
+    let mut offset = 0;
+    while offset < preview.total() {
+        let page = preview
+            .page(offset, 100)
+            .map_err(|_| Failure::Unavailable)?;
+        for row in page {
+            decisions.push(match row.status() {
+                CsvRowStatus::New => CsvImportDecision::ImportNew,
+                CsvRowStatus::ExactDuplicate => CsvImportDecision::SkipExact,
+                CsvRowStatus::CandidateDuplicate if replace_candidates => {
+                    CsvImportDecision::Replace(*row.duplicate_item().ok_or(Failure::Unavailable)?)
+                }
+                CsvRowStatus::CandidateDuplicate => CsvImportDecision::KeepBoth,
+            });
+        }
+        offset += page.len();
+    }
+    let prepared = vault
+        .prepare_1pux_import(preview, decisions)
+        .map_err(|_| Failure::Unavailable)?;
+    let signature = vault
+        .sign(prepared.prepared())
+        .map_err(|_| Failure::Unavailable)?;
+    let report = prepared.report();
+    let mut response = vec![0];
+    for value in [
+        report.total(),
+        report.new_items(),
+        report.replaced(),
+        report.skipped_exact(),
+        report.excluded(),
+        report.preserved_fields(),
+        report.event_pages(),
+    ] {
+        response.extend_from_slice(
+            &u64::try_from(value)
+                .map_err(|_| Failure::Unavailable)?
+                .to_be_bytes(),
+        );
+    }
+    response.extend_from_slice(
+        &u32::try_from(prepared.item_ids().len())
+            .map_err(|_| Failure::Unavailable)?
+            .to_be_bytes(),
+    );
+    for item in prepared.item_ids() {
+        response.extend_from_slice(item);
+    }
+    response.extend_from_slice(prepared.prepared().transaction_id());
+    response.extend_from_slice(prepared.prepared().item_id());
+    push_bytes(&mut response, prepared.prepared().command())?;
+    push_bytes(&mut response, prepared.prepared().body())?;
+    response.extend_from_slice(&signature);
+    write_frame(tls, &response)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2880,6 +3062,125 @@ fn read_import_source(path: &Path) -> Result<Zeroizing<Vec<u8>>, Failure> {
         return Err(Failure::Unavailable);
     }
     Ok(bytes)
+}
+
+fn open_1pux_source(path: &Path) -> Result<File, Failure> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| Failure::Unavailable)?;
+    let metadata = file.metadata().map_err(|_| Failure::Unavailable)?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != current_uid()
+        || !matches!(metadata.mode() & 0o7777, 0o400 | 0o600)
+        || metadata.nlink() != 1
+        || metadata.len() == 0
+        || metadata.len() > 1024_u64.pow(4) + 256 * 1024 * 1024
+    {
+        return Err(Failure::Unavailable);
+    }
+    Ok(file)
+}
+
+fn send_file_descriptor(socket: &UnixStream, descriptor: RawFd) -> Result<(), Failure> {
+    let mut carrier = 0x20_u8;
+    let mut vector = libc::iovec {
+        iov_base: (&raw mut carrier).cast(),
+        iov_len: 1,
+    };
+    let mut control = [0_usize; 4];
+    // SAFETY: the aligned control buffer is at least CMSG_SPACE(sizeof(fd)); all
+    // pointers live until sendmsg returns and describe exactly one carrier byte.
+    let sent = unsafe {
+        let mut message: libc::msghdr = mem::zeroed();
+        message.msg_iov = &raw mut vector;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = usize::try_from(libc::CMSG_SPACE(
+            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?,
+        ))
+        .map_err(|_| Failure::Unavailable)?;
+        let header = libc::CMSG_FIRSTHDR(&raw const message);
+        if header.is_null() {
+            return Err(Failure::Unavailable);
+        }
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = usize::try_from(libc::CMSG_LEN(
+            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?,
+        ))
+        .map_err(|_| Failure::Unavailable)?;
+        std::ptr::copy_nonoverlapping(
+            &raw const descriptor,
+            libc::CMSG_DATA(header).cast::<RawFd>(),
+            1,
+        );
+        libc::sendmsg(socket.as_raw_fd(), &raw const message, libc::MSG_NOSIGNAL)
+    };
+    if sent == 1 {
+        Ok(())
+    } else {
+        Err(Failure::Unavailable)
+    }
+}
+
+fn receive_file_descriptor(socket: &UnixStream) -> Result<File, Failure> {
+    let mut carrier = 0_u8;
+    let mut vector = libc::iovec {
+        iov_base: (&raw mut carrier).cast(),
+        iov_len: 1,
+    };
+    let mut control = [0_usize; 4];
+    // SAFETY: recvmsg owns valid aligned buffers for the duration of the call;
+    // MSG_CMSG_CLOEXEC closes the inheritance race before File assumes ownership.
+    let (received, flags, descriptors, extra) = unsafe {
+        let mut message: libc::msghdr = mem::zeroed();
+        message.msg_iov = &raw mut vector;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = usize::try_from(libc::CMSG_SPACE(
+            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?,
+        ))
+        .map_err(|_| Failure::Unavailable)?;
+        let received = libc::recvmsg(socket.as_raw_fd(), &raw mut message, libc::MSG_CMSG_CLOEXEC);
+        let header = libc::CMSG_FIRSTHDR(&raw const message);
+        let mut descriptors = Vec::new();
+        let mut extra = false;
+        if !header.is_null()
+            && (*header).cmsg_level == libc::SOL_SOCKET
+            && (*header).cmsg_type == libc::SCM_RIGHTS
+        {
+            let base = usize::try_from(libc::CMSG_LEN(0)).map_err(|_| Failure::Unavailable)?;
+            let payload = (*header).cmsg_len.saturating_sub(base);
+            if payload % mem::size_of::<RawFd>() == 0 {
+                for index in 0..payload / mem::size_of::<RawFd>() {
+                    descriptors.push(std::ptr::read_unaligned(
+                        libc::CMSG_DATA(header).cast::<RawFd>().add(index),
+                    ));
+                }
+            }
+            extra = !libc::CMSG_NXTHDR(&raw const message, header).is_null();
+        }
+        (received, message.msg_flags, descriptors, extra)
+    };
+    let mut files = descriptors
+        .into_iter()
+        .filter(|descriptor| *descriptor >= 0)
+        .map(|descriptor| {
+            // SAFETY: every SCM_RIGHTS descriptor is newly owned by this process.
+            unsafe { File::from_raw_fd(descriptor) }
+        })
+        .collect::<Vec<_>>();
+    if received != 1
+        || carrier != 0x20
+        || flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0
+        || extra
+        || files.len() != 1
+    {
+        return Err(Failure::Unavailable);
+    }
+    files.pop().ok_or(Failure::Unavailable)
 }
 
 fn read_regular(
