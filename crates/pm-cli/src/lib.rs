@@ -405,7 +405,10 @@ fn decode_discovery(raw: &[u8]) -> Result<Json, ErrorCode> {
                 "account".into(),
                 Json::String(String::from_utf8_lossy(account).into()),
             ),
-            ("integrations".into(), credential_integrations(destination)),
+            (
+                "integrations".into(),
+                credential_integrations(kind, destination),
+            ),
         ]));
     }
     Ok(Json::Object(vec![
@@ -413,7 +416,7 @@ fn decode_discovery(raw: &[u8]) -> Result<Json, ErrorCode> {
         ("next_cursor".into(), Json::Null),
     ]))
 }
-fn credential_integrations(destination: &[u8]) -> Json {
+fn credential_integrations(kind: &[u8], destination: &[u8]) -> Json {
     let mut integrations = vec![Json::String("controlled.external".into())];
     if destination == b"ssh-lab" {
         integrations.push(Json::String("ssh-server".into()));
@@ -422,6 +425,9 @@ fn credential_integrations(destination: &[u8]) -> Json {
         integrations.push(Json::String("keycloak-browser-oidc".into()));
     } else if destination == b"keycloak-exchange-lab" {
         integrations.push(Json::String("keycloak-token-exchange".into()));
+    }
+    if kind == b"passkey" {
+        integrations.push(Json::String("keycloak-webauthn".into()));
     }
     Json::Array(integrations)
 }

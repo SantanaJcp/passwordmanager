@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
     os::unix::{
@@ -71,6 +71,7 @@ pub fn serve(
     let listener = UnixListener::bind(socket_path).map_err(|_| ())?;
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o666)).map_err(|_| ())?;
     let mut waiting = BTreeSet::new();
+    let mut passkey_sessions = BTreeMap::new();
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         if peer_uid(&stream)? != custodian_uid {
@@ -85,7 +86,12 @@ pub fn serve(
         let Ok(mut request) = read_frame(&mut stream) else {
             continue;
         };
-        let response = Zeroizing::new(handle(&profile, &request, &mut waiting));
+        let response = Zeroizing::new(handle(
+            &profile,
+            &request,
+            &mut waiting,
+            &mut passkey_sessions,
+        ));
         request.zeroize();
         let _ = write_frame(&mut stream, &response);
     }
@@ -97,7 +103,12 @@ enum InstalledProfile {
     Exchange(ExchangeProfile),
 }
 
-fn handle(profile: &InstalledProfile, request: &[u8], waiting: &mut BTreeSet<[u8; 16]>) -> Vec<u8> {
+fn handle(
+    profile: &InstalledProfile,
+    request: &[u8],
+    waiting: &mut BTreeSet<[u8; 16]>,
+    passkey_sessions: &mut BTreeMap<[u8; 16], browser::PasskeySession>,
+) -> Vec<u8> {
     let mut cursor = Cursor::new(request);
     let Ok(opcode) = cursor.byte() else {
         return response(4, b"");
@@ -109,18 +120,25 @@ fn handle(profile: &InstalledProfile, request: &[u8], waiting: &mut BTreeSet<[u8
         return response(4, b"");
     };
     if opcode == 2 {
-        return if matches!(profile, InstalledProfile::Browser(_))
-            && cursor.finish().is_ok()
-            && waiting.contains(&attempt)
-        {
-            response(1, b"KEYCLOAK_HUMAN_REQUIRED")
-        } else {
-            response(3, b"")
+        if cursor.finish().is_err() {
+            return response(4, b"");
+        }
+        return match profile {
+            InstalledProfile::Browser(profile) if profile.is_passkey() => {
+                reconcile(profile, attempt, waiting, passkey_sessions)
+            }
+            InstalledProfile::Browser(_) if waiting.contains(&attempt) => {
+                response(1, b"KEYCLOAK_HUMAN_REQUIRED")
+            }
+            InstalledProfile::Browser(_) | InstalledProfile::Exchange(_) => response(3, b""),
         };
     }
     match (profile, opcode) {
-        (InstalledProfile::Browser(profile), 3) => {
+        (InstalledProfile::Browser(profile), 3) if !profile.is_passkey() => {
             handle_browser(profile, cursor, attempt, waiting)
+        }
+        (InstalledProfile::Browser(profile), 4) if profile.is_passkey() => {
+            handle_passkey(profile, attempt, &mut cursor, passkey_sessions)
         }
         (InstalledProfile::Exchange(profile), 4) => handle_exchange(profile, cursor),
         _ => response(4, b""),
@@ -240,6 +258,80 @@ fn handle_exchange(profile: &ExchangeProfile, mut cursor: Cursor<'_>) -> Vec<u8>
         Err(exchange::ExchangeError::InvalidResponse) => response(2, b""),
         Err(exchange::ExchangeError::InvalidToken | exchange::ExchangeError::SecretReflection) => {
             response(5, b"")
+        }
+    }
+}
+
+fn reconcile(
+    profile: &Profile,
+    attempt: [u8; 16],
+    waiting: &BTreeSet<[u8; 16]>,
+    sessions: &mut BTreeMap<[u8; 16], browser::PasskeySession>,
+) -> Vec<u8> {
+    let Some(session) = sessions.get_mut(&attempt) else {
+        return if waiting.contains(&attempt) {
+            response(1, b"KEYCLOAK_HUMAN_REQUIRED")
+        } else {
+            response(5, b"")
+        };
+    };
+    let outcome = session.poll(profile);
+    if matches!(outcome, Ok(browser::BrowserOutcome::Waiting)) {
+        return response(1, b"PASSKEY_HUMAN_CONFIRMATION");
+    }
+    sessions.remove(&attempt);
+    match outcome {
+        Ok(browser::BrowserOutcome::Succeeded(result)) => response(0, &result),
+        Ok(browser::BrowserOutcome::Rejected) => response(2, b""),
+        Ok(browser::BrowserOutcome::IntegrityFailure) | Err(()) => response(5, b""),
+        Ok(browser::BrowserOutcome::Waiting) => unreachable!(),
+    }
+}
+
+fn handle_passkey(
+    profile: &Profile,
+    attempt: [u8; 16],
+    cursor: &mut Cursor<'_>,
+    sessions: &mut BTreeMap<[u8; 16], browser::PasskeySession>,
+) -> Vec<u8> {
+    let parsed = (|| {
+        let integration = cursor.text()?;
+        let method = cursor.text()?;
+        let destination = cursor.text()?;
+        let context = cursor.text()?;
+        let username = cursor.text()?.to_owned();
+        let password = cursor.bytes()?;
+        let item = cursor.fixed::<16>()?;
+        cursor.finish()?;
+        let issuer = profile.url("issuer").map_err(|_| ())?;
+        let origin = format!("https://{}:{}", issuer.host(), issuer.port());
+        if !profile.is_passkey()
+            || integration != "keycloak-webauthn"
+            || method != "webauthn"
+            || destination != origin
+            || context != profile.profile_id()
+            || username != profile.value("expected_username")
+            || !password.is_empty()
+        {
+            return Err(());
+        }
+        Ok((username, item))
+    })();
+    let Ok((username, item)) = parsed else {
+        eprintln!("WEB_AUTH_FAIL stage=passkey-request");
+        return response(4, b"");
+    };
+    match browser::authenticate_passkey(profile, &username, item) {
+        Ok((browser::BrowserOutcome::Waiting, Some(session))) => {
+            sessions.insert(attempt, session);
+            response(1, b"PASSKEY_HUMAN_CONFIRMATION")
+        }
+        Ok((browser::BrowserOutcome::Succeeded(result), None)) => response(0, &result),
+        Ok((browser::BrowserOutcome::Rejected, None)) => response(2, b""),
+        Ok((browser::BrowserOutcome::IntegrityFailure, None)) => response(5, b""),
+        _ => {
+            eprintln!("WEB_AUTH_FAIL stage=passkey-browser-start");
+            response(4, b"")
         }
     }
 }

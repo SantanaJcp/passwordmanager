@@ -1520,6 +1520,7 @@ impl HumanVault {
             request.display_name().to_owned(),
             true,
             false,
+            crate::passkey::registration_client_data_json(request),
         );
         let record = LogicalRecord::new(
             RecordKind::Passkey,

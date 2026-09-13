@@ -1525,6 +1525,14 @@ fn credential_material(
         Ok(CredentialMaterial::empty())
     } else if integration == "keycloak-token-exchange" {
         token_exchange_material(auth, destination, now)
+    } else if integration == "keycloak-webauthn" || method == "webauthn" {
+        Ok(CredentialMaterial {
+            username: passkey_material(auth)?.user_name,
+            password: Zeroizing::new(Vec::new()),
+            subject_token: None,
+            totp: None,
+            ssh: None,
+        })
     } else {
         password_material(auth, method)
     }
@@ -1548,9 +1556,10 @@ fn matches_authentication_profile(kind: RecordKind, request: &StartAttempt) -> b
         };
     let passkey_profile = kind == RecordKind::Passkey
         && request.method == "webauthn"
-        && request.integration_id == "vault-webauthn-provider"
         && request.integration_version == 1
-        && request.context == b"keycloak-webauthn/1";
+        && ((request.integration_id == "vault-webauthn-provider"
+            && request.context == b"keycloak-webauthn/1")
+            || (request.integration_id == "keycloak-webauthn" && is_profile_id(&request.context)));
     let ssh_profile = request.integration_version == 1
         && request.context == request.destination.as_bytes()
         && match (request.integration_id.as_str(), request.method.as_str()) {
@@ -1635,6 +1644,14 @@ struct PasskeyMaterial {
     rp_id: String,
     credential_id: Vec<u8>,
     user_name: String,
+}
+
+fn is_profile_id(value: &[u8]) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn passkey_material(auth: &[u8]) -> Result<PasskeyMaterial, AttemptError> {

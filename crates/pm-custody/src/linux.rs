@@ -3114,6 +3114,8 @@ fn call_controlled_provider(
     }
     let opcode = if lease.reconciliation_only() {
         2
+    } else if lease.integration_id() == "keycloak-webauthn" {
+        4
     } else if lease.integration_id() == "keycloak-browser-oidc" {
         3
     } else if lease.integration_id() == "keycloak-token-exchange" {
@@ -3133,6 +3135,9 @@ fn call_controlled_provider(
         push_bytes(&mut request, lease.context()).map_err(|_| ())?;
         push_bytes(&mut request, lease.username().as_bytes()).map_err(|_| ())?;
         push_bytes(&mut request, lease.password()).map_err(|_| ())?;
+        if lease.integration_id() == "keycloak-webauthn" {
+            request.extend_from_slice(lease.credential_id());
+        }
         if opcode == 3 {
             if let Some(totp) = lease.totp() {
                 push_bytes(&mut request, totp.secret()).map_err(|_| ())?;
@@ -3152,7 +3157,7 @@ fn call_controlled_provider(
                 request.extend_from_slice(&0_u16.to_be_bytes());
                 request.extend_from_slice(&0_u64.to_be_bytes());
             }
-        } else if opcode == 4 {
+        } else if lease.integration_id() == "keycloak-token-exchange" {
             push_bytes(&mut request, lease.subject_token().ok_or(())?).map_err(|_| ())?;
         }
     }
