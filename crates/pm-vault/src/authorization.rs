@@ -11,6 +11,7 @@ use std::{
 use minicbor::{Decoder, Encoder, data::Type};
 use pm_crypto::{TrustedRoot, digest, verify_device_event, verify_human_event};
 use rusqlite::{Connection, OptionalExtension};
+use zeroize::Zeroizing;
 
 use crate::audit;
 use crate::{AuditDeviceCustody, RecordKind, VaultError, load_and_validate_bundle};
@@ -255,7 +256,44 @@ pub struct DelegatedVault {
     custody_generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentIdentity {
+    pub(crate) subject: [u8; 16],
+    pub(crate) generation: u64,
+}
+
+impl AgentIdentity {
+    #[must_use]
+    pub const fn subject(&self) -> &[u8; 16] {
+        &self.subject
+    }
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+pub(crate) struct OperationalCredential {
+    pub descriptor: DelegatedCredential,
+    pub auth: Zeroizing<Vec<u8>>,
+}
+
 impl DelegatedVault {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+    pub(crate) const fn device(&self) -> [u8; 16] {
+        self.device
+    }
+    pub(crate) fn custody(&self) -> Arc<AuditDeviceCustody> {
+        Arc::clone(&self.custody)
+    }
+    pub(crate) const fn trusted(&self) -> TrustedRoot {
+        self.trusted
+    }
+    pub(crate) const fn custody_generation(&self) -> u64 {
+        self.custody_generation
+    }
     /// Opens only device custody and verified public authority, never `K_H`.
     ///
     /// # Errors
@@ -298,15 +336,18 @@ impl DelegatedVault {
         let mut rows = statement.query([])?;
         let mut values = Vec::new();
         while let Some(row) = rows.next()? {
-            values.push(self.open_credential(
-                &connection,
-                fixed_sql(&row.get::<_, Vec<u8>>(0)?)?,
-                fixed_sql(&row.get::<_, Vec<u8>>(1)?)?,
-                &row.get::<_, Vec<u8>>(2)?,
-                &row.get::<_, Vec<u8>>(3)?,
-                fixed_sql(&row.get::<_, Vec<u8>>(4)?)?,
-                fixed_sql(&row.get::<_, Vec<u8>>(5)?)?,
-            )?);
+            values.push(
+                self.open_operational_credential(
+                    &connection,
+                    fixed_sql(&row.get::<_, Vec<u8>>(0)?)?,
+                    fixed_sql(&row.get::<_, Vec<u8>>(1)?)?,
+                    &row.get::<_, Vec<u8>>(2)?,
+                    &row.get::<_, Vec<u8>>(3)?,
+                    fixed_sql(&row.get::<_, Vec<u8>>(4)?)?,
+                    fixed_sql(&row.get::<_, Vec<u8>>(5)?)?,
+                )?
+                .descriptor,
+            );
         }
         Ok(values)
     }
@@ -340,7 +381,45 @@ impl DelegatedVault {
             .optional()?;
         let (revision, package, grant, event, commitment) =
             row.ok_or(AuthorizationError::CredentialUnavailable)?;
-        self.open_credential(
+        Ok(self
+            .open_operational_credential(
+                &connection,
+                item,
+                fixed_sql(&revision)?,
+                &package,
+                &grant,
+                fixed_sql(&event)?,
+                fixed_sql(&commitment)?,
+            )?
+            .descriptor)
+    }
+
+    /// Resolves the RPK-bound subject and generation without applying the
+    /// independent global suspension switch. This is the ownership seam used
+    /// by get/cancel; revoked generations still fail closed.
+    ///
+    /// # Errors
+    /// Returns a stable denial for an unknown, revoked, or corrupt RPK binding.
+    pub fn agent_identity(&self, peer: &AgentPeer) -> Result<AgentIdentity, AuthorizationError> {
+        let connection = open_connection(&self.path)?;
+        self.verify_agent(&connection, peer)
+    }
+
+    pub(crate) fn operational_credential(
+        &self,
+        peer: &AgentPeer,
+        item: [u8; 16],
+    ) -> Result<OperationalCredential, AuthorizationError> {
+        let connection = open_connection(&self.path)?;
+        self.verify_agent_and_global(&connection, peer)?;
+        let row: Option<CredentialRow> = connection.query_row(
+            "SELECT revision_id,control_package,grant,event_digest,grant_commitment FROM credential_authorizations WHERE item_id=?1 AND status='enabled'",
+            [item.as_slice()],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+        ).optional()?;
+        let (revision, package, grant, event, commitment) =
+            row.ok_or(AuthorizationError::CredentialUnavailable)?;
+        self.open_operational_credential(
             &connection,
             item,
             fixed_sql(&revision)?,
@@ -349,6 +428,21 @@ impl DelegatedVault {
             fixed_sql(&event)?,
             fixed_sql(&commitment)?,
         )
+    }
+
+    pub(crate) fn operational_credential_for_identity(
+        &self,
+        identity: AgentIdentity,
+        item: [u8; 16],
+    ) -> Result<OperationalCredential, AuthorizationError> {
+        let connection = open_connection(&self.path)?;
+        let rpk: Vec<u8> = connection.query_row(
+            "SELECT transport_rpk FROM agent_authorizations WHERE subject_id=?1 AND generation=?2",
+            rusqlite::params![identity.subject.as_slice(), i64::try_from(identity.generation).map_err(|_| AuthorizationError::Integrity)?],
+            |row| row.get(0),
+        ).optional()?.ok_or(AuthorizationError::AgentRevoked)?;
+        let peer = AgentPeer::from_transport_rpk(&rpk)?;
+        self.operational_credential(&peer, item)
     }
 
     /// Exposes verified causal headers for ticket-16 reduction without a second ledger.
@@ -385,6 +479,35 @@ impl DelegatedVault {
         connection: &Connection,
         peer: &AgentPeer,
     ) -> Result<(), AuthorizationError> {
+        self.verify_agent(connection, peer)?;
+        let global: Option<(String, Vec<u8>)> = connection
+            .query_row(
+                "SELECT status,event_digest FROM delegated_state WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (global_status, global_digest) = global.ok_or(AuthorizationError::AccessSuspended)?;
+        let global_event = self.verify_authority_event(connection, fixed_sql(&global_digest)?)?;
+        let expected_kind = if global_status == "resumed" {
+            "resume"
+        } else {
+            "suspend"
+        };
+        if global_event.kind != expected_kind || global_event.subject != *self.trusted.vault_id() {
+            return Err(AuthorizationError::Integrity);
+        }
+        if global_status != "resumed" {
+            return Err(AuthorizationError::AccessSuspended);
+        }
+        Ok(())
+    }
+
+    fn verify_agent(
+        &self,
+        connection: &Connection,
+        peer: &AgentPeer,
+    ) -> Result<AgentIdentity, AuthorizationError> {
         type AgentStatus = (Vec<u8>, i64, String, Vec<u8>, Option<Vec<u8>>);
         let authorization: Option<AgentStatus> = connection
             .query_row(
@@ -431,31 +554,14 @@ impl DelegatedVault {
             "superseded" => return Err(AuthorizationError::AgentRevoked),
             _ => return Err(AuthorizationError::Integrity),
         }
-        let global: Option<(String, Vec<u8>)> = connection
-            .query_row(
-                "SELECT status,event_digest FROM delegated_state WHERE singleton=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let (global_status, global_digest) = global.ok_or(AuthorizationError::AccessSuspended)?;
-        let global_event = self.verify_authority_event(connection, fixed_sql(&global_digest)?)?;
-        let expected_kind = if global_status == "resumed" {
-            "resume"
-        } else {
-            "suspend"
-        };
-        if global_event.kind != expected_kind || global_event.subject != *self.trusted.vault_id() {
-            return Err(AuthorizationError::Integrity);
-        }
-        if global_status != "resumed" {
-            return Err(AuthorizationError::AccessSuspended);
-        }
-        Ok(())
+        Ok(AgentIdentity {
+            subject,
+            generation,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn open_credential(
+    fn open_operational_credential(
         &self,
         connection: &Connection,
         item: [u8; 16],
@@ -464,7 +570,7 @@ impl DelegatedVault {
         grant: &[u8],
         event_digest: [u8; 32],
         commitment: [u8; 32],
-    ) -> Result<DelegatedCredential, AuthorizationError> {
+    ) -> Result<OperationalCredential, AuthorizationError> {
         let enable = self.verify_authority_event(connection, event_digest)?;
         if enable.kind != "enable" || enable.subject != item {
             return Err(AuthorizationError::Integrity);
@@ -487,8 +593,8 @@ impl DelegatedVault {
                 revision,
             )
             .map_err(|_| AuthorizationError::Integrity)?;
-        let credential = decode_credential(&plaintext)?;
-        if credential.item_id != item || credential.revision_id != revision {
+        let credential = decode_operational_credential(&plaintext)?;
+        if credential.descriptor.item_id != item || credential.descriptor.revision_id != revision {
             return Err(AuthorizationError::Integrity);
         }
         Ok(credential)
@@ -582,9 +688,9 @@ pub(crate) fn encode_g5_event(input: &G5EventInput<'_>) -> Vec<u8> {
     e.into_writer()
 }
 
-pub(crate) fn encode_credential(value: &DelegatedCredential) -> Vec<u8> {
+pub(crate) fn encode_credential(value: &DelegatedCredential, auth: &[u8]) -> Vec<u8> {
     let mut e = Encoder::new(Vec::new());
-    e.map(6).unwrap();
+    e.map(7).unwrap();
     e.str("item_id").unwrap().bytes(&value.item_id).unwrap();
     e.str("revision_id")
         .unwrap()
@@ -596,6 +702,7 @@ pub(crate) fn encode_credential(value: &DelegatedCredential) -> Vec<u8> {
     optional_string(&mut e, value.destination.as_deref());
     e.str("account").unwrap();
     optional_string(&mut e, value.account.as_deref());
+    e.str("auth").unwrap().bytes(auth).unwrap();
     e.into_writer()
 }
 
@@ -617,9 +724,11 @@ pub(crate) fn new_credential(
     }
 }
 
-fn decode_credential(bytes: &[u8]) -> Result<DelegatedCredential, AuthorizationError> {
+fn decode_operational_credential(
+    bytes: &[u8],
+) -> Result<OperationalCredential, AuthorizationError> {
     let mut d = Decoder::new(bytes);
-    expect_map(&mut d, 6)?;
+    expect_map(&mut d, 7)?;
     expect_key(&mut d, "item_id")?;
     let item_id = fixed_decode(&mut d)?;
     expect_key(&mut d, "revision_id")?;
@@ -636,10 +745,16 @@ fn decode_credential(bytes: &[u8]) -> Result<DelegatedCredential, AuthorizationE
     let destination = optional_string_decode(&mut d)?;
     expect_key(&mut d, "account")?;
     let account = optional_string_decode(&mut d)?;
+    expect_key(&mut d, "auth")?;
+    let auth = Zeroizing::new(
+        d.bytes()
+            .map_err(|_| AuthorizationError::Integrity)?
+            .to_vec(),
+    );
     if d.position() != bytes.len() {
         return Err(AuthorizationError::Integrity);
     }
-    let value = DelegatedCredential {
+    let descriptor = DelegatedCredential {
         item_id,
         revision_id,
         kind,
@@ -647,10 +762,10 @@ fn decode_credential(bytes: &[u8]) -> Result<DelegatedCredential, AuthorizationE
         destination,
         account,
     };
-    if encode_credential(&value) != bytes {
+    if encode_credential(&descriptor, &auth) != bytes {
         return Err(AuthorizationError::Integrity);
     }
-    Ok(value)
+    Ok(OperationalCredential { descriptor, auth })
 }
 
 fn decode_event_header(

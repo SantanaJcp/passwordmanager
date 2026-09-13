@@ -1253,6 +1253,182 @@ impl AuditDeviceKeyPair {
         )
     }
 
+    /// Creates a device-only `K_ATT` package for one authentication attempt.
+    /// The attempt key is never wrapped by, or recoverable through, `K_H`.
+    ///
+    /// # Errors
+    /// Returns an error for invalid context, oversized state, or cryptographic failure.
+    pub fn seal_attempt_state(
+        &self,
+        vault: [u8; ID_BYTES],
+        device: [u8; ID_BYTES],
+        generation: u64,
+        attempt: [u8; ID_BYTES],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        if generation == 0 || plaintext.len() > MAX_OBJECT_BYTES {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let target = target_header(vault, attempt, attempt, Purpose::AttemptState, generation);
+        let key = Secret::random()?;
+        let envelope = seal(&key, target.clone(), plaintext)?;
+        let mut key_plaintext = encode_sealed_key(&key, &target, &device, generation);
+        let mut key_box = vec![0_u8; key_plaintext.len() + 48];
+        let result = unsafe {
+            // SAFETY: output/input/public-key buffers have documented sizes.
+            libsodium_sys::crypto_box_seal(
+                key_box.as_mut_ptr(),
+                key_plaintext.as_ptr(),
+                key_plaintext.len() as u64,
+                self.encryption_public_key.as_ptr(),
+            )
+        };
+        wipe_vec(&mut key_plaintext);
+        if result != 0 {
+            return Err(CryptoError::Authentication);
+        }
+        let unsigned = encode_attempt_package_unsigned(device, generation, &envelope, &key_box);
+        let signature = sign_detached(
+            &self.signing_seed,
+            &domain_message(b"pm/attempt-key/v1", &unsigned),
+        )?;
+        Ok(encode_attempt_package(
+            device, generation, &envelope, &key_box, &signature,
+        ))
+    }
+
+    /// Re-encrypts state with the existing per-attempt `K_ATT` and a fresh nonce.
+    ///
+    /// # Errors
+    /// Returns an error for altered packages, mismatched context, or encryption failure.
+    pub fn update_attempt_state(
+        &self,
+        bytes: &[u8],
+        vault: [u8; ID_BYTES],
+        device: [u8; ID_BYTES],
+        generation: u64,
+        attempt: [u8; ID_BYTES],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let (stored_device, stored_generation, envelope, key_box, _) =
+            self.verify_attempt_package(bytes, vault, device, generation, attempt)?;
+        let key = self.open_attempt_key(&envelope, &key_box, device, generation)?;
+        let replacement = seal(&key, envelope.header.clone(), plaintext)?;
+        let unsigned = encode_attempt_package_unsigned(
+            stored_device,
+            stored_generation,
+            &replacement,
+            &key_box,
+        );
+        let signature = sign_detached(
+            &self.signing_seed,
+            &domain_message(b"pm/attempt-key/v1", &unsigned),
+        )?;
+        Ok(encode_attempt_package(
+            stored_device,
+            stored_generation,
+            &replacement,
+            &key_box,
+            &signature,
+        ))
+    }
+
+    /// Opens authenticated attempt state after checking the complete custody context.
+    ///
+    /// # Errors
+    /// Returns an error for altered packages or any vault/device/generation mismatch.
+    pub fn open_attempt_state(
+        &self,
+        bytes: &[u8],
+        vault: [u8; ID_BYTES],
+        device: [u8; ID_BYTES],
+        generation: u64,
+        attempt: [u8; ID_BYTES],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let (_, _, envelope, key_box, _) =
+            self.verify_attempt_package(bytes, vault, device, generation, attempt)?;
+        let key = self.open_attempt_key(&envelope, &key_box, device, generation)?;
+        open(&key, &envelope)
+    }
+
+    fn verify_attempt_package(
+        &self,
+        bytes: &[u8],
+        vault: [u8; ID_BYTES],
+        device: [u8; ID_BYTES],
+        generation: u64,
+        attempt: [u8; ID_BYTES],
+    ) -> Result<AttemptPackage, CryptoError> {
+        let (stored_device, stored_generation, envelope, key_box, signature) =
+            decode_attempt_package(bytes)?;
+        if stored_device != device
+            || stored_generation != generation
+            || envelope.header.vault != vault
+            || envelope.header.object != attempt
+            || envelope.header.revision != attempt
+            || envelope.header.purpose != Purpose::AttemptState
+            || envelope.header.key_generation != generation
+        {
+            return Err(CryptoError::Authentication);
+        }
+        let unsigned =
+            encode_attempt_package_unsigned(stored_device, stored_generation, &envelope, &key_box);
+        let signed_message = domain_message(b"pm/attempt-key/v1", &unsigned);
+        if unsafe {
+            // SAFETY: detached signature and public key have fixed documented sizes.
+            libsodium_sys::crypto_sign_verify_detached(
+                signature.as_ptr(),
+                signed_message.as_ptr(),
+                signed_message.len() as u64,
+                self.signing_public_key.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(CryptoError::Authentication);
+        }
+        Ok((
+            stored_device,
+            stored_generation,
+            envelope,
+            key_box,
+            signature,
+        ))
+    }
+
+    fn open_attempt_key(
+        &self,
+        envelope: &Envelope,
+        key_box: &[u8],
+        device: [u8; 16],
+        generation: u64,
+    ) -> Result<Secret, CryptoError> {
+        if key_box.len() < 48 {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let mut plaintext = vec![0_u8; key_box.len() - 48];
+        if unsafe {
+            // SAFETY: sealed-box buffers and device keys have documented sizes.
+            libsodium_sys::crypto_box_seal_open(
+                plaintext.as_mut_ptr(),
+                key_box.as_ptr(),
+                key_box.len() as u64,
+                self.encryption_public_key.as_ptr(),
+                self.encryption_private_key.0.as_ptr(),
+            )
+        } != 0
+        {
+            wipe_vec(&mut plaintext);
+            return Err(CryptoError::Authentication);
+        }
+        let decoded = decode_sealed_audit_key(&plaintext);
+        wipe_vec(&mut plaintext);
+        let (key, target, recipient, stored_generation) = decoded?;
+        if recipient != device || stored_generation != generation || target != envelope.header {
+            return Err(CryptoError::Authentication);
+        }
+        Ok(key)
+    }
+
     /// Opens a typed control package sealed to this device. Authority-event
     /// verification and package-digest membership remain the caller's job.
     ///
@@ -2857,6 +3033,64 @@ fn decode_control_package(bytes: &[u8]) -> Result<ControlPackage, CryptoError> {
         return Err(CryptoError::InvalidFormat);
     }
     Ok(package)
+}
+
+fn encode_attempt_package_unsigned(
+    device: [u8; 16],
+    generation: u64,
+    envelope: &Envelope,
+    key_box: &[u8],
+) -> Vec<u8> {
+    let mut e = Encoder::new(Vec::new());
+    e.array(4).expect("Vec writes cannot fail");
+    e.bytes(&device).expect("Vec writes cannot fail");
+    e.u64(generation).expect("Vec writes cannot fail");
+    e.bytes(&encode_envelope(envelope))
+        .expect("Vec writes cannot fail");
+    e.bytes(key_box).expect("Vec writes cannot fail");
+    e.into_writer()
+}
+
+fn encode_attempt_package(
+    device: [u8; 16],
+    generation: u64,
+    envelope: &Envelope,
+    key_box: &[u8],
+    signature: &[u8; 64],
+) -> Vec<u8> {
+    let mut e = Encoder::new(Vec::new());
+    e.array(5).expect("Vec writes cannot fail");
+    e.bytes(&device).expect("Vec writes cannot fail");
+    e.u64(generation).expect("Vec writes cannot fail");
+    e.bytes(&encode_envelope(envelope))
+        .expect("Vec writes cannot fail");
+    e.bytes(key_box).expect("Vec writes cannot fail");
+    e.bytes(signature).expect("Vec writes cannot fail");
+    e.into_writer()
+}
+
+type AttemptPackage = ([u8; 16], u64, Envelope, Vec<u8>, [u8; 64]);
+
+fn decode_attempt_package(bytes: &[u8]) -> Result<AttemptPackage, CryptoError> {
+    if bytes.len() > MAX_OBJECT_BYTES {
+        return Err(CryptoError::InvalidFormat);
+    }
+    let mut d = Decoder::new(bytes);
+    if d.array().map_err(invalid)? != Some(5) {
+        return Err(CryptoError::InvalidFormat);
+    }
+    let device = decode_bytes(&mut d)?;
+    let generation = d.u64().map_err(invalid)?;
+    let envelope = decode_envelope(d.bytes().map_err(invalid)?)?;
+    let key_box = d.bytes().map_err(invalid)?.to_vec();
+    let signature = decode_bytes(&mut d)?;
+    if generation == 0
+        || d.position() != bytes.len()
+        || encode_attempt_package(device, generation, &envelope, &key_box, &signature) != bytes
+    {
+        return Err(CryptoError::InvalidFormat);
+    }
+    Ok((device, generation, envelope, key_box, signature))
 }
 
 fn encode_aad(header: &Header) -> Vec<u8> {

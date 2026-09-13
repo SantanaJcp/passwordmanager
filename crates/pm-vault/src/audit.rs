@@ -239,6 +239,46 @@ impl AuditDeviceCustody {
         Ok(self.keys.sign_device_event(event)?)
     }
 
+    pub(crate) fn seal_attempt_state(
+        &self,
+        vault: [u8; 16],
+        device: [u8; 16],
+        generation: u64,
+        attempt: [u8; 16],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, HumanCommitError> {
+        Ok(self
+            .keys
+            .seal_attempt_state(vault, device, generation, attempt, plaintext)?)
+    }
+
+    pub(crate) fn update_attempt_state(
+        &self,
+        package: &[u8],
+        vault: [u8; 16],
+        device: [u8; 16],
+        generation: u64,
+        attempt: [u8; 16],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, HumanCommitError> {
+        Ok(self
+            .keys
+            .update_attempt_state(package, vault, device, generation, attempt, plaintext)?)
+    }
+
+    pub(crate) fn open_attempt_state(
+        &self,
+        package: &[u8],
+        vault: [u8; 16],
+        device: [u8; 16],
+        generation: u64,
+        attempt: [u8; 16],
+    ) -> Result<Vec<u8>, HumanCommitError> {
+        Ok(self
+            .keys
+            .open_attempt_state(package, vault, device, generation, attempt)?)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_control_package(
         &self,
@@ -1243,7 +1283,7 @@ fn encode_stored_record(envelope: &[u8], signature: &[u8; 64]) -> Vec<u8> {
     e.str("signature").unwrap().bytes(signature).unwrap();
     e.into_writer()
 }
-fn current_frontier(connection: &Connection) -> Result<[u8; 32], HumanCommitError> {
+pub(crate) fn current_frontier(connection: &Connection) -> Result<[u8; 32], HumanCommitError> {
     connection
         .query_row(
             "SELECT event_digest FROM authority_events ORDER BY rowid DESC LIMIT 1",
@@ -1258,7 +1298,7 @@ fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
     c.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY; PRAGMA trusted_schema=OFF;")?;
     Ok(c)
 }
-fn now_us() -> Result<i64, HumanCommitError> {
+pub(crate) fn now_us() -> Result<i64, HumanCommitError> {
     let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| HumanCommitError::InvalidCommand)?;
