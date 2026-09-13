@@ -683,10 +683,13 @@ pub fn public_attempt_result(
     let Some(result) = result else {
         return Ok(Json::Null);
     };
-    let value = parse_json(result).map_err(|_| ErrorCode::Internal)?;
     match integration_id {
-        "keycloak-browser-oidc" => validate_oidc_result(value),
-        "ssh-server" | "linux-system-ssh" => validate_ssh_result(value),
+        "keycloak-browser-oidc" => {
+            validate_oidc_result(parse_json(result).map_err(|_| ErrorCode::Internal)?)
+        }
+        "ssh-server" | "linux-system-ssh" => {
+            validate_ssh_result(parse_json(result).map_err(|_| ErrorCode::Internal)?)
+        }
         _ => Ok(Json::Null),
     }
 }
@@ -1153,6 +1156,10 @@ mod tests {
         );
         assert_eq!(
             public_attempt_result("unknown", Some(valid)).unwrap(),
+            Json::Null
+        );
+        assert_eq!(
+            public_attempt_result("controlled.external", Some(b"private provider bytes")).unwrap(),
             Json::Null
         );
     }
