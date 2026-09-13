@@ -409,13 +409,28 @@ impl DelegatedVault {
         self.verify_agent(&connection, peer)
     }
 
-    pub(crate) fn operational_credential(
+    pub(crate) fn operational_credential_for_identity(
         &self,
-        peer: &AgentPeer,
+        identity: AgentIdentity,
         item: [u8; 16],
     ) -> Result<OperationalCredential, AuthorizationError> {
         let connection = open_connection(&self.path)?;
-        self.verify_agent_and_global(&connection, peer)?;
+        self.operational_credential_for_identity_in(&connection, identity, item)
+    }
+
+    pub(crate) fn operational_credential_for_identity_in(
+        &self,
+        connection: &Connection,
+        identity: AgentIdentity,
+        item: [u8; 16],
+    ) -> Result<OperationalCredential, AuthorizationError> {
+        let rpk: Vec<u8> = connection.query_row(
+            "SELECT transport_rpk FROM agent_authorizations WHERE subject_id=?1 AND generation=?2",
+            rusqlite::params![identity.subject.as_slice(), i64::try_from(identity.generation).map_err(|_| AuthorizationError::Integrity)?],
+            |row| row.get(0),
+        ).optional()?.ok_or(AuthorizationError::AgentRevoked)?;
+        let peer = AgentPeer::from_transport_rpk(&rpk)?;
+        self.verify_agent_and_global(connection, &peer)?;
         let row: Option<CredentialRow> = connection.query_row(
             "SELECT revision_id,control_package,grant,event_digest,grant_commitment FROM credential_authorizations WHERE item_id=?1 AND status='enabled'",
             [item.as_slice()],
@@ -424,7 +439,7 @@ impl DelegatedVault {
         let (revision, package, grant, event, commitment) =
             row.ok_or(AuthorizationError::CredentialUnavailable)?;
         self.open_operational_credential(
-            &connection,
+            connection,
             item,
             fixed_sql(&revision)?,
             &package,
@@ -432,21 +447,6 @@ impl DelegatedVault {
             fixed_sql(&event)?,
             fixed_sql(&commitment)?,
         )
-    }
-
-    pub(crate) fn operational_credential_for_identity(
-        &self,
-        identity: AgentIdentity,
-        item: [u8; 16],
-    ) -> Result<OperationalCredential, AuthorizationError> {
-        let connection = open_connection(&self.path)?;
-        let rpk: Vec<u8> = connection.query_row(
-            "SELECT transport_rpk FROM agent_authorizations WHERE subject_id=?1 AND generation=?2",
-            rusqlite::params![identity.subject.as_slice(), i64::try_from(identity.generation).map_err(|_| AuthorizationError::Integrity)?],
-            |row| row.get(0),
-        ).optional()?.ok_or(AuthorizationError::AgentRevoked)?;
-        let peer = AgentPeer::from_transport_rpk(&rpk)?;
-        self.operational_credential(&peer, item)
     }
 
     /// Exposes verified causal headers for ticket-16 reduction without a second ledger.

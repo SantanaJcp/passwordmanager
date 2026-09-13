@@ -12,8 +12,9 @@ use std::{
 
 use minicbor::{Decoder, Encoder, data::Type};
 use pm_crypto::{
-    ControlPackageInput, CryptoError, DigestState, GrantVectorInput, RevisionPackageInput,
-    TrustedRoot, UnlockedRoot, digest, fill_random, random_id, verify_human_command,
+    ControlPackageInput, CryptoError, DigestState, GrantVectorInput, PasskeyKeyPair,
+    RevisionPackageInput, TrustedRoot, UnlockedRoot, digest, fill_random, random_id,
+    verify_human_command,
 };
 pub use pm_native_channel::AuthenticatedHumanChannel as HumanChannel;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -30,8 +31,10 @@ use crate::migration::{
 };
 use crate::{
     AgentEnrollment, AuthRecord, AuthorizationError, AuthorizationReason, CausalEventDraft,
-    Destination, GeneratedPassword, GeneratorConfig, HumanMetadata, LogicalRecord, PasswordRng,
-    PreparedAgentEnrollment, RecordKind, SearchHit, SearchQuery, VaultError, content, unlock_root,
+    Destination, GeneratedPassword, GeneratorConfig, HumanMetadata, LogicalRecord,
+    PasskeyAssertion, PasskeyError, PasskeyOperation, PasskeyPublicCredential, PasskeyRequest,
+    PasswordRng, PreparedAgentEnrollment, PreparedPasskeyRegistration, RecordKind, SearchHit,
+    SearchQuery, VaultError, content, unlock_root,
 };
 
 const CHALLENGE_LIFETIME_US: i64 = 60_000_000;
@@ -1022,6 +1025,121 @@ impl HumanVault {
         record: &LogicalRecord,
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
         self.prepare_record_write(random_id()?, record)
+    }
+
+    /// Generates and stages one independent Ed25519 passkey credential. The
+    /// private seed is included only in the encrypted logical revision.
+    ///
+    /// # Errors
+    /// Returns an error unless this is a valid browser registration request or
+    /// secure key generation/staging fails.
+    pub fn prepare_passkey_registration(
+        &mut self,
+        request: &PasskeyRequest,
+    ) -> Result<PreparedPasskeyRegistration, PasskeyError> {
+        if request.operation() != PasskeyOperation::Create {
+            return Err(PasskeyError::InvalidRequest);
+        }
+        let key = PasskeyKeyPair::generate().map_err(HumanCommitError::from)?;
+        let mut credential_id = vec![0_u8; 32];
+        fill_random(&mut credential_id).map_err(HumanCommitError::from)?;
+        let public = PasskeyPublicCredential::new(
+            credential_id.clone(),
+            request.rp_id().to_owned(),
+            request.user_handle().to_vec(),
+            *key.public_key(),
+            request.user_name().to_owned(),
+            request.display_name().to_owned(),
+            true,
+            false,
+        );
+        let record = LogicalRecord::new(
+            RecordKind::Passkey,
+            HumanMetadata {
+                title: format!("Passkey for {}", request.rp_id()),
+                destinations: vec![Destination {
+                    label: "RP origin".into(),
+                    value: request.origin().to_owned(),
+                }],
+                tags: Vec::new(),
+                favorite: false,
+                notes: String::new(),
+                fields: Vec::new(),
+                source_fields: Vec::new(),
+            },
+            vec![AuthRecord::Passkey {
+                rp_id: request.rp_id().to_owned(),
+                user_handle: request.user_handle().to_vec(),
+                credential_id,
+                cose_alg: -8,
+                private_key: key.seed(),
+                public_key: *key.public_key(),
+                user_name: request.user_name().to_owned(),
+                display_name: request.display_name().to_owned(),
+                sign_count: 0,
+                backup_eligible: true,
+                backup_state: false,
+            }],
+            Vec::new(),
+        )?;
+        let prepared = self.prepare_create_record(&record)?;
+        Ok(PreparedPasskeyRegistration { prepared, public })
+    }
+
+    pub(crate) fn sign_passkey_assertion(
+        &self,
+        item: [u8; 16],
+        request: &PasskeyRequest,
+        verified: bool,
+    ) -> Result<PasskeyAssertion, PasskeyError> {
+        self.channel.verify().map_err(HumanCommitError::from)?;
+        if request.operation() != PasskeyOperation::Get {
+            return Err(PasskeyError::InvalidRequest);
+        }
+        let record = self.read_record(item)?;
+        let [
+            AuthRecord::Passkey {
+                rp_id,
+                user_handle,
+                credential_id,
+                private_key,
+                public_key,
+                sign_count,
+                ..
+            },
+        ] = record.auth()
+        else {
+            return Err(PasskeyError::Integrity);
+        };
+        if rp_id != request.rp_id()
+            || !request
+                .credential_ids()
+                .iter()
+                .any(|id| id == credential_id)
+            || *sign_count != 0
+        {
+            return Err(PasskeyError::InvalidRequest);
+        }
+        let key = PasskeyKeyPair::from_seed(*private_key).map_err(HumanCommitError::from)?;
+        if key.public_key() != public_key {
+            return Err(PasskeyError::Integrity);
+        }
+        let client_data_json = crate::passkey::client_data_json(request);
+        let mut authenticator_data = Vec::with_capacity(37);
+        authenticator_data.extend_from_slice(&digest(rp_id.as_bytes()));
+        authenticator_data.push(1 | if verified { 4 } else { 0 });
+        authenticator_data.extend_from_slice(&0_u32.to_be_bytes());
+        let mut signed_message = authenticator_data.clone();
+        signed_message.extend_from_slice(&digest(&client_data_json));
+        let signature = key.sign(&signed_message).map_err(HumanCommitError::from)?;
+        Ok(PasskeyAssertion::new(
+            credential_id.clone(),
+            authenticator_data,
+            client_data_json,
+            signature,
+            user_handle.clone(),
+            signed_message,
+        ))
     }
 
     /// Parses a bounded CSV source and classifies every row without writing it.

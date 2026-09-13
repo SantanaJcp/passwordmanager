@@ -419,6 +419,7 @@ dependencies = [
  "aws-lc-rs",
  "libc",
  "pm-crypto",
+ "pm-interface",
  "pm-native-channel",
  "pm-vault",
  "rustls",

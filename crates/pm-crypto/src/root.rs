@@ -1241,6 +1241,87 @@ impl AuditKeyPackage {
     }
 }
 
+/// One independently generated Ed25519 credential key for a custodial passkey.
+/// The seed is exposed only so the vault layer can place it inside an encrypted
+/// logical record; browser and delegated interfaces receive only the public key.
+pub struct PasskeyKeyPair {
+    public_key: [u8; KEY_BYTES],
+    seed: Secret,
+}
+
+impl PasskeyKeyPair {
+    /// Generates a fresh credential key unrelated to human, device or TLS keys.
+    ///
+    /// # Errors
+    /// Returns an error when native randomness/key generation is unavailable.
+    pub fn generate() -> Result<Self, CryptoError> {
+        sodium()?;
+        let seed = Secret::random()?;
+        let mut public_key = [0_u8; KEY_BYTES];
+        let mut expanded = [0_u8; 64];
+        let result = unsafe {
+            // SAFETY: buffers have libsodium's documented Ed25519 sizes.
+            libsodium_sys::crypto_sign_seed_keypair(
+                public_key.as_mut_ptr(),
+                expanded.as_mut_ptr(),
+                seed.0.as_ptr(),
+            )
+        };
+        // SAFETY: the expanded key is not retained by this abstraction.
+        unsafe { libsodium_sys::sodium_memzero(expanded.as_mut_ptr().cast(), expanded.len()) };
+        if result != 0 {
+            return Err(CryptoError::Authentication);
+        }
+        Ok(Self { public_key, seed })
+    }
+
+    /// Reconstitutes one credential key from the seed held by encrypted vault
+    /// custody. This constructor is intentionally not used by browser-facing
+    /// code.
+    ///
+    /// # Errors
+    /// Returns an error if native Ed25519 key derivation fails.
+    pub fn from_seed(seed: [u8; KEY_BYTES]) -> Result<Self, CryptoError> {
+        sodium()?;
+        let seed = Secret(seed);
+        let mut public_key = [0_u8; KEY_BYTES];
+        let mut expanded = [0_u8; 64];
+        let result = unsafe {
+            // SAFETY: buffers have libsodium's documented Ed25519 sizes.
+            libsodium_sys::crypto_sign_seed_keypair(
+                public_key.as_mut_ptr(),
+                expanded.as_mut_ptr(),
+                seed.0.as_ptr(),
+            )
+        };
+        // SAFETY: the expanded key is not retained by this abstraction.
+        unsafe { libsodium_sys::sodium_memzero(expanded.as_mut_ptr().cast(), expanded.len()) };
+        if result != 0 {
+            return Err(CryptoError::Authentication);
+        }
+        Ok(Self { public_key, seed })
+    }
+
+    #[must_use]
+    pub const fn public_key(&self) -> &[u8; KEY_BYTES] {
+        &self.public_key
+    }
+
+    /// Copies the seed for immediate encrypted persistence by `pm-vault`.
+    #[must_use]
+    pub const fn seed(&self) -> [u8; KEY_BYTES] {
+        self.seed.0
+    }
+
+    /// Signs the exact WebAuthn authenticator-data/client-data hash sequence.
+    ///
+    /// # Errors
+    /// Returns an error when native signing fails.
+    pub fn sign(&self, message: &[u8]) -> Result<[u8; 64], CryptoError> {
+        sign_detached(&self.seed, message)
+    }
+}
+
 /// Device-held X25519 envelope key plus independent Ed25519 audit provenance seed.
 pub struct AuditDeviceKeyPair {
     encryption_public_key: [u8; KEY_BYTES],
@@ -3884,6 +3965,33 @@ fn domain_message(domain: &[u8], payload: &[u8]) -> Vec<u8> {
         .expect("Vec writes cannot fail");
     encoder.writer_mut().extend_from_slice(payload);
     encoder.into_writer()
+}
+
+/// Verifies a raw Ed25519 WebAuthn signature against its credential public key.
+///
+/// # Errors
+/// Returns authentication failure for any wrong key, message or signature.
+pub fn verify_passkey_signature(
+    public_key: &[u8; 32],
+    message: &[u8],
+    signature: &[u8; 64],
+) -> Result<(), CryptoError> {
+    sodium()?;
+    if unsafe {
+        // SAFETY: pointers reference fixed public/signature buffers and the
+        // caller-supplied message for exactly its length.
+        libsodium_sys::crypto_sign_verify_detached(
+            signature.as_ptr(),
+            message.as_ptr(),
+            message.len() as u64,
+            public_key.as_ptr(),
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(CryptoError::Authentication)
+    }
 }
 
 fn verify_human_signature(

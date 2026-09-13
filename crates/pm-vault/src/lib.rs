@@ -8,6 +8,7 @@ mod authorization;
 mod content;
 mod human;
 mod migration;
+mod passkey;
 mod reducer;
 
 pub use attempts::{
@@ -34,6 +35,11 @@ pub use human::{
 pub use migration::{
     CsvDelimiter, CsvEncoding, CsvField, CsvImportDecision, CsvImportPreview, CsvImportProfile,
     CsvImportReport, CsvMapping, CsvRecordPreview, CsvRowPreview, CsvRowStatus, PreparedCsvImport,
+};
+pub use passkey::{
+    HumanVerification, PasskeyAssertion, PasskeyError, PasskeyOperation, PasskeyPrompt,
+    PasskeyProvider, PasskeyPublicCredential, PasskeyRequest, PasskeyStatus,
+    PreparedPasskeyRegistration, UserVerificationRequirement,
 };
 pub use reducer::{
     AcceptedPrefix, CausalEventBody, CausalEventDraft, CausalEventKind, CausalReducer,
@@ -512,6 +518,18 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                lease_token BLOB CHECK(lease_token IS NULL OR length(lease_token)=16),
                claimed_at_us INTEGER,
                provider_sent INTEGER NOT NULL DEFAULT 0 CHECK(provider_sent IN (0,1))
+             ) STRICT;
+             CREATE TABLE passkey_requests (
+               request_id BLOB PRIMARY KEY CHECK (length(request_id)=16),
+               request_digest BLOB NOT NULL CHECK (length(request_digest)=32),
+               operation TEXT NOT NULL CHECK (operation IN ('create','get')),
+               attempt_id BLOB CHECK (attempt_id IS NULL OR length(attempt_id)=16),
+               request BLOB NOT NULL CHECK (length(request) BETWEEN 1 AND 262144),
+               state TEXT NOT NULL CHECK (state IN ('waiting','complete')),
+               item_id BLOB CHECK (item_id IS NULL OR length(item_id)=16),
+               response BLOB CHECK (response IS NULL OR length(response) BETWEEN 1 AND 262144),
+               created_at_us INTEGER NOT NULL,
+               expires_at_us INTEGER NOT NULL CHECK (expires_at_us>created_at_us)
              ) STRICT;
              CREATE INDEX attempts_owner_state ON authentication_attempts(owner_subject,owner_generation,state);
              CREATE TABLE attempt_clock (

@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Passwordmanager custodial passkey bridge",
+  "version": "0.1.0",
+  "key": "MCowBQYDK2VwAyEAAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+  "permissions": ["nativeMessaging"],
+  "host_permissions": ["https://passkey.test/*"],
+  "background": {"service_worker": "service.js"},
+  "content_scripts": [{
+    "matches": ["https://passkey.test/*"],
+    "js": ["content.js"],
+    "all_frames": false,
+    "match_origin_as_fallback": false,
+    "run_at": "document_start",
+    "world": "ISOLATED"
+  }]
+}
