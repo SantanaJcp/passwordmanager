@@ -1,7 +1,7 @@
 # 14 — Passkey propia hasta login Keycloak
 
 Type: task
-Status: claimed
+Status: resolved
 Owner: sol-14
 Blocked by: 10,13
 Spec: ../spec.md
@@ -26,20 +26,27 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [x] exigencia UP/UV pausa/reanuda solo intento y no puede afirmarla el agente.
 - [x] challenge expirado/restart/revoke cuenta/origen incorrecto nunca producen éxito ni uso de sustituto virtual/llave OS.
 - [x] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
-- [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
+- [x] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
 ## Answer
 
-Candidato de implementación completo, pendiente solo de integración y
-verificación por merger. P4 registra una passkey propia contra Keycloak 26.7.3,
-habilita ese item por acción humana separada, usa la misma clave por
-MV3/Native Messaging/TLS-RPK y entrega únicamente un resultado OIDC validado.
-UP/UV usa `/dev/tty` con reautenticación fresca. Expiry, restart del proveedor,
-revocación, cuenta y origen incorrectos quedan cerrados sin autenticador
-virtual, llave de OS ni fallback. Evidencia exacta y límites en
-[ticket-14](../../../docs/verification/ticket-14.md).
+Implementado desde candidato `7df6191`, integrado semánticamente en `f778fa7`
+y enlazado como padre en `c385262`. La passkey propia completa el assertion real
+de Keycloak 26.7.3 con la misma clave y publica solo OIDC validado. UP/UV exige
+TTY y reautenticación fresca; expiry, restart, revocación, cuenta y origen
+incorrectos quedan cerrados sin autenticador virtual, llave OS ni fallback.
+El merger corrigió la colisión de framing del opcode 4 con token exchange y
+verificó `check.sh`, build limpio offline, P4 y los 16 labs Linux actuales.
+[Evidencia completa](../../../docs/verification/ticket-14.md). Revisión formal
+Astra y otros targets permanecen en sus gates posteriores.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-13 — Claimed por Sol tras integración verificada de 10 y 13; review Astra solo al finalizar el DAG.
+
+2026-09-13 — Merger separado resolvió los conflictos aditivos con 11/12/21/22,
+conservó resultados opacos de `controlled.external` y cerró la colisión de
+payload entre WebAuthn y token exchange. Check completo, clean offline y los 16
+labs Linux terminaron con exit 0; sin push, limpieza de worktrees ni review
+formal Astra.

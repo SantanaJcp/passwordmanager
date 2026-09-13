@@ -105,3 +105,45 @@ instrument.
   absence of a signed response execute in the real custody process.
 - Formal Astra review remains the final DAG gate. Integration and ticket
   resolution belong to the separate merger.
+
+## Verificación de integración unificada
+
+El merger integró el código candidato sobre `817fe1e` preservando los perfiles
+`keycloak-browser-oidc` y `keycloak-token-exchange`, SSH y los opcodes ya
+publicados. El primer P4 unificado fue rojo de forma reproducible: el framing
+compartido del opcode 4 añadía tanto el `credential_id` de WebAuthn como el
+`subject_token` exclusivo del exchange; al no existir ese token en una passkey,
+la llamada no llegaba al proveedor y la reconciliación cerraba el intento como
+`INTEGRITY_FAILURE`. La corrección separa los dos payloads por integration ID,
+sin sustitución ni ruta alternativa. El P4 posterior fue verde y el laboratorio
+P2 confirmó que el token exchange seguía intacto.
+
+Verificación final sobre el árbol integrado:
+
+```text
+./scripts/cargo-local.sh test -p pm-web-auth -p pm-vault -p pm-interface -p pm-cli
+# exit 0
+
+./scripts/check.sh
+# fmt, check/test workspace --all-targets y clippy -D warnings: exit 0
+
+./scripts/clean-offline-build.sh
+# removed 13,975 files / 4.0 GiB; locked/offline build finished in 38.81 s
+
+PM_KEYCLOAK_DIST=.scratch/lab-artifacts/keycloak/keycloak-26.7.3 \
+PM_CFT_DIR=.scratch/lab-artifacts/cft/chrome-linux64 \
+./scripts/test-linux-passkey-login-lab.sh
+# las cuatro líneas PASS P4 y los límites documentados; exit 0
+
+# Los 16 scripts/test-linux-*-lab.sh, en orden, con los mismos artefactos fijados
+# ALL_LABS_EXIT=0
+
+git diff --check
+./scripts/cargo-local.sh fmt --all -- --check
+# exit 0
+```
+
+La corrida conjunta cubrió P4 real y sus negativas de expiry, restart,
+revocación, cuenta y origen, además de las regresiones P1, P2, SSH, recovery,
+sync, contenido, historial, imports, backup, autorización, intentos y custodia.
+No se usó autenticador virtual, llave del OS, mock de aceptación ni fallback.
