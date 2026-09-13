@@ -153,3 +153,50 @@ owns the operational lost-device workflow that creates and atomically replaces
 a wholly new vault after separately verifying its new recovery path. No host
 reboot, production systemd/FDE, public Internet, real provider, real passkey
 ceremony, TUI, database-copy backup or production secret was exercised.
+
+## Unified merger verification
+
+Candidate `2a3415fad0096ffbc2a28bccd6d8c314cd854d8f`, based on
+`699ac1162243f874ddd3be090f672abca7d65578`, was merged without rewriting
+history as `3d76d029e5a0b39e7d8d50455978a8b7dc18affc` on top of unified HEAD
+`60d6016d2ab09277257a6a38a13b34bf36fa50ad`. The sole content conflict was
+additive in `pm-custody`: the merger retained ticket 20's 1PUX command and
+ticket 10's human opcode 40 together with the backup commands and plaintext
+confirmation opcode 33. Existing attempt opcodes 30--32 and all web, sync,
+history and import paths remained present.
+
+Focused and repository-wide verification on the integrated tree reported:
+
+```text
+./scripts/cargo-local.sh test -p pm-crypto --test backup_stream --locked --offline
+# 1 passed; 0 failed
+
+./scripts/cargo-local.sh test -p pm-vault --test backup_lifecycle --locked --offline
+# 5 passed; 0 failed
+
+./scripts/clean-offline-build.sh
+# Removed 8,826 files / 2.1 GiB; locked/offline build in 33.16 s: exit 0
+
+./scripts/check.sh
+# pinned inputs, fmt, workspace/all-target tests and clippy: exit 0
+
+git diff --check
+# exit 0
+```
+
+All eleven current `scripts/test-linux-*-lab.sh` laboratories passed on the
+integrated tree: 1PUX, attempts, authorization, backup, content, CSV, custody,
+history, human transaction, sync and web authentication. Ticket 21's exact
+observation remained:
+
+```text
+PASS backup-e2e tls=rpk+alpn/pm-human/1 native=PMB1/PMF1 plaintext=confirmed streaming=>2MiB inventory=exact history+trash=roundtrip authority=historical-only private-keys+grants+attempts=excluded corrupt+truncated=atomic source=immutable permissions=0600 role=human-only raw-canaries=absent
+```
+
+The web regression used the pinned repository-local Keycloak 26.7.3 and CFT
+153.0.8010.36 laboratory artifacts; it passed code+PKCE-S256, password+TOTP,
+pre-secret hostile DOM/iframe rejection, private CDP pipe/profile,
+post-response validation and challenge cancellation. It continues to report
+Chromium-own, six native targets and cross-platform coverage as not run/ticket
+33, rather than extending Ticket 21's claims. No Ticket 12 code was integrated,
+no worktree was removed, and no push or formal Astra review was performed.
