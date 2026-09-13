@@ -3,12 +3,17 @@
 //! Atomic persistence for already-encrypted vault objects.
 
 mod audit;
+mod authorization;
 mod content;
 mod human;
 
 pub use audit::{
     AuditAction, AuditActorKind, AuditDeviceCustody, AuditDiscontinuity, AuditEvent, AuditOutcome,
     AuditPurgeScope, AuditQuery, AuditRecordView, AutonomousAuditVault, PreparedAuditPurge,
+};
+pub use authorization::{
+    AgentEnrollment, AgentPeer, AuthorityEventHeader, AuthorizationError, AuthorizationReason,
+    DelegatedCredential, DelegatedVault, PreparedAgentEnrollment,
 };
 pub use content::{
     Attachment, AuthRecord, CustomField, Destination, GeneratedPassword, GeneratorConfig,
@@ -298,8 +303,18 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                event_digest BLOB PRIMARY KEY CHECK (length(event_digest) = 32),
                event_id BLOB NOT NULL UNIQUE CHECK (length(event_id) = 16),
                transaction_id BLOB NOT NULL UNIQUE CHECK (length(transaction_id) = 16),
+               issuer_device BLOB NOT NULL CHECK (length(issuer_device) = 16),
+               issuer_generation INTEGER NOT NULL CHECK (issuer_generation > 0),
+               seq INTEGER NOT NULL CHECK (seq > 0),
+               previous_digest BLOB CHECK (previous_digest IS NULL OR length(previous_digest) = 32),
+               parents BLOB NOT NULL CHECK (length(parents) BETWEEN 1 AND 262144),
+               kind TEXT NOT NULL,
+               subject BLOB NOT NULL CHECK (length(subject) = 16),
+               subject_generation INTEGER NOT NULL CHECK (subject_generation > 0),
                event BLOB NOT NULL CHECK (length(event) BETWEEN 1 AND 262144),
-               human_signature BLOB NOT NULL CHECK (length(human_signature) = 64)
+               human_signature BLOB NOT NULL CHECK (length(human_signature) = 64),
+               device_signature BLOB NOT NULL CHECK (length(device_signature) = 64),
+               UNIQUE (issuer_device,issuer_generation,seq)
              ) STRICT;
              CREATE TABLE outbox (
                event_digest BLOB PRIMARY KEY CHECK (length(event_digest) = 32),
@@ -316,8 +331,8 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              ) STRICT;
              CREATE TABLE human_staging (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
-               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'audit_purge')),
-               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'audit-purge')),
+               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'audit_purge', 'availability_change', 'identity_change')),
+               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume')),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB CHECK (revision_id IS NULL OR length(revision_id) = 16),
                body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144),
@@ -325,7 +340,10 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                item_kind TEXT CHECK (item_kind IS NULL OR item_kind IN ('password','totp','passkey','ssh','token','note','file')),
                attachments BLOB CHECK (attachments IS NULL OR length(attachments) BETWEEN 1 AND 18874368),
                audit_generation INTEGER CHECK (audit_generation IS NULL OR audit_generation > 0),
-               audit_through_seq INTEGER CHECK (audit_through_seq IS NULL OR audit_through_seq > 0)
+               audit_through_seq INTEGER CHECK (audit_through_seq IS NULL OR audit_through_seq > 0),
+               subject_generation INTEGER CHECK (subject_generation IS NULL OR subject_generation > 0),
+               authority_body BLOB CHECK (authority_body IS NULL OR length(authority_body) BETWEEN 1 AND 262144),
+               staged_grant BLOB CHECK (staged_grant IS NULL OR length(staged_grant) BETWEEN 1 AND 16777216)
              ) STRICT;
              CREATE TABLE human_staging_streams (
                transaction_id BLOB NOT NULL CHECK (length(transaction_id) = 16), attachment_id BLOB NOT NULL CHECK (length(attachment_id) = 16),
@@ -398,6 +416,32 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                last_seq INTEGER NOT NULL CHECK (last_seq >= first_seq),
                purge_event_id BLOB NOT NULL CHECK (length(purge_event_id) = 16),
                PRIMARY KEY (device_id,generation,first_seq,last_seq)
+             ) STRICT;
+             CREATE TABLE agent_authorizations (
+               subject_id BLOB NOT NULL CHECK (length(subject_id) = 16),
+               generation INTEGER NOT NULL CHECK (generation > 0),
+               request_id BLOB NOT NULL UNIQUE CHECK (length(request_id) = 16),
+               transport_rpk BLOB NOT NULL UNIQUE CHECK (length(transport_rpk) = 44),
+               label TEXT NOT NULL CHECK (length(CAST(label AS BLOB)) <= 256),
+               environment_binding TEXT NOT NULL CHECK (length(CAST(environment_binding AS BLOB)) <= 256),
+               grant_event_digest BLOB NOT NULL CHECK (length(grant_event_digest) = 32),
+               revoke_event_digest BLOB CHECK (revoke_event_digest IS NULL OR length(revoke_event_digest) = 32),
+               status TEXT NOT NULL CHECK (status IN ('active','revoked','superseded')),
+               PRIMARY KEY (subject_id,generation)
+             ) STRICT;
+             CREATE TABLE delegated_state (
+               singleton INTEGER PRIMARY KEY CHECK (singleton=1),
+               status TEXT NOT NULL CHECK (status IN ('resumed','suspended')),
+               event_digest BLOB NOT NULL CHECK (length(event_digest) = 32)
+             ) STRICT;
+             CREATE TABLE credential_authorizations (
+               item_id BLOB PRIMARY KEY CHECK (length(item_id) = 16),
+               revision_id BLOB NOT NULL CHECK (length(revision_id) = 16),
+               status TEXT NOT NULL CHECK (status IN ('enabled','disabled')),
+               event_digest BLOB NOT NULL CHECK (length(event_digest) = 32),
+               control_package BLOB NOT NULL CHECK (length(control_package) BETWEEN 1 AND 16777216),
+               grant BLOB NOT NULL CHECK (length(grant) BETWEEN 1 AND 16777216),
+               grant_commitment BLOB NOT NULL CHECK (length(grant_commitment) = 32)
              ) STRICT;",
         )?;
         let transaction = connection.transaction()?;

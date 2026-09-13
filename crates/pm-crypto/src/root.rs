@@ -403,6 +403,54 @@ impl UnlockedRoot {
         )
     }
 
+    /// Encrypts a bounded operational-control snapshot under a fresh `K_O`
+    /// and seals that key to the enrolled device wrapping key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for generation zero, oversized plaintext, unavailable
+    /// randomness, or failed authenticated encryption/sealed-box creation.
+    pub fn seal_control_package(
+        &self,
+        input: ControlPackageInput<'_>,
+        recipient_public_key: &[u8; 32],
+    ) -> Result<Vec<u8>, CryptoError> {
+        if input.recipient_generation == 0 {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let target = target_header(
+            self.vault,
+            input.object,
+            input.revision,
+            Purpose::Control,
+            input.recipient_generation,
+        );
+        let key = Secret::random()?;
+        let envelope = seal(&key, target.clone(), input.plaintext)?;
+        let mut key_plaintext =
+            encode_sealed_key(&key, &target, &input.recipient, input.recipient_generation);
+        let mut key_box = vec![0_u8; key_plaintext.len() + 48];
+        let result = unsafe {
+            // SAFETY: output/input/public-key buffers have documented sizes.
+            libsodium_sys::crypto_box_seal(
+                key_box.as_mut_ptr(),
+                key_plaintext.as_ptr(),
+                key_plaintext.len() as u64,
+                recipient_public_key.as_ptr(),
+            )
+        };
+        wipe_vec(&mut key_plaintext);
+        if result != 0 {
+            return Err(CryptoError::Authentication);
+        }
+        Ok(encode_control_package(&ControlPackage {
+            recipient: input.recipient,
+            recipient_generation: input.recipient_generation,
+            envelope,
+            key_box,
+        }))
+    }
+
     /// Creates one independent audit key with both a human-root envelope and
     /// a sealed device-custody envelope, then binds the complete package with
     /// the human authority signature.
@@ -872,6 +920,25 @@ impl UnlockedRoot {
             signature,
         })
     }
+
+    /// Completes a durably staged pending grant after its authority event is known.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed/noncanonical staged bytes or signing failure.
+    pub fn finish_staged_grant_vector(
+        &self,
+        staged: &[u8],
+        authority_event: [u8; 32],
+    ) -> Result<SignedGrantVector, CryptoError> {
+        self.finish_grant_vector(
+            PendingGrantVector {
+                fields: decode_grant_without_event(staged)?,
+                commitment: sha256(staged),
+            },
+            authority_event,
+        )
+    }
 }
 
 /// Public and encrypted material needed to activate a per-device audit key.
@@ -1172,6 +1239,126 @@ impl AuditDeviceKeyPair {
             &self.signing_seed,
             &domain_message(b"pm/audit-record/v1", envelope),
         )
+    }
+
+    /// Signs one canonical G5 event as device provenance, not human authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native Ed25519 signing fails.
+    pub fn sign_device_event(&self, event: &[u8]) -> Result<[u8; 64], CryptoError> {
+        sign_detached(
+            &self.signing_seed,
+            &domain_message(b"pm/device-event/v1", event),
+        )
+    }
+
+    /// Opens a typed control package sealed to this device. Authority-event
+    /// verification and package-digest membership remain the caller's job.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a wrong device/generation/object/revision, altered
+    /// ciphertext, or a package not sealed to this device key.
+    pub fn open_control_package(
+        &self,
+        bytes: &[u8],
+        expected_vault: [u8; 16],
+        expected_recipient: [u8; 16],
+        expected_generation: u64,
+        expected_object: [u8; 16],
+        expected_revision: [u8; 16],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let package = decode_control_package(bytes)?;
+        if expected_generation == 0
+            || package.recipient != expected_recipient
+            || package.recipient_generation != expected_generation
+            || package.envelope.header.vault != expected_vault
+            || package.envelope.header.object != expected_object
+            || package.envelope.header.revision != expected_revision
+            || package.envelope.header.purpose != Purpose::Control
+            || package.envelope.header.key_generation != expected_generation
+        {
+            return Err(CryptoError::Authentication);
+        }
+        if package.key_box.len() < 48 {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let mut plaintext = vec![0_u8; package.key_box.len() - 48];
+        if unsafe {
+            // SAFETY: all box buffers and device keys have documented sizes.
+            libsodium_sys::crypto_box_seal_open(
+                plaintext.as_mut_ptr(),
+                package.key_box.as_ptr(),
+                package.key_box.len() as u64,
+                self.encryption_public_key.as_ptr(),
+                self.encryption_private_key.0.as_ptr(),
+            )
+        } != 0
+        {
+            wipe_vec(&mut plaintext);
+            return Err(CryptoError::Authentication);
+        }
+        let decoded = decode_sealed_audit_key(&plaintext);
+        wipe_vec(&mut plaintext);
+        let (key, target, recipient, generation) = decoded?;
+        if recipient != expected_recipient
+            || generation != expected_generation
+            || target != package.envelope.header
+        {
+            return Err(CryptoError::Authentication);
+        }
+        open(&key, &package.envelope)
+    }
+
+    /// Verifies a human-signed grant bound to one authority event and opens
+    /// its device-sealed context. Returns the authenticated payload digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a wrong signature, commitment, recipient, event,
+    /// generation, or device wrapping key.
+    pub fn verify_grant_vector(
+        &self,
+        bytes: &[u8],
+        trusted_root: &TrustedRoot,
+        recipient: [u8; 16],
+        authority_event: [u8; 32],
+        commitment: [u8; 32],
+    ) -> Result<[u8; 32], CryptoError> {
+        let signed = decode_signed_grant(bytes)?;
+        verify_grant_fields(
+            &signed,
+            trusted_root,
+            recipient,
+            authority_event,
+            commitment,
+        )?;
+        let mut plaintext = vec![0_u8; signed.fields.sealed_box.len() - 48];
+        if unsafe {
+            // SAFETY: key and message buffers have the exact declared lengths.
+            libsodium_sys::crypto_box_seal_open(
+                plaintext.as_mut_ptr(),
+                signed.fields.sealed_box.as_ptr(),
+                signed.fields.sealed_box.len() as u64,
+                self.encryption_public_key.as_ptr(),
+                self.encryption_private_key.0.as_ptr(),
+            )
+        } != 0
+        {
+            wipe_vec(&mut plaintext);
+            return Err(CryptoError::Authentication);
+        }
+        let decoded = decode_sealed_key_context(&plaintext);
+        wipe_vec(&mut plaintext);
+        let (target, inner_recipient, generation) = decoded?;
+        if target != signed.fields.target_header
+            || inner_recipient != recipient
+            || generation != signed.fields.authorization_generation
+        {
+            return Err(CryptoError::Authentication);
+        }
+        Ok(signed.fields.payload_sha256)
     }
 }
 
@@ -1889,32 +2076,13 @@ impl DeviceKeyPair {
         commitment: [u8; 32],
     ) -> Result<(), CryptoError> {
         let signed = decode_signed_grant(bytes)?;
-        if signed.fields.vault != trusted_root.vault_id
-            || signed.fields.recipient != recipient
-            || signed.fields.authority_event != Some(authority_event)
-            || sha256(&encode_grant_without_event(&signed.fields)) != commitment
-            || signed.fields.target_header.vault != signed.fields.vault
-            || signed.fields.target_header.revision != signed.fields.revision
-            || signed.fields.target_header.purpose != Purpose::AuthPayload
-        {
-            return Err(CryptoError::Authentication);
-        }
-        let message = encode_grant_signature_message(&signed.fields);
-        if unsafe {
-            // SAFETY: signature/public key sizes and message buffer are valid.
-            libsodium_sys::crypto_sign_verify_detached(
-                signed.signature.as_ptr(),
-                message.as_ptr(),
-                message.len() as u64,
-                trusted_root.public_key.as_ptr(),
-            )
-        } != 0
-        {
-            return Err(CryptoError::Authentication);
-        }
-        if signed.fields.sealed_box.len() < 48 {
-            return Err(CryptoError::InvalidFormat);
-        }
+        verify_grant_fields(
+            &signed,
+            trusted_root,
+            recipient,
+            authority_event,
+            commitment,
+        )?;
         let mut plaintext = vec![0_u8; signed.fields.sealed_box.len() - 48];
         if unsafe {
             // SAFETY: key and message buffers have the exact declared lengths.
@@ -1951,6 +2119,23 @@ pub struct GrantVectorInput {
     pub payload_sha256: [u8; 32],
 }
 
+/// Context for a device-readable operational-control package.
+#[derive(Clone, Copy)]
+pub struct ControlPackageInput<'a> {
+    pub object: [u8; 16],
+    pub revision: [u8; 16],
+    pub recipient: [u8; 16],
+    pub recipient_generation: u64,
+    pub plaintext: &'a [u8],
+}
+
+struct ControlPackage {
+    recipient: [u8; 16],
+    recipient_generation: u64,
+    envelope: Envelope,
+    key_box: Vec<u8>,
+}
+
 pub struct PendingGrantVector {
     fields: GrantFields,
     commitment: [u8; 32],
@@ -1960,6 +2145,12 @@ impl PendingGrantVector {
     #[must_use]
     pub const fn commitment(&self) -> [u8; 32] {
         self.commitment
+    }
+
+    /// Returns canonical bytes suitable for durable pre-event staging.
+    #[must_use]
+    pub fn to_staged_bytes(&self) -> Vec<u8> {
+        encode_grant_without_event(&self.fields)
     }
 }
 
@@ -2179,6 +2370,33 @@ pub fn verify_human_event(
         &domain_message(b"pm/human-event/v1", event),
         signature,
     )
+}
+
+/// Verifies device provenance for one canonical G5 event.
+///
+/// # Errors
+///
+/// Returns authentication failure for a wrong device key, signature, or event.
+pub fn verify_device_event(
+    public_key: &[u8; 32],
+    event: &[u8],
+    signature: &[u8; 64],
+) -> Result<(), CryptoError> {
+    sodium()?;
+    let message = domain_message(b"pm/device-event/v1", event);
+    if unsafe {
+        // SAFETY: signature/public-key sizes and message buffer are valid.
+        libsodium_sys::crypto_sign_verify_detached(
+            signature.as_ptr(),
+            message.as_ptr(),
+            message.len() as u64,
+            public_key.as_ptr(),
+        )
+    } != 0
+    {
+        return Err(CryptoError::Authentication);
+    }
+    Ok(())
 }
 
 fn unlock_with_key(
@@ -2588,6 +2806,59 @@ fn decode_envelope(bytes: &[u8]) -> Result<Envelope, CryptoError> {
     Ok(envelope)
 }
 
+fn encode_control_package(package: &ControlPackage) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.map(4).expect("Vec writes cannot fail");
+    encoder.str("recipient").expect("Vec writes cannot fail");
+    encoder
+        .bytes(&package.recipient)
+        .expect("Vec writes cannot fail");
+    encoder
+        .str("recipient_generation")
+        .expect("Vec writes cannot fail");
+    encoder
+        .u64(package.recipient_generation)
+        .expect("Vec writes cannot fail");
+    encoder.str("envelope").expect("Vec writes cannot fail");
+    encoder
+        .bytes(&encode_envelope(&package.envelope))
+        .expect("Vec writes cannot fail");
+    encoder.str("key_box").expect("Vec writes cannot fail");
+    encoder
+        .bytes(&package.key_box)
+        .expect("Vec writes cannot fail");
+    encoder.into_writer()
+}
+
+fn decode_control_package(bytes: &[u8]) -> Result<ControlPackage, CryptoError> {
+    if bytes.len() > MAX_OBJECT_BYTES {
+        return Err(CryptoError::InvalidFormat);
+    }
+    let mut decoder = Decoder::new(bytes);
+    expect_map(&mut decoder, 4)?;
+    expect_key(&mut decoder, "recipient")?;
+    let recipient = decode_bytes(&mut decoder)?;
+    expect_key(&mut decoder, "recipient_generation")?;
+    let recipient_generation = decoder.u64().map_err(invalid)?;
+    expect_key(&mut decoder, "envelope")?;
+    let envelope = decode_envelope(decoder.bytes().map_err(invalid)?)?;
+    expect_key(&mut decoder, "key_box")?;
+    let key_box = decoder.bytes().map_err(invalid)?.to_vec();
+    if decoder.position() != bytes.len() {
+        return Err(CryptoError::InvalidFormat);
+    }
+    let package = ControlPackage {
+        recipient,
+        recipient_generation,
+        envelope,
+        key_box,
+    };
+    if recipient_generation == 0 || encode_control_package(&package) != bytes {
+        return Err(CryptoError::InvalidFormat);
+    }
+    Ok(package)
+}
+
 fn encode_aad(header: &Header) -> Vec<u8> {
     let mut encoder = Encoder::new(Vec::new());
     encoder.array(2).expect("Vec writes cannot fail");
@@ -2984,6 +3255,85 @@ fn decode_signed_grant(bytes: &[u8]) -> Result<SignedGrantVector, CryptoError> {
         return Err(CryptoError::InvalidFormat);
     }
     Ok(signed)
+}
+
+fn verify_grant_fields(
+    signed: &SignedGrantVector,
+    trusted_root: &TrustedRoot,
+    recipient: [u8; 16],
+    authority_event: [u8; 32],
+    commitment: [u8; 32],
+) -> Result<(), CryptoError> {
+    if signed.fields.vault != trusted_root.vault_id
+        || signed.fields.recipient != recipient
+        || signed.fields.authority_event != Some(authority_event)
+        || sha256(&encode_grant_without_event(&signed.fields)) != commitment
+        || signed.fields.target_header.vault != signed.fields.vault
+        || signed.fields.target_header.revision != signed.fields.revision
+        || signed.fields.target_header.purpose != Purpose::AuthPayload
+    {
+        return Err(CryptoError::Authentication);
+    }
+    let message = encode_grant_signature_message(&signed.fields);
+    if unsafe {
+        // SAFETY: signature/public key sizes and message buffer are valid.
+        libsodium_sys::crypto_sign_verify_detached(
+            signed.signature.as_ptr(),
+            message.as_ptr(),
+            message.len() as u64,
+            trusted_root.public_key.as_ptr(),
+        )
+    } != 0
+    {
+        return Err(CryptoError::Authentication);
+    }
+    if signed.fields.sealed_box.len() < 48 {
+        return Err(CryptoError::InvalidFormat);
+    }
+    Ok(())
+}
+
+fn decode_grant_without_event(bytes: &[u8]) -> Result<GrantFields, CryptoError> {
+    let mut decoder = Decoder::new(bytes);
+    expect_map(&mut decoder, 9)?;
+    expect_key(&mut decoder, "v")?;
+    if decoder.u64().map_err(invalid)? != FORMAT_VERSION {
+        return Err(CryptoError::InvalidFormat);
+    }
+    expect_key(&mut decoder, "item")?;
+    let item = decode_bytes(&mut decoder)?;
+    expect_key(&mut decoder, "vault")?;
+    let vault = decode_bytes(&mut decoder)?;
+    expect_key(&mut decoder, "revision")?;
+    let revision = decode_bytes(&mut decoder)?;
+    expect_key(&mut decoder, "recipient")?;
+    let recipient = decode_bytes(&mut decoder)?;
+    expect_key(&mut decoder, "sealed_box")?;
+    let sealed_box = decoder.bytes().map_err(invalid)?.to_vec();
+    expect_key(&mut decoder, "target_header")?;
+    let target_header = decode_header(&mut decoder)?;
+    expect_key(&mut decoder, "payload_sha256")?;
+    let payload_sha256 = decode_bytes(&mut decoder)?;
+    expect_key(&mut decoder, "authorization_generation")?;
+    let authorization_generation = decoder.u64().map_err(invalid)?;
+    if decoder.position() != bytes.len() {
+        return Err(CryptoError::InvalidFormat);
+    }
+    let fields = GrantFields {
+        vault,
+        item,
+        revision,
+        recipient,
+        authorization_generation,
+        target_header,
+        payload_sha256,
+        sealed_box,
+        authority_event: None,
+    };
+    if authorization_generation == 0 || encode_grant_without_event(&fields) != bytes {
+        return Err(CryptoError::InvalidFormat);
+    }
+    Ok(fields)
 }
 
 fn decode_grant_with_event(bytes: &[u8]) -> Result<GrantFields, CryptoError> {

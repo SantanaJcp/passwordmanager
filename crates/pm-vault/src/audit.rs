@@ -224,6 +224,59 @@ impl AuditDeviceCustody {
             keys: AuditDeviceKeyPair::from_protected_bytes(bytes)?,
         })
     }
+
+    #[must_use]
+    pub(crate) const fn encryption_public_key(&self) -> &[u8; 32] {
+        self.keys.encryption_public_key()
+    }
+
+    #[must_use]
+    pub(crate) const fn signing_public_key(&self) -> &[u8; 32] {
+        self.keys.signing_public_key()
+    }
+
+    pub(crate) fn sign_device_event(&self, event: &[u8]) -> Result<[u8; 64], HumanCommitError> {
+        Ok(self.keys.sign_device_event(event)?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_control_package(
+        &self,
+        bytes: &[u8],
+        vault: [u8; 16],
+        device: [u8; 16],
+        generation: u64,
+        object: [u8; 16],
+        revision: [u8; 16],
+    ) -> Result<Vec<u8>, HumanCommitError> {
+        Ok(self
+            .keys
+            .open_control_package(bytes, vault, device, generation, object, revision)?)
+    }
+
+    pub(crate) fn verify_grant_vector(
+        &self,
+        bytes: &[u8],
+        trusted: &TrustedRoot,
+        recipient: [u8; 16],
+        authority_event: [u8; 32],
+        commitment: [u8; 32],
+    ) -> Result<[u8; 32], HumanCommitError> {
+        Ok(self
+            .keys
+            .verify_grant_vector(bytes, trusted, recipient, authority_event, commitment)?)
+    }
+
+    pub(crate) fn validate_package(
+        &self,
+        package: &AuditKeyPackage,
+        trusted: &TrustedRoot,
+        device: [u8; 16],
+    ) -> Result<(), HumanCommitError> {
+        self.keys
+            .open_audit_key(package, trusted, device, package.generation())?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -714,7 +767,7 @@ fn ensure_package(
     Ok(package)
 }
 
-fn load_matching_package(
+pub(crate) fn load_matching_package(
     connection: &Connection,
     trusted: &TrustedRoot,
     device: [u8; 16],

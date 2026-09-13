@@ -12,8 +12,8 @@ use std::{
 
 use minicbor::{Decoder, Encoder, data::Type};
 use pm_crypto::{
-    CryptoError, DigestState, RevisionPackageInput, TrustedRoot, UnlockedRoot, digest, fill_random,
-    random_id, verify_human_command,
+    ControlPackageInput, CryptoError, DigestState, GrantVectorInput, RevisionPackageInput,
+    TrustedRoot, UnlockedRoot, digest, fill_random, random_id, verify_human_command,
 };
 pub use pm_native_channel::AuthenticatedHumanChannel as HumanChannel;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -23,9 +23,11 @@ use crate::audit::{
     self, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome,
     AuditPurgeScope, AuditQuery, PreparedAuditPurge,
 };
+use crate::authorization::{G5EventInput, encode_credential, encode_g5_event, new_credential};
 use crate::{
-    AuthRecord, Destination, GeneratedPassword, GeneratorConfig, HumanMetadata, LogicalRecord,
-    PasswordRng, RecordKind, SearchHit, SearchQuery, VaultError, content, unlock_root,
+    AgentEnrollment, AuthRecord, AuthorizationError, AuthorizationReason, Destination,
+    GeneratedPassword, GeneratorConfig, HumanMetadata, LogicalRecord, PasswordRng,
+    PreparedAgentEnrollment, RecordKind, SearchHit, SearchQuery, VaultError, content, unlock_root,
 };
 
 const CHALLENGE_LIFETIME_US: i64 = 60_000_000;
@@ -354,6 +356,235 @@ impl HumanVault {
         self.prepare_write(random_id()?, record)
     }
 
+    /// Stages a human-signed G5 registration for one RPK-bound agent generation.
+    ///
+    /// # Errors
+    /// Returns an error for duplicate/active identity material or unavailable storage.
+    pub fn prepare_agent_enrollment(
+        &mut self,
+        enrollment: &AgentEnrollment,
+    ) -> Result<PreparedAgentEnrollment, AuthorizationError> {
+        self.channel
+            .verify()
+            .map_err(|_| AuthorizationError::Unauthorized)?;
+        let connection = open_connection(&self.path).map_err(AuthorizationError::from)?;
+        let prior_status: Option<String> = connection
+            .query_row(
+                "SELECT status FROM agent_authorizations WHERE subject_id=?1 ORDER BY generation DESC LIMIT 1",
+                [enrollment.subject_id.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if prior_status.as_deref() == Some("active") {
+            return Err(AuthorizationError::InvalidInput);
+        }
+        let duplicate_rpk: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_authorizations WHERE transport_rpk=?1)",
+            [enrollment.transport_rpk.as_slice()],
+            |row| row.get(0),
+        )?;
+        if duplicate_rpk {
+            return Err(AuthorizationError::InvalidInput);
+        }
+        let maximum: i64 = connection
+            .query_row(
+                "SELECT coalesce(max(generation),0) FROM agent_authorizations WHERE subject_id=?1",
+                [enrollment.subject_id.as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|_| AuthorizationError::Integrity)?;
+        let generation = u64::try_from(maximum)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or(AuthorizationError::InvalidInput)?;
+        let mut statement = connection
+            .prepare("SELECT grant_event_digest FROM agent_authorizations WHERE subject_id=?1")?;
+        let mut predecessors = statement
+            .query_map([enrollment.subject_id.as_slice()], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })?
+            .map(|value| {
+                value
+                    .map_err(AuthorizationError::from)
+                    .and_then(|bytes| bytes.try_into().map_err(|_| AuthorizationError::Integrity))
+            })
+            .collect::<Result<Vec<[u8; 32]>, _>>()?;
+        predecessors.sort_unstable();
+        drop(statement);
+        drop(connection);
+        let body = encode_agent_grant_body(enrollment, &predecessors);
+        let prepared = self
+            .prepare_authority(
+                "identity_change",
+                "agent-grant",
+                enrollment.subject_id,
+                generation,
+                &body,
+                None,
+                None,
+            )
+            .map_err(AuthorizationError::from)?;
+        Ok(PreparedAgentEnrollment {
+            prepared,
+            generation,
+        })
+    }
+
+    /// Stages terminal revocation of the subject's current active generation.
+    ///
+    /// # Errors
+    /// Returns an error when no active generation exists.
+    pub fn prepare_agent_revocation(
+        &mut self,
+        subject: [u8; 16],
+        reason: AuthorizationReason,
+    ) -> Result<PreparedHumanCommand, AuthorizationError> {
+        let connection = open_connection(&self.path).map_err(AuthorizationError::from)?;
+        let generation: Option<i64> = connection
+            .query_row(
+                "SELECT generation FROM agent_authorizations WHERE subject_id=?1 AND status='active' ORDER BY generation DESC LIMIT 1",
+                [subject.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let generation = generation
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or(AuthorizationError::Unauthorized)?;
+        self.prepare_authority(
+            "identity_change",
+            "agent-revoke",
+            subject,
+            generation,
+            &encode_reason_body(reason),
+            None,
+            None,
+        )
+        .map_err(AuthorizationError::from)
+    }
+
+    /// Stages global delegated suspension without changing human lock state.
+    ///
+    /// # Errors
+    /// Returns an error when staging fails.
+    pub fn prepare_delegated_suspend(
+        &mut self,
+        reason: AuthorizationReason,
+    ) -> Result<PreparedHumanCommand, AuthorizationError> {
+        self.prepare_authority(
+            "availability_change",
+            "suspend",
+            *self.root.vault_id(),
+            1,
+            &encode_reason_body(reason),
+            None,
+            None,
+        )
+        .map_err(AuthorizationError::from)
+    }
+
+    /// Stages restoration of global delegated availability.
+    ///
+    /// # Errors
+    /// Returns an error when staging fails.
+    pub fn prepare_delegated_resume(&mut self) -> Result<PreparedHumanCommand, AuthorizationError> {
+        let withdrawals = authority_digests(
+            &open_connection(&self.path).map_err(AuthorizationError::from)?,
+            *self.root.vault_id(),
+            &["suspend"],
+        )
+        .map_err(AuthorizationError::from)?;
+        self.prepare_authority(
+            "availability_change",
+            "resume",
+            *self.root.vault_id(),
+            1,
+            &encode_resume_body(&withdrawals),
+            None,
+            None,
+        )
+        .map_err(AuthorizationError::from)
+    }
+
+    /// Stages an authenticated minimal credential descriptor and its real G2 grant.
+    ///
+    /// # Errors
+    /// Rejects non-auth records and unavailable or corrupt device custody.
+    pub fn prepare_enable(
+        &mut self,
+        item: [u8; 16],
+    ) -> Result<PreparedHumanCommand, AuthorizationError> {
+        let record = self.read_record(item).map_err(AuthorizationError::from)?;
+        let account =
+            delegated_account(&record).ok_or(AuthorizationError::CredentialUnavailable)?;
+        let connection = open_connection(&self.path).map_err(AuthorizationError::from)?;
+        let revision_bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT visible_revision FROM vault_items WHERE item_id=?1 AND status='active'",
+                [item.as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|_| AuthorizationError::Integrity)?;
+        let revision = bytes::<16>(&revision_bytes).map_err(AuthorizationError::from)?;
+        let package = audit::load_matching_package(
+            &connection,
+            &self.trusted_root,
+            self.device,
+            &self.audit_custody,
+        )
+        .map_err(|_| AuthorizationError::Integrity)?;
+        let descriptor = new_credential(
+            item,
+            revision,
+            record.kind(),
+            record.human().title.clone(),
+            record
+                .human()
+                .destinations
+                .first()
+                .map(|value| value.value.clone()),
+            Some(account),
+        );
+        let plaintext = encode_credential(&descriptor);
+        let control_package = self
+            .root
+            .seal_control_package(
+                ControlPackageInput {
+                    object: item,
+                    revision,
+                    recipient: self.device,
+                    recipient_generation: package.generation(),
+                    plaintext: &plaintext,
+                },
+                self.audit_custody.encryption_public_key(),
+            )
+            .map_err(|_| AuthorizationError::Integrity)?;
+        let pending = self
+            .root
+            .prepare_grant_vector(
+                GrantVectorInput {
+                    item,
+                    revision,
+                    recipient: self.device,
+                    authorization_generation: package.generation(),
+                    payload_sha256: digest(&control_package),
+                },
+                self.audit_custody.encryption_public_key(),
+            )
+            .map_err(|_| AuthorizationError::Integrity)?;
+        let staged_grant = pending.to_staged_bytes();
+        let body = encode_enable_body(revision, pending.commitment());
+        self.prepare_authority(
+            "availability_change",
+            "enable",
+            item,
+            1,
+            &body,
+            Some(&control_package),
+            Some(&staged_grant),
+        )
+        .map_err(AuthorizationError::from)
+    }
+
     /// Stages a new encrypted revision of an active password item.
     ///
     /// # Errors
@@ -382,6 +613,9 @@ impl HumanVault {
             "item_lifecycle",
             "trash",
             item,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -442,6 +676,9 @@ impl HumanVault {
             None,
             Some(generation),
             Some(through_seq),
+            None,
+            None,
+            None,
         )?;
         Ok(PreparedAuditPurge {
             prepared,
@@ -540,31 +777,73 @@ impl HumanVault {
         let committed_at_us = now_us()?;
         let event_id = random_id()?;
         let previous = current_head(&transaction)?;
-        let event = encode_event(&EventInput {
+        let seq = next_authority_seq(&transaction, self.device, 1)?;
+        let mut parents = authority_specific_parents(&transaction, &staged)?;
+        if let Some(previous) = previous {
+            parents.push(previous);
+        }
+        parents.sort_unstable();
+        parents.dedup();
+        if parents.len() > 4096 {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        let legacy_body;
+        let authority_body = if let Some(value) = staged.authority_body.as_deref() {
+            value
+        } else {
+            legacy_body = encode_legacy_event_body(
+                staged.revision_id,
+                committed_at_us,
+                staged.audit_generation,
+                staged.audit_through_seq,
+            );
+            &legacy_body
+        };
+        let subject_generation = staged.subject_generation.unwrap_or(1);
+        let event = encode_g5_event(&G5EventInput {
             vault: self.root.vault_id(),
             event_id,
-            device: self.device,
-            kind: &staged.event_kind,
-            item: staged.item_id,
-            revision: staged.revision_id,
+            authority_epoch: 1,
+            issuer_device: self.device,
+            issuer_generation: 1,
+            seq,
             previous,
-            modified_at: committed_at_us,
+            parents: &parents,
+            kind: &staged.event_kind,
+            subject: staged.item_id,
+            subject_generation,
+            body: authority_body,
         });
         let event_signature = self.root.sign_human_event(&event)?;
+        let device_signature = self.audit_custody.sign_device_event(&event)?;
         let event_digest = digest(&event);
-        let signed_event = encode_signed_event(&event, &event_signature);
+        let signed_event = encode_signed_event(&event, &device_signature, &event_signature);
+        let signed_grant = staged
+            .staged_grant
+            .as_deref()
+            .map(|value| self.root.finish_staged_grant_vector(value, event_digest))
+            .transpose()?
+            .map(|value| value.to_bytes());
 
-        apply_staged(&transaction, &staged)?;
+        apply_staged(&transaction, &staged, event_digest, signed_grant.as_deref())?;
         transaction.execute(
             "INSERT INTO authority_events
-             (event_digest,event_id,transaction_id,event,human_signature)
-             VALUES (?1,?2,?3,?4,?5)",
+             (event_digest,event_id,transaction_id,issuer_device,issuer_generation,seq,previous_digest,parents,kind,subject,subject_generation,event,human_signature,device_signature)
+             VALUES (?1,?2,?3,?4,1,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 event_digest.as_slice(),
                 event_id.as_slice(),
                 body.transaction_id.as_slice(),
+                self.device.as_slice(),
+                i64::try_from(seq).map_err(|_| HumanCommitError::InvalidCommand)?,
+                previous.as_ref().map(<[u8; 32]>::as_slice),
+                encode_heads_allow_empty(&parents),
+                staged.event_kind,
+                staged.item_id.as_slice(),
+                i64::try_from(subject_generation).map_err(|_| HumanCommitError::InvalidCommand)?,
                 event,
                 event_signature.as_slice(),
+                device_signature.as_slice(),
             ],
         )?;
         transaction.execute(
@@ -596,7 +875,11 @@ impl HumanVault {
                 &AuditEvent::new(
                     AuditActorKind::Human,
                     None,
-                    AuditAction::ItemChange,
+                    if staged.authority_body.is_some() {
+                        AuditAction::AuthorityChange
+                    } else {
+                        AuditAction::ItemChange
+                    },
                     AuditOutcome::Succeeded,
                 )
                 .with_item(staged.item_id, staged.revision_id),
@@ -754,6 +1037,7 @@ impl HumanVault {
             item,
             Some(revision),
             object_digest,
+            None,
             None,
             None,
         );
@@ -1044,6 +1328,9 @@ impl HumanVault {
             Some(&attachments),
             None,
             None,
+            None,
+            None,
+            None,
         )
     }
 
@@ -1059,13 +1346,17 @@ impl HumanVault {
         attachments: Option<&[u8]>,
         audit_generation: Option<u64>,
         audit_through_seq: Option<u64>,
+        subject_generation: Option<u64>,
+        authority_body: Option<&[u8]>,
+        staged_grant: Option<&[u8]>,
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
         self.channel.verify()?;
         let transaction_id = random_id()?;
         let challenge = random_challenge()?;
         let connection = open_connection(&self.path)?;
         let expected_state = state_digest(&connection, self.root.vault_id(), 1)?;
-        let object_digest = staged_object_digest(package, attachments);
+        let object_digest =
+            staged_authority_digest(package, attachments, authority_body, staged_grant);
         let event_manifest = encode_event_manifest(
             event_kind,
             item,
@@ -1073,6 +1364,7 @@ impl HumanVault {
             object_digest,
             audit_generation,
             audit_through_seq,
+            authority_body.map(digest),
         );
         let body = encode_body(&Body {
             transaction_id,
@@ -1108,8 +1400,8 @@ impl HumanVault {
         )?;
         transaction.execute(
             "INSERT INTO human_staging
-             (transaction_id,operation,event_kind,item_id,revision_id,body,package,item_kind,attachments,audit_generation,audit_through_seq)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+             (transaction_id,operation,event_kind,item_id,revision_id,body,package,item_kind,attachments,audit_generation,audit_through_seq,subject_generation,authority_body,staged_grant)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 transaction_id.as_slice(),
                 operation,
@@ -1122,6 +1414,9 @@ impl HumanVault {
                 attachments,
                 audit_generation.map(i64::try_from).transpose().map_err(|_| HumanCommitError::InvalidInput)?,
                 audit_through_seq.map(i64::try_from).transpose().map_err(|_| HumanCommitError::InvalidInput)?,
+                subject_generation.map(i64::try_from).transpose().map_err(|_| HumanCommitError::InvalidInput)?,
+                authority_body,
+                staged_grant,
             ],
         )?;
         transaction.commit()?;
@@ -1131,6 +1426,33 @@ impl HumanVault {
             command,
             body,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_authority(
+        &mut self,
+        operation: &'static str,
+        event_kind: &'static str,
+        subject: [u8; 16],
+        subject_generation: u64,
+        authority_body: &[u8],
+        package: Option<&[u8]>,
+        staged_grant: Option<&[u8]>,
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        self.prepare(
+            operation,
+            event_kind,
+            subject,
+            None,
+            package,
+            None,
+            None,
+            None,
+            None,
+            Some(subject_generation),
+            Some(authority_body),
+            staged_grant,
+        )
     }
 
     fn require_active(&self, item: [u8; 16]) -> Result<(), HumanCommitError> {
@@ -1168,6 +1490,7 @@ struct Challenge {
     consumed: bool,
 }
 
+#[allow(clippy::struct_field_names)]
 struct Staged {
     transaction_id: [u8; 16],
     operation: String,
@@ -1180,17 +1503,9 @@ struct Staged {
     attachments: Option<Vec<u8>>,
     audit_generation: Option<u64>,
     audit_through_seq: Option<u64>,
-}
-
-struct EventInput<'a> {
-    vault: &'a [u8; 16],
-    event_id: [u8; 16],
-    device: [u8; 16],
-    kind: &'a str,
-    item: [u8; 16],
-    revision: Option<[u8; 16]>,
-    previous: Option<[u8; 32]>,
-    modified_at: i64,
+    subject_generation: Option<u64>,
+    authority_body: Option<Vec<u8>>,
+    staged_grant: Option<Vec<u8>>,
 }
 
 fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
@@ -1204,7 +1519,13 @@ fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
     Ok(connection)
 }
 
-fn apply_staged(transaction: &Transaction<'_>, staged: &Staged) -> rusqlite::Result<()> {
+#[allow(clippy::too_many_lines)]
+fn apply_staged(
+    transaction: &Transaction<'_>,
+    staged: &Staged,
+    event_digest: [u8; 32],
+    signed_grant: Option<&[u8]>,
+) -> Result<(), HumanCommitError> {
     match staged.event_kind.as_str() {
         "item-revision" => {
             let revision = staged.revision_id.expect("validated staging revision");
@@ -1238,11 +1559,94 @@ fn apply_staged(transaction: &Transaction<'_>, staged: &Staged) -> rusqlite::Res
             )?;
         }
         "audit-purge" => {}
+        "agent-grant" => {
+            let body = decode_agent_grant_body(
+                staged
+                    .authority_body
+                    .as_deref()
+                    .ok_or(HumanCommitError::BodyChanged)?,
+            )?;
+            let generation = staged
+                .subject_generation
+                .ok_or(HumanCommitError::BodyChanged)?;
+            transaction.execute(
+                "INSERT INTO agent_authorizations
+                 (subject_id,generation,request_id,transport_rpk,label,environment_binding,grant_event_digest,status)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,'active')",
+                params![
+                    staged.item_id.as_slice(),
+                    i64::try_from(generation).map_err(|_| HumanCommitError::InvalidInput)?,
+                    body.request_id.as_slice(),
+                    body.transport_rpk.as_slice(),
+                    body.label,
+                    body.environment_binding,
+                    event_digest.as_slice(),
+                ],
+            )?;
+        }
+        "agent-revoke" => {
+            let generation = staged
+                .subject_generation
+                .ok_or(HumanCommitError::BodyChanged)?;
+            let changed = transaction.execute(
+                "UPDATE agent_authorizations SET status='revoked',revoke_event_digest=?3
+                 WHERE subject_id=?1 AND generation=?2 AND status='active'",
+                params![
+                    staged.item_id.as_slice(),
+                    i64::try_from(generation).map_err(|_| HumanCommitError::InvalidInput)?,
+                    event_digest.as_slice(),
+                ],
+            )?;
+            if changed != 1 {
+                return Err(HumanCommitError::StateChanged);
+            }
+        }
+        "suspend" | "resume" => {
+            let status = if staged.event_kind == "resume" {
+                "resumed"
+            } else {
+                "suspended"
+            };
+            transaction.execute(
+                "INSERT INTO delegated_state(singleton,status,event_digest) VALUES(1,?1,?2)
+                 ON CONFLICT(singleton) DO UPDATE SET status=excluded.status,event_digest=excluded.event_digest",
+                params![status, event_digest.as_slice()],
+            )?;
+        }
+        "enable" => {
+            let enable = decode_enable_body(
+                staged
+                    .authority_body
+                    .as_deref()
+                    .ok_or(HumanCommitError::BodyChanged)?,
+            )?;
+            transaction.execute(
+                "INSERT INTO credential_authorizations
+                 (item_id,revision_id,status,event_digest,control_package,grant,grant_commitment)
+                 VALUES(?1,?2,'enabled',?3,?4,?5,?6)
+                 ON CONFLICT(item_id) DO UPDATE SET revision_id=excluded.revision_id,status='enabled',event_digest=excluded.event_digest,control_package=excluded.control_package,grant=excluded.grant,grant_commitment=excluded.grant_commitment",
+                params![
+                    staged.item_id.as_slice(),
+                    enable.revision.as_slice(),
+                    event_digest.as_slice(),
+                    staged.package.as_deref().ok_or(HumanCommitError::BodyChanged)?,
+                    signed_grant.ok_or(HumanCommitError::BodyChanged)?,
+                    enable.commitment.as_slice(),
+                ],
+            )?;
+        }
+        "disable" => {
+            transaction.execute(
+                "UPDATE credential_authorizations SET status='disabled',event_digest=?2 WHERE item_id=?1",
+                params![staged.item_id.as_slice(), event_digest.as_slice()],
+            )?;
+        }
         _ => unreachable!("validated staging event kind"),
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_staged(
     transaction: &Transaction<'_>,
     staged: &Staged,
@@ -1263,7 +1667,12 @@ fn validate_staged(
                 .ok_or(HumanCommitError::BodyChanged)?,
         )?)
     } else {
-        staged_object_digest(staged.package.as_deref(), staged.attachments.as_deref())
+        staged_authority_digest(
+            staged.package.as_deref(),
+            staged.attachments.as_deref(),
+            staged.authority_body.as_deref(),
+            staged.staged_grant.as_deref(),
+        )
     };
     let valid_shape = match staged.event_kind.as_str() {
         "item-revision" => {
@@ -1278,6 +1687,9 @@ fn validate_staged(
                     || stream_count > 0)
                 && staged.audit_generation.is_none()
                 && staged.audit_through_seq.is_none()
+                && staged.subject_generation.is_none()
+                && staged.authority_body.is_none()
+                && staged.staged_grant.is_none()
         }
         "trash" => {
             staged.operation == "item_lifecycle"
@@ -1287,6 +1699,9 @@ fn validate_staged(
                 && staged.attachments.is_none()
                 && staged.audit_generation.is_none()
                 && staged.audit_through_seq.is_none()
+                && staged.subject_generation.is_none()
+                && staged.authority_body.is_none()
+                && staged.staged_grant.is_none()
         }
         "audit-purge" => {
             staged.operation == "audit_purge"
@@ -1296,6 +1711,59 @@ fn validate_staged(
                 && staged.attachments.is_none()
                 && staged.audit_generation.is_some()
                 && staged.audit_through_seq.is_some()
+                && staged.subject_generation.is_none()
+                && staged.authority_body.is_none()
+                && staged.staged_grant.is_none()
+        }
+        "agent-grant" => {
+            staged.operation == "identity_change"
+                && staged.subject_generation.is_some()
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .is_some_and(|value| decode_agent_grant_body(value).is_ok())
+                && staged.package.is_none()
+                && staged.staged_grant.is_none()
+        }
+        "agent-revoke" => {
+            staged.operation == "identity_change"
+                && staged.subject_generation.is_some()
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .is_some_and(|value| decode_reason_body(value).is_ok())
+                && staged.package.is_none()
+                && staged.staged_grant.is_none()
+        }
+        "suspend" => {
+            staged.operation == "availability_change"
+                && staged.subject_generation == Some(1)
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .is_some_and(|value| decode_reason_body(value).is_ok())
+                && staged.package.is_none()
+                && staged.staged_grant.is_none()
+        }
+        "resume" => {
+            staged.operation == "availability_change"
+                && staged.subject_generation == Some(1)
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .is_some_and(|value| decode_resume_body(value).is_ok())
+                && staged.package.is_none()
+                && staged.staged_grant.is_none()
+        }
+        "enable" => {
+            staged.operation == "availability_change"
+                && staged.subject_generation == Some(1)
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .is_some_and(|value| decode_enable_body(value).is_ok())
+                && staged.package.is_some()
+                && staged.staged_grant.is_some()
         }
         _ => false,
     };
@@ -1306,7 +1774,37 @@ fn validate_staged(
         object_digest,
         staged.audit_generation,
         staged.audit_through_seq,
+        staged.authority_body.as_deref().map(digest),
     );
+    if valid_shape {
+        match staged.event_kind.as_str() {
+            "agent-grant" => {
+                let decoded = decode_agent_grant_body(
+                    staged
+                        .authority_body
+                        .as_deref()
+                        .ok_or(HumanCommitError::BodyChanged)?,
+                )?;
+                if decoded.predecessors
+                    != authority_digests(transaction, staged.item_id, &["agent-grant"])?
+                {
+                    return Err(HumanCommitError::StateChanged);
+                }
+            }
+            "resume" => {
+                let decoded = decode_resume_body(
+                    staged
+                        .authority_body
+                        .as_deref()
+                        .ok_or(HumanCommitError::BodyChanged)?,
+                )?;
+                if decoded != authority_digests(transaction, staged.item_id, &["suspend"])? {
+                    return Err(HumanCommitError::StateChanged);
+                }
+            }
+            _ => {}
+        }
+    }
     if !valid_shape
         || body.event_count != 1
         || body.object_manifest_digest != object_digest
@@ -1369,6 +1867,246 @@ fn password_from_logical(record: &LogicalRecord) -> Result<PasswordRecord, Human
     )
 }
 
+fn delegated_account(record: &LogicalRecord) -> Option<String> {
+    record.auth().first().map(|value| match value {
+        AuthRecord::Password { username, .. } | AuthRecord::Ssh { username, .. } => {
+            username.clone()
+        }
+        AuthRecord::Totp { account, .. } => account.clone(),
+        AuthRecord::Passkey { user_name, .. } => user_name.clone(),
+        AuthRecord::Token { profile_id, .. } => profile_id.clone(),
+    })
+}
+
+struct AgentGrantBody {
+    request_id: [u8; 16],
+    transport_rpk: [u8; 44],
+    label: String,
+    environment_binding: String,
+    predecessors: Vec<[u8; 32]>,
+}
+
+fn encode_agent_grant_body(enrollment: &AgentEnrollment, predecessors: &[[u8; 32]]) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.map(5).unwrap();
+    encoder
+        .str("request_id")
+        .unwrap()
+        .bytes(&enrollment.request_id)
+        .unwrap();
+    encoder.str("public_identity").unwrap().map(2).unwrap();
+    encoder
+        .str("transport_rpk")
+        .unwrap()
+        .bytes(&enrollment.transport_rpk)
+        .unwrap();
+    encoder
+        .str("label")
+        .unwrap()
+        .str(&enrollment.label)
+        .unwrap();
+    encoder
+        .str("predecessor_grants")
+        .unwrap()
+        .array(u64::try_from(predecessors.len()).unwrap())
+        .unwrap();
+    for predecessor in predecessors {
+        encoder.bytes(predecessor).unwrap();
+    }
+    encoder.str("expires_at").unwrap().null().unwrap();
+    encoder
+        .str("environment_binding")
+        .unwrap()
+        .str(&enrollment.environment_binding)
+        .unwrap();
+    encoder.into_writer()
+}
+
+fn decode_agent_grant_body(value: &[u8]) -> Result<AgentGrantBody, HumanCommitError> {
+    let mut decoder = Decoder::new(value);
+    expect_map(&mut decoder, 5)?;
+    expect_key(&mut decoder, "request_id")?;
+    let request_id = decode_fixed(&mut decoder)?;
+    expect_key(&mut decoder, "public_identity")?;
+    expect_map(&mut decoder, 2)?;
+    expect_key(&mut decoder, "transport_rpk")?;
+    let transport_rpk = decode_fixed(&mut decoder)?;
+    expect_key(&mut decoder, "label")?;
+    let label = decoder.str().map_err(invalid)?.to_owned();
+    expect_key(&mut decoder, "predecessor_grants")?;
+    let count = decoder
+        .array()
+        .map_err(invalid)?
+        .ok_or(HumanCommitError::InvalidCommand)?;
+    let mut predecessors =
+        Vec::with_capacity(usize::try_from(count).map_err(|_| HumanCommitError::InvalidCommand)?);
+    for _ in 0..count {
+        let predecessor = decode_fixed(&mut decoder)?;
+        if predecessors
+            .last()
+            .is_some_and(|prior| prior >= &predecessor)
+        {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        predecessors.push(predecessor);
+    }
+    expect_key(&mut decoder, "expires_at")?;
+    decoder.null().map_err(invalid)?;
+    expect_key(&mut decoder, "environment_binding")?;
+    let environment_binding = decoder.str().map_err(invalid)?.to_owned();
+    if decoder.position() != value.len() {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    let body = AgentGrantBody {
+        request_id,
+        transport_rpk,
+        label,
+        environment_binding,
+        predecessors,
+    };
+    let enrollment = AgentEnrollment {
+        subject_id: [1; 16],
+        request_id: body.request_id,
+        transport_rpk: body.transport_rpk,
+        label: body.label.clone(),
+        environment_binding: body.environment_binding.clone(),
+    };
+    if encode_agent_grant_body(&enrollment, &body.predecessors) != value {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    Ok(body)
+}
+
+fn encode_reason_body(reason: AuthorizationReason) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder
+        .map(1)
+        .unwrap()
+        .str("reason_code")
+        .unwrap()
+        .str(reason.name())
+        .unwrap();
+    encoder.into_writer()
+}
+
+fn decode_reason_body(value: &[u8]) -> Result<(), HumanCommitError> {
+    let mut decoder = Decoder::new(value);
+    expect_map(&mut decoder, 1)?;
+    expect_key(&mut decoder, "reason_code")?;
+    let reason = match decoder.str().map_err(invalid)? {
+        "owner_request" => AuthorizationReason::OwnerRequest,
+        "replacement" => AuthorizationReason::Replacement,
+        "suspected_compromise" => AuthorizationReason::SuspectedCompromise,
+        _ => return Err(HumanCommitError::InvalidCommand),
+    };
+    if decoder.position() != value.len() || encode_reason_body(reason) != value {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    Ok(())
+}
+
+fn encode_resume_body(withdrawals: &[[u8; 32]]) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.map(2).unwrap();
+    encoder
+        .str("prior_positive_events")
+        .unwrap()
+        .array(0)
+        .unwrap();
+    encoder
+        .str("withdrawals_seen")
+        .unwrap()
+        .array(u64::try_from(withdrawals.len()).unwrap())
+        .unwrap();
+    for withdrawal in withdrawals {
+        encoder.bytes(withdrawal).unwrap();
+    }
+    encoder.into_writer()
+}
+
+fn decode_resume_body(value: &[u8]) -> Result<Vec<[u8; 32]>, HumanCommitError> {
+    let mut decoder = Decoder::new(value);
+    expect_map(&mut decoder, 2)?;
+    expect_key(&mut decoder, "prior_positive_events")?;
+    if decoder.array().map_err(invalid)? != Some(0) {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    expect_key(&mut decoder, "withdrawals_seen")?;
+    let count = decoder
+        .array()
+        .map_err(invalid)?
+        .ok_or(HumanCommitError::InvalidCommand)?;
+    let mut withdrawals =
+        Vec::with_capacity(usize::try_from(count).map_err(|_| HumanCommitError::InvalidCommand)?);
+    for _ in 0..count {
+        let withdrawal = decode_fixed(&mut decoder)?;
+        if withdrawals.last().is_some_and(|prior| prior >= &withdrawal) {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        withdrawals.push(withdrawal);
+    }
+    if decoder.position() != value.len() || encode_resume_body(&withdrawals) != value {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    Ok(withdrawals)
+}
+
+struct EnableBody {
+    revision: [u8; 16],
+    commitment: [u8; 32],
+}
+
+fn encode_enable_body(revision: [u8; 16], commitment: [u8; 32]) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.map(4).unwrap();
+    encoder
+        .str("revision_id")
+        .unwrap()
+        .bytes(&revision)
+        .unwrap();
+    encoder
+        .str("grant_commitments")
+        .unwrap()
+        .array(1)
+        .unwrap()
+        .bytes(&commitment)
+        .unwrap();
+    encoder
+        .str("prior_positive_events")
+        .unwrap()
+        .array(0)
+        .unwrap();
+    encoder.str("withdrawals_seen").unwrap().array(0).unwrap();
+    encoder.into_writer()
+}
+
+fn decode_enable_body(value: &[u8]) -> Result<EnableBody, HumanCommitError> {
+    let mut decoder = Decoder::new(value);
+    expect_map(&mut decoder, 4)?;
+    expect_key(&mut decoder, "revision_id")?;
+    let revision = decode_fixed(&mut decoder)?;
+    expect_key(&mut decoder, "grant_commitments")?;
+    if decoder.array().map_err(invalid)? != Some(1) {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    let commitment = decode_fixed(&mut decoder)?;
+    expect_key(&mut decoder, "prior_positive_events")?;
+    if decoder.array().map_err(invalid)? != Some(0) {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    expect_key(&mut decoder, "withdrawals_seen")?;
+    if decoder.array().map_err(invalid)? != Some(0)
+        || decoder.position() != value.len()
+        || encode_enable_body(revision, commitment) != value
+    {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    Ok(EnableBody {
+        revision,
+        commitment,
+    })
+}
+
 fn encode_staged_attachments(values: &[([u8; 16], Vec<u8>)]) -> Vec<u8> {
     let mut encoder = Encoder::new(Vec::new());
     encoder.array(u64::try_from(values.len()).unwrap()).unwrap();
@@ -1418,6 +2156,24 @@ fn staged_object_digest(package: Option<&[u8]>, attachments: Option<&[u8]>) -> O
     } else {
         encoder.null().unwrap();
     }
+    Some(digest(&encoder.into_writer()))
+}
+
+fn staged_authority_digest(
+    package: Option<&[u8]>,
+    attachments: Option<&[u8]>,
+    authority_body: Option<&[u8]>,
+    staged_grant: Option<&[u8]>,
+) -> Option<[u8; 32]> {
+    if authority_body.is_none() && staged_grant.is_none() {
+        return staged_object_digest(package, attachments);
+    }
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.array(4).unwrap();
+    encode_optional_bytes(&mut encoder, package);
+    encode_optional_bytes(&mut encoder, attachments);
+    encode_optional_bytes(&mut encoder, authority_body);
+    encode_optional_bytes(&mut encoder, staged_grant);
     Some(digest(&encoder.into_writer()))
 }
 
@@ -1515,7 +2271,10 @@ fn decode_command(bytes_value: &[u8]) -> Result<CommandFields<'_>, HumanCommitEr
     let expected_state = decode_fixed(&mut decoder)?;
     expect_key(&mut decoder, "operation")?;
     let operation = decoder.str().map_err(invalid)?;
-    if !matches!(operation, "item_write" | "item_lifecycle" | "audit_purge") {
+    if !matches!(
+        operation,
+        "item_write" | "item_lifecycle" | "audit_purge" | "identity_change" | "availability_change"
+    ) {
         return Err(HumanCommitError::InvalidCommand);
     }
     expect_key(&mut decoder, "body_hash")?;
@@ -1610,9 +2369,10 @@ fn encode_event_manifest(
     object_digest: Option<[u8; 32]>,
     audit_generation: Option<u64>,
     audit_through_seq: Option<u64>,
+    authority_body_digest: Option<[u8; 32]>,
 ) -> Vec<u8> {
     let mut encoder = Encoder::new(Vec::new());
-    encoder.array(1).unwrap().map(6).unwrap();
+    encoder.array(1).unwrap().map(7).unwrap();
     encoder.str("kind").unwrap().str(kind).unwrap();
     encoder.str("item").unwrap().bytes(&item).unwrap();
     encoder.str("revision").unwrap();
@@ -1634,56 +2394,120 @@ fn encode_event_manifest(
     } else {
         encoder.null().unwrap();
     }
-    encoder.into_writer()
-}
-
-fn encode_event(input: &EventInput<'_>) -> Vec<u8> {
-    let mut encoder = Encoder::new(Vec::new());
-    encoder.map(10).unwrap();
-    encoder.str("v").unwrap().u64(1).unwrap();
-    encoder.str("vault").unwrap().bytes(input.vault).unwrap();
-    encoder
-        .str("event_id")
-        .unwrap()
-        .bytes(&input.event_id)
-        .unwrap();
-    encoder.str("authority_epoch").unwrap().u64(1).unwrap();
-    encoder
-        .str("issuer_device")
-        .unwrap()
-        .bytes(&input.device)
-        .unwrap();
-    encoder.str("kind").unwrap().str(input.kind).unwrap();
-    encoder.str("subject").unwrap().bytes(&input.item).unwrap();
-    encoder.str("revision_id").unwrap();
+    encoder.str("authority_body_digest").unwrap();
     encode_optional_bytes(
         &mut encoder,
-        input.revision.as_ref().map(<[u8; 16]>::as_slice),
-    );
-    encoder
-        .str("modified_at")
-        .unwrap()
-        .i64(input.modified_at)
-        .unwrap();
-    encoder.str("prev").unwrap();
-    encode_optional_bytes(
-        &mut encoder,
-        input.previous.as_ref().map(<[u8; 32]>::as_slice),
+        authority_body_digest.as_ref().map(<[u8; 32]>::as_slice),
     );
     encoder.into_writer()
 }
 
-fn encode_signed_event(event: &[u8], human_signature: &[u8; 64]) -> Vec<u8> {
+fn encode_signed_event(
+    event: &[u8],
+    device_signature: &[u8; 64],
+    human_signature: &[u8; 64],
+) -> Vec<u8> {
     let mut encoder = Encoder::new(Vec::new());
     encoder.map(3).unwrap();
     encoder.str("event").unwrap();
     encoder.writer_mut().extend_from_slice(event);
-    encoder.str("device_signature").unwrap().null().unwrap();
+    encoder
+        .str("device_signature")
+        .unwrap()
+        .bytes(device_signature)
+        .unwrap();
     encoder
         .str("human_signature")
         .unwrap()
         .bytes(human_signature)
         .unwrap();
+    encoder.into_writer()
+}
+
+fn encode_legacy_event_body(
+    revision: Option<[u8; 16]>,
+    modified_at: i64,
+    audit_generation: Option<u64>,
+    audit_through_seq: Option<u64>,
+) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.map(4).unwrap();
+    encoder.str("revision_id").unwrap();
+    encode_optional_bytes(&mut encoder, revision.as_ref().map(<[u8; 16]>::as_slice));
+    encoder
+        .str("modified_at")
+        .unwrap()
+        .i64(modified_at)
+        .unwrap();
+    encoder.str("audit_generation").unwrap();
+    if let Some(value) = audit_generation {
+        encoder.u64(value).unwrap();
+    } else {
+        encoder.null().unwrap();
+    }
+    encoder.str("audit_through_seq").unwrap();
+    if let Some(value) = audit_through_seq {
+        encoder.u64(value).unwrap();
+    } else {
+        encoder.null().unwrap();
+    }
+    encoder.into_writer()
+}
+
+fn next_authority_seq(
+    connection: &Connection,
+    device: [u8; 16],
+    generation: u64,
+) -> Result<u64, HumanCommitError> {
+    let current: i64 = connection.query_row(
+        "SELECT coalesce(max(seq),0) FROM authority_events WHERE issuer_device=?1 AND issuer_generation=?2",
+        params![device.as_slice(), i64::try_from(generation).map_err(|_| HumanCommitError::InvalidCommand)?],
+        |row| row.get(0),
+    )?;
+    u64::try_from(current)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or(HumanCommitError::InvalidCommand)
+}
+
+fn authority_digests(
+    connection: &Connection,
+    subject: [u8; 16],
+    kinds: &[&str],
+) -> Result<Vec<[u8; 32]>, HumanCommitError> {
+    let mut statement = connection.prepare(
+        "SELECT event_digest,kind FROM authority_events WHERE subject=?1 ORDER BY event_digest",
+    )?;
+    let mut rows = statement.query([subject.as_slice()])?;
+    let mut digests = Vec::new();
+    while let Some(row) = rows.next()? {
+        let kind: String = row.get(1)?;
+        if kinds.contains(&kind.as_str()) {
+            digests.push(bytes(&row.get::<_, Vec<u8>>(0)?)?);
+        }
+    }
+    Ok(digests)
+}
+
+fn authority_specific_parents(
+    connection: &Connection,
+    staged: &Staged,
+) -> Result<Vec<[u8; 32]>, HumanCommitError> {
+    let kinds: &[&str] = match staged.event_kind.as_str() {
+        "agent-grant" => &["agent-grant", "agent-revoke"],
+        "resume" => &["suspend"],
+        "enable" => &["enable", "disable"],
+        _ => &[],
+    };
+    authority_digests(connection, staged.item_id, kinds)
+}
+
+fn encode_heads_allow_empty(heads: &[[u8; 32]]) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.array(u64::try_from(heads.len()).unwrap()).unwrap();
+    for head in heads {
+        encoder.bytes(head).unwrap();
+    }
     encoder.into_writer()
 }
 
@@ -1745,7 +2569,7 @@ fn load_staging(
 ) -> Result<Staged, HumanCommitError> {
     connection
         .query_row(
-            "SELECT operation,event_kind,item_id,revision_id,body,package,item_kind,attachments,audit_generation,audit_through_seq FROM human_staging
+            "SELECT operation,event_kind,item_id,revision_id,body,package,item_kind,attachments,audit_generation,audit_through_seq,subject_generation,authority_body,staged_grant FROM human_staging
              WHERE transaction_id=?1",
             [transaction_id.as_slice()],
             |row| {
@@ -1773,6 +2597,13 @@ fn load_staging(
                         .map(u64::try_from)
                         .transpose()
                         .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    subject_generation: row
+                        .get::<_, Option<i64>>(10)?
+                        .map(u64::try_from)
+                        .transpose()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    authority_body: row.get(11)?,
+                    staged_grant: row.get(12)?,
                 })
             },
         )
