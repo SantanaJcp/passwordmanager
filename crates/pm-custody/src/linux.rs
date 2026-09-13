@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+#![allow(dead_code)]
+
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
@@ -156,6 +158,33 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-streaming-file") => human_streaming_file(&mut arguments),
         Some("human-streaming-stall") => human_streaming_stall(&mut arguments),
         _ => Err(Failure::Usage),
+    }
+}
+
+/// Authenticated client seam shared by delegated adapters. The initial
+/// discovery frame is always consumed before an optional domain request.
+pub fn agent_rpc(
+    profile_path: &Path,
+    private_path: &Path,
+    socket_path: &Path,
+    request: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    let profile = read_profile(profile_path).map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())?;
+    if profile.role != Role::Agent {
+        return Err("UNAUTHORIZED".to_owned());
+    }
+    let key =
+        read_key(private_path, current_uid()).map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())?;
+    let mut tls =
+        connect(&profile, &key, socket_path).map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())?;
+    tls.write_all(AGENT_MAGIC)
+        .map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())?;
+    let discovery = read_frame(&mut tls).map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())?;
+    if let Some(request) = request {
+        write_frame(&mut tls, request).map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())?;
+        read_frame(&mut tls).map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())
+    } else {
+        Ok(discovery)
     }
 }
 

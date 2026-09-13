@@ -78,6 +78,50 @@ def parse(r,state=None):
 def denied(r,code):
     assert r.returncode != 0 and r.stdout == f"DENIED code={code}\n".encode(), r
 
+def interface_process(binary, uid, env, args, stdin=None):
+    def change_identity():
+        os.setgroups([]); os.setgid(uid); os.setuid(uid)
+    merged=os.environ.copy(); merged.update(env)
+    return subprocess.run([str(binary), *args], input=stdin, capture_output=True,
+                          env=merged, preexec_fn=change_identity, timeout=15)
+
+def mcp_call(binary, uid, env, name, arguments):
+    request=json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                        "params":{"name":name,"arguments":arguments}}).encode()+b"\n"
+    result=interface_process(binary, uid, env, ["mcp"], request)
+    assert result.returncode==0 and result.stderr==b"", (result.stdout,result.stderr)
+    response=json.loads(result.stdout.splitlines()[-1]); return response["result"]
+
+def assert_interface_equivalence(binary, uid, env, item, sid, cancelled, now):
+    cli_cap=interface_process(binary,uid,env,["--json","capabilities"])
+    assert cli_cap.returncode==0 and cli_cap.stderr==b"",(cli_cap.stdout,cli_cap.stderr)
+    mcp_cap=mcp_call(binary,uid,env,"get_capabilities",{})
+    assert mcp_cap["isError"] is False
+    assert mcp_cap["structuredContent"]==json.loads(cli_cap.stdout)["result"],(cli_cap.stdout,mcp_cap)
+    cli=interface_process(binary,uid,env,["--json","credentials","list"])
+    assert cli.returncode==0 and cli.stderr==b"",(cli.stdout,cli.stderr)
+    cli_discovery=json.loads(cli.stdout); assert "result" in cli_discovery,cli.stdout
+    mcp_discovery=mcp_call(binary,uid,env,"discover_credentials",{})
+    assert mcp_discovery["isError"] is False
+    assert mcp_discovery["structuredContent"]==cli_discovery["result"],(cli_discovery,mcp_discovery)
+    common=["--json","auth","status","--attempt",sid]
+    cli_get=interface_process(binary,uid,env,common); assert cli_get.returncode==0 and cli_get.stderr==b"",(cli_get.stdout,cli_get.stderr)
+    mcp_get=mcp_call(binary,uid,env,"get_authentication",{"attempt_id":sid})
+    assert mcp_get["structuredContent"]==json.loads(cli_get.stdout)["result"]
+    cancel_args=["--json","auth","cancel","--attempt",cancelled]
+    cli_cancel=interface_process(binary,uid,env,cancel_args); assert cli_cancel.returncode==0 and cli_cancel.stderr==b"",(cli_cancel.stdout,cli_cancel.stderr)
+    mcp_cancel=mcp_call(binary,uid,env,"cancel_authentication",{"attempt_id":cancelled})
+    assert mcp_cancel["structuredContent"]==json.loads(cli_cancel.stdout)["result"]
+    start_args=["--json","auth","start","--credential-id",item,"--integration-id","controlled.external","--integration-version","1","--method","password","--destination","https://ticket07.invalid/login","--context","success","--issued-at",str(now),"--nonce","01"*16]
+    cli_start=interface_process(binary,uid,env,start_args); assert cli_start.returncode==0 and cli_start.stderr==b"",(cli_start.stdout,cli_start.stderr)
+    mcp_start=mcp_call(binary,uid,env,"start_authentication",{"credential_id":item,"integration_id":"controlled.external","integration_version":1,"method":"password","destination":"https://ticket07.invalid/login","context":"success","idempotency_key":{"issued_at":str(now),"nonce":"01"*16}})
+    assert mcp_start["structuredContent"]==json.loads(cli_start.stdout)["result"]
+    # Both adapters must redact diagnostics/results and use the same public error.
+    cli_bad=interface_process(binary,uid,env,["--json","auth","status","--attempt","ff"*16]); assert cli_bad.returncode!=0
+    mcp_bad=mcp_call(binary,uid,env,"get_authentication",{"attempt_id":"ff"*16}); assert mcp_bad["isError"] is True
+    assert "NOT_FOUND" in cli_bad.stdout.decode() and "NOT_FOUND" in json.dumps(mcp_bad)
+    return cli_discovery
+
 def main():
     binary,cli=map(lambda x:pathlib.Path(x).resolve(),sys.argv[1:]);root=pathlib.Path(tempfile.mkdtemp(prefix="pm-attempts-linux-lab-"))
     try:
@@ -97,6 +141,7 @@ def main():
         now=int(time.time()*1_000_000)
         success=agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="01"*16,context="success");sid=parse(success,"CREATED")
         time.sleep(.05);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=sid),"SUCCEEDED")
+        interface_env={"PM_PROFILE":str(aprof),"PM_PRIVATE":str(ak),"PM_SOCKET":str(runtime/"agent.sock")}
         assert parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="01"*16,context="success"),"SUCCEEDED")==sid
         conflict=agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="01"*16,context="reject");denied(conflict,3)
         challenge=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="02"*16,context="challenge"),"CREATED");time.sleep(.05);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=challenge),"WAITING_FOR_HUMAN")
@@ -105,6 +150,7 @@ def main():
         ambiguous=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="04"*16,context="ambiguous"),"CREATED");time.sleep(.05);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=ambiguous),"INDETERMINATE")
         lost=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="07"*16,context="response-loss"),"CREATED");time.sleep(.2);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=lost),"SUCCEEDED")
         rejected=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="08"*16,context="reject"),"CREATED");time.sleep(.05);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=rejected),"FAILED")
+        assert_interface_equivalence(pcli,AGENT_A,interface_env,item,sid,cancelled,now)
         stop(daemon);daemon=start(b,boota,runtime,vault,psock);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=ambiguous),"INDETERMINATE")
         data=json.loads(journal.read_text());assert data[ambiguous]["calls"]==1 and data[lost]["calls"]==1
         db=sqlite3.connect(vault);before=db.execute("select count(*) from authentication_attempts").fetchone()[0];db.execute("create trigger fail_ticket08_audit before insert on encrypted_audit_records begin select raise(abort,'ticket08 audit fault'); end");db.commit();db.close()
