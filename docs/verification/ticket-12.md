@@ -39,3 +39,79 @@ Casos observados: Ed25519 y password exitosos; canal posterior sobre ambas conex
 ## Límites explícitos
 
 Evidencia solo para Linux x86_64, OpenSSH 10.5p1, Ed25519 y password, en laboratorio descartable. macOS Remote Login, Windows OpenSSH, otros targets/algoritmos y empaquetado permanecen en ticket 33. No se afirma que russh zeroice internamente el `String` recibido por `authenticate_password`; la garantía observada es que vive en el proceso UID confiable y nunca en recursos/log/env del agente. La revocación impide una autenticación nueva; por contrato no mata conexiones ya autenticadas.
+
+## Verificación unificada del merger
+
+El candidato `2af343d523ec3cef5b8af492a0b8d868a2417b90`, basado en
+`cb5654d88e4e6f0fc7f17b0352a3dffce6e74c8a`, se integró sin reescribir
+historia sobre el HEAD unificado
+`c8973fc2f85759d2a2b0f13b34efd0df142e6609` mediante el merge
+`9328be55276817cbba2be405328a0d552b96eb03`. Los conflictos se resolvieron
+como unión aditiva: el workspace y lock conservan backup, passkey, web auth y
+sync junto con `pm-ssh-client`; `AttemptLease` conserva TOTP/passkey y añade
+material SSH custodial; discovery y resultados públicos conservan OIDC y
+agregan los dos perfiles SSH cerrados. No se integró el candidato del ticket
+11.
+
+El helper humano exclusivo del laboratorio SSH usaba provisionalmente el
+opcode 41. Para preservar los opcodes humanos ya integrados (1PUX 31, backup
+32--34, passkey 35--37 y web 40), y evitar el 41 reservado por el candidato 11,
+se trasladó simétricamente a 45. Los opcodes del canal agente permanecen en su
+espacio separado.
+
+La primera ejecución integrada de `./scripts/check.sh` detectó dos límites
+`clippy::too_many_lines` creados por la unión de TOTP/passkey y SSH. Se extrajo
+el decodificador cerrado de material de autenticación y la construcción vacía
+de reconciliación, sin cambiar el formato persistido. El primer recorrido del
+laboratorio de intentos descubrió después una incompatibilidad observable:
+`controlled.external` guarda un resultado opaco no JSON, pero el dispatcher
+unificado intentaba parsear todo resultado antes de comprobar la integración y
+respondía `INTERNAL_ERROR`/`CUSTODY_UNAVAILABLE`. La regresión pública ahora
+prueba bytes opacos no JSON; solo OIDC y SSH parsean sus esquemas públicos
+cerrados. `pm-interface` quedó en 4/4 y el laboratorio de intentos volvió a
+pasar sus rutas E2E/crash.
+
+Gates finales, ejecutados sobre el árbol corregido:
+
+```text
+./scripts/check.sh
+# verify-build-inputs, fmt, workspace check/tests y clippy locked+offline: PASS
+
+./scripts/clean-offline-build.sh
+# Removed 14077 files, 4.0GiB total
+# workspace/all-targets locked+offline build: PASS (35.37 s)
+
+./scripts/cargo-local.sh test -p pm-vault --test delegated_authorization --locked --offline
+# 8 passed; 0 failed
+
+./scripts/cargo-local.sh test -p pm-ssh-client --locked --offline
+# profile: 2 passed; 0 failed
+```
+
+Después del build limpio se ejecutaron secuencialmente los trece laboratorios
+Linux presentes, todos con salida cero y `PASS`:
+
+```text
+./scripts/test-linux-custody-lab.sh
+./scripts/test-linux-human-transaction-lab.sh
+./scripts/test-linux-content-lab.sh
+./scripts/test-linux-authorization-lab.sh
+./scripts/test-linux-attempts-lab.sh
+./scripts/test-linux-csv-import-lab.sh
+./scripts/test-linux-sync-lab.sh
+./scripts/test-linux-history-lab.sh
+./scripts/test-linux-1pux-import-lab.sh
+./scripts/test-linux-backup-lab.sh
+PM_KEYCLOAK_DIST=.scratch/lab-artifacts/keycloak/keycloak-26.7.3 PM_CFT_DIR=.scratch/lab-artifacts/cft/chrome-linux64 ./scripts/test-linux-web-auth-lab.sh
+PM_CFT_DIR=.scratch/lab-artifacts/cft/chrome-linux64 ./scripts/test-linux-passkey-lab.sh
+./scripts/test-linux-ssh-lab.sh
+```
+
+La corrida SSH final observó nuevamente OpenSSH 10.5p1 y russh 0.63.3, éxito
+real por Ed25519 y password, y apertura/cierre de canal sobre ambas conexiones
+retenidas. También repitió rechazo pre-secreto de hostkey, username y payload
+de firma mal ligados, consumidor por UID, ownership oculto, revoke previo y
+partial-success cancelado. Web auth volvió a ejecutar Keycloak 26.7.3 + CFT
+153; passkey volvió a recorrer CFT/MV3/Native Messaging; backup volvió a
+recorrer PMB1/PMF1. No se amplían los límites de plataforma ya declarados ni se
+afirma soporte de macOS/Windows.

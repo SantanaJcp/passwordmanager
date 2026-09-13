@@ -1,7 +1,7 @@
 # 12 — SSH y cuentas de sistema con conexión confirmada
 
 Type: task
-Status: claimed
+Status: resolved
 Owner: sol-12
 Blocked by: 08
 Spec: ../spec.md
@@ -27,15 +27,35 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [x] consumidor usa canal posterior sin que motor intermedie/gestione sesión y sin privata/password en sus recursos. Linux/OpenSSH real inicialmente.
 - [x] matriz macOS/Windows en 33.
 - [x] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
-- [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
+- [x] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
 ## Answer
 
-Candidato completo en `codex/pm-12`. `pm-ssh-client` fija russh 0.63.3 y conserva el transporte/`Handle` desde KEX y hostkey hasta `AuthResult::Success`; custodia libera password solo después del host verificado o firma exclusivamente el payload RFC 4252 ligado al intento. El `consumer_ref` de 256 bits solo funciona desde el UID instalado y abre/cierra un canal sobre la conexión retenida, sin relay ni API de comandos/sesión en motor, CLI o MCP.
+Candidato `2af343d523ec3cef5b8af492a0b8d868a2417b90` integrado sin reescribir
+historia mediante `9328be55276817cbba2be405328a0d552b96eb03`: `pm-ssh-client`
+con russh 0.63.3 conserva el transporte desde KEX/hostkey hasta
+`AuthResult::Success`, retiene la conexión para el consumidor UID-bound y la
+custodia solo entrega password tras host verificado o firma el payload RFC
+4252 ligado al intento. El laboratorio OpenSSH 10.5p1 real pasó key+password,
+canal posterior, impostor/host/destino/firma/revoke/partial-success y canarios.
 
-Evidencia exacta, fuentes y límites: [docs/verification/ticket-12.md](../../../docs/verification/ticket-12.md). El laboratorio user+mount namespace ejecutó OpenSSH 10.5p1 real con cuenta sintética para publickey/password, hostkey/usuario/firma incorrectos, consumidor impostor, ownership, revocación previa y partial-success/cancelación. `check.sh`, clean offline build y todos los laboratorios Linux quedaron verdes. La matriz macOS/Windows y targets/algoritmos restantes sigue expresamente en 33. Falta únicamente integración y verificación por merger separado; por ello el ticket permanece `claimed`.
+La integración preserva backup/passkey/web/sync y los opcodes humanos ya
+publicados; el helper SSH de laboratorio quedó en 45. `check.sh`, build limpio
+offline y los trece laboratorios Linux actuales pasaron. La evidencia exacta,
+incluidos dos fallos de integración detectados y corregidos antes de resolver,
+está en [docs/verification/ticket-12.md](../../../docs/verification/ticket-12.md).
+macOS/Windows y otros targets/algoritmos permanecen en el ticket 33.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-13 — Reclamado paraSSH/systemaccounts porloginrealconfirmado; laboratorio aislado sinmodificar cuentasdelhost.
+
+
+2026-09-13 — Merger separado integró el candidato sobre el árbol unificado y
+preservó los contratos de 1PUX, backup, passkey y web. `check.sh` detectó y
+forzó el refactor de los decodificadores combinados; el laboratorio de intentos
+detectó que resultados opacos de `controlled.external` no deben parsearse como
+JSON. Tras la regresión cerrada, check, build limpio offline y los trece labs
+Linux (incluidos SSH/OpenSSH, Keycloak/CFT, passkey/MV3 y backup) quedaron
+verdes. No hubo push, limpieza de worktrees ni review formal Astra.
