@@ -1,8 +1,8 @@
 # 06 — Auditoría cifrada y purga explícita
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-06
 Blocked by: 04
 Spec: ../spec.md
 Requirements: R05,R09
@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-13 — Reclamado por Sol en frontera paralela 05/06 tras integración verificada de 04. Conservar motor/commit compartidos, sin revisión formal Astra por ticket.
