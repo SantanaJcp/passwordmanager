@@ -39,7 +39,11 @@ use rustls::{
 use zeroize::{Zeroize, Zeroizing};
 
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
-use pm_vault::{HumanCommitError, HumanVault, PasswordRecord, PreparedHumanCommand};
+use pm_vault::{
+    Attachment, AuthRecord, CustomField, Destination, GeneratorConfig, HumanCommitError,
+    HumanMetadata, HumanVault, LogicalRecord, LogicalValue, PasswordRecord, PreparedHumanCommand,
+    PrivateKeyFormat, RecordKind, SearchQuery, SourceEncoding, SourceField, TotpAlgorithm,
+};
 
 use crate::{Failure, take_path};
 
@@ -53,7 +57,7 @@ const SPKI_BYTES: usize = 44;
 const MAX_PROTECTED_BYTES: u64 = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const HUMAN_MAGIC: &[u8; 5] = b"PMH1\n";
-const MAX_HUMAN_FRAME: usize = 1024 * 1024;
+const MAX_HUMAN_FRAME: usize = 18 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Role {
@@ -127,6 +131,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("serve-vault") => serve_vault(&mut arguments),
         Some("probe") => probe(&mut arguments),
         Some("human-password-crud") => human_password_crud(&mut arguments),
+        Some("human-content-flow") => human_content_flow(&mut arguments),
         _ => Err(Failure::Usage),
     }
 }
@@ -433,6 +438,202 @@ fn human_password_crud(arguments: &mut impl Iterator<Item = OsString>) -> Result
     Ok(())
 }
 
+fn human_content_flow(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+
+    let mut items = Vec::new();
+    for expected in content_fixture_records()? {
+        let mut request = vec![9];
+        push_bytes(&mut request, &expected.to_bytes())?;
+        write_frame(&mut tls, &request)?;
+        let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
+        rpc_commit(&mut tls, &prepared)?;
+        let mut request = vec![10];
+        request.extend_from_slice(&prepared.item_id);
+        write_frame(&mut tls, &request)?;
+        let response = read_frame(&mut tls)?;
+        let actual = LogicalRecord::from_bytes(&expect_success_payload(&response)?)
+            .map_err(|_| Failure::Unavailable)?;
+        if actual != expected {
+            return Err(Failure::Unavailable);
+        }
+        items.push(prepared.item_id);
+    }
+
+    let note = items[5];
+    let mut organize = vec![11];
+    organize.extend_from_slice(&note);
+    organize.push(1);
+    organize.extend_from_slice(&1_u16.to_be_bytes());
+    push_bytes(&mut organize, b"ticket05-team")?;
+    write_frame(&mut tls, &organize)?;
+    let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
+    rpc_commit(&mut tls, &prepared)?;
+
+    let mut search = vec![12];
+    push_bytes(&mut search, b"ticket05-e2e-search-canary")?;
+    push_bytes(&mut search, b"ticket05-team")?;
+    search.push(2);
+    write_frame(&mut tls, &search)?;
+    let response = read_frame(&mut tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    if cursor.fixed(2)? != 1_u16.to_be_bytes() || cursor.fixed(16)? != note {
+        return Err(Failure::Unavailable);
+    }
+    cursor.finish()?;
+
+    let mut generator = vec![13];
+    generator.extend_from_slice(&96_u16.to_be_bytes());
+    generator.push(0b0110); // uppercase + digits only
+    write_frame(&mut tls, &generator)?;
+    let generated = expect_success_payload(&read_frame(&mut tls)?)?;
+    if generated.len() != 96
+        || !generated
+            .iter()
+            .all(|value| value.is_ascii_uppercase() || value.is_ascii_digit())
+    {
+        return Err(Failure::Unavailable);
+    }
+    println!(
+        "PASS content-e2e types=7 unicode-attachment=exact source-fields=preserved search=1 organize=tag+favorite generator=configured passkey=storage-only"
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
+    let metadata = |title: &str, notes: &str| HumanMetadata {
+        title: title.to_owned(),
+        destinations: vec![Destination {
+            label: "Portal 🌎".to_owned(),
+            value: "https://e2e.invalid/雪".to_owned(),
+        }],
+        tags: vec!["synthetic".to_owned()],
+        favorite: false,
+        notes: notes.to_owned(),
+        fields: vec![CustomField {
+            id: [0x61; 16],
+            label: "extra".to_owned(),
+            value: LogicalValue::Text("exact".to_owned()),
+            concealed: false,
+        }],
+        source_fields: vec![SourceField {
+            path: "legacy.unknown".to_owned(),
+            encoding: SourceEncoding::Bytes,
+            value: b"ticket05-e2e-source-canary".to_vec(),
+        }],
+    };
+    let attachment = || {
+        Attachment::new(
+            [0x71; 16],
+            "archivo-雪.txt",
+            "text/plain",
+            "ticket05-e2e-attachment-canary 🌎".as_bytes(),
+        )
+        .map_err(|_| Failure::Unavailable)
+    };
+    let make = |kind, human, auth, attachments| {
+        LogicalRecord::new(kind, human, auth, attachments).map_err(|_| Failure::Unavailable)
+    };
+    Ok(vec![
+        make(
+            RecordKind::Password,
+            metadata("Password", "password"),
+            vec![AuthRecord::Password {
+                username: "e2e".to_owned(),
+                password: b"ticket05-e2e-password-canary".to_vec(),
+                destination_refs: vec![0],
+            }],
+            vec![attachment()?],
+        )?,
+        make(
+            RecordKind::Totp,
+            metadata("TOTP", "totp"),
+            vec![AuthRecord::Totp {
+                secret: b"ticket05-e2e-totp-canary".to_vec(),
+                algorithm: TotpAlgorithm::Sha1,
+                digits: 6,
+                period: 30,
+                t0: 0,
+                issuer: "Synthetic".to_owned(),
+                account: "e2e".to_owned(),
+                destination_refs: vec![0],
+            }],
+            vec![],
+        )?,
+        make(
+            RecordKind::Passkey,
+            metadata("Passkey", "stored only"),
+            vec![AuthRecord::Passkey {
+                rp_id: "e2e.invalid".to_owned(),
+                user_handle: b"e2e-user".to_vec(),
+                credential_id: b"e2e-credential".to_vec(),
+                cose_alg: -8,
+                private_key: [0x73; 32],
+                public_key: [0x74; 32],
+                user_name: "e2e".to_owned(),
+                display_name: "E2E".to_owned(),
+                sign_count: 0,
+                backup_eligible: true,
+                backup_state: true,
+            }],
+            vec![],
+        )?,
+        make(
+            RecordKind::Ssh,
+            metadata("SSH", "ssh"),
+            vec![AuthRecord::Ssh {
+                private_format: PrivateKeyFormat::OpenSsh,
+                private_key: b"ticket05-e2e-ssh-canary".to_vec(),
+                public_key: b"ssh-ed25519 e2e".to_vec(),
+                username: "e2e".to_owned(),
+                destination_refs: vec![0],
+                passphrase: None,
+            }],
+            vec![],
+        )?,
+        make(
+            RecordKind::Token,
+            metadata("Token", "token"),
+            vec![AuthRecord::Token {
+                secret: b"ticket05-e2e-token-canary".to_vec(),
+                provider: "synthetic".to_owned(),
+                profile_id: "e2e".to_owned(),
+                destination_refs: vec![0],
+                expires_at: None,
+            }],
+            vec![],
+        )?,
+        make(
+            RecordKind::Note,
+            metadata("ticket05-e2e-search-canary", "note"),
+            vec![],
+            vec![],
+        )?,
+        make(
+            RecordKind::File,
+            metadata("File", "file"),
+            vec![],
+            vec![attachment()?],
+        )?,
+    ])
+}
+
 struct WirePrepared {
     transaction_id: [u8; 16],
     item_id: [u8; 16],
@@ -502,7 +703,11 @@ fn rpc_prepare(
     }
     write_frame(tls, &request)?;
     let response = read_frame(tls)?;
-    let mut cursor = Cursor::new(&response);
+    decode_prepared_response(&response)
+}
+
+fn decode_prepared_response(response: &[u8]) -> Result<WirePrepared, Failure> {
+    let mut cursor = Cursor::new(response);
     cursor.expect(&[0])?;
     let transaction_id = cursor
         .fixed(16)?
@@ -633,6 +838,7 @@ fn handle_human_rpc(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_human_request(vault: &mut HumanVault, request: &[u8]) -> Result<Vec<u8>, Failure> {
     let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
     match opcode {
@@ -714,6 +920,110 @@ fn handle_human_request(vault: &mut HumanVault, request: &[u8]) -> Result<Vec<u8
                 }
                 Err(_) => Ok(vec![3]),
             }
+        }
+        9 => {
+            let mut cursor = Cursor::new(rest);
+            let bytes = cursor.bytes()?;
+            cursor.finish()?;
+            let record = LogicalRecord::from_bytes(&bytes).map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_create_record(&record)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
+        }
+        10 => {
+            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            match vault.read_record(item) {
+                Ok(record) => {
+                    let mut response = vec![0];
+                    response.extend_from_slice(&record.to_bytes());
+                    Ok(response)
+                }
+                Err(HumanCommitError::ItemNotFound) => Ok(vec![3]),
+                Err(_) => Ok(vec![1]),
+            }
+        }
+        11 => {
+            let mut cursor = Cursor::new(rest);
+            let item = cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            let favorite = match cursor.fixed(1)? {
+                [0] => false,
+                [1] => true,
+                _ => return Err(Failure::Unavailable),
+            };
+            let count = usize::from(u16::from_be_bytes(
+                cursor
+                    .fixed(2)?
+                    .try_into()
+                    .map_err(|_| Failure::Unavailable)?,
+            ));
+            let mut tags = Vec::with_capacity(count);
+            for _ in 0..count {
+                tags.push(String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?);
+            }
+            cursor.finish()?;
+            let prepared = vault
+                .prepare_organize(item, tags, favorite)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
+        }
+        12 => {
+            let mut cursor = Cursor::new(rest);
+            let text = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+            let tag = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+            let favorite = match cursor.fixed(1)? {
+                [0] => None,
+                [1] => Some(false),
+                [2] => Some(true),
+                _ => return Err(Failure::Unavailable),
+            };
+            cursor.finish()?;
+            let hits = vault
+                .search(&SearchQuery {
+                    text: (!text.is_empty()).then_some(text),
+                    tag: (!tag.is_empty()).then_some(tag),
+                    favorite,
+                })
+                .map_err(|_| Failure::Unavailable)?;
+            let mut response = vec![0];
+            response.extend_from_slice(
+                &u16::try_from(hits.len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            for hit in hits {
+                response.extend_from_slice(hit.item_id());
+            }
+            Ok(response)
+        }
+        13 => {
+            let mut cursor = Cursor::new(rest);
+            let length = usize::from(u16::from_be_bytes(
+                cursor
+                    .fixed(2)?
+                    .try_into()
+                    .map_err(|_| Failure::Unavailable)?,
+            ));
+            let flags = *cursor.fixed(1)?.first().ok_or(Failure::Unavailable)?;
+            cursor.finish()?;
+            if flags & !0b1111 != 0 {
+                return Err(Failure::Unavailable);
+            }
+            let generated = vault
+                .generate_password(&GeneratorConfig {
+                    length,
+                    lowercase: flags & 1 != 0,
+                    uppercase: flags & 2 != 0,
+                    digits: flags & 4 != 0,
+                    symbols: flags & 8 != 0,
+                })
+                .map_err(|_| Failure::Unavailable)?;
+            let mut response = vec![0];
+            response.extend_from_slice(generated.expose());
+            Ok(response)
         }
         _ => Err(Failure::Unavailable),
     }

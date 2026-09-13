@@ -10,14 +10,17 @@ use std::{
 
 use minicbor::{Decoder, Encoder, data::Type};
 use pm_crypto::{
-    CryptoError, ItemKind, RevisionPackageInput, TrustedRoot, UnlockedRoot, digest, random_id,
+    CryptoError, RevisionPackageInput, TrustedRoot, UnlockedRoot, digest, fill_random, random_id,
     verify_human_command,
 };
 pub use pm_native_channel::AuthenticatedHumanChannel as HumanChannel;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use zeroize::Zeroize;
 
-use crate::{VaultError, unlock_root};
+use crate::{
+    AuthRecord, Destination, GeneratedPassword, GeneratorConfig, HumanMetadata, LogicalRecord,
+    PasswordRng, RecordKind, SearchHit, SearchQuery, VaultError, content, unlock_root,
+};
 
 const CHALLENGE_LIFETIME_US: i64 = 60_000_000;
 const AUDIT_GENERATION: i64 = 1;
@@ -35,6 +38,7 @@ pub enum HumanCommitError {
     InvalidInput,
     InvalidSignature,
     ItemNotFound,
+    RandomUnavailable,
     StateChanged,
     Storage(rusqlite::Error),
     TransactionConflict,
@@ -51,7 +55,8 @@ impl fmt::Display for HumanCommitError {
             Self::InvalidCommand => "invalid human command",
             Self::InvalidInput => "invalid password record",
             Self::InvalidSignature => "invalid human signature",
-            Self::ItemNotFound => "password item not found",
+            Self::ItemNotFound => "item not found",
+            Self::RandomUnavailable => "secure random source unavailable",
             Self::StateChanged => "vault authority state changed",
             Self::Storage(_) => "human transaction storage failed",
             Self::TransactionConflict => "human transaction id conflicts with another body",
@@ -318,7 +323,7 @@ impl HumanVault {
         item: [u8; 16],
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
         self.require_active(item)?;
-        self.prepare("item_lifecycle", "trash", item, None, None)
+        self.prepare("item_lifecycle", "trash", item, None, None, None, None)
     }
 
     /// Signs exactly the canonical prepared command under the `SK_H` domain.
@@ -474,23 +479,162 @@ impl HumanVault {
     ///
     /// Returns an error for an unavailable item or invalid encrypted package.
     pub fn read_password(&self, item: [u8; 16]) -> Result<PasswordRecord, HumanCommitError> {
+        let record = self.read_record(item)?;
+        password_from_logical(&record)
+    }
+
+    /// Stages any selected G6 record and independently encrypted attachments.
+    ///
+    /// # Errors
+    /// Returns an error for invalid logical data, randomness, or durable staging.
+    pub fn prepare_create_record(
+        &mut self,
+        record: &LogicalRecord,
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        self.prepare_record_write(random_id()?, record)
+    }
+
+    /// Stages a complete replacement revision for any active logical item.
+    ///
+    /// # Errors
+    /// Returns an error when the item is absent or staging cannot complete.
+    pub fn prepare_edit_record(
+        &mut self,
+        item: [u8; 16],
+        record: &LogicalRecord,
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        self.require_active(item)?;
+        self.prepare_record_write(item, record)
+    }
+
+    /// Reads, authenticates and reconstructs one complete logical record.
+    ///
+    /// Passkey material returned here is preserved content only; this method is
+    /// not a `WebAuthn` authenticator and cannot perform a login.
+    ///
+    /// # Errors
+    /// Returns an error for an absent item, altered revision, or altered file.
+    pub fn read_record(&self, item: [u8; 16]) -> Result<LogicalRecord, HumanCommitError> {
         self.channel.verify()?;
         let connection = open_connection(&self.path)?;
-        let package: Vec<u8> = connection
+        let (revision_bytes, expected_kind, package): (Vec<u8>, String, Vec<u8>) = connection
             .query_row(
-                "SELECT r.package FROM vault_items i
+                "SELECT i.visible_revision,i.kind,r.package FROM vault_items i
                  JOIN revision_parts r ON r.revision_id=i.visible_revision
                  WHERE i.item_id=?1 AND i.status='active'",
                 [item.as_slice()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?
             .ok_or(HumanCommitError::ItemNotFound)?;
+        let revision = bytes::<16>(&revision_bytes)?;
         let opened = self.root.open_revision_package(&package)?;
-        if opened.item() != &item {
+        let mut record =
+            LogicalRecord::decode_parts(opened.human_plaintext(), opened.auth_plaintext())?;
+        if opened.item() != &item
+            || opened.revision() != &revision
+            || record.kind().name() != expected_kind
+            || record.kind().crypto() != opened.kind()
+        {
             return Err(HumanCommitError::InvalidCommand);
         }
-        decode_password(opened.human_plaintext(), opened.auth_plaintext())
+        let ids: Vec<[u8; 16]> = record
+            .attachments()
+            .iter()
+            .map(|value| *value.id())
+            .collect();
+        for id in ids {
+            let file: Vec<u8> = connection
+                .query_row(
+                    "SELECT package FROM attachment_parts WHERE attachment_id=?1 AND revision_id=?2",
+                    params![id.as_slice(), revision.as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(HumanCommitError::InvalidCommand)?;
+            let content = self.root.open_file(id, revision, &file)?;
+            record.restore_attachment(id, content)?;
+        }
+        let attachment_count: i64 = connection.query_row(
+            "SELECT count(*) FROM attachment_parts WHERE revision_id=?1",
+            [revision.as_slice()],
+            |row| row.get(0),
+        )?;
+        if usize::try_from(attachment_count).ok() != Some(record.attachments().len()) {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        record.validate_complete()?;
+        Ok(record)
+    }
+
+    /// Updates tags/favorite by publishing a complete encrypted revision.
+    ///
+    /// # Errors
+    /// Returns an error for an absent item or invalid organization limits.
+    pub fn prepare_organize(
+        &mut self,
+        item: [u8; 16],
+        tags: Vec<String>,
+        favorite: bool,
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        let mut record = self.read_record(item)?;
+        record.set_organization(tags, favorite)?;
+        self.prepare_edit_record(item, &record)
+    }
+
+    /// Searches decrypted human metadata without a persistent plaintext index.
+    ///
+    /// # Errors
+    /// Returns an error if any visible record fails authentication.
+    pub fn search(&self, query: &SearchQuery) -> Result<Vec<SearchHit>, HumanCommitError> {
+        self.channel.verify()?;
+        let connection = open_connection(&self.path)?;
+        let mut statement = connection
+            .prepare("SELECT item_id FROM vault_items WHERE status='active' ORDER BY item_id")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(connection);
+        let mut hits = Vec::new();
+        for value in ids {
+            let id = bytes::<16>(&value)?;
+            let record = self.read_record(id)?;
+            if record.matches(query) {
+                hits.push(SearchHit::new(id, &record));
+            }
+        }
+        Ok(hits)
+    }
+
+    /// Generates a password using the selected native RNG and human configuration.
+    ///
+    /// # Errors
+    /// Returns an error for invalid configuration, wrong channel, or RNG failure.
+    pub fn generate_password(
+        &self,
+        config: &GeneratorConfig,
+    ) -> Result<GeneratedPassword, HumanCommitError> {
+        struct NativeRng;
+        impl PasswordRng for NativeRng {
+            fn fill(&mut self, output: &mut [u8]) -> Result<(), HumanCommitError> {
+                fill_random(output).map_err(|_| HumanCommitError::RandomUnavailable)
+            }
+        }
+        self.generate_password_with_rng(config, &mut NativeRng)
+    }
+
+    /// Runs the same human generator with an explicit RNG boundary for fault evidence.
+    ///
+    /// # Errors
+    /// Returns a fixed failure and no partial output if the RNG cannot fill a block.
+    pub fn generate_password_with_rng(
+        &self,
+        config: &GeneratorConfig,
+        rng: &mut impl PasswordRng,
+    ) -> Result<GeneratedPassword, HumanCommitError> {
+        self.channel.verify()?;
+        content::generate_password(config, rng)
     }
 
     fn prepare_write(
@@ -498,27 +642,45 @@ impl HumanVault {
         item: [u8; 16],
         record: &PasswordRecord,
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        let logical = logical_from_password(record)?;
+        self.prepare_record_write(item, &logical)
+    }
+
+    fn prepare_record_write(
+        &mut self,
+        item: [u8; 16],
+        record: &LogicalRecord,
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
         let revision = random_id()?;
-        let (human, auth) = encode_password(record);
+        let human = record.encode_human();
+        let auth = record.encode_auth();
         let package = self.root.seal_revision_package(RevisionPackageInput {
             item,
             revision,
             issuer_device: self.device,
             modified_at: now_us()?,
-            kind: ItemKind::Password,
+            kind: record.kind().crypto(),
             human_plaintext: &human,
-            auth_plaintext: Some(&auth),
+            auth_plaintext: auth.as_deref(),
         })?;
         let package = package.to_bytes();
+        let mut attachments = Vec::new();
+        for (id, plaintext) in record.attachment_inputs() {
+            attachments.push((id, self.root.seal_file(id, revision, plaintext)?.to_bytes()));
+        }
+        let attachments = encode_staged_attachments(&attachments);
         self.prepare(
             "item_write",
             "item-revision",
             item,
             Some(revision),
             Some(&package),
+            Some(record.kind().name()),
+            Some(&attachments),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare(
         &mut self,
         operation: &'static str,
@@ -526,13 +688,15 @@ impl HumanVault {
         item: [u8; 16],
         revision: Option<[u8; 16]>,
         package: Option<&[u8]>,
+        item_kind: Option<&str>,
+        attachments: Option<&[u8]>,
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
         self.channel.verify()?;
         let transaction_id = random_id()?;
         let challenge = random_challenge()?;
         let connection = open_connection(&self.path)?;
         let expected_state = state_digest(&connection, self.root.vault_id(), 1)?;
-        let object_digest = package.map(digest);
+        let object_digest = staged_object_digest(package, attachments);
         let event_manifest = encode_event_manifest(event_kind, item, revision, object_digest);
         let body = encode_body(&Body {
             transaction_id,
@@ -568,8 +732,8 @@ impl HumanVault {
         )?;
         transaction.execute(
             "INSERT INTO human_staging
-             (transaction_id,operation,event_kind,item_id,revision_id,body,package)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+             (transaction_id,operation,event_kind,item_id,revision_id,body,package,item_kind,attachments)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 transaction_id.as_slice(),
                 operation,
@@ -578,6 +742,8 @@ impl HumanVault {
                 revision.as_ref().map(<[u8; 16]>::as_slice),
                 body,
                 package,
+                item_kind,
+                attachments,
             ],
         )?;
         transaction.commit()?;
@@ -631,6 +797,8 @@ struct Staged {
     revision_id: Option<[u8; 16]>,
     body: Vec<u8>,
     package: Option<Vec<u8>>,
+    item_kind: Option<String>,
+    attachments: Option<Vec<u8>>,
 }
 
 struct EventInput<'a> {
@@ -669,16 +837,31 @@ fn apply_staged(transaction: &Transaction<'_>, staged: &Staged) -> rusqlite::Res
         "item-revision" => {
             let revision = staged.revision_id.expect("validated staging revision");
             let package = staged.package.as_ref().expect("validated staging package");
+            let kind = staged.item_kind.as_ref().expect("validated staging kind");
             transaction.execute(
                 "INSERT INTO revision_parts (revision_id,item_id,package) VALUES (?1,?2,?3)",
                 params![revision.as_slice(), staged.item_id.as_slice(), package],
             )?;
             transaction.execute(
-                "INSERT INTO vault_items (item_id,visible_revision,status)
-                 VALUES (?1,?2,'active')
-                 ON CONFLICT(item_id) DO UPDATE SET visible_revision=excluded.visible_revision",
-                params![staged.item_id.as_slice(), revision.as_slice()],
+                "INSERT INTO vault_items (item_id,visible_revision,kind,status)
+                 VALUES (?1,?2,?3,'active')
+                 ON CONFLICT(item_id) DO UPDATE SET
+                   visible_revision=excluded.visible_revision,kind=excluded.kind,status='active'",
+                params![staged.item_id.as_slice(), revision.as_slice(), kind],
             )?;
+            for (attachment, attachment_package) in decode_staged_attachments(
+                staged
+                    .attachments
+                    .as_ref()
+                    .expect("validated staged attachments"),
+            )
+            .map_err(|_| rusqlite::Error::InvalidQuery)?
+            {
+                transaction.execute(
+                    "INSERT INTO attachment_parts (attachment_id,revision_id,package) VALUES (?1,?2,?3)",
+                    params![attachment.as_slice(), revision.as_slice(), attachment_package],
+                )?;
+            }
         }
         "trash" => {
             transaction.execute(
@@ -692,17 +875,25 @@ fn apply_staged(transaction: &Transaction<'_>, staged: &Staged) -> rusqlite::Res
 }
 
 fn validate_staged(staged: &Staged, body: &Body) -> Result<(), HumanCommitError> {
-    let object_digest = staged.package.as_deref().map(digest);
+    let object_digest =
+        staged_object_digest(staged.package.as_deref(), staged.attachments.as_deref());
     let valid_shape = match staged.event_kind.as_str() {
         "item-revision" => {
             staged.operation == "item_write"
                 && staged.revision_id.is_some()
                 && staged.package.is_some()
+                && staged.item_kind.is_some()
+                && staged
+                    .attachments
+                    .as_deref()
+                    .is_some_and(|value| decode_staged_attachments(value).is_ok())
         }
         "trash" => {
             staged.operation == "item_lifecycle"
                 && staged.revision_id.is_none()
                 && staged.package.is_none()
+                && staged.item_kind.is_none()
+                && staged.attachments.is_none()
         }
         _ => false,
     };
@@ -801,96 +992,108 @@ fn persist_audit(
     Ok(())
 }
 
-fn encode_password(record: &PasswordRecord) -> (Vec<u8>, Vec<u8>) {
-    let mut human = Encoder::new(Vec::new());
-    human.map(8).unwrap();
-    human.str("title").unwrap().str(&record.title).unwrap();
-    human.str("destinations").unwrap().array(1).unwrap();
-    human.map(2).unwrap();
-    human.str("label").unwrap().str("").unwrap();
-    human
-        .str("value")
-        .unwrap()
-        .str(&record.destination)
-        .unwrap();
-    human.str("tags").unwrap().array(0).unwrap();
-    human.str("favorite").unwrap().bool(false).unwrap();
-    human.str("notes").unwrap().str(&record.notes).unwrap();
-    human.str("fields").unwrap().array(0).unwrap();
-    human.str("attachment_ids").unwrap().array(0).unwrap();
-    human.str("source_fields").unwrap().array(0).unwrap();
-
-    let mut auth = Encoder::new(Vec::new());
-    auth.array(1).unwrap().map(4).unwrap();
-    auth.str("method").unwrap().str("password").unwrap();
-    auth.str("username").unwrap().str(&record.username).unwrap();
-    auth.str("password")
-        .unwrap()
-        .bytes(&record.password)
-        .unwrap();
-    auth.str("destination_refs")
-        .unwrap()
-        .array(1)
-        .unwrap()
-        .u64(0)
-        .unwrap();
-    (human.into_writer(), auth.into_writer())
+fn logical_from_password(record: &PasswordRecord) -> Result<LogicalRecord, HumanCommitError> {
+    LogicalRecord::new(
+        RecordKind::Password,
+        HumanMetadata {
+            title: record.title.clone(),
+            destinations: vec![Destination {
+                label: String::new(),
+                value: record.destination.clone(),
+            }],
+            tags: Vec::new(),
+            favorite: false,
+            notes: record.notes.clone(),
+            fields: Vec::new(),
+            source_fields: Vec::new(),
+        },
+        vec![AuthRecord::Password {
+            username: record.username.clone(),
+            password: record.password.clone(),
+            destination_refs: vec![0],
+        }],
+        Vec::new(),
+    )
 }
 
-fn decode_password(
-    human_bytes: &[u8],
-    auth_bytes: Option<&[u8]>,
-) -> Result<PasswordRecord, HumanCommitError> {
-    let mut human = Decoder::new(human_bytes);
-    expect_map(&mut human, 8)?;
-    expect_key(&mut human, "title")?;
-    let title = human.str().map_err(invalid)?.to_owned();
-    expect_key(&mut human, "destinations")?;
-    expect_array(&mut human, 1)?;
-    expect_map(&mut human, 2)?;
-    expect_key(&mut human, "label")?;
-    if !human.str().map_err(invalid)?.is_empty() {
-        return Err(HumanCommitError::InvalidCommand);
+fn password_from_logical(record: &LogicalRecord) -> Result<PasswordRecord, HumanCommitError> {
+    if record.kind() != RecordKind::Password {
+        return Err(HumanCommitError::ItemNotFound);
     }
-    expect_key(&mut human, "value")?;
-    let destination = human.str().map_err(invalid)?.to_owned();
-    expect_key(&mut human, "tags")?;
-    expect_array(&mut human, 0)?;
-    expect_key(&mut human, "favorite")?;
-    if human.bool().map_err(invalid)? {
-        return Err(HumanCommitError::InvalidCommand);
-    }
-    expect_key(&mut human, "notes")?;
-    let notes = human.str().map_err(invalid)?.to_owned();
-    for key in ["fields", "attachment_ids", "source_fields"] {
-        expect_key(&mut human, key)?;
-        expect_array(&mut human, 0)?;
-    }
-    if human.position() != human_bytes.len() {
-        return Err(HumanCommitError::InvalidCommand);
-    }
+    let destination = record
+        .human()
+        .destinations
+        .first()
+        .ok_or(HumanCommitError::InvalidCommand)?;
+    let (username, password) = record
+        .auth()
+        .iter()
+        .find_map(|auth| match auth {
+            AuthRecord::Password {
+                username, password, ..
+            } => Some((username, password)),
+            _ => None,
+        })
+        .ok_or(HumanCommitError::InvalidCommand)?;
+    PasswordRecord::new(
+        &record.human().title,
+        username,
+        password,
+        &destination.value,
+        &record.human().notes,
+    )
+}
 
-    let auth_bytes = auth_bytes.ok_or(HumanCommitError::InvalidCommand)?;
-    let mut auth = Decoder::new(auth_bytes);
-    expect_array(&mut auth, 1)?;
-    expect_map(&mut auth, 4)?;
-    expect_key(&mut auth, "method")?;
-    if auth.str().map_err(invalid)? != "password" {
+fn encode_staged_attachments(values: &[([u8; 16], Vec<u8>)]) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.array(u64::try_from(values.len()).unwrap()).unwrap();
+    for (id, package) in values {
+        encoder.map(2).unwrap();
+        encoder.str("id").unwrap().bytes(id).unwrap();
+        encoder.str("package").unwrap().bytes(package).unwrap();
+    }
+    encoder.into_writer()
+}
+
+type StagedAttachment = ([u8; 16], Vec<u8>);
+
+fn decode_staged_attachments(
+    bytes_value: &[u8],
+) -> Result<Vec<StagedAttachment>, HumanCommitError> {
+    let mut decoder = Decoder::new(bytes_value);
+    let count = decoder
+        .array()
+        .map_err(invalid)?
+        .ok_or(HumanCommitError::InvalidCommand)?;
+    let count = usize::try_from(count).map_err(|_| HumanCommitError::InvalidCommand)?;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        expect_map(&mut decoder, 2)?;
+        expect_key(&mut decoder, "id")?;
+        let id = decode_fixed(&mut decoder)?;
+        expect_key(&mut decoder, "package")?;
+        let package = decoder.bytes().map_err(invalid)?.to_vec();
+        if values.iter().any(|(other, _)| other == &id) {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        values.push((id, package));
+    }
+    if decoder.position() != bytes_value.len() {
         return Err(HumanCommitError::InvalidCommand);
     }
-    expect_key(&mut auth, "username")?;
-    let username = auth.str().map_err(invalid)?.to_owned();
-    expect_key(&mut auth, "password")?;
-    let password = auth.bytes().map_err(invalid)?.to_vec();
-    expect_key(&mut auth, "destination_refs")?;
-    expect_array(&mut auth, 1)?;
-    if auth.u64().map_err(invalid)? != 0 || auth.position() != auth_bytes.len() {
-        return Err(HumanCommitError::InvalidCommand);
+    Ok(values)
+}
+
+fn staged_object_digest(package: Option<&[u8]>, attachments: Option<&[u8]>) -> Option<[u8; 32]> {
+    let package = package?;
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.array(2).unwrap().bytes(package).unwrap();
+    if let Some(attachments) = attachments {
+        encoder.bytes(attachments).unwrap();
+    } else {
+        encoder.null().unwrap();
     }
-    let decoded = PasswordRecord::new(&title, &username, &password, &destination, &notes);
-    let mut password = password;
-    password.zeroize();
-    decoded
+    Some(digest(&encoder.into_writer()))
 }
 
 fn encode_command(command: &CommandFields<'_>) -> Vec<u8> {
@@ -1211,7 +1414,7 @@ fn load_staging(
 ) -> Result<Staged, HumanCommitError> {
     connection
         .query_row(
-            "SELECT operation,event_kind,item_id,revision_id,body,package FROM human_staging
+            "SELECT operation,event_kind,item_id,revision_id,body,package,item_kind,attachments FROM human_staging
              WHERE transaction_id=?1",
             [transaction_id.as_slice()],
             |row| {
@@ -1226,6 +1429,8 @@ fn load_staging(
                         .transpose()?,
                     body: row.get(4)?,
                     package: row.get(5)?,
+                    item_kind: row.get(6)?,
+                    attachments: row.get(7)?,
                 })
             },
         )
@@ -1316,13 +1521,6 @@ fn encode_optional_bytes(encoder: &mut Encoder<Vec<u8>>, value: Option<&[u8]>) {
 
 fn expect_map(decoder: &mut Decoder<'_>, fields: u64) -> Result<(), HumanCommitError> {
     if decoder.map().map_err(invalid)? != Some(fields) {
-        return Err(HumanCommitError::InvalidCommand);
-    }
-    Ok(())
-}
-
-fn expect_array(decoder: &mut Decoder<'_>, fields: u64) -> Result<(), HumanCommitError> {
-    if decoder.array().map_err(invalid)? != Some(fields) {
         return Err(HumanCommitError::InvalidCommand);
     }
     Ok(())
