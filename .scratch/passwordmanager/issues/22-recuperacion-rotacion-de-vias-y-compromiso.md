@@ -1,8 +1,8 @@
 # 22 — Recuperación, rotación de vías y compromiso
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-22
 Blocked by: 21,17
 Spec: ../spec.md
 Requirements: R06,R18,R19
@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-13 — Claimed por Sol tras integrar y verificar 21 y 17; implementación aislada, revisión formal Astra solo al final.
