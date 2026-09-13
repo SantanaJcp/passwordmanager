@@ -1,8 +1,8 @@
 # 11 — Token exchange Keycloak acotado
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-11
 Blocked by: 08
 Spec: ../spec.md
 Requirements: R03,R08,R09,R14
@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-13 — Reclamado conKeycloak10 integrado paraexchangeV2acotado; no endpointarbitrario ni fallbacklegacy.
