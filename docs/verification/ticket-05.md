@@ -92,10 +92,11 @@ Observed green output:
 ```text
 PASS uid_map='0       1000          1\n         1     100000      65535'
 PASS custody_uid=1 human_uid=2 agent_uid=3
-PASS bootstrap_sha256=ffc3a002c5725b06576ff03adf77ac6f0699d9979ffe2122757d3969e666f6c6 restart=process tls=1.3 rpk=mutual alpn=role-specific
+PASS bootstrap_sha256=9bf2607c20b65e66fdc81d6dd213cbddcdffc7cdedb2307838e7cb0afb4d84e7 restart=process tls=1.3 rpk=mutual alpn=role-specific
 PASS human_crud=prepare-commit-receipt tls=1.3 rpk=mutual alpn=pm-human/1
 PASS human_negatives=wrong-role,body-change,audit-failure atomicity=no-partial replay=receipt response-loss=recovered
 PASS content=all-types+organization+generator+streaming-file stream-crash=rolled-back tls=1.3 rpk=mutual alpn=pm-human/1
+PASS audit=encrypted,signed,segmented,query,purge autonomous_without_kh=device-custody human_path=mutual-tls-rpk
 LIMIT reboot_host=NOT_RUN production_systemd_fde=NOT_RUN
 ```
 
@@ -117,7 +118,7 @@ fixed error and no partial password, database write, log, stdout or stderr.
 # pinned inputs and clean locked/offline workspace build passed; exit 0
 
 ./scripts/check.sh
-# pinned inputs, fmt, workspace/all-target check, 31 tests and clippy passed; exit 0
+# pinned inputs, fmt, workspace/all-target check, 37 tests and clippy passed; exit 0
 
 ./scripts/test-linux-custody-lab.sh
 # ticket-03 native multi-UID/RPK laboratory passed; exit 0
@@ -131,8 +132,11 @@ fixed error and no partial password, database write, log, stdout or stderr.
 # exit 0
 ```
 
-The normal ticket-04 command remains unchanged and does not opt into the new
-content flow. Formal Astra review remains deferred until all tickets. This
-evidence does not claim passkey/WebAuthn use, SSH/provider login, import,
-history, sync, host reboot, systemd/FDE, non-Linux behavior, or ticket-06
-audit query/purge.
+The corrector `9ea748aef95ca0e0c1fa1f0e5223c8e0f1468789` was integrated as
+`d7f0389`. The normal ticket-04 command remains unchanged and does not opt
+into the new content flow; it passed independently, as did the ticket-03
+custody lab and all six ticket-06 audit lifecycle tests. The merge preserves
+audit opcodes 14–16 and uses 17–18 only for streaming. Formal Astra review
+remains deferred until all tickets. This evidence does not claim
+passkey/WebAuthn use, SSH/provider login, import, history, sync, host reboot,
+systemd/FDE or non-Linux behavior.
