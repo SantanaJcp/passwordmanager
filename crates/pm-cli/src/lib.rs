@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-#![allow(clippy::all, clippy::pedantic)]
-
 //! Human vault bootstrap and delegated CLI/MCP presentation adapters.
 
 use pm_crypto::{KdfProfile, RecoveryCode};
@@ -12,6 +10,7 @@ use pm_interface::{
 use pm_vault::{PendingVault, open_vault};
 use std::{
     ffi::OsString,
+    fmt::Write as FmtWrite,
     io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
 };
@@ -40,6 +39,8 @@ impl std::fmt::Display for CliError {
 }
 impl std::error::Error for CliError {}
 
+/// # Errors
+/// Returns a category-safe error for invalid arguments or unavailable custody.
 pub fn run(arguments: &[OsString]) -> Result<(), CliError> {
     match arguments {
         [flag] if flag == "--version" => {
@@ -458,8 +459,9 @@ fn decode_hex(value: &str) -> Result<[u8; 16], ErrorCode> {
         return Err(ErrorCode::InvalidArgument);
     }
     let mut output = [0_u8; 16];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        output[index] = (digit(chunk[0])? << 4) | digit(chunk[1])?;
+    for (index, output_byte) in output.iter_mut().enumerate() {
+        let chunk = &value.as_bytes()[index * 2..index * 2 + 2];
+        *output_byte = (digit(chunk[0])? << 4) | digit(chunk[1])?;
     }
     Ok(output)
 }
@@ -476,7 +478,7 @@ fn run_mcp() -> Result<(), CliError> {
     let mut input = stdin.lock();
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    let engine = AgentEngine::from_environment().unwrap_or_else(|_| AgentEngine {
+    let engine = AgentEngine::from_environment().unwrap_or_else(|()| AgentEngine {
         config: TransportConfig::missing(),
     });
     let mut line = String::new();
@@ -505,8 +507,8 @@ fn run_mcp() -> Result<(), CliError> {
             let response = mcp_dispatch(&request, &engine);
             output
                 .write_all(&encode_json(&response))
-                .and_then(|_| output.write_all(b"\n"))
-                .and_then(|_| output.flush())
+                .and_then(|()| output.write_all(b"\n"))
+                .and_then(|()| output.flush())
                 .map_err(|_| CliError::new("CUSTODY_UNAVAILABLE", 4))?;
         }
         line.clear();
@@ -561,7 +563,8 @@ fn mcp_dispatch(request: &Request, engine: &impl Engine) -> Json {
                 method: method.into(),
                 params,
             };
-            tool_response(request, dispatch(&internal, engine))
+            let response = dispatch(&internal, engine);
+            tool_response(request, &response)
         }
         _ => error_response(request, ErrorCode::NotFound),
     }
@@ -602,7 +605,7 @@ fn tools_list(request: &Request) -> Json {
         ),
     ])
 }
-fn tool_response(request: &Request, response: Json) -> Json {
+fn tool_response(request: &Request, response: &Json) -> Json {
     if let Some(error) = response.field("error") {
         let text = String::from_utf8(encode_json(error)).expect("JSON encoder emits UTF-8");
         return Json::Object(vec![
@@ -723,5 +726,9 @@ fn read_limited_line(input: &mut impl BufRead, maximum: usize) -> Result<Vec<u8>
     Ok(value)
 }
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
