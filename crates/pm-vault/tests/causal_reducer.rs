@@ -411,6 +411,144 @@ fn delete_beats_future_clock_edit_until_restore_sees_every_delete_and_purge_is_t
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn lifecycle_and_selective_purge_converge_in_all_delivery_permutations() {
+    let directory = TestDir::new();
+    let seed = directory.path("lifecycle-permutations-seed.sqlite3");
+    persist_test_vault(&seed);
+    let (a, _pa) = open_human(
+        &seed,
+        [0x41; 16],
+        Arc::new(AuditDeviceCustody::generate().unwrap()),
+    );
+    let (b, _pb) = open_human(
+        &seed,
+        [0x42; 16],
+        Arc::new(AuditDeviceCustody::generate().unwrap()),
+    );
+    let (c, _pc) = open_human(
+        &seed,
+        [0x43; 16],
+        Arc::new(AuditDeviceCustody::generate().unwrap()),
+    );
+
+    let first = a
+        .sign_causal_event(&revision_draft([0x31; 16], [0x91; 16], 1))
+        .unwrap();
+    let trash = b
+        .sign_causal_event(
+            &CausalEventDraft::new(
+                [0x32; 16],
+                1,
+                1,
+                None,
+                vec![],
+                CausalEventKind::Trash,
+                ITEM,
+                1,
+                CausalEventBody::Lifecycle {
+                    deletions_seen: vec![],
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut second_parents = vec![first.digest(), trash.digest()];
+    second_parents.sort_unstable();
+    let second = a
+        .sign_causal_event(
+            &CausalEventDraft::new(
+                [0x33; 16],
+                1,
+                2,
+                Some(first.digest()),
+                second_parents,
+                CausalEventKind::ItemRevision,
+                ITEM,
+                1,
+                CausalEventBody::Revision {
+                    revision_id: [0x92; 16],
+                    modified_at: 2,
+                    manifest_digest: [0x56; 32],
+                    previous_revisions: vec![[0x91; 16]],
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut restore_parents = vec![trash.digest(), second.digest()];
+    restore_parents.sort_unstable();
+    let restore = c
+        .sign_causal_event(
+            &CausalEventDraft::new(
+                [0x34; 16],
+                1,
+                1,
+                None,
+                restore_parents,
+                CausalEventKind::Restore,
+                ITEM,
+                1,
+                CausalEventBody::Lifecycle {
+                    deletions_seen: vec![trash.digest()],
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut purge_parents = vec![second.digest(), restore.digest()];
+    purge_parents.sort_unstable();
+    let purge = a
+        .sign_causal_event(
+            &CausalEventDraft::new(
+                [0x35; 16],
+                1,
+                3,
+                Some(second.digest()),
+                purge_parents,
+                CausalEventKind::PurgeRevisions,
+                ITEM,
+                1,
+                CausalEventBody::Purge {
+                    revision_ids: vec![[0x91; 16]],
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let events = [first, trash, second, restore, purge];
+    rusqlite::Connection::open(&seed)
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+
+    let mut orders = Vec::new();
+    permutations(&mut [0, 1, 2, 3, 4], 0, &mut orders);
+    assert_eq!(orders.len(), 120);
+    let mut expected = None;
+    for (case, order) in orders.into_iter().enumerate() {
+        let path = directory.path(&format!("lifecycle-permutation-{case}.sqlite3"));
+        fs::copy(&seed, &path).unwrap();
+        let mut reducer = CausalReducer::open(&path).unwrap();
+        for index in order {
+            reducer.apply(std::slice::from_ref(&events[index])).unwrap();
+        }
+        // A repeated delivery cannot resurrect the purged losing revision.
+        let view = reducer.apply(std::slice::from_ref(&events[0])).unwrap();
+        let item = view.item(&ITEM).unwrap();
+        assert_eq!(item.lifecycle(), ItemLifecycle::Active);
+        assert_eq!(item.visible_revision(), Some(&[0x92; 16]));
+        assert_eq!(item.history(), &[[0x92; 16]]);
+        assert_eq!(view.pending_count(), 0);
+        assert_eq!(view.retained_header_count(), 5);
+        match expected {
+            None => expected = Some(*view.digest()),
+            Some(digest) => assert_eq!(*view.digest(), digest),
+        }
+    }
+}
+
+#[test]
 fn altered_batch_is_rejected_atomically_and_checkpoint_is_only_a_verified_cache() {
     let directory = TestDir::new();
     let path = directory.path("atomic.sqlite3");
@@ -761,6 +899,18 @@ fn revision_body(revision_id: [u8; 16], modified_at: i64) -> CausalEventBody {
         modified_at,
         manifest_digest: [0x55; 32],
         previous_revisions: Vec::new(),
+    }
+}
+
+fn permutations(values: &mut [usize], start: usize, output: &mut Vec<Vec<usize>>) {
+    if start == values.len() {
+        output.push(values.to_vec());
+        return;
+    }
+    for index in start..values.len() {
+        values.swap(start, index);
+        permutations(values, start + 1, output);
+        values.swap(start, index);
     }
 }
 
