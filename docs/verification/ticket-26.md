@@ -41,8 +41,8 @@ documentation.
 The manual
 [macOS custody acceptance workflow](../../.github/workflows/macos-custody-acceptance.yml)
 orchestrates exactly the two standard runners `macos-15-intel` and `macos-15`.
-It is prepared but has not been published or executed. Its only product entry
-point is:
+It was published as workflow-only bootstrap `c4e8779` and its first product
+run is recorded below. Its only product entry point is:
 
 ```text
 PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh
@@ -97,6 +97,21 @@ custody binary returned `CUSTODY_UNAVAILABLE`, and `OwnedClipboard` did not
 exist. It must be recorded on the native runner rather than inferred here.
 The green is the exact same native test/laboratory command after this patch.
 Until those two observed native records exist, the ticket must remain claimed.
+
+The first native product run
+[`34763192705`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763192705)
+on checkpoint `3409f5b` is an observed **RED** on both `macos-15-intel` and
+`macos-15`. Environment validation, the locked dependency fetch and the
+native libsodium build advanced successfully, but `pm-vault` failed to compile
+before any product assertion ran. Darwin exposes `statvfs.f_bavail` as `u32`
+while `f_frsize` is `u64`, and exposes `S_IFMT`, `S_IFREG` and `S_IFDIR` as
+`u16` while ZIP modes are `u32`. The six compiler errors were the same width
+mismatches on both architectures. This is real native compile evidence, not
+custody behavioral evidence and not acceptance. The focused repair converts
+both platform values into their protocol-sized unsigned type with checked
+conversions, rejects multiplication overflow explicitly, and keeps rejecting
+non-regular/non-directory ZIP entry kinds. Both native targets must rerun the
+unchanged product entry point before any GREEN claim.
 
 The acceptance-workflow checker was written before the workflow existed:
 
@@ -167,9 +182,12 @@ replace the native method above.
 
 ## Remaining acceptance work
 
-- Execute the red record on the pre-port revision and the green record on both
-  authorized ephemeral macOS architectures after the CI bootstrap is
-  published.
+- Rerun the repaired checkpoint on both authorized ephemeral macOS
+  architectures; the first run stopped at the native compile RED and did not
+  reach the product assertions.
+- Execute or recover the intended pre-port behavioral red if the acceptance
+  record requires it; the observed compile RED does not substitute for that
+  behavioral evidence.
 - Record exact runner versions, command output and cleanup result here.
 - Repeat the repository and Linux gates on the integrated candidate after the
   separate merger incorporates the native CI configuration.

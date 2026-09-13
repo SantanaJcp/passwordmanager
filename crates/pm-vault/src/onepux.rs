@@ -288,12 +288,31 @@ pub(crate) fn ensure_staging_capacity(
         if libc::statvfs(path.as_ptr(), &raw mut status) != 0 {
             return Err(HumanCommitError::Io(std::io::Error::last_os_error()));
         }
-        status.f_bavail.saturating_mul(status.f_frsize)
+        filesystem_available_bytes(status.f_bavail, status.f_frsize)?
     };
     if available < required {
         return Err(HumanCommitError::InvalidInput);
     }
     Ok(())
+}
+
+fn filesystem_available_bytes<B, F>(
+    available_blocks: B,
+    fragment_size: F,
+) -> Result<u64, HumanCommitError>
+where
+    B: TryInto<u64>,
+    F: TryInto<u64>,
+{
+    let available_blocks = available_blocks
+        .try_into()
+        .map_err(|_| HumanCommitError::InvalidInput)?;
+    let fragment_size = fragment_size
+        .try_into()
+        .map_err(|_| HumanCommitError::InvalidInput)?;
+    available_blocks
+        .checked_mul(fragment_size)
+        .ok_or(HumanCommitError::InvalidInput)
 }
 
 fn required_capacity(logical_bytes: u64, file_count: usize) -> Result<u64, HumanCommitError> {
@@ -555,16 +574,39 @@ fn validate_entry(entry: &zip::read::ZipFile<'_, File>) -> Result<String, HumanC
     {
         return Err(HumanCommitError::InvalidInput);
     }
-    if let Some(mode) = entry.unix_mode() {
-        let kind = mode & libc::S_IFMT;
-        if kind != 0 && kind != libc::S_IFREG && kind != libc::S_IFDIR {
-            return Err(HumanCommitError::InvalidInput);
-        }
+    if let Some(mode) = entry.unix_mode()
+        && !zip_mode_is_supported(mode, libc::S_IFMT, libc::S_IFREG, libc::S_IFDIR)?
+    {
+        return Err(HumanCommitError::InvalidInput);
     }
     if entry.is_symlink() || (!entry.is_file() && !entry.is_dir()) {
         return Err(HumanCommitError::InvalidInput);
     }
     Ok(name.to_owned())
+}
+
+fn zip_mode_is_supported<M, R, D>(
+    mode: u32,
+    file_type_mask: M,
+    regular_file: R,
+    directory: D,
+) -> Result<bool, HumanCommitError>
+where
+    M: TryInto<u32>,
+    R: TryInto<u32>,
+    D: TryInto<u32>,
+{
+    let file_type_mask = file_type_mask
+        .try_into()
+        .map_err(|_| HumanCommitError::InvalidInput)?;
+    let regular_file = regular_file
+        .try_into()
+        .map_err(|_| HumanCommitError::InvalidInput)?;
+    let directory = directory
+        .try_into()
+        .map_err(|_| HumanCommitError::InvalidInput)?;
+    let kind = mode & file_type_mask;
+    Ok(kind == 0 || kind == regular_file || kind == directory)
 }
 
 fn validate_attributes(bytes: &[u8]) -> Result<(), HumanCommitError> {
@@ -1316,6 +1358,29 @@ mod tests {
         assert!(Attachment::descriptor([1; 16], "x", "x", MAX_FILE + 1, [2; 32]).is_err());
         assert_eq!(required_capacity(0, 0).unwrap(), 64 * 1024 * 1024);
         assert!(required_capacity(u64::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn native_integer_widths_are_normalized_without_truncation() {
+        assert_eq!(filesystem_available_bytes(7_u32, 4096_u64).unwrap(), 28_672);
+        assert!(filesystem_available_bytes(u64::MAX, 2_u64).is_err());
+
+        let mask = 0o170_000_u16;
+        let regular = 0o100_000_u16;
+        let directory = 0o040_000_u16;
+        assert!(zip_mode_is_supported(0, mask, regular, directory).unwrap());
+        assert!(zip_mode_is_supported(0o100_644, mask, regular, directory).unwrap());
+        assert!(zip_mode_is_supported(0o040_755, mask, regular, directory).unwrap());
+        assert!(!zip_mode_is_supported(0o120_777, mask, regular, directory).unwrap());
+        assert!(
+            zip_mode_is_supported(
+                0,
+                u64::from(u32::MAX) + 1,
+                u64::from(regular),
+                u64::from(directory),
+            )
+            .is_err()
+        );
     }
 
     #[test]
