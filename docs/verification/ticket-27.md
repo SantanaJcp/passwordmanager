@@ -12,6 +12,12 @@ probar producto salvo que observe Windows 11 nativo, proceso/PE de la CPU del
 job y Rust 1.98.1. No acepta Windows Server, WoW64, WSL, emulación, mocks ni
 cross-compilation como evidencia.
 
+El workflow manual preparado es
+`.github/workflows/ticket-27-windows.yml`. Instala Rust 1.98.1 ARM64 en los
+homes `.toolchain` del repositorio, ejecuta el preflight aprobado, hace
+`cargo fetch --locked` y solo entonces entra al lab con builds `--offline`.
+No se ha publicado ni despachado desde este worktree.
+
 En Windows 11 ARM64 hospedado y Windows 11 x64 aún no disponible, el laboratorio
 debe crear mediante SCM el servicio own-process automático
 `PasswordManager` bajo `NT SERVICE\PasswordManager`, identidades restringidas
