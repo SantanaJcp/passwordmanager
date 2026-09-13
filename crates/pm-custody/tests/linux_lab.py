@@ -126,6 +126,7 @@ def main():
     assert os.geteuid() == 0, "harness must be root only inside the disposable user namespace"
     source_binary = pathlib.Path(sys.argv[1]).resolve()
     source_cli = pathlib.Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else None
+    run_content = len(sys.argv) > 3 and sys.argv[3] == "content"
     root = pathlib.Path(tempfile.mkdtemp(prefix="pm-custody-linux-lab-"))
     try:
         os.chmod(root, 0o711)
@@ -343,6 +344,39 @@ def main():
             assert database.execute("select status from vault_items").fetchone() == ("trash",)
             database.close()
 
+            if run_content:
+                content = as_uid(
+                    HUMAN,
+                    [
+                        binary,
+                        "human-content-flow",
+                        "--profile",
+                        human_profile,
+                        "--private",
+                        human_private,
+                        "--socket",
+                        human_socket,
+                    ],
+                    input=wire_fields([master]),
+                )
+                assert content.stdout == (
+                    b"PASS content-e2e types=7 unicode-attachment=exact source-fields=preserved "
+                    b"search=1 organize=tag+favorite generator=configured passkey=storage-only\n"
+                )
+                assert content.stderr == b""
+                canaries = [
+                    b"ticket05-e2e-password-canary",
+                    b"ticket05-e2e-totp-canary",
+                    b"ticket05-e2e-ssh-canary",
+                    b"ticket05-e2e-token-canary",
+                    b"ticket05-e2e-attachment-canary",
+                    b"ticket05-e2e-source-canary",
+                    b"ticket05-e2e-search-canary",
+                ]
+                for candidate in vault.parent.glob(vault.name + "*"):
+                    persisted = candidate.read_bytes()
+                    assert all(canary not in persisted for canary in canaries)
+
         os.chmod(agent_private, 0o600)
         key_acl_fault = as_uid(
             AGENT,
@@ -386,6 +420,8 @@ def main():
                 "PASS human_negatives=wrong-role,body-change,audit-failure "
                 "atomicity=no-partial replay=receipt response-loss=recovered"
             )
+            if run_content:
+                print("PASS content=all-types+organization+generator tls=1.3 rpk=mutual alpn=pm-human/1")
         print("LIMIT reboot_host=NOT_RUN production_systemd_fde=NOT_RUN")
     finally:
         shutil.rmtree(root, ignore_errors=True)

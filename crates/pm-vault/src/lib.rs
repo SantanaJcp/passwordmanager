@@ -2,8 +2,14 @@
 
 //! Atomic persistence for already-encrypted vault objects.
 
+mod content;
 mod human;
 
+pub use content::{
+    Attachment, AuthRecord, CustomField, Destination, GeneratedPassword, GeneratorConfig,
+    HumanMetadata, LogicalRecord, LogicalValue, PasswordRng, PrivateKeyFormat, RecordKind,
+    SearchHit, SearchQuery, SourceEncoding, SourceField, TotpAlgorithm,
+};
 pub use human::{
     HumanChannel, HumanCommitError, HumanReceipt, HumanVault, PasswordRecord, PreparedHumanCommand,
 };
@@ -258,12 +264,19 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              CREATE TABLE vault_items (
                item_id BLOB PRIMARY KEY CHECK (length(item_id) = 16),
                visible_revision BLOB NOT NULL CHECK (length(visible_revision) = 16),
+               kind TEXT NOT NULL CHECK (kind IN ('password','totp','passkey','ssh','token','note','file')),
                status TEXT NOT NULL CHECK (status IN ('active', 'trash'))
              ) STRICT;
              CREATE TABLE revision_parts (
                revision_id BLOB PRIMARY KEY CHECK (length(revision_id) = 16),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                package BLOB NOT NULL CHECK (length(package) BETWEEN 1 AND 16777216)
+             ) STRICT;
+             CREATE TABLE attachment_parts (
+               attachment_id BLOB NOT NULL CHECK (length(attachment_id) = 16),
+               revision_id BLOB NOT NULL CHECK (length(revision_id) = 16),
+               package BLOB NOT NULL CHECK (length(package) BETWEEN 1 AND 17825792),
+               PRIMARY KEY (attachment_id, revision_id)
              ) STRICT;
              CREATE TABLE authority_events (
                event_digest BLOB PRIMARY KEY CHECK (length(event_digest) = 32),
@@ -292,7 +305,9 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB CHECK (revision_id IS NULL OR length(revision_id) = 16),
                body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144),
-               package BLOB CHECK (package IS NULL OR length(package) BETWEEN 1 AND 16777216)
+               package BLOB CHECK (package IS NULL OR length(package) BETWEEN 1 AND 16777216),
+               item_kind TEXT CHECK (item_kind IS NULL OR item_kind IN ('password','totp','passkey','ssh','token','note','file')),
+               attachments BLOB CHECK (attachments IS NULL OR length(attachments) BETWEEN 1 AND 18874368)
              ) STRICT;
              CREATE TABLE human_receipts (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),

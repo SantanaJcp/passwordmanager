@@ -634,9 +634,87 @@ impl UnlockedRoot {
         Ok(OpenedRevisionPackage {
             item: manifest.item,
             revision: manifest.revision,
+            kind: manifest.kind,
             human_plaintext,
             auth_plaintext,
         })
+    }
+
+    /// Encrypts one complete attachment with an independent `K_F`, PMF1
+    /// framing and a human-root key envelope bound to its ID and revision.
+    ///
+    /// # Errors
+    /// Returns an error for an oversized file or unavailable randomness.
+    pub fn seal_file(
+        &self,
+        attachment: [u8; ID_BYTES],
+        revision: [u8; ID_BYTES],
+        plaintext: &[u8],
+    ) -> Result<FileCiphertext, CryptoError> {
+        if plaintext.len() > MAX_OBJECT_BYTES {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let target = target_header(self.vault, attachment, revision, Purpose::File, 1);
+        let key = Secret::random()?;
+        let stream = seal_pmf1(&key, &target, plaintext)?;
+        let key_envelope = seal_key(
+            &self.human_root,
+            &key,
+            &target,
+            wrapping_header(
+                self.vault,
+                random_array()?,
+                revision,
+                Purpose::KeyWrap,
+                &target,
+                None,
+            ),
+        )?;
+        Ok(FileCiphertext {
+            key_envelope,
+            stream,
+        })
+    }
+
+    /// Authenticates an attachment package and its expected logical membership.
+    ///
+    /// # Errors
+    /// Returns an error for altered bytes, wrong IDs/revision/purpose, or truncation.
+    pub fn open_file(
+        &self,
+        expected_attachment: [u8; ID_BYTES],
+        expected_revision: [u8; ID_BYTES],
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let package = FileCiphertext::from_bytes(bytes)?;
+        let (key, target) = open_key(&self.human_root, &package.key_envelope)?;
+        let stream_header_len = usize::try_from(u32::from_be_bytes(
+            package
+                .stream
+                .get(4..8)
+                .ok_or(CryptoError::InvalidFormat)?
+                .try_into()
+                .map_err(invalid)?,
+        ))
+        .map_err(invalid)?;
+        let header_end = 8_usize
+            .checked_add(stream_header_len)
+            .ok_or(CryptoError::InvalidFormat)?;
+        let (stream_target, _) = decode_pmf1_header(
+            package
+                .stream
+                .get(8..header_end)
+                .ok_or(CryptoError::InvalidFormat)?,
+        )?;
+        if target != stream_target
+            || target.vault != self.vault
+            || target.object != expected_attachment
+            || target.revision != expected_revision
+            || target.purpose != Purpose::File
+        {
+            return Err(CryptoError::Authentication);
+        }
+        open_pmf1(&key, &package.stream)
     }
 
     /// Prepares the sealed portion and commitment before an authority event exists.
@@ -834,6 +912,7 @@ impl RevisionPackage {
 pub struct OpenedRevisionPackage {
     item: [u8; ID_BYTES],
     revision: [u8; ID_BYTES],
+    kind: ItemKind,
     human_plaintext: Vec<u8>,
     auth_plaintext: Option<Vec<u8>>,
 }
@@ -850,6 +929,11 @@ impl OpenedRevisionPackage {
     }
 
     #[must_use]
+    pub const fn kind(&self) -> ItemKind {
+        self.kind
+    }
+
+    #[must_use]
     pub fn human_plaintext(&self) -> &[u8] {
         &self.human_plaintext
     }
@@ -857,6 +941,59 @@ impl OpenedRevisionPackage {
     #[must_use]
     pub fn auth_plaintext(&self) -> Option<&[u8]> {
         self.auth_plaintext.as_deref()
+    }
+}
+
+/// Portable attachment ciphertext: a PMF1 stream and its independent `K_F` envelope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileCiphertext {
+    key_envelope: Envelope,
+    stream: Vec<u8>,
+}
+
+impl FileCiphertext {
+    /// Returns the closed portable package.
+    ///
+    /// # Panics
+    /// Only if the in-memory `Vec` encoder cannot write, which is uninhabited;
+    /// allocation failure follows Rust's process-level behavior.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut encoder = Encoder::new(Vec::new());
+        encoder.map(3).expect("Vec writes cannot fail");
+        encoder.str("v").expect("Vec writes cannot fail");
+        encoder.u64(FORMAT_VERSION).expect("Vec writes cannot fail");
+        encoder.str("key_envelope").expect("Vec writes cannot fail");
+        encoder
+            .bytes(&encode_envelope(&self.key_envelope))
+            .expect("Vec writes cannot fail");
+        encoder.str("stream").expect("Vec writes cannot fail");
+        encoder.bytes(&self.stream).expect("Vec writes cannot fail");
+        encoder.into_writer()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() > MAX_OBJECT_BYTES + MAX_HEADER_BYTES * 2 {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let mut decoder = Decoder::new(bytes);
+        expect_map(&mut decoder, 3)?;
+        expect_key(&mut decoder, "v")?;
+        if decoder.u64().map_err(invalid)? != FORMAT_VERSION {
+            return Err(CryptoError::InvalidFormat);
+        }
+        expect_key(&mut decoder, "key_envelope")?;
+        let key_envelope = decode_envelope(decoder.bytes().map_err(invalid)?)?;
+        expect_key(&mut decoder, "stream")?;
+        let stream = decoder.bytes().map_err(invalid)?.to_vec();
+        let package = Self {
+            key_envelope,
+            stream,
+        };
+        if decoder.position() != bytes.len() || package.to_bytes() != bytes {
+            return Err(CryptoError::InvalidFormat);
+        }
+        Ok(package)
     }
 }
 
@@ -1228,6 +1365,17 @@ pub fn recover_human_root(
 pub fn random_id() -> Result<[u8; ID_BYTES], CryptoError> {
     sodium()?;
     random_array()
+}
+
+/// Fills caller-owned bytes from the selected native random source.
+///
+/// # Errors
+/// Returns an error when the native RNG cannot be initialized securely.
+pub fn fill_random(output: &mut [u8]) -> Result<(), CryptoError> {
+    sodium()?;
+    // SAFETY: sodium is initialized and `output` is writable for its full length.
+    unsafe { libsodium_sys::randombytes_buf(output.as_mut_ptr().cast(), output.len()) };
+    Ok(())
 }
 
 /// Computes SHA-256 through the repository's single native crypto boundary.
