@@ -1,8 +1,8 @@
-# Ticket 27 — checkpoint de implementación Windows
+# Ticket 27 — composición Windows pendiente de ejecución nativa
 
-Fecha: 2026-09-13. Estado: **checkpoint, no candidato aceptado**. Este documento
-no acredita Windows ni resuelve el ticket. No se ejecutó Windows, no se instaló
-servicio y no se modificó el host Linux.
+Fecha: 2026-09-13. Estado: **implementación sin acreditar, no candidato
+aceptado**. Este documento no acredita Windows ni resuelve el ticket. No se
+ejecutó Windows, no se instaló servicio y no se modificó el host Linux.
 
 ## Método nativo que deberá ejecutarse
 
@@ -50,7 +50,7 @@ Se observó RED en el seam público antes de implementar:
 # error E0432: WindowsEndpoint/windows_pipe_sddl no existían
 ```
 
-El checkpoint añade al canal nativo, sin segundo motor:
+La implementación local añade al canal nativo, sin segundo ledger:
 
 - nombres separados agent/human y SDDL protegida solo SYSTEM, service SID y el
   SID de cuenta configurado;
@@ -60,6 +60,16 @@ El checkpoint añade al canal nativo, sin segundo motor:
 - `OwnedClipboard` con `CF_UNICODETEXT` y limpieza condicionada al sequence;
 - `ConPty` nativo con resize; tests Windows futuros para DPAPI, clipboard race y
   pseudoconsola.
+
+Después del checkpoint inicial se compuso `pm-custody` con SCM como servicio
+own-process bajo `NT SERVICE\PasswordManager`, los dos pipes, TLS 1.3/RPK/ALPN,
+DPAPI para claves/bootstrap/custodia de auditoría, desbloqueo y cierre humano y
+el motor wire delegado. El motor delegado se extrajo a `agent_wire.rs` y lo
+usan Linux y Windows; Windows no mantiene una copia divergente ni un segundo
+ledger. `scripts/test-windows-custody-lab.ps1` prepara cuentas locales
+restringidas sintéticas, DACL, servicio virtual, vault real, sustitución
+negativa y restart. Nada de esto cuenta como evidencia hasta ejecutarlo en el
+runner Windows 11 ARM64 autorizado.
 
 Comprobaciones locales, que **no sustituyen ejecución Windows**:
 
@@ -74,18 +84,33 @@ RUSTFLAGS='--cfg target_os="windows" -Aexplicit_builtin_cfgs_in_flags' \
 
 ## Pendiente que bloquea aceptación
 
-Falta conectar estos primitives al servicio `pm-custody`, al transporte TLS/RPK
-y al motor/canal humano completos; falta el script nativo anterior y toda su
-ejecución observable. Windows 11 ARM64 CI aún no está publicado/ejecutado y
-Windows 11 x64 estándar no está disponible. Reboot/FDE, humano real y firma
-permanecen pendientes. Por ello el ticket conserva `Status: claimed` y ningún
+Falta compilar y ejecutar el producto y el script en Windows 11 ARM64. El
+preflight corregido `34763094631` pasó 5/5 y observó Windows 11 Enterprise
+10.0.26200, imagen `win11-vs2026-arm64 20260907.151.1`, PowerShell/PE ARM64 y
+Rust 1.98.1 host `aarch64-pc-windows-msvc`; `EnableLUA=1` y el token del runner
+pasó la comprobación de administrador. Fue solo entorno, no ejecutó producto.
+Además,
+`libsodium-sys-stable 1.24.0` contiene en su `build.rs` un fallback existente:
+si falla `install_from_source()` en MSVC, activa
+`extract_libsodium_precompiled_msvc()` y sustituye la compilación del tarball
+fijado por `libsodium-1.0.22-stable-msvc.zip`. `SODIUM_DIST_DIR` fuerza entrada
+local y ese zip no existe, así que hoy el build falla explícitamente; no se
+añadió el zip ni se cambió el fallback sin autorización. Windows 11 x64
+estándar no está disponible. Reboot/FDE, Windows Terminal humano real y firma
+permanecen en 32/34. Por ello el ticket conserva `Status: claimed` y ningún
 criterio de aceptación se marca completo.
 
 ## Regresión Linux del checkpoint
 
-Después del último cambio, `./scripts/check.sh` terminó con exit 0. Un build
-limpio locked/offline terminó en 1m04s y los 17
-`scripts/test-linux-*-lab.sh`, ordenados, terminaron `COUNT=17 EXIT=0`, incluidos
-Keycloak P1/P2/P4, GitHub bearer, SSH, recovery y custodia. Esto demuestra que
-el código `cfg(windows)` no recortó los perfiles Linux ya integrados; no aporta
-evidencia Windows.
+Después de extraer el motor wire compartido, `./scripts/check.sh` terminó con
+exit 0. La corrida integral de labs **no** fue verde: `attempts` devolvió
+`RUNNING` donde el lab esperaba `INDETERMINATE`; pasó sin cambios al reintento.
+La continuación se detuvo al faltar en el worktree el artefacto CFT ya
+preparado; se enlazó el mismo artefacto del repositorio, no otro navegador. Los
+17 scripts terminaron verdes individualmente, pero `passkey-login` devolvió
+primero `RUNNING` donde esperaba `WAITING_FOR_HUMAN` y `token-exchange` obtuvo
+retorno no cero en la negativa de audience; ambos pasaron sin cambios al
+reintento. No se estableció causa para esos tres resultados, no se ocultan y no
+se afirma estabilidad integral. `./scripts/clean-offline-build.sh` pasó después
+de los cambios en 35.50 s. Lo observado cubre regresión funcional Linux, no
+aporta evidencia Windows.

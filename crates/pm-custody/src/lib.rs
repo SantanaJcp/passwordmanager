@@ -6,19 +6,28 @@
 
 extern crate self as pm_custody;
 
-pub use pm_native_channel::{AuthenticatedHumanChannel, ChannelAuthenticationError, unix_peer_uid};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod agent_wire;
+
+#[cfg(unix)]
+pub use pm_native_channel::unix_peer_uid;
+pub use pm_native_channel::{AuthenticatedHumanChannel, ChannelAuthenticationError};
+#[cfg(target_os = "windows")]
+pub use pm_native_channel::{WindowsClientPipe, WindowsEndpoint, WindowsServerPipe};
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Clone, Copy)]
 enum Failure {
     Usage,
     Unavailable,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn take_path(
     arguments: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &str,
@@ -44,4 +53,14 @@ pub fn agent_rpc(
     request: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
     linux::agent_rpc(profile, private, socket, request)
+}
+
+#[cfg(target_os = "windows")]
+pub fn agent_rpc(
+    profile: &std::path::Path,
+    private: &std::path::Path,
+    vault: &std::path::Path,
+    request: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    windows::agent_rpc(profile, private, vault, request)
 }

@@ -4,8 +4,13 @@
 
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod agent_wire;
+
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
 
 const CUSTODY_UNAVAILABLE: &str = "CUSTODY_UNAVAILABLE";
 
@@ -30,11 +35,14 @@ enum Failure {
 }
 
 fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        linux::run(arguments)
+        #[cfg(target_os = "linux")]
+        return linux::run(arguments);
+        #[cfg(target_os = "windows")]
+        return windows::run(arguments);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = arguments;
         Err(Failure::Unavailable)

@@ -1305,6 +1305,7 @@ dependencies = [
  "russh",
  "rustls",
  "signature",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

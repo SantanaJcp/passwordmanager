@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::ptr;
+use std::{io, ptr};
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, GlobalFree,
-        HANDLE, HGLOBAL, INVALID_HANDLE_VALUE, LocalFree,
+        CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_PIPE_CONNECTED, GENERIC_READ,
+        GENERIC_WRITE, GetLastError, GlobalFree, HANDLE, HGLOBAL, INVALID_HANDLE_VALUE, LocalFree,
     },
     Security::{
         Authorization::{
@@ -18,8 +18,8 @@ use windows_sys::Win32::{
         TOKEN_QUERY, TOKEN_USER, TokenImpersonationLevel, TokenUser,
     },
     Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
-        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
+        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
     },
     System::{
         Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole},
@@ -39,7 +39,7 @@ use windows_sys::Win32::{
             SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
             SERVICE_STATUS_PROCESS,
         },
-        Threading::{GetCurrentThread, OpenThreadToken},
+        Threading::{GetCurrentProcess, GetCurrentThread, OpenThreadToken},
     },
 };
 use zeroize::Zeroizing;
@@ -88,12 +88,15 @@ impl WindowsServerPipe {
         let handle = unsafe {
             CreateNamedPipeW(
                 name.as_ptr(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_ACCESS_DUPLEX
+                    | FILE_FLAG_FIRST_PIPE_INSTANCE
+                    | SECURITY_SQOS_PRESENT
+                    | SECURITY_IDENTIFICATION,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 PIPE_BUFFER,
                 PIPE_BUFFER,
-                SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                0,
                 &raw const security,
             )
         };
@@ -158,11 +161,56 @@ impl WindowsServerPipe {
     pub const fn raw_handle(&self) -> HANDLE {
         self.handle
     }
+
+    /// Duplicates the authenticated kernel handle for a TLS stream while the
+    /// original remains attached to the human-channel identity lease.
+    ///
+    /// # Errors
+    /// Returns an opaque error when the kernel refuses the duplication.
+    pub fn try_clone(&self) -> Result<Self, ChannelAuthenticationError> {
+        let process = unsafe { GetCurrentProcess() };
+        let mut handle = ptr::null_mut();
+        if unsafe {
+            DuplicateHandle(
+                process,
+                self.handle,
+                process,
+                &raw mut handle,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } == 0
+        {
+            return Err(ChannelAuthenticationError);
+        }
+        Ok(Self {
+            handle,
+            expected_client_sid: self.expected_client_sid.clone(),
+            client_pid: self.client_pid,
+        })
+    }
 }
 
 impl Drop for WindowsServerPipe {
     fn drop(&mut self) {
         unsafe { CloseHandle(self.handle) };
+    }
+}
+
+impl io::Read for WindowsServerPipe {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        read_handle(self.handle, buffer)
+    }
+}
+
+impl io::Write for WindowsServerPipe {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        write_handle(self.handle, buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -192,7 +240,7 @@ impl WindowsClientPipe {
                 0,
                 ptr::null(),
                 OPEN_EXISTING,
-                0,
+                SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
                 ptr::null_mut(),
             )
         };
@@ -240,6 +288,22 @@ impl WindowsClientPipe {
 impl Drop for WindowsClientPipe {
     fn drop(&mut self) {
         unsafe { CloseHandle(self.handle) };
+    }
+}
+
+impl io::Read for WindowsClientPipe {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        read_handle(self.handle, buffer)
+    }
+}
+
+impl io::Write for WindowsClientPipe {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        write_handle(self.handle, buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -562,6 +626,44 @@ fn installed_service_pid() -> Result<u32, ChannelAuthenticationError> {
         return Err(ChannelAuthenticationError);
     }
     Ok(status.dwProcessId)
+}
+
+fn read_handle(handle: HANDLE, buffer: &mut [u8]) -> io::Result<usize> {
+    let length = u32::try_from(buffer.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "buffer exceeds Win32 limit"))?;
+    let mut read = 0;
+    if unsafe {
+        ReadFile(
+            handle,
+            buffer.as_mut_ptr().cast(),
+            length,
+            &raw mut read,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(read as usize)
+}
+
+fn write_handle(handle: HANDLE, buffer: &[u8]) -> io::Result<usize> {
+    let length = u32::try_from(buffer.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "buffer exceeds Win32 limit"))?;
+    let mut written = 0;
+    if unsafe {
+        WriteFile(
+            handle,
+            buffer.as_ptr().cast(),
+            length,
+            &raw mut written,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(written as usize)
 }
 
 #[cfg(test)]
