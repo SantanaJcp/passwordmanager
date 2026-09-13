@@ -1,8 +1,8 @@
 # 16 — Reductor firmado de contenido y autoridad
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-16
 Blocked by: 07
 Spec: ../spec.md
 Requirements: R05,R06,R16,R17
@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-13 — Reclamado por Sol en frontera paralela08/16 tras07 integrado/verificado. 19 también desbloqueado y en cola de capacidad; se conserva merger separado.
