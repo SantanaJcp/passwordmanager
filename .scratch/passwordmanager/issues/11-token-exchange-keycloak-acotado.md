@@ -1,7 +1,7 @@
 # 11 — Token exchange Keycloak acotado
 
 Type: task
-Status: claimed
+Status: resolved
 Owner: sol-11
 Blocked by: 08
 Spec: ../spec.md
@@ -22,16 +22,18 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [Tracker](../../../docs/agents/issue-tracker.md).
 
 ## Acceptance criteria
-- [ ] P2 real entrega B distinto de A con subject/audience verificados.
-- [ ] reflect/redirect/auxiliares/audience no autorizada son rechazados sin fuga.
-- [ ] revocación antes de POST impide nuevo uso, sin pretender anular token emitido. No exchange genérico.
-- [ ] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
-- [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
+- [x] P2 real entrega B distinto de A con subject/audience verificados.
+- [x] reflect/redirect/auxiliares/audience no autorizada son rechazados sin fuga.
+- [x] revocación antes de POST impide nuevo uso, sin pretender anular token emitido. No exchange genérico.
+- [x] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
+- [x] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
 ## Answer
-Pendiente de implementación y evidencia.
+Implementado en candidato `6bc1e7a`, integrado en `d0c6288`. Verificación conjunta: 96 tests, check/Clippy, clean offline y 14 labs Linux verdes, incluidos Keycloak V2 real y regresiones SSH/passkey/backup. [Evidencia completa](../../../docs/verification/ticket-11.md). No es revisión formal Astra ni certificación de otros targets.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-13 — Reclamado conKeycloak10 integrado paraexchangeV2acotado; no endpointarbitrario ni fallbacklegacy.
+
+2026-09-13 — Resuelto tras integración no destructiva y verificación observable; revisión formal de código permanece al final del DAG.

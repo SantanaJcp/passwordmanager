@@ -5,9 +5,11 @@
 El usuario solicitó explícitamente `implement-spec` después de publicar la especificación: autoriza pasar de documentación a implementación del alcance aprobado, sin cambios funcionales ni publicación en un destino inventado. La excepción de autorización posterior de AGENTS.md queda satisfecha por esta solicitud. La base histórica de la spec permanece; sus frases sobre ausencia de autorización describían la fase de síntesis.
 
 - Astra (`gpt-6-astra`): coordinación de DAG y revisión; no delegar revisión de seguridad al mismo implementador que produjo el cambio.
-- Sol (`gpt-5.6-sol`): implementación con complejidad criptográfica, autoridad, protocolos, persistencia, nativos o integración sensible.
-- Luna (`gpt-5.6-luna`): cambios acotados/mecánicos sobre contratos y seams ya presentes. Escalar a Sol si afecta garantías de seguridad; no hacer avanzar tickets bloqueados para ocupar agentes.
+- Sol (`gpt-5.6-sol`, esfuerzo `medium`): implementación con complejidad criptográfica, autoridad, protocolos, persistencia, nativos o integración sensible.
+- Luna (`gpt-5.6-luna`, esfuerzo `max`): cambios acotados/mecánicos sobre contratos y seams ya presentes. Escalar a Sol si afecta garantías de seguridad; no hacer avanzar tickets bloqueados para ocupar agentes.
 - Merger separado: integrar serialmente y verificar suite completa, manteniendo la rama unificada verde.
+
+El usuario fijó explícitamente los esfuerzos anteriores después de actualizar sus acuerdos de trabajo. Toda nueva delegación especifica el esfuerzo; no heredar silenciosamente los niveles históricos. No introducir fallbacks. Si se detecta uno existente, informar ubicación, activación y comportamiento sustituido antes de solicitar autorización para cambiarlo.
 
 ## Base e integración
 

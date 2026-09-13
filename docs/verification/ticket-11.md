@@ -137,3 +137,39 @@ reconciliation; that change was removed and the attempts lab then returned its
 expected `ambiguous=INDETERMINATE restart=no-blind-retry` evidence. Ticket 11's
 adapter still cannot replay the POST during reconciliation because opcode 2
 carries no credential material and the exchange adapter supports only opcode 4.
+
+
+## Unified integration verification
+
+Candidate `6bc1e7a5a8ea6e6ad385f30d8f783592b802f4fd` was merged
+non-destructively as `d0c628845f516e2495139bdb8c09f3ea73acc26a` onto
+`3c4844199144f1d07f595b2dcfa388a9c4d3eae6`. Integration was resumed by
+Astra after the interrupted, distinct Sol merger; this is integration
+verification, not the formal end-of-DAG review.
+
+The union preserves passkey, SSH, backup and exchange paths. Human opcodes
+remain 31 (1PUX), 32–34 (backup), 35–37 (passkey), 40 (web), 41 (exchange)
+and 45 (SSH). Opaque `controlled.external` results remain opaque; only the
+closed provider-specific result schemas are parsed. The SSH lease explicitly
+initializes the new optional subject token to absent.
+
+The first integrated `check.sh` passed all tests but failed Clippy because the
+combined attempt-start profile checks made the function 107 lines. Extracting
+those unchanged checks into `matches_authentication_profile` restored the gate;
+no global lint suppression or behavioral fallback was added.
+
+Final verification on the combined code:
+
+```sh
+./scripts/check.sh
+# exit 0; 96 tests passed across all targets, format/check/clippy passed
+./scripts/clean-offline-build.sh
+# exit 0; removed 15,860 files / 4.2 GiB; build completed in 33.44 s
+for lab in scripts/test-linux-*-lab.sh; do "$lab"; done
+# exit 0; all 14 labs passed on the final code after the clean build
+```
+
+The final sorted run included 1PUX, attempts, authorization, backup, content,
+CSV, custody, history, human transactions, passkey, SSH, sync, real Keycloak
+Token Exchange V2 and real Keycloak/CFT password/TOTP OIDC. This preserves the
+Linux-lab-only and later native/distribution/review limitations above.
