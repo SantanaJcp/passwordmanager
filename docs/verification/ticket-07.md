@@ -101,4 +101,37 @@ git diff --check
 This ticket does not perform external provider actions, delegated use, full
 multi-device synchronization/reduction, or host reboot/production service/FDE
 validation; those remain tickets 08+, 16 and 19 as assigned. Formal Astra
-review and merger integration remain separate final gates.
+review remains a separate final gate; unified merger evidence follows.
+
+## Unified merger verification
+
+Candidate `29089a383b9bab212184a963609a55046c9d2949` was a direct child of
+unified base `104e19eca882d80a53ea503aca7060b21d37864e` and was integrated
+without conflicts or history rewriting as merge
+`07b9b025a285b124a08a4e81014e3dfc3f806b62`. The merger observed:
+
+```text
+./scripts/cargo-local.sh test -p pm-vault --test delegated_authorization --locked --offline
+# 3 passed; exit 0
+
+./scripts/test-linux-authorization-lab.sh
+# PASS authorization-e2e rpk-agents=2 same-set=1 human-lock-independent=1 suspend=denied revoke=terminal generation=2 restart=durable
+# PASS authorization-path agent=tls1.3+rpk+alpn/pm-agent/1 human=tls1.3+rpk+alpn/pm-human/1 prepare-commit-receipt=replayed audit=atomic
+# exit 0
+
+./scripts/check.sh
+# pinned inputs, fmt, workspace/all-target check, 40 tests and clippy passed; exit 0
+
+./scripts/clean-offline-build.sh
+# pinned inputs passed; removed 9109 files/1.3 GiB and compiled the clean offline workspace in 19.53 s; exit 0
+```
+
+All three prior Linux labs also passed. Their synthetic bootstrap hashes were
+`d6a12b9661003ad8062ba2289eeb116b230b48e4c27b79fb731ee5ad22f648f9`
+(custody),
+`0932cc447fe041750ed64bcd78fe50efe5da603b7d9ac26dd01dcf0662736814`
+(human/audit), and
+`1d7e0a701b0e2ff15095c70fb1edc4a419e4a7de9f482b7ff8d036586b2ad4bf`
+(content/streaming/audit). Each returned exit 0 and retained the explicit
+`reboot_host=NOT_RUN production_systemd_fde=NOT_RUN` limitation. Formal Astra
+review was not run per ticket and remains reserved for the final DAG review.
