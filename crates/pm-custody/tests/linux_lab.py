@@ -14,6 +14,7 @@ import pathlib
 import select
 import shutil
 import signal
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -70,7 +71,19 @@ def wait_for_sockets(process, paths):
             stdout, stderr = process.communicate()
             raise AssertionError((process.returncode, stdout, stderr))
         if all(path.exists() for path in paths):
-            return
+            probes = []
+            try:
+                for path in paths:
+                    probe = socket.socket(socket.AF_UNIX)
+                    probes.append(probe)
+                    probe.settimeout(0.1)
+                    probe.connect(str(path))
+                return
+            except OSError:
+                pass
+            finally:
+                for probe in probes:
+                    probe.close()
         time.sleep(0.02)
     raise AssertionError("custodian did not publish both sockets")
 

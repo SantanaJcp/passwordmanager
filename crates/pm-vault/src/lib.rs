@@ -7,6 +7,7 @@ mod audit;
 mod authorization;
 mod content;
 mod human;
+mod migration;
 mod reducer;
 
 pub use attempts::{
@@ -29,6 +30,10 @@ pub use content::{
 pub use human::{
     AttachmentReader, HumanChannel, HumanCommitError, HumanReceipt, HumanVault, PasswordRecord,
     PreparedHumanCommand,
+};
+pub use migration::{
+    CsvDelimiter, CsvEncoding, CsvField, CsvImportDecision, CsvImportPreview, CsvImportProfile,
+    CsvImportReport, CsvMapping, CsvRecordPreview, CsvRowPreview, CsvRowStatus, PreparedCsvImport,
 };
 pub use reducer::{
     AcceptedPrefix, CausalEventBody, CausalEventDraft, CausalEventKind, CausalReducer,
@@ -341,8 +346,8 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              ) STRICT;
              CREATE TABLE human_staging (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
-               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'audit_purge', 'availability_change', 'identity_change')),
-               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume')),
+               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'audit_purge', 'availability_change', 'identity_change', 'import_commit')),
+               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'import-batch')),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB CHECK (revision_id IS NULL OR length(revision_id) = 16),
                body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144),
@@ -364,6 +369,43 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                transaction_id BLOB NOT NULL CHECK (length(transaction_id) = 16), attachment_id BLOB NOT NULL CHECK (length(attachment_id) = 16),
                chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0), ciphertext BLOB NOT NULL CHECK (length(ciphertext) BETWEEN 21 AND 1048597),
                PRIMARY KEY (transaction_id, attachment_id, chunk_index)
+             ) STRICT;
+             CREATE TABLE import_staging_batches (
+               transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
+               batch_id BLOB NOT NULL UNIQUE CHECK (length(batch_id) = 16),
+               source TEXT NOT NULL CHECK (source IN ('chrome','apple','mappable')),
+               object_digest BLOB NOT NULL CHECK (length(object_digest) = 32),
+               total INTEGER NOT NULL CHECK (total >= 0),
+               new_items INTEGER NOT NULL CHECK (new_items >= 0),
+               replaced INTEGER NOT NULL CHECK (replaced >= 0),
+               skipped_exact INTEGER NOT NULL CHECK (skipped_exact >= 0),
+               excluded INTEGER NOT NULL CHECK (excluded >= 0),
+               preserved_fields INTEGER NOT NULL CHECK (preserved_fields >= 0),
+               event_pages INTEGER NOT NULL CHECK (event_pages > 0)
+             ) STRICT;
+             CREATE TABLE import_staging_items (
+               transaction_id BLOB NOT NULL CHECK (length(transaction_id) = 16),
+               ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+               item_id BLOB NOT NULL CHECK (length(item_id) = 16),
+               revision_id BLOB NOT NULL CHECK (length(revision_id) = 16),
+               item_kind TEXT NOT NULL CHECK (item_kind IN ('password','totp','ssh','token','note')),
+               package BLOB NOT NULL CHECK (length(package) BETWEEN 1 AND 16777216),
+               replacement INTEGER NOT NULL CHECK (replacement IN (0,1)),
+               PRIMARY KEY (transaction_id, ordinal),
+               UNIQUE (transaction_id, item_id)
+             ) STRICT;
+             CREATE TABLE import_reports (
+               batch_id BLOB PRIMARY KEY CHECK (length(batch_id) = 16),
+               transaction_id BLOB NOT NULL UNIQUE CHECK (length(transaction_id) = 16),
+               source TEXT NOT NULL CHECK (source IN ('chrome','apple','mappable')),
+               total INTEGER NOT NULL CHECK (total >= 0),
+               new_items INTEGER NOT NULL CHECK (new_items >= 0),
+               replaced INTEGER NOT NULL CHECK (replaced >= 0),
+               skipped_exact INTEGER NOT NULL CHECK (skipped_exact >= 0),
+               excluded INTEGER NOT NULL CHECK (excluded >= 0),
+               preserved_fields INTEGER NOT NULL CHECK (preserved_fields >= 0),
+               event_pages INTEGER NOT NULL CHECK (event_pages > 0),
+               committed_at_us INTEGER NOT NULL
              ) STRICT;
              CREATE TABLE human_receipts (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),

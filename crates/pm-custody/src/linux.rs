@@ -44,7 +44,8 @@ use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
 use pm_vault::{
     AgentEnrollment, AgentPeer, Attachment, AttachmentReader, AttemptOutcome, AttemptState,
     AttemptVault, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome,
-    AuthRecord, AuthorizationReason, AutonomousAuditVault, CustomField, DelegatedVault,
+    AuthRecord, AuthorizationReason, AutonomousAuditVault, CsvDelimiter, CsvEncoding, CsvField,
+    CsvImportDecision, CsvImportProfile, CsvMapping, CsvRowStatus, CustomField, DelegatedVault,
     Destination, GeneratorConfig, HumanCommitError, HumanMetadata, HumanVault, IdempotencyKey,
     LogicalRecord, LogicalValue, PasswordRecord, PreparedHumanCommand, PrivateKeyFormat,
     RecordKind, SearchQuery, SourceEncoding, SourceField, StartAttempt, TotpAlgorithm,
@@ -157,6 +158,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-audit-lifecycle") => human_audit_lifecycle(&mut arguments),
         Some("human-streaming-file") => human_streaming_file(&mut arguments),
         Some("human-streaming-stall") => human_streaming_stall(&mut arguments),
+        Some("human-csv-import") => human_csv_import(&mut arguments),
         _ => Err(Failure::Usage),
     }
 }
@@ -621,6 +623,147 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
         action.to_string_lossy()
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn human_csv_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    let source_path = take_path(arguments, "--source")?;
+    let format_flag = arguments.next().ok_or(Failure::Usage)?;
+    let format = arguments.next().ok_or(Failure::Usage)?;
+    let confirm = arguments.next().ok_or(Failure::Usage)?;
+    if format_flag != "--format" || confirm != "--confirm" {
+        return Err(Failure::Usage);
+    }
+    let mut response_loss = false;
+    let mut enable_after = false;
+    let mut replace_candidates = false;
+    for value in arguments.by_ref() {
+        match value.to_str() {
+            Some("--simulate-response-loss") if !response_loss => response_loss = true,
+            Some("--enable-after") if !enable_after => enable_after = true,
+            Some("--replace-candidates") if !replace_candidates => replace_candidates = true,
+            _ => return Err(Failure::Usage),
+        }
+    }
+    finish_arguments(arguments)?;
+    let format = match format.to_str() {
+        Some("chrome") => 0,
+        Some("apple") => 1,
+        Some("mappable") => 2,
+        _ => return Err(Failure::Usage),
+    };
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let source = read_import_source(&source_path)?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    let mut request = vec![23, format, u8::from(replace_candidates)];
+    push_bytes(&mut request, &source)?;
+    write_frame(&mut tls, &request)?;
+    let response = read_frame(&mut tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let total = cursor.u64()?;
+    let new_items = cursor.u64()?;
+    let replaced = cursor.u64()?;
+    let skipped = cursor.u64()?;
+    let excluded = cursor.u64()?;
+    let preserved = cursor.u64()?;
+    let pages = cursor.u64()?;
+    let count = usize::try_from(cursor.u32()?).map_err(|_| Failure::Unavailable)?;
+    let mut item_ids: Vec<[u8; 16]> = Vec::with_capacity(count);
+    for _ in 0..count {
+        item_ids.push(
+            cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?,
+        );
+    }
+    let prepared = WirePrepared {
+        transaction_id: cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+        item_id: cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+        command: cursor.bytes()?,
+        body: cursor.bytes()?,
+        signature: cursor
+            .fixed(64)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    };
+    cursor.finish()?;
+    let committed = if response_loss {
+        write_frame(
+            &mut tls,
+            &encode_commit_request(8, &prepared, &prepared.body)?,
+        )?;
+        if read_frame(&mut tls).is_ok() {
+            return Err(Failure::Unavailable);
+        }
+        drop(tls);
+        let mut recovered = connect(&profile, &key, &socket_path)?;
+        recovered
+            .write_all(HUMAN_MAGIC)
+            .map_err(|_| Failure::Unavailable)?;
+        rpc_unlock(&mut recovered, &password)?;
+        let receipt = rpc_receipt(&mut recovered, prepared.transaction_id)?;
+        if rpc_commit(&mut recovered, &prepared)? != receipt {
+            return Err(Failure::Unavailable);
+        }
+        tls = recovered;
+        receipt
+    } else {
+        rpc_commit(&mut tls, &prepared)?
+    };
+    if rpc_commit(&mut tls, &prepared)? != committed
+        || rpc_receipt(&mut tls, prepared.transaction_id)? != committed
+    {
+        return Err(Failure::Unavailable);
+    }
+    if enable_after {
+        let item = *item_ids
+            .first()
+            .filter(|_| item_ids.len() == 1)
+            .ok_or(Failure::Unavailable)?;
+        let mut enable = vec![24];
+        enable.extend_from_slice(&item);
+        write_frame(&mut tls, &enable)?;
+        let enable = decode_prepared_response(&read_frame(&mut tls)?)?;
+        rpc_commit(&mut tls, &enable)?;
+    }
+    println!(
+        "PASS csv-import format={} total={total} new={new_items} replaced={replaced} skipped_exact={skipped} excluded={excluded} preserved_fields={preserved} pages={pages} items={} tls-rpk=1 alpn=pm-human/1 signed=1 receipt-replay=1 response-loss={} explicit-enable={} replace-candidates={} source-unchanged=1 auto-enable=0",
+        format_name(format),
+        item_ids.len(),
+        u8::from(response_loss),
+        u8::from(enable_after),
+        u8::from(replace_candidates),
+    );
+    Ok(())
+}
+
+const fn format_name(format: u8) -> &'static str {
+    match format {
+        0 => "chrome",
+        1 => "apple",
+        2 => "mappable",
+        _ => "invalid",
+    }
 }
 
 fn human_password_crud(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
@@ -2139,6 +2282,120 @@ fn handle_human_request(
             authorization_reenroll(vault, rest)?;
             Ok(vec![0])
         }
+        23 => {
+            let mut cursor = Cursor::new(rest);
+            let format = *cursor.fixed(1)?.first().ok_or(Failure::Unavailable)?;
+            let replace_candidates = match cursor.fixed(1)? {
+                [0] => false,
+                [1] => true,
+                _ => return Err(Failure::Unavailable),
+            };
+            let source = Zeroizing::new(cursor.bytes()?);
+            cursor.finish()?;
+            let profile = match format {
+                0 => CsvImportProfile::chrome(),
+                1 => CsvImportProfile::apple(
+                    CsvMapping::new(
+                        CsvDelimiter::Comma,
+                        CsvEncoding::Utf8,
+                        true,
+                        RecordKind::Password,
+                        vec![
+                            (0, CsvField::Title),
+                            (1, CsvField::Destination),
+                            (2, CsvField::Username),
+                            (3, CsvField::Password),
+                            (4, CsvField::Notes),
+                            (5, CsvField::OtpAuth),
+                        ],
+                    )
+                    .map_err(|_| Failure::Unavailable)?,
+                ),
+                2 => CsvImportProfile::mappable(
+                    CsvMapping::new(
+                        CsvDelimiter::Semicolon,
+                        CsvEncoding::Utf8,
+                        true,
+                        RecordKind::Password,
+                        vec![
+                            (0, CsvField::Title),
+                            (2, CsvField::Destination),
+                            (1, CsvField::Username),
+                            (3, CsvField::Password),
+                        ],
+                    )
+                    .map_err(|_| Failure::Unavailable)?,
+                ),
+                _ => return Err(Failure::Unavailable),
+            };
+            let preview = vault
+                .preview_csv(&source, &profile)
+                .map_err(|_| Failure::Unavailable)?;
+            let mut decisions = Vec::with_capacity(preview.total());
+            let mut offset = 0;
+            while offset < preview.total() {
+                let page = preview
+                    .page(offset, 100)
+                    .map_err(|_| Failure::Unavailable)?;
+                for row in page {
+                    decisions.push(match row.status() {
+                        CsvRowStatus::New => CsvImportDecision::ImportNew,
+                        CsvRowStatus::ExactDuplicate => CsvImportDecision::SkipExact,
+                        CsvRowStatus::CandidateDuplicate if replace_candidates => {
+                            CsvImportDecision::Replace(
+                                *row.duplicate_item().ok_or(Failure::Unavailable)?,
+                            )
+                        }
+                        CsvRowStatus::CandidateDuplicate => CsvImportDecision::KeepBoth,
+                    });
+                }
+                offset += page.len();
+            }
+            let prepared = vault
+                .prepare_csv_import(preview, decisions)
+                .map_err(|_| Failure::Unavailable)?;
+            let signature = vault
+                .sign(prepared.prepared())
+                .map_err(|_| Failure::Unavailable)?;
+            let report = prepared.report();
+            let mut response = vec![0];
+            for value in [
+                report.total(),
+                report.new_items(),
+                report.replaced(),
+                report.skipped_exact(),
+                report.excluded(),
+                report.preserved_fields(),
+                report.event_pages(),
+            ] {
+                response.extend_from_slice(
+                    &u64::try_from(value)
+                        .map_err(|_| Failure::Unavailable)?
+                        .to_be_bytes(),
+                );
+            }
+            response.extend_from_slice(
+                &u32::try_from(prepared.item_ids().len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            for item in prepared.item_ids() {
+                response.extend_from_slice(item);
+            }
+            response.extend_from_slice(prepared.prepared().transaction_id());
+            response.extend_from_slice(prepared.prepared().item_id());
+            push_bytes(&mut response, prepared.prepared().command())?;
+            push_bytes(&mut response, prepared.prepared().body())?;
+            response.extend_from_slice(&signature);
+            Ok(response)
+        }
+        24 => {
+            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_enable(item)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
+        }
         _ => Err(Failure::Unavailable),
     }
 }
@@ -2587,6 +2844,42 @@ fn read_public(path: &Path) -> Result<Vec<u8>, Failure> {
     let encoded = read_regular(path, metadata.uid(), 0o444)?;
     validate_spki(&encoded)?;
     Ok(encoded.to_vec())
+}
+
+fn read_import_source(path: &Path) -> Result<Zeroizing<Vec<u8>>, Failure> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| Failure::Unavailable)?;
+    let before = file.metadata().map_err(|_| Failure::Unavailable)?;
+    if !before.file_type().is_file()
+        || before.uid() != current_uid()
+        || !matches!(before.mode() & 0o7777, 0o400 | 0o600)
+        || before.nlink() != 1
+        || before.len() == 0
+        || before.len() > (MAX_HUMAN_FRAME - 16) as u64
+    {
+        return Err(Failure::Unavailable);
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(before.len()).map_err(|_| Failure::Unavailable)?,
+    ));
+    file.read_to_end(&mut bytes)
+        .map_err(|_| Failure::Unavailable)?;
+    let after = file.metadata().map_err(|_| Failure::Unavailable)?;
+    if u64::try_from(bytes.len()).ok() != Some(before.len())
+        || before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.len() != after.len()
+        || before.mtime() != after.mtime()
+        || before.mtime_nsec() != after.mtime_nsec()
+        || before.ctime() != after.ctime()
+        || before.ctime_nsec() != after.ctime_nsec()
+    {
+        return Err(Failure::Unavailable);
+    }
+    Ok(bytes)
 }
 
 fn read_regular(
