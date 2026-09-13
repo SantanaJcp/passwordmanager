@@ -9,8 +9,18 @@ fi
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
-./scripts/cargo-local.sh test -p pm-vault --test human_transactions --locked --offline
-printf '%s\n' \
-  'PASS channel=SO_PEERCRED role=request-field-absent crypto=libsodium storage=sqlite-wal-full' \
-  'PASS prepare=challenge60s commit=atomic receipt=idempotent audit=encrypted-atomic' \
-  'LIMIT tls-rpk-alpn=ticket-03-lab host-reboot=NOT_RUN non-linux=NOT_RUN'
+./scripts/cargo-local.sh build -p pm-custody -p pm-cli --locked --offline
+
+user=$(id -un)
+host_uid=$(id -u)
+host_gid=$(id -g)
+subuid=$(awk -F: -v user="$user" '$1 == user { print $2; exit }' /etc/subuid)
+subgid=$(awk -F: -v user="$user" '$1 == user { print $2; exit }' /etc/subgid)
+test -n "$subuid"
+test -n "$subgid"
+
+unshare --user \
+  --map-users "0:$host_uid:1" --map-users "1:$subuid:65535" \
+  --map-groups "0:$host_gid:1" --map-groups "1:$subgid:65535" \
+  python3 "$root/crates/pm-custody/tests/linux_lab.py" \
+  "$root/target/debug/pm-custody" "$root/target/debug/pm"

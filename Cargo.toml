@@ -3,6 +3,7 @@ members = [
     "crates/pm-cli",
     "crates/pm-crypto",
     "crates/pm-custody",
+    "crates/pm-native-channel",
     "crates/pm-process-runner",
     "crates/pm-vault",
 ]
@@ -26,6 +27,7 @@ libsodium-sys-stable = { version = "=1.24.0", default-features = false }
 minicbor = { version = "=2.3.0", features = ["std"] }
 pm-crypto = { path = "crates/pm-crypto" }
 pm-custody = { path = "crates/pm-custody" }
+pm-native-channel = { path = "crates/pm-native-channel" }
 pm-process-runner = { path = "crates/pm-process-runner" }
 pm-vault = { path = "crates/pm-vault" }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }

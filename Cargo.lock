@@ -416,8 +416,17 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "libc",
+ "pm-native-channel",
+ "pm-vault",
  "rustls",
  "zeroize",
+]
+
+[[package]]
+name = "pm-native-channel"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -434,7 +443,7 @@ dependencies = [
  "libc",
  "minicbor",
  "pm-crypto",
- "pm-custody",
+ "pm-native-channel",
  "rusqlite",
  "zeroize",
 ]

@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use pm_crypto::KdfProfile;
@@ -105,9 +106,20 @@ fn changed_body_expired_challenge_false_peer_and_replay_are_rejected() {
     ));
 
     let (mut vault, _peer) = open_human(&path);
+    let prepare_started_us = now_us();
     let prepared = vault
         .prepare_create(&record("Changed body", SECRET_ONE))
         .unwrap();
+    let expires_at_us: i64 = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT expires_at_us FROM human_challenges WHERE transaction_id=?1",
+            [prepared.transaction_id().as_slice()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(expires_at_us >= prepare_started_us + 60_000_000);
+    assert!(expires_at_us <= now_us() + 60_000_000);
     let signature = vault.sign(&prepared).unwrap();
     let mut changed_body = prepared.body().to_vec();
     *changed_body.last_mut().unwrap() ^= 1;
@@ -265,6 +277,16 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
+}
+
+fn now_us() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
+    )
+    .unwrap()
 }
 
 struct TestDir(PathBuf);

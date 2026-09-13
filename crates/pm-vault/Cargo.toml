@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 minicbor.workspace = true
 pm-crypto.workspace = true
-pm-custody.workspace = true
+pm-native-channel.workspace = true
 rusqlite.workspace = true
 zeroize.workspace = true
 

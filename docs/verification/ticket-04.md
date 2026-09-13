@@ -25,23 +25,46 @@ and transaction path, the same locked/offline command passed. Subsequent
 cycles added stale-state/invalid-signature and audit rollback assertions and
 remained green.
 
+The first candidate still exercised that engine only through a direct native
+socket seam. The composed transport regression was preserved against commit
+`c6159fa` by building that commit in a detached disposable worktree and running
+the current public process harness against it:
+
+```text
+unshare ... python3 crates/pm-custody/tests/linux_lab.py \
+  /tmp/passwordmanager-pm04-red.../target/debug/pm-custody \
+  /tmp/passwordmanager-pm04-red.../target/debug/pm
+```
+
+It exited 1 because the old custodian process rejected `serve-vault` with
+exactly `INVALID_ARGUMENT`; consequently no password operation could traverse
+the ticket-03 transport. The green command is the ticket-04 laboratory below.
+It now drives the real custodian handler across the authenticated connection,
+not a direct invocation of `HumanVault`.
+
 ## Observable transaction and Linux laboratory
 
-`scripts/test-linux-human-transaction-lab.sh` exercises public Rust APIs over a
-real Unix socket pair, obtains the peer UID through Linux `SO_PEERCRED`, uses
-the real libsodium and bundled SQLite builds, and restarts the human vault
-session against the durable file. It covers:
+`scripts/test-linux-human-transaction-lab.sh` builds the public `pm-custody`
+and `pm` processes, creates three real identities in a disposable user
+namespace and executes the password flow through the existing ticket-03
+listener. The product path is human UID/`SO_PEERCRED` -> mutual TLS 1.3 RPK ->
+`pm-human/1` ALPN -> custodian human handler -> `HumanVault` -> bundled SQLite.
+It uses the real libsodium and SQLite builds and reconnects the human client
+against the durable file. It covers:
 
 - create/read/edit/delete of a G6 password record whose human and auth parts
   are protected by the existing revision-package seam;
 - 32-byte challenge, signed canonical command/body/state hashes, 60-second
   expiry, `SK_H` domain signatures, wrong peer, altered signature/body, stale
   state and replay;
-- retry after an injected audit insertion failure leaves item, revision,
-  authority event, outbox, receipt, audit key/head/record and challenge
-  consumption all unchanged;
-- retry after that no-op succeeds, while a new session retrieves the durable
-  receipt without applying the effect again;
+- an injected SQLite audit trigger reached by a commit over that TLS channel:
+  the client receives the permitted no-op outcome after reconnect, while
+  item, revision, authority event, outbox, receipt, audit key/head/record and
+  challenge consumption all remain unchanged; no production fault hook exists;
+- after removal of the laboratory trigger, create/edit/delete each publish an
+  encrypted audit record in their single transaction; deliberate response
+  loss after create is recovered through `receipt`, and exact replay returns
+  that receipt without applying the effect again;
 - one encrypted audit record and its per-device audit-key envelope are written
   in the same transaction as every mutation. A scan of the SQLite/WAL files
   does not find either synthetic password.
@@ -49,16 +72,20 @@ session against the durable file. It covers:
 Observed output:
 
 ```text
-PASS channel=SO_PEERCRED role=request-field-absent crypto=libsodium storage=sqlite-wal-full
-PASS prepare=challenge60s commit=atomic receipt=idempotent audit=encrypted-atomic
-LIMIT tls-rpk-alpn=ticket-03-lab host-reboot=NOT_RUN non-linux=NOT_RUN
+PASS uid_map='0       1000          1\n         1     100000      65535'
+PASS custody_uid=1 human_uid=2 agent_uid=3
+PASS bootstrap_sha256=26cacb07bac68b0b98d48008c86fc2377cadeb6b2010ee559c42fb4beb999177 restart=process tls=1.3 rpk=mutual alpn=role-specific
+PASS human_crud=prepare-commit-receipt tls=1.3 rpk=mutual alpn=pm-human/1
+PASS human_negatives=wrong-role,body-change,audit-failure atomicity=no-partial replay=receipt response-loss=recovered
+LIMIT reboot_host=NOT_RUN production_systemd_fde=NOT_RUN
 ```
 
-The channel object intentionally has no role field supplied by a request.
-Ticket 03 separately observed mutual TLS 1.3 RPK, human/agent ALPN separation,
-and rejection of an agent UID on the human endpoint. This ticket does not
-claim a new TLS implementation, host reboot, macOS/Windows behavior, sync
-reduction, delegated authorization, external authentication, or the audit
+The channel object and request payload intentionally have no role field. The
+same composed laboratory rejects an agent UID at the human endpoint before TLS
+and the TLS profile pins the human RPK and ALPN; ticket-03 evidence is reused as
+code, not substituted as disconnected evidence. This ticket does not claim a
+new TLS implementation, host reboot, macOS/Windows behavior, sync reduction,
+delegated authorization, external authentication, or the audit
 segment/query/purge work owned by tickets 06 and later.
 
 ## Stable extension seams and limits

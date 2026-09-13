@@ -13,7 +13,7 @@ use pm_crypto::{
     CryptoError, ItemKind, RevisionPackageInput, TrustedRoot, UnlockedRoot, digest, random_id,
     verify_human_command,
 };
-pub use pm_custody::AuthenticatedHumanChannel as HumanChannel;
+pub use pm_native_channel::AuthenticatedHumanChannel as HumanChannel;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use zeroize::Zeroize;
 
@@ -81,8 +81,8 @@ impl From<VaultError> for HumanCommitError {
     }
 }
 
-impl From<pm_custody::ChannelAuthenticationError> for HumanCommitError {
-    fn from(_: pm_custody::ChannelAuthenticationError) -> Self {
+impl From<pm_native_channel::ChannelAuthenticationError> for HumanCommitError {
+    fn from(_: pm_native_channel::ChannelAuthenticationError) -> Self {
         Self::WrongChannel
     }
 }
@@ -211,6 +211,39 @@ impl HumanReceipt {
     #[must_use]
     pub const fn outcome(&self) -> &'static str {
         "committed"
+    }
+
+    /// Returns the canonical minimal receipt schema for the human wire.
+    ///
+    /// # Panics
+    ///
+    /// This uses an in-memory `Vec` writer, whose encoder error is
+    /// uninhabited; allocation failure follows Rust's process-level behavior.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut encoder = Encoder::new(Vec::new());
+        encoder.map(5).unwrap();
+        encoder
+            .str("transaction_id")
+            .unwrap()
+            .bytes(&self.transaction_id)
+            .unwrap();
+        encoder
+            .str("body_hash")
+            .unwrap()
+            .bytes(&self.body_hash)
+            .unwrap();
+        encoder.str("committed_heads").unwrap();
+        encoder
+            .writer_mut()
+            .extend_from_slice(&encode_heads(&self.committed_heads));
+        encoder
+            .str("committed_at")
+            .unwrap()
+            .i64(self.committed_at_us)
+            .unwrap();
+        encoder.str("outcome").unwrap().str(self.outcome()).unwrap();
+        encoder.into_writer()
     }
 }
 
