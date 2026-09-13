@@ -842,6 +842,7 @@ impl HumanVault {
                 committed_at_us,
                 staged.audit_generation,
                 staged.audit_through_seq,
+                body.object_manifest_digest,
             );
             &legacy_body
         };
@@ -2475,9 +2476,10 @@ fn encode_legacy_event_body(
     modified_at: i64,
     audit_generation: Option<u64>,
     audit_through_seq: Option<u64>,
+    object_manifest_digest: Option<[u8; 32]>,
 ) -> Vec<u8> {
     let mut encoder = Encoder::new(Vec::new());
-    encoder.map(4).unwrap();
+    encoder.map(5).unwrap();
     encoder.str("revision_id").unwrap();
     encode_optional_bytes(&mut encoder, revision.as_ref().map(<[u8; 16]>::as_slice));
     encoder
@@ -2497,6 +2499,11 @@ fn encode_legacy_event_body(
     } else {
         encoder.null().unwrap();
     }
+    encoder.str("object_manifest_digest").unwrap();
+    encode_optional_bytes(
+        &mut encoder,
+        object_manifest_digest.as_ref().map(<[u8; 32]>::as_slice),
+    );
     encoder.into_writer()
 }
 

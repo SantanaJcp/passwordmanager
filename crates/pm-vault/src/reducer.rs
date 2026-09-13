@@ -1013,7 +1013,10 @@ fn decode_legacy_body(
         return Err(ReductionError::InvalidEvent);
     }
     let mut d = Decoder::new(bytes);
-    expect_map(&mut d, 4)?;
+    let fields = d.map().map_err(|_| ReductionError::InvalidEvent)?;
+    if !matches!(fields, Some(4 | 5)) {
+        return Err(ReductionError::InvalidEvent);
+    }
     expect_key(&mut d, "revision_id")?;
     let revision_id = decode_optional_fixed(&mut d)?;
     expect_key(&mut d, "modified_at")?;
@@ -1022,6 +1025,12 @@ fn decode_legacy_body(
     decode_optional_u64(&mut d)?;
     expect_key(&mut d, "audit_through_seq")?;
     decode_optional_u64(&mut d)?;
+    let object_manifest_digest = if fields == Some(5) {
+        expect_key(&mut d, "object_manifest_digest")?;
+        decode_optional_fixed(&mut d)?
+    } else {
+        None
+    };
     if d.position() != bytes.len() {
         return Err(ReductionError::InvalidEvent);
     }
@@ -1029,7 +1038,7 @@ fn decode_legacy_body(
         (CausalEventKind::ItemRevision, Some(revision_id)) => Ok(CausalEventBody::Revision {
             revision_id,
             modified_at,
-            manifest_digest: digest(bytes),
+            manifest_digest: object_manifest_digest.unwrap_or_else(|| digest(bytes)),
             previous_revisions: Vec::new(),
         }),
         (CausalEventKind::Trash, _) => Ok(CausalEventBody::Lifecycle {
