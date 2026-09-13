@@ -76,3 +76,45 @@ grep -RIn 'TODO\|FIXME\|todo!\|unimplemented!' <ticket-20 changed source/test fi
 ```
 
 The 1PUX process laboratory is this ticket's positive integrated evidence; older laboratories are regression evidence rather than substitutes. No private provider database, real credential, plugin, network account, TUI, backup/import-history feature or ticket 21+ behavior is accessed or implemented. A reboot and production service/FDE environment remain outside this disposable lab and are not claimed.
+
+## Unified merger verification
+
+Candidate `170c1e5c484af4ba195387633334c2be073aacb3`, based on
+`b9af99271ee122e080422ac0b1a25b0f1765a71a`, was merged without history
+rewriting as `5b9fe57f1a0055dc967f490617a25ad23562778f` on top of unified HEAD
+`699ac1162243f874ddd3be090f672abca7d65578`. Two additive conflicts were
+resolved by retaining ticket 18's history commands and human opcodes 25–30
+alongside 1PUX's human opcode 31, and by retaining the existing vault
+dependencies plus the pinned `zip` dependency. Agent attempt opcodes and the
+ticket-09 interface remained unchanged.
+
+Focused and repository-wide verification on the integrated tree reported:
+
+```text
+./scripts/cargo-local.sh test -p pm-vault --test onepux_import --locked --offline
+# 4 passed; 0 failed
+
+./scripts/check.sh
+# pinned-input verification, fmt, workspace tests and clippy: exit 0
+
+./scripts/clean-offline-build.sh
+# removed 13,519 files / 3.0 GiB; locked/offline build in 24.23 s: exit 0
+
+git diff --check
+# exit 0
+```
+
+A sequential run of all nine Linux laboratories also completed with exit 0. The
+ticket-specific observation was:
+
+```text
+PASS 1pux-import-e2e tls-rpk=1 multi-uid=1 archive-over-frame=1 attachment-streamed=21chunks source-fd=scm-rights private-source=0400 source-unchanged=1 process-crash=staging-rollback traversal=no-effect symlink=rejected audit-failure=atomic response-loss=recovered restart=durable exact-duplicate=explicit-skip plaintext-canaries=absent auto-enable=0
+```
+
+The same run also passed custody, human transactions, content, authorization,
+attempts (including CLI/MCP parity and no-blind-retry recovery), CSV import,
+history and three-custodian opaque sync. Thus the integrated result preserves
+ticket 17's ciphertext graph/map-5, ticket 18's history/opcodes 25–30 and
+ticket 19's common staging, duplicate decisions and reason codes. No ticket
+10, 13 or 21 code was merged, no worktree was removed, and no push or final
+Astra review was performed.
