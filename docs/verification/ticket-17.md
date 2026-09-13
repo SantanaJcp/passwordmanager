@@ -181,5 +181,98 @@ delivery using independent SQLite stores; it does not claim a public-Internet
 partition test. Public Internet deployment, production service installation,
 host reboot and production systemd/FDE remain explicitly not run. Ticket 17
 does not add backup/import/history or provider actions. Formal Astra review and
-unified merger verification remain separate final gates, so this candidate
-evidence does not resolve the ticket.
+unified merger verification were still separate gates when the candidate was
+cut; the following section records the completed merger gate.
+
+## Unified merger verification
+
+The dedicated merger integrated candidate
+`afdf9edfdd598b982bea28b971d7bcce39081b2b` without rewriting history as
+`da335d595e16c3a7660286d3a7d0cab8c3b4cdae`, on top of unified commit
+`b9af99271ee122e080422ac0b1a25b0f1765a71a`. Two textual conflicts were
+resolved semantically. In `reducer.rs`, the existing CSV replacement and
+suspected-compromise reason codes were retained exactly once alongside the
+sync decoder for grant/enable and the backward-compatible four/five-field item
+body carrying `object_manifest_digest`. In `delegated_authorization.rs`, the
+attempt types and tests from 08/09 were retained together with the sync causal
+types and retirement regression. No side was selected wholesale, no conflict
+markers remain, and ticket 18's checkpoint was not touched.
+
+Focused integration commands after conflict resolution:
+
+```text
+./scripts/cargo-local.sh test -p pm-sync --test e2ee_replication --locked --offline
+# 5 passed; exit 0
+
+./scripts/cargo-local.sh test -p pm-vault --test delegated_authorization --locked --offline
+# 6 passed; exit 0
+
+./scripts/cargo-local.sh test -p pm-vault --test csv_import --locked --offline
+# 3 passed; exit 0
+
+./scripts/cargo-local.sh test -p pm-cli --locked --offline
+# CLI, human-process and the five-tool CLI/MCP contract passed; exit 0
+
+./scripts/check.sh
+# pinned inputs, fmt, workspace/all-target check, 62 tests and clippy passed;
+# exit 0
+
+./scripts/clean-offline-build.sh
+# LATEST.tar.gz and its minisign passed; removed 11120 files/2.4 GiB and
+# rebuilt every locked/offline workspace target in 26.19 s; exit 0
+
+./scripts/cargo-local.sh test --workspace --all-targets --locked --offline
+# 62 passed; exit 0
+
+git diff --check
+# exit 0
+```
+
+All seven current Linux laboratories were executed after the clean offline
+build and returned exit 0:
+
+```text
+./scripts/test-linux-attempts-lab.sh
+# PASS attempts-e2e tls=rpk+alpn/pm-agent/1 provider=separate-uid
+# idempotency=stable ownership=hidden challenge=trusted cancel=terminal
+# PASS attempts-crash provider-calls=1 ambiguous=INDETERMINATE
+# restart=no-blind-retry K_ATT=device-only audit=atomic
+
+./scripts/test-linux-authorization-lab.sh
+# PASS authorization-e2e rpk-agents=2 same-set=1 ... restart=durable
+# PASS authorization-path agent=tls1.3+rpk+alpn/pm-agent/1
+# human=tls1.3+rpk+alpn/pm-human/1 ... audit=atomic
+
+./scripts/test-linux-content-lab.sh
+# PASS content=all-types+organization+generator+streaming-file
+# stream-crash=rolled-back tls=1.3 rpk=mutual alpn=pm-human/1
+
+./scripts/test-linux-csv-import-lab.sh
+# PASS csv-import-e2e ... audit-failure=replace-atomic-enabled
+# response-loss=recovered restart=durable duplicate=replace+explicit-skip
+# disable=g5+reducer-compatible paginated=2 source-unchanged=1
+
+./scripts/test-linux-custody-lab.sh
+./scripts/test-linux-human-transaction-lab.sh
+# PASS role-separated mutual TLS RPK, durable human prepare/commit/receipt,
+# negative/replay/audit rollback, encrypted audit and restart paths
+
+./scripts/test-linux-sync-lab.sh
+# PASS sync-e2e custodians=3 server=opaque put=idempotent list=roots
+# get=hash-bound partial=rejected hostile-tamper=rejected
+# PASS sync-path process=real multi-uid=1 tls=1.3 rpk=mutual
+# alpn=pm-sync/1 json=base64 sqlite-copy=none
+```
+
+The focused sync suite is the authoritative composed evidence for real TLS
+replica objects, multi-page descriptors, streamed attachments, one-transaction
+graph plus authority activation, omitted-block rejection, crash rollback,
+idempotent retry and distinct backpressure/integrity/unavailable outcomes. The
+attempts laboratory and public CLI tests also remained green after integration,
+including the exact five CLI/MCP operations and no retry after an indeterminate
+provider outcome.
+
+The limits remain those recorded by the laboratories: public Internet,
+production service installation, host reboot and production systemd/FDE were
+not run; network partition was simulated. Formal Astra review remains the
+project-level final gate and was intentionally not run for this ticket.
