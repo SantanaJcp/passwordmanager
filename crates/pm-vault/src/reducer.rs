@@ -29,6 +29,13 @@ pub struct AcceptedPrefix {
     pub tip_digest: [u8; 32],
 }
 
+/// Human-confirmed logical purge scope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PurgeScopeKind {
+    Item,
+    Revisions,
+}
+
 /// Closed G5 event kinds implemented by the v1 reducer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CausalEventKind {
@@ -98,6 +105,11 @@ pub enum CausalEventBody {
     Purge {
         revision_ids: Vec<[u8; 16]>,
     },
+    PurgeScoped {
+        item_id: [u8; 16],
+        revision_ids: Vec<[u8; 16]>,
+        scope: PurgeScopeKind,
+    },
     Join,
     Checkpoint {
         covered_heads: Vec<[u8; 32]>,
@@ -157,6 +169,18 @@ impl CausalEventDraft {
             ) | (
                 CausalEventKind::PurgeItem | CausalEventKind::PurgeRevisions,
                 CausalEventBody::Purge { .. }
+            ) | (
+                CausalEventKind::PurgeItem,
+                CausalEventBody::PurgeScoped {
+                    scope: PurgeScopeKind::Item,
+                    ..
+                }
+            ) | (
+                CausalEventKind::PurgeRevisions,
+                CausalEventBody::PurgeScoped {
+                    scope: PurgeScopeKind::Revisions,
+                    ..
+                }
             ) | (CausalEventKind::Join, CausalEventBody::Join)
                 | (
                     CausalEventKind::CheckpointCache,
@@ -169,6 +193,10 @@ impl CausalEventDraft {
             }
             | CausalEventBody::Purge {
                 revision_ids: previous_revisions,
+            }
+            | CausalEventBody::PurgeScoped {
+                revision_ids: previous_revisions,
+                ..
             } => strictly_sorted(previous_revisions),
             CausalEventBody::Positive {
                 prior_positive_events,
@@ -609,6 +637,28 @@ pub(crate) fn encode_body(body: &CausalEventBody) -> Vec<u8> {
             e.map(1).unwrap().str("revision_ids").unwrap();
             encode_ids16(&mut e, revision_ids);
         }
+        CausalEventBody::PurgeScoped {
+            item_id,
+            revision_ids,
+            scope,
+        } => {
+            e.map(3)
+                .unwrap()
+                .str("item_id")
+                .unwrap()
+                .bytes(item_id)
+                .unwrap()
+                .str("revision_ids")
+                .unwrap();
+            encode_ids16(&mut e, revision_ids);
+            e.str("scope")
+                .unwrap()
+                .str(match scope {
+                    PurgeScopeKind::Item => "item",
+                    PurgeScopeKind::Revisions => "revisions",
+                })
+                .unwrap();
+        }
         CausalEventBody::Join => {
             e.map(0).unwrap();
         }
@@ -702,6 +752,12 @@ fn decode_event(bytes: &[u8]) -> Result<ParsedEvent, ReductionError> {
         }
         _ => decode_legacy_body(raw_body, kind)?,
     };
+    if matches!(
+        &body,
+        CausalEventBody::PurgeScoped { item_id, .. } if item_id != &subject
+    ) {
+        return Err(ReductionError::InvalidEvent);
+    }
     if d.position() != bytes.len()
         || event_id == [0; 16]
         || issuer_generation == 0
@@ -838,13 +894,39 @@ fn decode_body(
             Ok(CausalEventBody::Lifecycle { deletions_seen })
         }
         CausalEventKind::PurgeItem | CausalEventKind::PurgeRevisions => {
-            expect_map(d, 1)?;
-            expect_key(d, "revision_ids")?;
-            let revision_ids = decode_array_fixed(d, 4096)?;
-            if !strictly_sorted(&revision_ids) {
-                return Err(ReductionError::InvalidEvent);
+            match d.map().map_err(|_| ReductionError::InvalidEvent)? {
+                Some(1) => {
+                    expect_key(d, "revision_ids")?;
+                    let revision_ids = decode_array_fixed(d, 4096)?;
+                    if !strictly_sorted(&revision_ids) {
+                        return Err(ReductionError::InvalidEvent);
+                    }
+                    Ok(CausalEventBody::Purge { revision_ids })
+                }
+                Some(3) => {
+                    expect_key(d, "item_id")?;
+                    let item_id = decode_fixed(d)?;
+                    expect_key(d, "revision_ids")?;
+                    let revision_ids = decode_array_fixed(d, 4096)?;
+                    expect_key(d, "scope")?;
+                    let scope = match d.str().map_err(|_| ReductionError::InvalidEvent)? {
+                        "item" if kind == CausalEventKind::PurgeItem => PurgeScopeKind::Item,
+                        "revisions" if kind == CausalEventKind::PurgeRevisions => {
+                            PurgeScopeKind::Revisions
+                        }
+                        _ => return Err(ReductionError::InvalidEvent),
+                    };
+                    if revision_ids.is_empty() || !strictly_sorted(&revision_ids) {
+                        return Err(ReductionError::InvalidEvent);
+                    }
+                    Ok(CausalEventBody::PurgeScoped {
+                        item_id,
+                        revision_ids,
+                        scope,
+                    })
+                }
+                _ => Err(ReductionError::InvalidEvent),
             }
-            Ok(CausalEventBody::Purge { revision_ids })
         }
         CausalEventKind::Join => {
             expect_map(d, 0)?;
@@ -897,6 +979,29 @@ fn decode_legacy_body(
             return Err(ReductionError::InvalidEvent);
         }
         return Ok(CausalEventBody::Reason);
+    }
+    if kind == CausalEventKind::Enable {
+        let mut d = Decoder::new(bytes);
+        expect_map(&mut d, 4)?;
+        expect_key(&mut d, "revision_id")?;
+        decode_fixed::<16>(&mut d)?;
+        expect_key(&mut d, "grant_commitments")?;
+        let commitments = decode_array_fixed::<32>(&mut d, 4096)?;
+        expect_key(&mut d, "prior_positive_events")?;
+        let prior_positive_events = decode_array_fixed(&mut d, 4096)?;
+        expect_key(&mut d, "withdrawals_seen")?;
+        let withdrawals_seen = decode_array_fixed(&mut d, 4096)?;
+        if commitments.len() != 1
+            || !strictly_sorted(&prior_positive_events)
+            || !strictly_sorted(&withdrawals_seen)
+            || d.position() != bytes.len()
+        {
+            return Err(ReductionError::InvalidEvent);
+        }
+        return Ok(CausalEventBody::Positive {
+            prior_positive_events,
+            withdrawals_seen,
+        });
     }
     if !matches!(kind, CausalEventKind::ItemRevision | CausalEventKind::Trash) {
         return Err(ReductionError::InvalidEvent);
@@ -1095,7 +1200,7 @@ fn reduce(events: &BTreeMap<[u8; 32], ParsedEvent>) -> Result<ReducedView, Reduc
             })
             .max_by_key(|value| value.0)
             .map(|value| value.1);
-        let CausalEventBody::Purge { revision_ids } = &event.body else {
+        let Some(revision_ids) = purge_revision_ids(&event.body) else {
             continue;
         };
         if winner.is_some_and(|winner| revision_ids.contains(&winner)) {
@@ -1262,7 +1367,7 @@ fn build_items(
             .collect();
         let mut purged = BTreeSet::new();
         for (id, winner) in causal_winners {
-            let CausalEventBody::Purge { revision_ids } = &events[&id].body else {
+            let Some(revision_ids) = purge_revision_ids(&events[&id].body) else {
                 continue;
             };
             if !revision_ids.contains(&winner) {
@@ -1270,8 +1375,16 @@ fn build_items(
             }
         }
         revisions.retain(|(r, _, _, _)| !purged.contains(r));
-        let visible_revision = revisions.last().map(|v| v.0);
-        let mut history: Vec<_> = revisions.into_iter().map(|v| v.0).collect();
+        let visible_revision = if purge_item {
+            None
+        } else {
+            revisions.last().map(|value| value.0)
+        };
+        let mut history: Vec<_> = if purge_item {
+            Vec::new()
+        } else {
+            revisions.into_iter().map(|v| v.0).collect()
+        };
         history.sort_unstable();
         history.dedup();
         let lifecycle = if purge_item {
@@ -1291,6 +1404,14 @@ fn build_items(
         );
     }
     items
+}
+
+fn purge_revision_ids(body: &CausalEventBody) -> Option<&[[u8; 16]]> {
+    match body {
+        CausalEventBody::Purge { revision_ids }
+        | CausalEventBody::PurgeScoped { revision_ids, .. } => Some(revision_ids),
+        _ => None,
+    }
 }
 
 struct Ancestors {

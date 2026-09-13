@@ -723,6 +723,8 @@ impl UnlockedRoot {
         Ok(OpenedRevisionPackage {
             item: manifest.item,
             revision: manifest.revision,
+            issuer_device: manifest.issuer_device,
+            modified_at: manifest.modified_at,
             kind: manifest.kind,
             human_plaintext,
             auth_plaintext,
@@ -1787,6 +1789,8 @@ impl RevisionPackage {
 pub struct OpenedRevisionPackage {
     item: [u8; ID_BYTES],
     revision: [u8; ID_BYTES],
+    issuer_device: [u8; ID_BYTES],
+    modified_at: i64,
     kind: ItemKind,
     human_plaintext: Vec<u8>,
     auth_plaintext: Option<Vec<u8>>,
@@ -1801,6 +1805,16 @@ impl OpenedRevisionPackage {
     #[must_use]
     pub const fn revision(&self) -> &[u8; ID_BYTES] {
         &self.revision
+    }
+
+    #[must_use]
+    pub const fn issuer_device(&self) -> &[u8; ID_BYTES] {
+        &self.issuer_device
+    }
+
+    #[must_use]
+    pub const fn modified_at(&self) -> i64 {
+        self.modified_at
     }
 
     #[must_use]

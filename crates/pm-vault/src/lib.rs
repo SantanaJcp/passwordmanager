@@ -6,6 +6,7 @@ mod attempts;
 mod audit;
 mod authorization;
 mod content;
+mod history;
 mod human;
 mod migration;
 mod reducer;
@@ -27,6 +28,7 @@ pub use content::{
     HumanMetadata, LogicalRecord, LogicalValue, PasswordRng, PrivateKeyFormat, RecordKind,
     SearchHit, SearchQuery, SourceEncoding, SourceField, TotpAlgorithm,
 };
+pub use history::{HistoryEntry, ItemHistory, ItemPurgeScope, PreparedItemPurge};
 pub use human::{
     AttachmentReader, HumanChannel, HumanCommitError, HumanReceipt, HumanVault, PasswordRecord,
     PreparedHumanCommand,
@@ -37,7 +39,7 @@ pub use migration::{
 };
 pub use reducer::{
     AcceptedPrefix, CausalEventBody, CausalEventDraft, CausalEventKind, CausalReducer,
-    ItemLifecycle, ReducedItem, ReducedView, ReductionError, SignedCausalEvent,
+    ItemLifecycle, PurgeScopeKind, ReducedItem, ReducedView, ReductionError, SignedCausalEvent,
 };
 
 use std::{
@@ -314,6 +316,27 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0), ciphertext BLOB NOT NULL CHECK (length(ciphertext) BETWEEN 21 AND 1048597),
                PRIMARY KEY (attachment_id, revision_id, chunk_index)
              ) STRICT;
+             CREATE TABLE purged_items (
+               item_id BLOB PRIMARY KEY CHECK (length(item_id) = 16),
+               purge_event_digest BLOB NOT NULL CHECK (length(purge_event_digest) = 32),
+               revision_count INTEGER NOT NULL CHECK (revision_count >= 0),
+               attachment_count INTEGER NOT NULL CHECK (attachment_count >= 0),
+               encrypted_bytes INTEGER NOT NULL CHECK (encrypted_bytes >= 0)
+             ) STRICT;
+             CREATE TABLE purged_revisions (
+               revision_id BLOB PRIMARY KEY CHECK (length(revision_id) = 16),
+               item_id BLOB NOT NULL CHECK (length(item_id) = 16),
+               purge_event_digest BLOB NOT NULL CHECK (length(purge_event_digest) = 32)
+             ) STRICT;
+             CREATE TRIGGER reject_purged_item_revision BEFORE INSERT ON revision_parts
+             WHEN EXISTS(SELECT 1 FROM purged_items WHERE item_id=NEW.item_id)
+             BEGIN SELECT RAISE(ABORT,'purged item is terminal'); END;
+             CREATE TRIGGER reject_purged_revision BEFORE INSERT ON revision_parts
+             WHEN EXISTS(SELECT 1 FROM purged_revisions WHERE revision_id=NEW.revision_id)
+             BEGIN SELECT RAISE(ABORT,'purged revision is terminal'); END;
+             CREATE TRIGGER reject_purged_item BEFORE INSERT ON vault_items
+             WHEN EXISTS(SELECT 1 FROM purged_items WHERE item_id=NEW.item_id)
+             BEGIN SELECT RAISE(ABORT,'purged item is terminal'); END;
              CREATE TABLE authority_events (
                event_digest BLOB PRIMARY KEY CHECK (length(event_digest) = 32),
                event_id BLOB NOT NULL UNIQUE CHECK (length(event_id) = 16),
@@ -346,8 +369,8 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              ) STRICT;
              CREATE TABLE human_staging (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
-               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'audit_purge', 'availability_change', 'identity_change', 'import_commit')),
-               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'import-batch')),
+               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'history_restore', 'item_purge', 'audit_purge', 'availability_change', 'identity_change', 'import_commit')),
+               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'restore', 'purge-item', 'purge-revisions', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'import-batch')),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB CHECK (revision_id IS NULL OR length(revision_id) = 16),
                body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144),

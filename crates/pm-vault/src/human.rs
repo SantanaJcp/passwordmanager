@@ -30,8 +30,9 @@ use crate::migration::{
 };
 use crate::{
     AgentEnrollment, AuthRecord, AuthorizationError, AuthorizationReason, CausalEventDraft,
-    Destination, GeneratedPassword, GeneratorConfig, HumanMetadata, LogicalRecord, PasswordRng,
-    PreparedAgentEnrollment, RecordKind, SearchHit, SearchQuery, VaultError, content, unlock_root,
+    Destination, GeneratedPassword, GeneratorConfig, HistoryEntry, HumanMetadata, ItemHistory,
+    ItemLifecycle, ItemPurgeScope, LogicalRecord, PasswordRng, PreparedAgentEnrollment,
+    PreparedItemPurge, RecordKind, SearchHit, SearchQuery, VaultError, content, unlock_root,
 };
 
 const CHALLENGE_LIFETIME_US: i64 = 60_000_000;
@@ -615,7 +616,15 @@ impl HumanVault {
             )
             .map_err(|_| AuthorizationError::Integrity)?;
         let staged_grant = pending.to_staged_bytes();
-        let body = encode_enable_body(revision, pending.commitment());
+        let positives =
+            authority_digests(&connection, item, &["enable"]).map_err(AuthorizationError::from)?;
+        let withdrawals = authority_digests(
+            &connection,
+            item,
+            &["disable", "trash", "purge-item", "purge-revisions"],
+        )
+        .map_err(AuthorizationError::from)?;
+        let body = encode_enable_body(revision, pending.commitment(), &positives, &withdrawals);
         self.prepare_authority(
             "availability_change",
             "enable",
@@ -652,17 +661,14 @@ impl HumanVault {
         item: [u8; 16],
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
         self.require_active(item)?;
-        self.prepare(
+        let mut deletions = authority_digests(&open_connection(&self.path)?, item, &["trash"])?;
+        deletions.sort_unstable();
+        self.prepare_authority(
             "item_lifecycle",
             "trash",
             item,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            1,
+            &encode_lifecycle_body(&deletions),
             None,
             None,
         )
@@ -825,6 +831,19 @@ impl HumanVault {
                 &self.trusted_root,
                 self.device,
                 &self.audit_custody,
+                &body,
+                actual_body_hash,
+                committed_at_us,
+            );
+        }
+        if staged.event_kind == "restore" {
+            return commit_restore(
+                transaction,
+                &self.root,
+                &self.trusted_root,
+                self.device,
+                &self.audit_custody,
+                &staged,
                 &body,
                 actual_body_hash,
                 committed_at_us,
@@ -1344,70 +1363,214 @@ impl HumanVault {
     pub fn read_record(&self, item: [u8; 16]) -> Result<LogicalRecord, HumanCommitError> {
         self.channel.verify()?;
         let connection = open_connection(&self.path)?;
-        let (revision_bytes, expected_kind, package): (Vec<u8>, String, Vec<u8>) = connection
+        let (revision_bytes, expected_kind): (Vec<u8>, String) = connection
             .query_row(
-                "SELECT i.visible_revision,i.kind,r.package FROM vault_items i
-                 JOIN revision_parts r ON r.revision_id=i.visible_revision
+                "SELECT i.visible_revision,i.kind FROM vault_items i
                  WHERE i.item_id=?1 AND i.status='active'",
                 [item.as_slice()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
             .ok_or(HumanCommitError::ItemNotFound)?;
         let revision = bytes::<16>(&revision_bytes)?;
-        let opened = self.root.open_revision_package(&package)?;
-        let mut record =
-            LogicalRecord::decode_parts(opened.human_plaintext(), opened.auth_plaintext())?;
-        if opened.item() != &item
-            || opened.revision() != &revision
-            || record.kind().name() != expected_kind
-            || record.kind().crypto() != opened.kind()
-        {
+        self.read_revision_from(&connection, item, revision, Some(&expected_kind))
+    }
+
+    /// Lists every retained authenticated revision in deterministic LWW order.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown/purged item or altered encrypted history.
+    pub fn history(&self, item: [u8; 16]) -> Result<ItemHistory, HumanCommitError> {
+        self.channel.verify()?;
+        let connection = open_connection(&self.path)?;
+        let (visible, status): (Vec<u8>, String) = connection
+            .query_row(
+                "SELECT visible_revision,status FROM vault_items WHERE item_id=?1",
+                [item.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(HumanCommitError::ItemNotFound)?;
+        let visible = bytes::<16>(&visible)?;
+        let lifecycle = match status.as_str() {
+            "active" => ItemLifecycle::Active,
+            "trash" => ItemLifecycle::Trash,
+            _ => return Err(HumanCommitError::InvalidCommand),
+        };
+        let mut statement = connection.prepare(
+            "SELECT revision_id,package FROM revision_parts WHERE item_id=?1 ORDER BY revision_id",
+        )?;
+        let rows = statement
+            .query_map([item.as_slice()], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut entries = Vec::with_capacity(rows.len());
+        for (revision, package) in rows {
+            let revision = bytes::<16>(&revision)?;
+            let opened = self.root.open_revision_package(&package)?;
+            if opened.item() != &item || opened.revision() != &revision {
+                return Err(HumanCommitError::InvalidCommand);
+            }
+            let count: i64 = connection.query_row(
+                "SELECT (SELECT count(*) FROM attachment_parts WHERE revision_id=?1) +
+                        (SELECT count(*) FROM attachment_streams WHERE revision_id=?1)",
+                [revision.as_slice()],
+                |row| row.get(0),
+            )?;
+            entries.push(HistoryEntry {
+                revision_id: revision,
+                modified_at_us: opened.modified_at(),
+                issuer_device: *opened.issuer_device(),
+                visible: revision == visible,
+                attachment_count: usize::try_from(count)
+                    .map_err(|_| HumanCommitError::InvalidCommand)?,
+            });
+        }
+        entries.sort_by_key(|entry| (entry.modified_at_us, entry.issuer_device, entry.revision_id));
+        if entries.is_empty() || entries.iter().filter(|entry| entry.visible).count() != 1 {
             return Err(HumanCommitError::InvalidCommand);
         }
-        let ids: Vec<[u8; 16]> = record
-            .attachments()
-            .iter()
-            .map(|value| *value.id())
-            .collect();
-        let mut has_stream = false;
-        for id in ids {
-            let file: Option<Vec<u8>> = connection
-                .query_row(
-                    "SELECT package FROM attachment_parts WHERE attachment_id=?1 AND revision_id=?2",
-                    params![id.as_slice(), revision.as_slice()],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(file) = file {
-                let content = self.root.open_file(id, revision, &file)?;
-                record.restore_attachment(id, content)?;
-            } else {
-                let exists: bool = connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM attachment_streams WHERE attachment_id=?1 AND revision_id=?2)",
-                    params![id.as_slice(), revision.as_slice()],
-                    |row| row.get(0),
-                )?;
-                if !exists {
-                    return Err(HumanCommitError::InvalidCommand);
-                }
-                has_stream = true;
-            }
-        }
-        let attachment_count: i64 = connection.query_row(
-            "SELECT (SELECT count(*) FROM attachment_parts WHERE revision_id=?1) + (SELECT count(*) FROM attachment_streams WHERE revision_id=?1)",
-            [revision.as_slice()],
+        Ok(ItemHistory { lifecycle, entries })
+    }
+
+    /// Reads one retained historical revision without changing visibility.
+    ///
+    /// # Errors
+    /// Returns an error for a purged/missing revision or failed authentication.
+    pub fn read_revision(
+        &self,
+        item: [u8; 16],
+        revision: [u8; 16],
+    ) -> Result<LogicalRecord, HumanCommitError> {
+        self.channel.verify()?;
+        let connection = open_connection(&self.path)?;
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM vault_items WHERE item_id=?1)",
+            [item.as_slice()],
             |row| row.get(0),
         )?;
-        if usize::try_from(attachment_count).ok() != Some(record.attachments().len()) {
-            return Err(HumanCommitError::InvalidCommand);
+        if !exists {
+            return Err(HumanCommitError::ItemNotFound);
         }
-        if has_stream {
-            record.validate_descriptors()?;
-        } else {
-            record.validate_complete()?;
+        self.read_revision_from(&connection, item, revision, None)
+    }
+
+    /// Restores retained content as a freshly encrypted revision plus an
+    /// explicit lifecycle event in one human transaction. It never enables use.
+    ///
+    /// # Errors
+    /// Rejects purged/missing revisions and streaming attachments in this
+    /// bounded API; callers must use a future explicit streaming restore seam.
+    pub fn prepare_restore(
+        &mut self,
+        item: [u8; 16],
+        source_revision: [u8; 16],
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        let history = self.history(item)?;
+        if !history
+            .entries()
+            .iter()
+            .any(|entry| entry.revision_id() == &source_revision)
+        {
+            return Err(HumanCommitError::ItemNotFound);
         }
-        Ok(record)
+        let record = self.read_revision(item, source_revision)?;
+        if record
+            .attachments()
+            .iter()
+            .any(|attachment| attachment.content().is_empty() && attachment.size() != 0)
+        {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let revision = random_id()?;
+        let package = self
+            .root
+            .seal_revision_package(RevisionPackageInput {
+                item,
+                revision,
+                issuer_device: self.device,
+                modified_at: now_us()?,
+                kind: record.kind().crypto(),
+                human_plaintext: &record.encode_human(),
+                auth_plaintext: record.encode_auth().as_deref(),
+            })?
+            .to_bytes();
+        let mut attachments = Vec::new();
+        for (id, plaintext) in record.attachment_inputs() {
+            attachments.push((id, self.root.seal_file(id, revision, plaintext)?.to_bytes()));
+        }
+        let attachments = encode_staged_attachments(&attachments);
+        let deletions = authority_digests(&open_connection(&self.path)?, item, &["trash"])?;
+        let lifecycle = encode_lifecycle_body(&deletions);
+        self.prepare_restore_staged(
+            item,
+            revision,
+            &package,
+            record.kind().name(),
+            &attachments,
+            &lifecycle,
+        )
+    }
+
+    /// Prepares irreversible deletion of selected non-visible revisions.
+    ///
+    /// # Errors
+    /// Rejects empty/duplicate/oversized scope, a visible revision, or prior purge.
+    pub fn prepare_purge_revisions(
+        &mut self,
+        item: [u8; 16],
+        revision_ids: Vec<[u8; 16]>,
+    ) -> Result<PreparedItemPurge, HumanCommitError> {
+        if revision_ids.is_empty() || revision_ids.len() > 4096 {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let mut sorted = revision_ids;
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let history = self.history(item)?;
+        if sorted.iter().any(|revision| {
+            history
+                .entries()
+                .iter()
+                .find(|entry| entry.revision_id() == revision)
+                .is_none_or(HistoryEntry::visible)
+        }) {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let scope = purge_scope(&open_connection(&self.path)?, item, &sorted, false)?;
+        let body = encode_item_purge_body(item, &sorted, false);
+        let prepared =
+            self.prepare_authority("item_purge", "purge-revisions", item, 1, &body, None, None)?;
+        Ok(PreparedItemPurge { prepared, scope })
+    }
+
+    /// Prepares terminal purge of an item currently in the trash.
+    ///
+    /// # Errors
+    /// Rejects active, absent, empty, or already purged items.
+    pub fn prepare_purge_item(
+        &mut self,
+        item: [u8; 16],
+    ) -> Result<PreparedItemPurge, HumanCommitError> {
+        let history = self.history(item)?;
+        if history.lifecycle() != ItemLifecycle::Trash || history.entries().is_empty() {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let mut revisions = history
+            .entries()
+            .iter()
+            .map(|entry| *entry.revision_id())
+            .collect::<Vec<_>>();
+        revisions.sort_unstable();
+        let scope = purge_scope(&open_connection(&self.path)?, item, &revisions, true)?;
+        let body = encode_item_purge_body(item, &revisions, true);
+        let prepared =
+            self.prepare_authority("item_purge", "purge-item", item, 1, &body, None, None)?;
+        Ok(PreparedItemPurge { prepared, scope })
     }
 
     /// Authenticates and writes one active attachment incrementally.
@@ -1533,6 +1696,142 @@ impl HumanVault {
     ) -> Result<GeneratedPassword, HumanCommitError> {
         self.channel.verify()?;
         content::generate_password(config, rng)
+    }
+
+    fn read_revision_from(
+        &self,
+        connection: &Connection,
+        item: [u8; 16],
+        revision: [u8; 16],
+        expected_kind: Option<&str>,
+    ) -> Result<LogicalRecord, HumanCommitError> {
+        let package: Vec<u8> = connection
+            .query_row(
+                "SELECT package FROM revision_parts WHERE revision_id=?1 AND item_id=?2",
+                params![revision.as_slice(), item.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(HumanCommitError::ItemNotFound)?;
+        let opened = self.root.open_revision_package(&package)?;
+        let mut record =
+            LogicalRecord::decode_parts(opened.human_plaintext(), opened.auth_plaintext())?;
+        if opened.item() != &item
+            || opened.revision() != &revision
+            || record.kind().crypto() != opened.kind()
+            || expected_kind.is_some_and(|kind| kind != record.kind().name())
+        {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        let ids = record
+            .attachments()
+            .iter()
+            .map(|value| *value.id())
+            .collect::<Vec<_>>();
+        let mut has_stream = false;
+        for id in ids {
+            let file: Option<Vec<u8>> = connection
+                .query_row(
+                    "SELECT package FROM attachment_parts WHERE attachment_id=?1 AND revision_id=?2",
+                    params![id.as_slice(), revision.as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(file) = file {
+                record.restore_attachment(id, self.root.open_file(id, revision, &file)?)?;
+            } else {
+                let exists: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attachment_streams WHERE attachment_id=?1 AND revision_id=?2)",
+                    params![id.as_slice(), revision.as_slice()],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    return Err(HumanCommitError::InvalidCommand);
+                }
+                has_stream = true;
+            }
+        }
+        let attachment_count: i64 = connection.query_row(
+            "SELECT (SELECT count(*) FROM attachment_parts WHERE revision_id=?1) +
+                    (SELECT count(*) FROM attachment_streams WHERE revision_id=?1)",
+            [revision.as_slice()],
+            |row| row.get(0),
+        )?;
+        if usize::try_from(attachment_count).ok() != Some(record.attachments().len()) {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        if has_stream {
+            record.validate_descriptors()?;
+        } else {
+            record.validate_complete()?;
+        }
+        Ok(record)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_restore_staged(
+        &mut self,
+        item: [u8; 16],
+        revision: [u8; 16],
+        package: &[u8],
+        item_kind: &str,
+        attachments: &[u8],
+        lifecycle_body: &[u8],
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        self.channel.verify()?;
+        let transaction_id = random_id()?;
+        let challenge = random_challenge()?;
+        let connection = open_connection(&self.path)?;
+        let expected_state = state_digest(&connection, self.root.vault_id(), 1)?;
+        let object_digest =
+            staged_authority_digest(Some(package), Some(attachments), Some(lifecycle_body), None)
+                .ok_or(HumanCommitError::InvalidCommand)?;
+        let manifest = encode_restore_manifest(item, revision, object_digest, lifecycle_body);
+        let body = encode_body(&Body {
+            transaction_id,
+            events_manifest_digest: digest(&manifest),
+            event_count: 2,
+            object_manifest_digest: Some(object_digest),
+        });
+        let body_hash = digest(&body);
+        let expires_at_us = now_us()?
+            .checked_add(CHALLENGE_LIFETIME_US)
+            .ok_or(HumanCommitError::InvalidCommand)?;
+        let command = encode_command(&CommandFields {
+            vault: *self.root.vault_id(),
+            challenge,
+            expected_state,
+            operation: "history_restore",
+            body_hash,
+            expires_at_us,
+        });
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO human_challenges
+             (challenge,transaction_id,command,body_hash,expected_state,expires_at_us,consumed)
+             VALUES(?1,?2,?3,?4,?5,?6,0)",
+            params![
+                challenge.as_slice(),
+                transaction_id.as_slice(),
+                command,
+                body_hash.as_slice(),
+                expected_state.as_slice(),
+                expires_at_us
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO human_staging
+             (transaction_id,operation,event_kind,item_id,revision_id,body,package,item_kind,attachments,subject_generation,authority_body)
+             VALUES(?1,'history_restore','restore',?2,?3,?4,?5,?6,?7,1,?8)",
+            params![transaction_id.as_slice(), item.as_slice(), revision.as_slice(), body, package, item_kind, attachments, lifecycle_body],
+        )?;
+        transaction.commit()?;
+        Ok(PreparedHumanCommand {
+            transaction_id,
+            item_id: item,
+            command,
+            body,
+        })
     }
 
     fn prepare_write(
@@ -1942,6 +2241,192 @@ fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn commit_restore(
+    transaction: Transaction<'_>,
+    root: &UnlockedRoot,
+    trusted_root: &TrustedRoot,
+    device: [u8; 16],
+    audit_custody: &AuditDeviceCustody,
+    staged: &Staged,
+    body: &Body,
+    body_hash: [u8; 32],
+    committed_at_us: i64,
+) -> Result<HumanReceipt, HumanCommitError> {
+    let revision = staged.revision_id.ok_or(HumanCommitError::BodyChanged)?;
+    let package = staged
+        .package
+        .as_deref()
+        .ok_or(HumanCommitError::BodyChanged)?;
+    let kind = staged
+        .item_kind
+        .as_deref()
+        .ok_or(HumanCommitError::BodyChanged)?;
+    let lifecycle_body = staged
+        .authority_body
+        .as_deref()
+        .ok_or(HumanCommitError::BodyChanged)?;
+    let mut previous_revisions = transaction
+        .prepare("SELECT revision_id FROM revision_parts WHERE item_id=?1 ORDER BY revision_id")?
+        .query_map([staged.item_id.as_slice()], |row| row.get::<_, Vec<u8>>(0))?
+        .map(|value| value?.try_into().map_err(|_| rusqlite::Error::InvalidQuery))
+        .collect::<Result<Vec<[u8; 16]>, _>>()?;
+    previous_revisions.sort_unstable();
+    let previous = current_head(&transaction)?;
+    let seq = next_authority_seq(&transaction, device, 1)?;
+    let mut revision_parents = authority_digests(&transaction, staged.item_id, &["item-revision"])?;
+    if let Some(previous) = previous {
+        revision_parents.push(previous);
+    }
+    revision_parents.sort_unstable();
+    revision_parents.dedup();
+    let revision_event_id = random_id()?;
+    let revision_body = encode_import_revision_body(
+        revision,
+        committed_at_us,
+        digest(package),
+        &previous_revisions,
+    );
+    let revision_event = encode_g5_event(&G5EventInput {
+        vault: root.vault_id(),
+        event_id: revision_event_id,
+        authority_epoch: 1,
+        issuer_device: device,
+        issuer_generation: 1,
+        seq,
+        previous,
+        parents: &revision_parents,
+        kind: "item-revision",
+        subject: staged.item_id,
+        subject_generation: 1,
+        body: &revision_body,
+    });
+    let revision_human_signature = root.sign_human_event(&revision_event)?;
+    let revision_device_signature = audit_custody.sign_device_event(&revision_event)?;
+    let revision_digest = digest(&revision_event);
+    transaction.execute(
+        "INSERT INTO revision_parts(revision_id,item_id,package) VALUES(?1,?2,?3)",
+        params![revision.as_slice(), staged.item_id.as_slice(), package],
+    )?;
+    for (attachment, attachment_package) in decode_staged_attachments(
+        staged
+            .attachments
+            .as_deref()
+            .ok_or(HumanCommitError::BodyChanged)?,
+    )? {
+        transaction.execute(
+            "INSERT INTO attachment_parts(attachment_id,revision_id,package) VALUES(?1,?2,?3)",
+            params![
+                attachment.as_slice(),
+                revision.as_slice(),
+                attachment_package
+            ],
+        )?;
+    }
+    transaction.execute(
+        "UPDATE vault_items SET visible_revision=?2,kind=?3,status='active' WHERE item_id=?1",
+        params![staged.item_id.as_slice(), revision.as_slice(), kind],
+    )?;
+    transaction.execute(
+        "INSERT INTO authority_events
+         (event_digest,event_id,transaction_id,issuer_device,issuer_generation,seq,previous_digest,parents,kind,subject,subject_generation,event,human_signature,device_signature)
+         VALUES(?1,?2,?3,?4,1,?5,?6,?7,'item-revision',?8,1,?9,?10,?11)",
+        params![revision_digest.as_slice(), revision_event_id.as_slice(), body.transaction_id.as_slice(), device.as_slice(), i64::try_from(seq).map_err(|_| HumanCommitError::InvalidCommand)?, previous.as_ref().map(<[u8; 32]>::as_slice), encode_heads_allow_empty(&revision_parents), staged.item_id.as_slice(), revision_event, revision_human_signature.as_slice(), revision_device_signature.as_slice()],
+    )?;
+    transaction.execute(
+        "INSERT INTO outbox(event_digest,event) VALUES(?1,?2)",
+        params![
+            revision_digest.as_slice(),
+            encode_signed_event(
+                &revision_event,
+                &revision_device_signature,
+                &revision_human_signature
+            )
+        ],
+    )?;
+
+    let restore_event_id = random_id()?;
+    let restore_seq = next_authority_seq(&transaction, device, 1)?;
+    let mut restore_parents = authority_digests(
+        &transaction,
+        staged.item_id,
+        &["trash", "restore", "purge-item", "purge-revisions"],
+    )?;
+    restore_parents.push(revision_digest);
+    restore_parents.sort_unstable();
+    restore_parents.dedup();
+    let restore_event = encode_g5_event(&G5EventInput {
+        vault: root.vault_id(),
+        event_id: restore_event_id,
+        authority_epoch: 1,
+        issuer_device: device,
+        issuer_generation: 1,
+        seq: restore_seq,
+        previous: Some(revision_digest),
+        parents: &restore_parents,
+        kind: "restore",
+        subject: staged.item_id,
+        subject_generation: 1,
+        body: lifecycle_body,
+    });
+    let restore_human_signature = root.sign_human_event(&restore_event)?;
+    let restore_device_signature = audit_custody.sign_device_event(&restore_event)?;
+    let restore_digest = digest(&restore_event);
+    transaction.execute(
+        "INSERT INTO authority_events
+         (event_digest,event_id,transaction_id,issuer_device,issuer_generation,seq,previous_digest,parents,kind,subject,subject_generation,event,human_signature,device_signature)
+         VALUES(?1,?2,?3,?4,1,?5,?6,?7,'restore',?8,1,?9,?10,?11)",
+        params![restore_digest.as_slice(), restore_event_id.as_slice(), random_id()?.as_slice(), device.as_slice(), i64::try_from(restore_seq).map_err(|_| HumanCommitError::InvalidCommand)?, revision_digest.as_slice(), encode_heads_allow_empty(&restore_parents), staged.item_id.as_slice(), restore_event, restore_human_signature.as_slice(), restore_device_signature.as_slice()],
+    )?;
+    transaction.execute(
+        "INSERT INTO outbox(event_digest,event) VALUES(?1,?2)",
+        params![
+            restore_digest.as_slice(),
+            encode_signed_event(
+                &restore_event,
+                &restore_device_signature,
+                &restore_human_signature
+            )
+        ],
+    )?;
+    audit::append_event(
+        &transaction,
+        trusted_root,
+        Some(root),
+        device,
+        audit_custody,
+        &AuditEvent::new(
+            AuditActorKind::Human,
+            None,
+            AuditAction::ItemChange,
+            AuditOutcome::Succeeded,
+        )
+        .with_item(staged.item_id, Some(revision)),
+        committed_at_us,
+        restore_digest,
+    )?;
+    transaction.execute(
+        "UPDATE human_challenges SET consumed=1 WHERE transaction_id=?1 AND consumed=0",
+        [body.transaction_id.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM human_staging WHERE transaction_id=?1",
+        [body.transaction_id.as_slice()],
+    )?;
+    transaction.execute(
+        "INSERT INTO human_receipts(transaction_id,body_hash,committed_heads,committed_at_us,outcome)
+         VALUES(?1,?2,?3,?4,'committed')",
+        params![body.transaction_id.as_slice(), body_hash.as_slice(), encode_heads(&[restore_digest]), committed_at_us],
+    )?;
+    transaction.commit()?;
+    Ok(HumanReceipt {
+        transaction_id: body.transaction_id,
+        body_hash,
+        committed_heads: vec![restore_digest],
+        committed_at_us,
+    })
+}
+
 fn commit_import_batch(
     transaction: Transaction<'_>,
     root: &UnlockedRoot,
@@ -2202,10 +2687,23 @@ fn apply_staged(
             transaction.execute("INSERT INTO attachment_stream_chunks (attachment_id,revision_id,chunk_index,ciphertext) SELECT attachment_id,?2,chunk_index,ciphertext FROM human_staging_stream_chunks WHERE transaction_id=?1",params![staged.transaction_id.as_slice(),revision.as_slice()])?;
         }
         "trash" => {
-            transaction.execute(
+            let changed = transaction.execute(
                 "UPDATE vault_items SET status='trash' WHERE item_id=?1 AND status='active'",
                 [staged.item_id.as_slice()],
             )?;
+            if changed != 1 {
+                return Err(HumanCommitError::StateChanged);
+            }
+            transaction.execute(
+                "UPDATE credential_authorizations SET status='disabled',event_digest=?2 WHERE item_id=?1",
+                params![staged.item_id.as_slice(), event_digest.as_slice()],
+            )?;
+        }
+        "purge-revisions" => {
+            apply_revision_purge(transaction, staged, event_digest)?;
+        }
+        "purge-item" => {
+            apply_item_purge(transaction, staged, event_digest)?;
         }
         "audit-purge" => {}
         "agent-grant" => {
@@ -2290,8 +2788,143 @@ fn apply_staged(
                 params![staged.item_id.as_slice(), event_digest.as_slice()],
             )?;
         }
+        "restore" => unreachable!("restore uses its two-event commit path"),
         _ => unreachable!("validated staging event kind"),
     }
+    Ok(())
+}
+
+fn validate_purge_against_current(
+    transaction: &Transaction<'_>,
+    staged: &Staged,
+) -> Result<(), HumanCommitError> {
+    let purge = decode_item_purge_body(
+        staged
+            .authority_body
+            .as_deref()
+            .ok_or(HumanCommitError::BodyChanged)?,
+    )?;
+    if purge.item != staged.item_id || purge.terminal != (staged.event_kind == "purge-item") {
+        return Err(HumanCommitError::BodyChanged);
+    }
+    let item: Option<(Vec<u8>, String)> = transaction
+        .query_row(
+            "SELECT visible_revision,status FROM vault_items WHERE item_id=?1",
+            [staged.item_id.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (visible, status) = item.ok_or(HumanCommitError::StateChanged)?;
+    let visible = bytes::<16>(&visible)?;
+    let mut statement = transaction
+        .prepare("SELECT revision_id FROM revision_parts WHERE item_id=?1 ORDER BY revision_id")?;
+    let current = statement
+        .query_map([staged.item_id.as_slice()], |row| row.get::<_, Vec<u8>>(0))?
+        .map(|value| value?.try_into().map_err(|_| rusqlite::Error::InvalidQuery))
+        .collect::<Result<Vec<[u8; 16]>, _>>()?;
+    drop(statement);
+    if purge.terminal {
+        if status != "trash" || current != purge.revisions {
+            return Err(HumanCommitError::StateChanged);
+        }
+    } else if purge
+        .revisions
+        .iter()
+        .any(|revision| revision == &visible || current.binary_search(revision).is_err())
+    {
+        return Err(HumanCommitError::StateChanged);
+    }
+    Ok(())
+}
+
+fn delete_revision_payloads(
+    transaction: &Transaction<'_>,
+    revision: [u8; 16],
+) -> Result<(), HumanCommitError> {
+    transaction.execute(
+        "DELETE FROM attachment_stream_chunks WHERE revision_id=?1",
+        [revision.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM attachment_streams WHERE revision_id=?1",
+        [revision.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM attachment_parts WHERE revision_id=?1",
+        [revision.as_slice()],
+    )?;
+    let changed = transaction.execute(
+        "DELETE FROM revision_parts WHERE revision_id=?1",
+        [revision.as_slice()],
+    )?;
+    if changed != 1 {
+        return Err(HumanCommitError::StateChanged);
+    }
+    Ok(())
+}
+
+fn apply_revision_purge(
+    transaction: &Transaction<'_>,
+    staged: &Staged,
+    event_digest: [u8; 32],
+) -> Result<(), HumanCommitError> {
+    let purge = decode_item_purge_body(
+        staged
+            .authority_body
+            .as_deref()
+            .ok_or(HumanCommitError::BodyChanged)?,
+    )?;
+    for revision in purge.revisions {
+        delete_revision_payloads(transaction, revision)?;
+        transaction.execute(
+            "INSERT INTO purged_revisions(revision_id,item_id,purge_event_digest) VALUES(?1,?2,?3)",
+            params![
+                revision.as_slice(),
+                staged.item_id.as_slice(),
+                event_digest.as_slice()
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn apply_item_purge(
+    transaction: &Transaction<'_>,
+    staged: &Staged,
+    event_digest: [u8; 32],
+) -> Result<(), HumanCommitError> {
+    let purge = decode_item_purge_body(
+        staged
+            .authority_body
+            .as_deref()
+            .ok_or(HumanCommitError::BodyChanged)?,
+    )?;
+    let scope = purge_scope(transaction, staged.item_id, &purge.revisions, true)?;
+    for revision in purge.revisions {
+        delete_revision_payloads(transaction, revision)?;
+    }
+    transaction.execute(
+        "DELETE FROM credential_authorizations WHERE item_id=?1",
+        [staged.item_id.as_slice()],
+    )?;
+    let changed = transaction.execute(
+        "DELETE FROM vault_items WHERE item_id=?1 AND status='trash'",
+        [staged.item_id.as_slice()],
+    )?;
+    if changed != 1 {
+        return Err(HumanCommitError::StateChanged);
+    }
+    transaction.execute(
+        "INSERT INTO purged_items(item_id,purge_event_digest,revision_count,attachment_count,encrypted_bytes)
+         VALUES(?1,?2,?3,?4,?5)",
+        params![
+            staged.item_id.as_slice(),
+            event_digest.as_slice(),
+            i64::try_from(scope.revision_ids.len()).map_err(|_| HumanCommitError::InvalidInput)?,
+            i64::try_from(scope.attachment_count).map_err(|_| HumanCommitError::InvalidInput)?,
+            i64::try_from(scope.encrypted_bytes).map_err(|_| HumanCommitError::InvalidInput)?,
+        ],
+    )?;
     Ok(())
 }
 
@@ -2379,8 +3012,49 @@ fn validate_staged(
                 && staged.attachments.is_none()
                 && staged.audit_generation.is_none()
                 && staged.audit_through_seq.is_none()
-                && staged.subject_generation.is_none()
-                && staged.authority_body.is_none()
+                && staged.subject_generation == Some(1)
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .is_some_and(|value| decode_lifecycle_body(value).is_ok())
+                && staged.staged_grant.is_none()
+        }
+        "restore" => {
+            staged.operation == "history_restore"
+                && staged.revision_id.is_some()
+                && staged.package.is_some()
+                && staged.item_kind.is_some()
+                && staged
+                    .attachments
+                    .as_deref()
+                    .is_some_and(|value| decode_staged_attachments(value).is_ok())
+                && stream_count == 0
+                && staged.audit_generation.is_none()
+                && staged.audit_through_seq.is_none()
+                && staged.subject_generation == Some(1)
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .is_some_and(|value| decode_lifecycle_body(value).is_ok())
+                && staged.staged_grant.is_none()
+        }
+        "purge-item" | "purge-revisions" => {
+            staged.operation == "item_purge"
+                && staged.revision_id.is_none()
+                && staged.package.is_none()
+                && staged.item_kind.is_none()
+                && staged.attachments.is_none()
+                && staged.audit_generation.is_none()
+                && staged.audit_through_seq.is_none()
+                && staged.subject_generation == Some(1)
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .and_then(|value| decode_item_purge_body(value).ok())
+                    .is_some_and(|value| {
+                        value.item == staged.item_id
+                            && value.terminal == (staged.event_kind == "purge-item")
+                    })
                 && staged.staged_grant.is_none()
         }
         "audit-purge" => {
@@ -2482,8 +3156,60 @@ fn validate_staged(
                     return Err(HumanCommitError::StateChanged);
                 }
             }
+            "enable" => {
+                let decoded = decode_enable_body(
+                    staged
+                        .authority_body
+                        .as_deref()
+                        .ok_or(HumanCommitError::BodyChanged)?,
+                )?;
+                if decoded.positives != authority_digests(transaction, staged.item_id, &["enable"])?
+                    || decoded.withdrawals
+                        != authority_digests(
+                            transaction,
+                            staged.item_id,
+                            &["disable", "trash", "purge-item", "purge-revisions"],
+                        )?
+                {
+                    return Err(HumanCommitError::StateChanged);
+                }
+            }
+            "trash" | "restore" => {
+                let decoded = decode_lifecycle_body(
+                    staged
+                        .authority_body
+                        .as_deref()
+                        .ok_or(HumanCommitError::BodyChanged)?,
+                )?;
+                if decoded != authority_digests(transaction, staged.item_id, &["trash"])? {
+                    return Err(HumanCommitError::StateChanged);
+                }
+            }
+            "purge-item" | "purge-revisions" => {
+                validate_purge_against_current(transaction, staged)?;
+            }
             _ => {}
         }
+    }
+    if staged.event_kind == "restore" {
+        let object_digest = object_digest.ok_or(HumanCommitError::BodyChanged)?;
+        let manifest = encode_restore_manifest(
+            staged.item_id,
+            staged.revision_id.ok_or(HumanCommitError::BodyChanged)?,
+            object_digest,
+            staged
+                .authority_body
+                .as_deref()
+                .ok_or(HumanCommitError::BodyChanged)?,
+        );
+        if !valid_shape
+            || body.event_count != 2
+            || body.object_manifest_digest != Some(object_digest)
+            || body.events_manifest_digest != digest(&manifest)
+        {
+            return Err(HumanCommitError::BodyChanged);
+        }
+        return Ok(());
     }
     if !valid_shape
         || body.event_count != 1
@@ -2657,6 +3383,171 @@ fn decode_agent_grant_body(value: &[u8]) -> Result<AgentGrantBody, HumanCommitEr
     Ok(body)
 }
 
+fn encode_lifecycle_body(deletions_seen: &[[u8; 32]]) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder
+        .map(1)
+        .unwrap()
+        .str("deletions_seen")
+        .unwrap()
+        .array(u64::try_from(deletions_seen.len()).unwrap())
+        .unwrap();
+    for deletion in deletions_seen {
+        encoder.bytes(deletion).unwrap();
+    }
+    encoder.into_writer()
+}
+
+fn decode_lifecycle_body(value: &[u8]) -> Result<Vec<[u8; 32]>, HumanCommitError> {
+    let mut decoder = Decoder::new(value);
+    expect_map(&mut decoder, 1)?;
+    expect_key(&mut decoder, "deletions_seen")?;
+    let count = decoder
+        .array()
+        .map_err(invalid)?
+        .ok_or(HumanCommitError::InvalidCommand)?;
+    if count > 4096 {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    let mut values =
+        Vec::with_capacity(usize::try_from(count).map_err(|_| HumanCommitError::InvalidCommand)?);
+    for _ in 0..count {
+        let value = decode_fixed(&mut decoder)?;
+        if values.last().is_some_and(|prior| prior >= &value) {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        values.push(value);
+    }
+    if decoder.position() != value.len() || encode_lifecycle_body(&values) != value {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    Ok(values)
+}
+
+struct ItemPurgeBody {
+    item: [u8; 16],
+    revisions: Vec<[u8; 16]>,
+    terminal: bool,
+}
+
+fn encode_item_purge_body(item: [u8; 16], revisions: &[[u8; 16]], terminal: bool) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder
+        .map(3)
+        .unwrap()
+        .str("item_id")
+        .unwrap()
+        .bytes(&item)
+        .unwrap()
+        .str("revision_ids")
+        .unwrap()
+        .array(u64::try_from(revisions.len()).unwrap())
+        .unwrap();
+    for revision in revisions {
+        encoder.bytes(revision).unwrap();
+    }
+    encoder
+        .str("scope")
+        .unwrap()
+        .str(if terminal { "item" } else { "revisions" })
+        .unwrap();
+    encoder.into_writer()
+}
+
+fn decode_item_purge_body(value: &[u8]) -> Result<ItemPurgeBody, HumanCommitError> {
+    let mut decoder = Decoder::new(value);
+    expect_map(&mut decoder, 3)?;
+    expect_key(&mut decoder, "item_id")?;
+    let item = decode_fixed(&mut decoder)?;
+    expect_key(&mut decoder, "revision_ids")?;
+    let count = decoder
+        .array()
+        .map_err(invalid)?
+        .ok_or(HumanCommitError::InvalidCommand)?;
+    if count > 4096 {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    let mut revisions =
+        Vec::with_capacity(usize::try_from(count).map_err(|_| HumanCommitError::InvalidCommand)?);
+    for _ in 0..count {
+        let revision = decode_fixed(&mut decoder)?;
+        if revisions.last().is_some_and(|prior| prior >= &revision) {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        revisions.push(revision);
+    }
+    expect_key(&mut decoder, "scope")?;
+    let terminal = match decoder.str().map_err(invalid)? {
+        "item" => true,
+        "revisions" => false,
+        _ => return Err(HumanCommitError::InvalidCommand),
+    };
+    if revisions.is_empty()
+        || decoder.position() != value.len()
+        || encode_item_purge_body(item, &revisions, terminal) != value
+    {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    Ok(ItemPurgeBody {
+        item,
+        revisions,
+        terminal,
+    })
+}
+
+fn purge_scope(
+    connection: &Connection,
+    item: [u8; 16],
+    revisions: &[[u8; 16]],
+    terminal: bool,
+) -> Result<ItemPurgeScope, HumanCommitError> {
+    let mut attachment_count = 0_usize;
+    let mut encrypted_bytes = 0_u64;
+    for revision in revisions {
+        let package_bytes: i64 = connection
+            .query_row(
+                "SELECT length(package) FROM revision_parts WHERE revision_id=?1 AND item_id=?2",
+                params![revision.as_slice(), item.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(HumanCommitError::ItemNotFound)?;
+        let (inline_count, inline_bytes): (i64, i64) = connection.query_row(
+            "SELECT count(*),coalesce(sum(length(package)),0) FROM attachment_parts WHERE revision_id=?1",
+            [revision.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let (stream_count, stream_bytes): (i64, i64) = connection.query_row(
+            "SELECT count(*),coalesce(sum(length(header)),0) FROM attachment_streams WHERE revision_id=?1",
+            [revision.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let chunk_bytes: i64 = connection.query_row(
+            "SELECT coalesce(sum(length(ciphertext)),0) FROM attachment_stream_chunks WHERE revision_id=?1",
+            [revision.as_slice()],
+            |row| row.get(0),
+        )?;
+        attachment_count = attachment_count
+            .checked_add(
+                usize::try_from(inline_count + stream_count)
+                    .map_err(|_| HumanCommitError::InvalidCommand)?,
+            )
+            .ok_or(HumanCommitError::InvalidCommand)?;
+        for value in [package_bytes, inline_bytes, stream_bytes, chunk_bytes] {
+            encrypted_bytes = encrypted_bytes
+                .checked_add(u64::try_from(value).map_err(|_| HumanCommitError::InvalidCommand)?)
+                .ok_or(HumanCommitError::InvalidCommand)?;
+        }
+    }
+    Ok(ItemPurgeScope {
+        item_id: item,
+        revision_ids: revisions.to_vec(),
+        attachment_count,
+        encrypted_bytes,
+        terminal,
+    })
+}
+
 fn encode_reason_body(reason: AuthorizationReason) -> Vec<u8> {
     let mut encoder = Encoder::new(Vec::new());
     encoder
@@ -2734,9 +3625,16 @@ fn decode_resume_body(value: &[u8]) -> Result<Vec<[u8; 32]>, HumanCommitError> {
 struct EnableBody {
     revision: [u8; 16],
     commitment: [u8; 32],
+    positives: Vec<[u8; 32]>,
+    withdrawals: Vec<[u8; 32]>,
 }
 
-fn encode_enable_body(revision: [u8; 16], commitment: [u8; 32]) -> Vec<u8> {
+fn encode_enable_body(
+    revision: [u8; 16],
+    commitment: [u8; 32],
+    positives: &[[u8; 32]],
+    withdrawals: &[[u8; 32]],
+) -> Vec<u8> {
     let mut encoder = Encoder::new(Vec::new());
     encoder.map(4).unwrap();
     encoder
@@ -2754,9 +3652,19 @@ fn encode_enable_body(revision: [u8; 16], commitment: [u8; 32]) -> Vec<u8> {
     encoder
         .str("prior_positive_events")
         .unwrap()
-        .array(0)
+        .array(u64::try_from(positives.len()).unwrap())
         .unwrap();
-    encoder.str("withdrawals_seen").unwrap().array(0).unwrap();
+    for positive in positives {
+        encoder.bytes(positive).unwrap();
+    }
+    encoder
+        .str("withdrawals_seen")
+        .unwrap()
+        .array(u64::try_from(withdrawals.len()).unwrap())
+        .unwrap();
+    for withdrawal in withdrawals {
+        encoder.bytes(withdrawal).unwrap();
+    }
     encoder.into_writer()
 }
 
@@ -2771,20 +3679,40 @@ fn decode_enable_body(value: &[u8]) -> Result<EnableBody, HumanCommitError> {
     }
     let commitment = decode_fixed(&mut decoder)?;
     expect_key(&mut decoder, "prior_positive_events")?;
-    if decoder.array().map_err(invalid)? != Some(0) {
-        return Err(HumanCommitError::InvalidCommand);
-    }
+    let positives = decode_sorted_digests(&mut decoder)?;
     expect_key(&mut decoder, "withdrawals_seen")?;
-    if decoder.array().map_err(invalid)? != Some(0)
-        || decoder.position() != value.len()
-        || encode_enable_body(revision, commitment) != value
+    let withdrawals = decode_sorted_digests(&mut decoder)?;
+    if decoder.position() != value.len()
+        || encode_enable_body(revision, commitment, &positives, &withdrawals) != value
     {
         return Err(HumanCommitError::InvalidCommand);
     }
     Ok(EnableBody {
         revision,
         commitment,
+        positives,
+        withdrawals,
     })
+}
+
+fn decode_sorted_digests(decoder: &mut Decoder<'_>) -> Result<Vec<[u8; 32]>, HumanCommitError> {
+    let count = decoder
+        .array()
+        .map_err(invalid)?
+        .ok_or(HumanCommitError::InvalidCommand)?;
+    if count > 4096 {
+        return Err(HumanCommitError::InvalidCommand);
+    }
+    let mut values =
+        Vec::with_capacity(usize::try_from(count).map_err(|_| HumanCommitError::InvalidCommand)?);
+    for _ in 0..count {
+        let value = decode_fixed(decoder)?;
+        if values.last().is_some_and(|prior| prior >= &value) {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        values.push(value);
+    }
+    Ok(values)
 }
 
 fn encode_staged_attachments(values: &[([u8; 16], Vec<u8>)]) -> Vec<u8> {
@@ -2955,6 +3883,8 @@ fn decode_command(bytes_value: &[u8]) -> Result<CommandFields<'_>, HumanCommitEr
         operation,
         "item_write"
             | "item_lifecycle"
+            | "history_restore"
+            | "item_purge"
             | "audit_purge"
             | "identity_change"
             | "availability_change"
@@ -3084,6 +4014,51 @@ fn encode_event_manifest(
         &mut encoder,
         authority_body_digest.as_ref().map(<[u8; 32]>::as_slice),
     );
+    encoder.into_writer()
+}
+
+fn encode_restore_manifest(
+    item: [u8; 16],
+    revision: [u8; 16],
+    object_digest: [u8; 32],
+    lifecycle_body: &[u8],
+) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder
+        .array(2)
+        .unwrap()
+        .map(4)
+        .unwrap()
+        .str("kind")
+        .unwrap()
+        .str("item-revision")
+        .unwrap()
+        .str("item")
+        .unwrap()
+        .bytes(&item)
+        .unwrap()
+        .str("revision")
+        .unwrap()
+        .bytes(&revision)
+        .unwrap()
+        .str("object_digest")
+        .unwrap()
+        .bytes(&object_digest)
+        .unwrap()
+        .map(3)
+        .unwrap()
+        .str("kind")
+        .unwrap()
+        .str("restore")
+        .unwrap()
+        .str("item")
+        .unwrap()
+        .bytes(&item)
+        .unwrap()
+        .str("body_digest")
+        .unwrap()
+        .bytes(&digest(lifecycle_body))
+        .unwrap();
     encoder.into_writer()
 }
 
@@ -3273,7 +4248,20 @@ fn authority_specific_parents(
     let kinds: &[&str] = match staged.event_kind.as_str() {
         "agent-grant" => &["agent-grant", "agent-revoke"],
         "resume" => &["suspend"],
-        "enable" => &["enable", "disable"],
+        "enable" => &[
+            "enable",
+            "disable",
+            "trash",
+            "purge-item",
+            "purge-revisions",
+        ],
+        "trash" | "restore" | "purge-item" | "purge-revisions" => &[
+            "item-revision",
+            "trash",
+            "restore",
+            "purge-item",
+            "purge-revisions",
+        ],
         _ => &[],
     };
     authority_digests(connection, staged.item_id, kinds)
