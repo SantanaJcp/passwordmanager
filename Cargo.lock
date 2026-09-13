@@ -447,6 +447,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-sync"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64",
+ "libc",
+ "minicbor",
+ "pm-crypto",
+ "pm-vault",
+ "rusqlite",
+ "rustls",
+ "zeroize",
+]
+
+[[package]]
 name = "pm-vault"
 version = "0.1.0"
 dependencies = [

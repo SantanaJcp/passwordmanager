@@ -37,7 +37,8 @@ pub use migration::{
 };
 pub use reducer::{
     AcceptedPrefix, CausalEventBody, CausalEventDraft, CausalEventKind, CausalReducer,
-    ItemLifecycle, ReducedItem, ReducedView, ReductionError, SignedCausalEvent,
+    ItemLifecycle, ReceivedCiphertextAttachment, ReceivedCiphertextGraph, ReceivedCiphertextStream,
+    ReducedItem, ReducedView, ReductionError, SignedCausalEvent,
 };
 
 use std::{
