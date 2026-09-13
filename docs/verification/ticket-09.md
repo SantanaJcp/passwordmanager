@@ -34,6 +34,28 @@ connection before sending the bounded delegated request. `AgentEngine` uses
 this seam for discover/start/get/cancel when `PM_PROFILE`, `PM_PRIVATE`, and
 `PM_SOCKET` (or equivalent CLI references) are configured.
 
+The composed Linux laboratory also drives both front doors against the same
+real custody/provider process. It launches separate UID processes, performs
+the TLS/RPK `pm-agent/1` handshake, and compares discover, start (idempotent
+replay), get, and cancel structured results plus a not-found error:
+
+```text
+./scripts/test-linux-attempts-lab.sh
+```
+
+Observed (including the existing crash/reconciliation assertions):
+
+```text
+PASS attempts-e2e tls=rpk+alpn/pm-agent/1 provider=separate-uid idempotency=stable ownership=hidden challenge=trusted cancel=terminal
+PASS attempts-crash provider-calls=1 ambiguous=INDETERMINATE restart=no-blind-retry K_ATT=device-only audit=atomic
+```
+
+The comparison uses the synthetic provider process and real SQLite attempt
+records; no mock engine is substituted. Both adapters produce the same public
+snapshot schema (including redacted `result`) and public error category. The
+lab also checks the provider secret canary remains out of agent output and
+persisted state.
+
 ## Checks and limits
 
 ```text
@@ -43,8 +65,6 @@ this seam for discover/start/get/cancel when `PM_PROFILE`, `PM_PRIVATE`, and
 git diff --check
 ```
 
-These checks pass on this host. A complete CLI-versus-MCP comparison against
-a running custody/provider laboratory was not executed in this worktree; no
-production integration, external session management, or cross-platform
-support is claimed. Formal Astra review and unified merger verification remain
-the DAG gates.
+These checks pass on this host. No production integration, external session
+management, or cross-platform support is claimed. Formal Astra review and
+unified merger verification remain the DAG gates.

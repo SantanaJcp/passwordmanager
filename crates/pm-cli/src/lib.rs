@@ -71,15 +71,16 @@ fn delegated(arguments: &[OsString]) -> Result<(), CliError> {
     }) {
         return Err(CliError::new("UNAUTHORIZED", 3));
     }
-    let method = match values.as_slice() {
-        [command] if command == "capabilities" => "pm.v1.capabilities",
-        [group, command] if group == "credentials" && command == "list" => {
-            "pm.v1.credentials.discover"
-        }
-        [group, command] if group == "auth" && command == "start" => "pm.v1.authentication.start",
-        [group, command] if group == "auth" && command == "status" => "pm.v1.authentication.get",
-        [group, command] if group == "auth" && command == "cancel" => "pm.v1.authentication.cancel",
-        [command] if command == "mcp" => return run_mcp(),
+    let method = match (
+        values.first().and_then(|v| v.to_str()),
+        values.get(1).and_then(|v| v.to_str()),
+    ) {
+        (Some("capabilities"), None) => "pm.v1.capabilities",
+        (Some("credentials"), Some("list")) => "pm.v1.credentials.discover",
+        (Some("auth"), Some("start")) => "pm.v1.authentication.start",
+        (Some("auth"), Some("status")) => "pm.v1.authentication.get",
+        (Some("auth"), Some("cancel")) => "pm.v1.authentication.cancel",
+        (Some("mcp"), None) => return run_mcp(),
         _ => return Err(CliError::new("INVALID_ARGUMENT", 2)),
     };
     let request = Request {
@@ -89,6 +90,8 @@ fn delegated(arguments: &[OsString]) -> Result<(), CliError> {
     };
     let response = if let Some(config) = config {
         dispatch(&request, &AgentEngine { config })
+    } else if let Ok(engine) = AgentEngine::from_environment() {
+        dispatch(&request, &engine)
     } else {
         dispatch(&request, &UnavailableEngine)
     };
@@ -204,6 +207,7 @@ fn params_for_cli(values: &[OsString]) -> Result<Json, CliError> {
         if ![
             "credential-id",
             "attempt-id",
+            "attempt",
             "integration-id",
             "integration-version",
             "method",
@@ -216,7 +220,11 @@ fn params_for_cli(values: &[OsString]) -> Result<Json, CliError> {
         {
             return Err(CliError::new("INVALID_ARGUMENT", 2));
         }
-        let normalized = key.replace('-', "_");
+        let normalized = if key == "attempt" {
+            "attempt_id".to_owned()
+        } else {
+            key.replace('-', "_")
+        };
         if normalized == "issued_at" || normalized == "nonce" {
             // these belong to the nested idempotency object below
             let idempotency = fields
