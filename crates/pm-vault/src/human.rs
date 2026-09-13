@@ -24,6 +24,10 @@ use crate::audit::{
     AuditPurgeScope, AuditQuery, PreparedAuditPurge,
 };
 use crate::authorization::{G5EventInput, encode_credential, encode_g5_event, new_credential};
+use crate::migration::{
+    self, CsvImportDecision, CsvImportPreview, CsvImportProfile, CsvImportReport, CsvRowStatus,
+    IMPORT_PAGE_ITEMS, PreparedCsvImport,
+};
 use crate::{
     AgentEnrollment, AuthRecord, AuthorizationError, AuthorizationReason, CausalEventDraft,
     Destination, GeneratedPassword, GeneratorConfig, HumanMetadata, LogicalRecord, PasswordRng,
@@ -63,7 +67,7 @@ impl fmt::Display for HumanCommitError {
             Self::ChallengeExpired => "human challenge expired or was already consumed",
             Self::Crypto(_) => "human transaction cryptography failed",
             Self::InvalidCommand => "invalid human command",
-            Self::InvalidInput => "invalid password record",
+            Self::InvalidInput => "invalid human input",
             Self::Integrity => "audit integrity verification failed",
             Self::AuditKeyUnavailable => "device audit custody is unavailable",
             Self::InvalidSignature => "invalid human signature",
@@ -809,6 +813,18 @@ impl HumanVault {
         }
         validate_staged(&transaction, &staged, &body)?;
         let committed_at_us = now_us()?;
+        if staged.event_kind == "import-batch" {
+            return commit_import_batch(
+                transaction,
+                &self.root,
+                &self.trusted_root,
+                self.device,
+                &self.audit_custody,
+                &body,
+                actual_body_hash,
+                committed_at_us,
+            );
+        }
         let event_id = random_id()?;
         let previous = current_head(&transaction)?;
         let seq = next_authority_seq(&transaction, self.device, 1)?;
@@ -988,6 +1004,200 @@ impl HumanVault {
         record: &LogicalRecord,
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
         self.prepare_record_write(random_id()?, record)
+    }
+
+    /// Parses a bounded CSV source and classifies every row without writing it.
+    ///
+    /// # Errors
+    /// Rejects malformed, lossy, oversized, or incompletely mapped input.
+    pub fn preview_csv(
+        &self,
+        source_bytes: &[u8],
+        profile: &CsvImportProfile,
+    ) -> Result<CsvImportPreview, HumanCommitError> {
+        self.channel.verify()?;
+        let mut preview = migration::parse(source_bytes, profile)?;
+        let connection = open_connection(&self.path)?;
+        let mut statement = connection
+            .prepare("SELECT item_id FROM vault_items WHERE status='active' ORDER BY item_id")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(connection);
+        let mut existing = Vec::with_capacity(ids.len());
+        for id in ids {
+            let id = bytes::<16>(&id)?;
+            existing.push((id, self.read_record(id)?));
+        }
+        for (row, record) in preview.rows.iter_mut().zip(&preview.records) {
+            if let Some((id, _)) = existing.iter().find(|(_, prior)| prior == record) {
+                row.status = CsvRowStatus::ExactDuplicate;
+                row.duplicate_item = Some(*id);
+            } else if let Some((id, _)) = existing
+                .iter()
+                .find(|(_, prior)| import_candidate(prior, record))
+            {
+                row.status = CsvRowStatus::CandidateDuplicate;
+                row.duplicate_item = Some(*id);
+            }
+        }
+        Ok(preview)
+    }
+
+    /// Encrypts explicitly selected preview rows into one durable signed batch.
+    ///
+    /// # Errors
+    /// Every row needs a decision consistent with its duplicate classification.
+    #[allow(clippy::too_many_lines)]
+    pub fn prepare_csv_import(
+        &mut self,
+        preview: CsvImportPreview,
+        decisions: Vec<CsvImportDecision>,
+    ) -> Result<PreparedCsvImport, HumanCommitError> {
+        self.channel.verify()?;
+        let CsvImportPreview {
+            records,
+            rows,
+            source,
+        } = preview;
+        if records.len() != decisions.len() || rows.len() != decisions.len() {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let transaction_id = random_id()?;
+        let batch_id = random_id()?;
+        let challenge = random_challenge()?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expected_state = state_digest(&transaction, self.root.vault_id(), 1)?;
+        let mut item_ids = Vec::new();
+        let mut new_items = 0_usize;
+        let mut replaced = 0_usize;
+        let mut skipped_exact = 0_usize;
+        let mut excluded = 0_usize;
+        let preserved_fields = rows.iter().map(|row| row.unknown_fields).sum();
+        for ((record, row), decision) in records.iter().zip(&rows).zip(decisions) {
+            let (item, replacement) = match (row.status, decision) {
+                (CsvRowStatus::New, CsvImportDecision::ImportNew | CsvImportDecision::KeepBoth)
+                | (
+                    CsvRowStatus::CandidateDuplicate | CsvRowStatus::ExactDuplicate,
+                    CsvImportDecision::KeepBoth,
+                ) => {
+                    new_items += 1;
+                    (random_id()?, false)
+                }
+                (CsvRowStatus::ExactDuplicate, CsvImportDecision::SkipExact) => {
+                    skipped_exact += 1;
+                    continue;
+                }
+                (_, CsvImportDecision::Exclude) => {
+                    excluded += 1;
+                    continue;
+                }
+                (
+                    CsvRowStatus::CandidateDuplicate | CsvRowStatus::ExactDuplicate,
+                    CsvImportDecision::Replace(target),
+                ) if row.duplicate_item == Some(target) => {
+                    require_active_in(&transaction, target)?;
+                    replaced += 1;
+                    (target, true)
+                }
+                _ => return Err(HumanCommitError::InvalidInput),
+            };
+            let revision = random_id()?;
+            let human = record.encode_human();
+            let auth = record.encode_auth();
+            let package = self
+                .root
+                .seal_revision_package(RevisionPackageInput {
+                    item,
+                    revision,
+                    issuer_device: self.device,
+                    modified_at: now_us()?,
+                    kind: record.kind().crypto(),
+                    human_plaintext: &human,
+                    auth_plaintext: auth.as_deref(),
+                })?
+                .to_bytes();
+            let ordinal = row.ordinal;
+            transaction.execute(
+                "INSERT INTO import_staging_items
+                 (transaction_id,ordinal,item_id,revision_id,item_kind,package,replacement)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    transaction_id.as_slice(),
+                    i64::try_from(ordinal).map_err(|_| HumanCommitError::InvalidInput)?,
+                    item.as_slice(),
+                    revision.as_slice(),
+                    record.kind().name(),
+                    package,
+                    i64::from(replacement),
+                ],
+            )?;
+            item_ids.push(item);
+        }
+        let event_pages = item_ids.len().max(1).div_ceil(IMPORT_PAGE_ITEMS);
+        let object_digest = import_object_digest(&transaction, transaction_id)?;
+        let report = CsvImportReport {
+            total: rows.len(),
+            new_items,
+            replaced,
+            skipped_exact,
+            excluded,
+            preserved_fields,
+            event_pages,
+        };
+        transaction.execute(
+            "INSERT INTO import_staging_batches
+             (transaction_id,batch_id,source,object_digest,total,new_items,replaced,skipped_exact,excluded,preserved_fields,event_pages)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                transaction_id.as_slice(),
+                batch_id.as_slice(),
+                source,
+                object_digest.as_slice(),
+                to_i64(report.total)?,
+                to_i64(report.new_items)?,
+                to_i64(report.replaced)?,
+                to_i64(report.skipped_exact)?,
+                to_i64(report.excluded)?,
+                to_i64(report.preserved_fields)?,
+                to_i64(report.event_pages)?,
+            ],
+        )?;
+        let manifest = encode_import_manifest(batch_id, source, object_digest, &report);
+        let body = encode_body(&Body {
+            transaction_id,
+            events_manifest_digest: digest(&manifest),
+            event_count: u64::try_from(item_ids.len() + report.replaced)
+                .map_err(|_| HumanCommitError::InvalidInput)?,
+            object_manifest_digest: Some(object_digest),
+        });
+        let body_hash = digest(&body);
+        let expires_at_us = now_us()?
+            .checked_add(CHALLENGE_LIFETIME_US)
+            .ok_or(HumanCommitError::InvalidCommand)?;
+        let command = encode_command(&CommandFields {
+            vault: *self.root.vault_id(),
+            challenge,
+            expected_state,
+            operation: "import_commit",
+            body_hash,
+            expires_at_us,
+        });
+        transaction.execute("INSERT INTO human_challenges (challenge,transaction_id,command,body_hash,expected_state,expires_at_us,consumed) VALUES (?1,?2,?3,?4,?5,?6,0)", params![challenge.as_slice(),transaction_id.as_slice(),command,body_hash.as_slice(),expected_state.as_slice(),expires_at_us])?;
+        transaction.execute("INSERT INTO human_staging (transaction_id,operation,event_kind,item_id,body) VALUES (?1,'import_commit','import-batch',?2,?3)",params![transaction_id.as_slice(),batch_id.as_slice(),body])?;
+        transaction.commit()?;
+        Ok(PreparedCsvImport {
+            prepared: PreparedHumanCommand {
+                transaction_id,
+                item_id: batch_id,
+                command,
+                body,
+            },
+            report,
+            item_ids,
+        })
     }
 
     /// Encrypts declared files incrementally into SQLite staging and prepares
@@ -1542,6 +1752,179 @@ struct Staged {
     staged_grant: Option<Vec<u8>>,
 }
 
+struct ImportBatch {
+    batch_id: [u8; 16],
+    source: String,
+    object_digest: [u8; 32],
+    report: CsvImportReport,
+}
+
+struct ImportItem {
+    ordinal: usize,
+    item: [u8; 16],
+    revision: [u8; 16],
+    kind: String,
+    package: Vec<u8>,
+    replacement: bool,
+}
+
+fn to_i64(value: usize) -> Result<i64, HumanCommitError> {
+    i64::try_from(value).map_err(|_| HumanCommitError::InvalidInput)
+}
+
+fn require_active_in(connection: &Connection, item: [u8; 16]) -> Result<(), HumanCommitError> {
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM vault_items WHERE item_id=?1 AND status='active')",
+        [item.as_slice()],
+        |row| row.get(0),
+    )?;
+    exists.then_some(()).ok_or(HumanCommitError::ItemNotFound)
+}
+
+fn import_account(record: &LogicalRecord) -> &str {
+    record.auth().first().map_or("", |auth| match auth {
+        AuthRecord::Password { username, .. } | AuthRecord::Ssh { username, .. } => {
+            username.as_str()
+        }
+        AuthRecord::Totp { account, .. } => account.as_str(),
+        AuthRecord::Token { profile_id, .. } => profile_id.as_str(),
+        AuthRecord::Passkey { user_name, .. } => user_name.as_str(),
+    })
+}
+
+fn import_candidate(left: &LogicalRecord, right: &LogicalRecord) -> bool {
+    left.kind() == right.kind()
+        && left.human().title == right.human().title
+        && left.human().destinations == right.human().destinations
+        && import_account(left) == import_account(right)
+}
+
+fn update_import_object_digest(
+    state: &mut DigestState,
+    ordinal: usize,
+    item: [u8; 16],
+    revision: [u8; 16],
+    kind: &str,
+    package: &[u8],
+    replacement: bool,
+) {
+    state.update(&u64::try_from(ordinal).unwrap().to_be_bytes());
+    state.update(&item);
+    state.update(&revision);
+    state.update(&u64::try_from(kind.len()).unwrap().to_be_bytes());
+    state.update(kind.as_bytes());
+    state.update(&digest(package));
+    state.update(&[u8::from(replacement)]);
+}
+
+fn load_import_items(
+    connection: &Connection,
+    transaction_id: [u8; 16],
+) -> Result<Vec<ImportItem>, HumanCommitError> {
+    let mut statement = connection.prepare(
+        "SELECT ordinal,item_id,revision_id,item_kind,package,replacement
+         FROM import_staging_items WHERE transaction_id=?1 ORDER BY ordinal",
+    )?;
+    let raw = statement
+        .query_map([transaction_id.as_slice()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, bool>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    raw.into_iter()
+        .map(|(ordinal, item, revision, kind, package, replacement)| {
+            Ok(ImportItem {
+                ordinal: usize::try_from(ordinal).map_err(|_| HumanCommitError::BodyChanged)?,
+                item: bytes(&item)?,
+                revision: bytes(&revision)?,
+                kind,
+                package,
+                replacement,
+            })
+        })
+        .collect()
+}
+
+fn import_object_digest(
+    connection: &Connection,
+    transaction_id: [u8; 16],
+) -> Result<[u8; 32], HumanCommitError> {
+    let items = load_import_items(connection, transaction_id)?;
+    let mut root = DigestState::new()?;
+    root.update(b"pm/import-object-root/v1");
+    root.update(
+        &u64::try_from(items.len().max(1).div_ceil(IMPORT_PAGE_ITEMS))
+            .unwrap()
+            .to_be_bytes(),
+    );
+    for page in items.chunks(IMPORT_PAGE_ITEMS) {
+        let mut state = DigestState::new()?;
+        state.update(b"pm/import-object-page/v1");
+        for item in page {
+            update_import_object_digest(
+                &mut state,
+                item.ordinal,
+                item.item,
+                item.revision,
+                &item.kind,
+                &item.package,
+                item.replacement,
+            );
+        }
+        root.update(&state.finish());
+    }
+    if items.is_empty() {
+        let mut empty = DigestState::new()?;
+        empty.update(b"pm/import-object-page/v1");
+        root.update(&empty.finish());
+    }
+    Ok(root.finish())
+}
+
+fn load_import_batch(
+    connection: &Connection,
+    transaction_id: [u8; 16],
+) -> Result<ImportBatch, HumanCommitError> {
+    let raw = connection
+        .query_row(
+            "SELECT batch_id,source,object_digest,total,new_items,replaced,skipped_exact,excluded,preserved_fields,event_pages
+             FROM import_staging_batches WHERE transaction_id=?1",
+            [transaction_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?, row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?, row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?, row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?, row.get::<_, i64>(9)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(HumanCommitError::BodyChanged)?;
+    let convert = |value: i64| usize::try_from(value).map_err(|_| HumanCommitError::BodyChanged);
+    Ok(ImportBatch {
+        batch_id: bytes(&raw.0)?,
+        source: raw.1,
+        object_digest: bytes(&raw.2)?,
+        report: CsvImportReport {
+            total: convert(raw.3)?,
+            new_items: convert(raw.4)?,
+            replaced: convert(raw.5)?,
+            skipped_exact: convert(raw.6)?,
+            excluded: convert(raw.7)?,
+            preserved_fields: convert(raw.8)?,
+            event_pages: convert(raw.9)?,
+        },
+    })
+}
+
 fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
     let connection = Connection::open(path)?;
     connection.execute_batch(
@@ -1551,6 +1934,233 @@ fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
          PRAGMA trusted_schema=OFF;",
     )?;
     Ok(connection)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn commit_import_batch(
+    transaction: Transaction<'_>,
+    root: &UnlockedRoot,
+    trusted_root: &TrustedRoot,
+    device: [u8; 16],
+    audit_custody: &AuditDeviceCustody,
+    body: &Body,
+    body_hash: [u8; 32],
+    committed_at_us: i64,
+) -> Result<HumanReceipt, HumanCommitError> {
+    let batch = load_import_batch(&transaction, body.transaction_id)?;
+    let items = load_import_items(&transaction, body.transaction_id)?;
+    if items.len() != batch.report.new_items + batch.report.replaced {
+        return Err(HumanCommitError::BodyChanged);
+    }
+    let mut previous_revisions = Vec::with_capacity(items.len());
+    for item in &items {
+        let opened = root.open_revision_package(&item.package)?;
+        let record =
+            LogicalRecord::decode_parts(opened.human_plaintext(), opened.auth_plaintext())?;
+        if opened.item() != &item.item
+            || opened.revision() != &item.revision
+            || record.kind().name() != item.kind
+            || record.kind().crypto() != opened.kind()
+            || !record.attachments().is_empty()
+        {
+            return Err(HumanCommitError::BodyChanged);
+        }
+        if item.replacement {
+            require_active_in(&transaction, item.item)?;
+        }
+        let prior = transaction
+            .query_row(
+                "SELECT visible_revision FROM vault_items WHERE item_id=?1 AND status='active'",
+                [item.item.as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .map(|value| bytes(&value))
+            .transpose()?;
+        previous_revisions.push(prior);
+    }
+
+    let mut previous = current_head(&transaction)?;
+    let mut final_digest = previous;
+    for (index, (item, prior_revision)) in items.iter().zip(previous_revisions).enumerate() {
+        let event_id = random_id()?;
+        let seq = next_authority_seq(&transaction, device, 1)?;
+        let mut parents = authority_digests(&transaction, item.item, &["item-revision"])?;
+        if let Some(head) = previous {
+            parents.push(head);
+        }
+        parents.sort_unstable();
+        parents.dedup();
+        let revisions = prior_revision.into_iter().collect::<Vec<_>>();
+        let revision_body = encode_import_revision_body(
+            item.revision,
+            committed_at_us,
+            digest(&item.package),
+            &revisions,
+        );
+        let event = encode_g5_event(&G5EventInput {
+            vault: root.vault_id(),
+            event_id,
+            authority_epoch: 1,
+            issuer_device: device,
+            issuer_generation: 1,
+            seq,
+            previous,
+            parents: &parents,
+            kind: "item-revision",
+            subject: item.item,
+            subject_generation: 1,
+            body: &revision_body,
+        });
+        let human_signature = root.sign_human_event(&event)?;
+        let device_signature = audit_custody.sign_device_event(&event)?;
+        let event_digest = digest(&event);
+        let signed_event = encode_signed_event(&event, &device_signature, &human_signature);
+        let event_transaction = if index == 0 {
+            body.transaction_id
+        } else {
+            random_id()?
+        };
+        transaction.execute(
+            "INSERT INTO revision_parts (revision_id,item_id,package) VALUES(?1,?2,?3)",
+            params![item.revision.as_slice(), item.item.as_slice(), item.package],
+        )?;
+        transaction.execute(
+            "INSERT INTO vault_items (item_id,visible_revision,kind,status)
+             VALUES(?1,?2,?3,'active')
+             ON CONFLICT(item_id) DO UPDATE SET
+               visible_revision=excluded.visible_revision,kind=excluded.kind,status='active'",
+            params![item.item.as_slice(), item.revision.as_slice(), item.kind],
+        )?;
+        transaction.execute(
+            "INSERT INTO authority_events
+             (event_digest,event_id,transaction_id,issuer_device,issuer_generation,seq,previous_digest,parents,kind,subject,subject_generation,event,human_signature,device_signature)
+             VALUES(?1,?2,?3,?4,1,?5,?6,?7,'item-revision',?8,1,?9,?10,?11)",
+            params![
+                event_digest.as_slice(), event_id.as_slice(), event_transaction.as_slice(),
+                device.as_slice(), i64::try_from(seq).map_err(|_| HumanCommitError::InvalidCommand)?,
+                previous.as_ref().map(<[u8; 32]>::as_slice), encode_heads_allow_empty(&parents),
+                item.item.as_slice(), event, human_signature.as_slice(), device_signature.as_slice(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO outbox(event_digest,event) VALUES(?1,?2)",
+            params![event_digest.as_slice(), signed_event],
+        )?;
+        previous = Some(event_digest);
+        final_digest = Some(event_digest);
+        if item.replacement {
+            let event_id = random_id()?;
+            let seq = next_authority_seq(&transaction, device, 1)?;
+            let mut parents = authority_digests(&transaction, item.item, &["enable", "disable"])?;
+            parents.push(event_digest);
+            parents.sort_unstable();
+            parents.dedup();
+            let reason = encode_reason_body(AuthorizationReason::Replacement);
+            let event = encode_g5_event(&G5EventInput {
+                vault: root.vault_id(),
+                event_id,
+                authority_epoch: 1,
+                issuer_device: device,
+                issuer_generation: 1,
+                seq,
+                previous: Some(event_digest),
+                parents: &parents,
+                kind: "disable",
+                subject: item.item,
+                subject_generation: 1,
+                body: &reason,
+            });
+            let human_signature = root.sign_human_event(&event)?;
+            let device_signature = audit_custody.sign_device_event(&event)?;
+            let disable_digest = digest(&event);
+            let signed_event = encode_signed_event(&event, &device_signature, &human_signature);
+            transaction.execute(
+                "INSERT INTO authority_events
+                 (event_digest,event_id,transaction_id,issuer_device,issuer_generation,seq,previous_digest,parents,kind,subject,subject_generation,event,human_signature,device_signature)
+                 VALUES(?1,?2,?3,?4,1,?5,?6,?7,'disable',?8,1,?9,?10,?11)",
+                params![
+                    disable_digest.as_slice(), event_id.as_slice(), random_id()?.as_slice(),
+                    device.as_slice(), i64::try_from(seq).map_err(|_| HumanCommitError::InvalidCommand)?,
+                    event_digest.as_slice(), encode_heads_allow_empty(&parents), item.item.as_slice(),
+                    event, human_signature.as_slice(), device_signature.as_slice(),
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO outbox(event_digest,event) VALUES(?1,?2)",
+                params![disable_digest.as_slice(), signed_event],
+            )?;
+            transaction.execute(
+                "UPDATE credential_authorizations SET status='disabled',event_digest=?2 WHERE item_id=?1",
+                params![item.item.as_slice(), disable_digest.as_slice()],
+            )?;
+            previous = Some(disable_digest);
+            final_digest = Some(disable_digest);
+        }
+    }
+    let final_digest = final_digest.ok_or(HumanCommitError::BodyChanged)?;
+    audit::append_event(
+        &transaction,
+        trusted_root,
+        Some(root),
+        device,
+        audit_custody,
+        &AuditEvent::new(
+            AuditActorKind::Human,
+            None,
+            AuditAction::Import,
+            AuditOutcome::Succeeded,
+        )
+        .with_item(batch.batch_id, None),
+        committed_at_us,
+        final_digest,
+    )?;
+    transaction.execute(
+        "INSERT INTO import_reports
+         (batch_id,transaction_id,source,total,new_items,replaced,skipped_exact,excluded,preserved_fields,event_pages,committed_at_us)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![
+            batch.batch_id.as_slice(), body.transaction_id.as_slice(), batch.source,
+            to_i64(batch.report.total)?, to_i64(batch.report.new_items)?,
+            to_i64(batch.report.replaced)?, to_i64(batch.report.skipped_exact)?,
+            to_i64(batch.report.excluded)?, to_i64(batch.report.preserved_fields)?,
+            to_i64(batch.report.event_pages)?, committed_at_us,
+        ],
+    )?;
+    transaction.execute(
+        "UPDATE human_challenges SET consumed=1 WHERE transaction_id=?1 AND consumed=0",
+        [body.transaction_id.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM human_staging WHERE transaction_id=?1",
+        [body.transaction_id.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM import_staging_items WHERE transaction_id=?1",
+        [body.transaction_id.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM import_staging_batches WHERE transaction_id=?1",
+        [body.transaction_id.as_slice()],
+    )?;
+    transaction.execute(
+        "INSERT INTO human_receipts
+         (transaction_id,body_hash,committed_heads,committed_at_us,outcome)
+         VALUES(?1,?2,?3,?4,'committed')",
+        params![
+            body.transaction_id.as_slice(),
+            body_hash.as_slice(),
+            encode_heads(&[final_digest]),
+            committed_at_us,
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(HumanReceipt {
+        transaction_id: body.transaction_id,
+        body_hash,
+        committed_heads: vec![final_digest],
+        committed_at_us,
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1686,6 +2296,37 @@ fn validate_staged(
     staged: &Staged,
     body: &Body,
 ) -> Result<(), HumanCommitError> {
+    if staged.event_kind == "import-batch" {
+        let batch = load_import_batch(transaction, staged.transaction_id)?;
+        let object_digest = import_object_digest(transaction, staged.transaction_id)?;
+        let selected = batch.report.new_items + batch.report.replaced;
+        let valid_shape = staged.operation == "import_commit"
+            && staged.item_id == batch.batch_id
+            && staged.revision_id.is_none()
+            && staged.package.is_none()
+            && staged.item_kind.is_none()
+            && staged.attachments.is_none()
+            && staged.audit_generation.is_none()
+            && staged.audit_through_seq.is_none()
+            && staged.subject_generation.is_none()
+            && staged.authority_body.is_none()
+            && staged.staged_grant.is_none()
+            && batch.report.total == selected + batch.report.skipped_exact + batch.report.excluded
+            && batch.report.event_pages == selected.max(1).div_ceil(IMPORT_PAGE_ITEMS);
+        let manifest =
+            encode_import_manifest(batch.batch_id, &batch.source, object_digest, &batch.report);
+        if !valid_shape
+            || object_digest != batch.object_digest
+            || body.event_count
+                != u64::try_from(selected + batch.report.replaced)
+                    .map_err(|_| HumanCommitError::BodyChanged)?
+            || body.object_manifest_digest != Some(object_digest)
+            || body.events_manifest_digest != digest(&manifest)
+        {
+            return Err(HumanCommitError::BodyChanged);
+        }
+        return Ok(());
+    }
     let stream_count: i64 = transaction.query_row(
         "SELECT count(*) FROM human_staging_streams WHERE transaction_id=?1",
         [staged.transaction_id.as_slice()],
@@ -2307,7 +2948,12 @@ fn decode_command(bytes_value: &[u8]) -> Result<CommandFields<'_>, HumanCommitEr
     let operation = decoder.str().map_err(invalid)?;
     if !matches!(
         operation,
-        "item_write" | "item_lifecycle" | "audit_purge" | "identity_change" | "availability_change"
+        "item_write"
+            | "item_lifecycle"
+            | "audit_purge"
+            | "identity_change"
+            | "availability_change"
+            | "import_commit"
     ) {
         return Err(HumanCommitError::InvalidCommand);
     }
@@ -2369,7 +3015,7 @@ fn decode_body(bytes_value: &[u8]) -> Result<Body, HumanCommitError> {
     let events_manifest_digest = decode_fixed(&mut decoder)?;
     expect_key(&mut decoder, "event_count")?;
     let event_count = decoder.u64().map_err(invalid)?;
-    if event_count != 1 {
+    if event_count > 1_000_000 {
         return Err(HumanCommitError::InvalidCommand);
     }
     expect_key(&mut decoder, "object_manifest_digest")?;
@@ -2433,6 +3079,98 @@ fn encode_event_manifest(
         &mut encoder,
         authority_body_digest.as_ref().map(<[u8; 32]>::as_slice),
     );
+    encoder.into_writer()
+}
+
+fn encode_import_manifest(
+    batch: [u8; 16],
+    source: &str,
+    object_digest: [u8; 32],
+    report: &CsvImportReport,
+) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.map(11).unwrap();
+    encoder
+        .str("domain")
+        .unwrap()
+        .str("pm/import-manifest/v1")
+        .unwrap();
+    encoder.str("batch").unwrap().bytes(&batch).unwrap();
+    encoder.str("source").unwrap().str(source).unwrap();
+    encoder
+        .str("object_digest")
+        .unwrap()
+        .bytes(&object_digest)
+        .unwrap();
+    encoder
+        .str("total")
+        .unwrap()
+        .u64(report.total as u64)
+        .unwrap();
+    encoder
+        .str("new")
+        .unwrap()
+        .u64(report.new_items as u64)
+        .unwrap();
+    encoder
+        .str("replaced")
+        .unwrap()
+        .u64(report.replaced as u64)
+        .unwrap();
+    encoder
+        .str("skipped_exact")
+        .unwrap()
+        .u64(report.skipped_exact as u64)
+        .unwrap();
+    encoder
+        .str("excluded")
+        .unwrap()
+        .u64(report.excluded as u64)
+        .unwrap();
+    encoder
+        .str("preserved_fields")
+        .unwrap()
+        .u64(report.preserved_fields as u64)
+        .unwrap();
+    encoder
+        .str("event_pages")
+        .unwrap()
+        .u64(report.event_pages as u64)
+        .unwrap();
+    encoder.into_writer()
+}
+
+fn encode_import_revision_body(
+    revision: [u8; 16],
+    modified_at: i64,
+    manifest_digest: [u8; 32],
+    previous_revisions: &[[u8; 16]],
+) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encoder.map(4).unwrap();
+    encoder
+        .str("revision_id")
+        .unwrap()
+        .bytes(&revision)
+        .unwrap();
+    encoder
+        .str("modified_at")
+        .unwrap()
+        .i64(modified_at)
+        .unwrap();
+    encoder
+        .str("manifest_digest")
+        .unwrap()
+        .bytes(&manifest_digest)
+        .unwrap();
+    encoder
+        .str("previous_revisions")
+        .unwrap()
+        .array(previous_revisions.len() as u64)
+        .unwrap();
+    for prior in previous_revisions {
+        encoder.bytes(prior).unwrap();
+    }
     encoder.into_writer()
 }
 
