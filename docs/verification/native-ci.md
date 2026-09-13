@@ -1,9 +1,11 @@
 # Método CI nativo efímero
 
-Estado: método adicional autorizado y preparación local; **ninguna ejecución de
-GitHub Actions observada todavía**. Este documento no acredita soporte de
-producto, no resuelve los tickets 26--32 y no sustituye sus laboratorios
-humanos, de reboot/FDE o de firma real.
+Estado: método adicional autorizado; primera ejecución real de preparación
+**fallida en los cinco targets** (evidencia al final). Este documento no acredita
+soporte de producto, no resuelve los tickets 26--32 y no sustituye sus laboratorios
+humanos, de reboot/FDE o de firma real. Las reglas de no instalación implícita
+describen el contrato del método; la primera corrida detectó que Rustup lo
+incumplía mediante autoinstalación y esa corrección sigue pendiente.
 
 ## Alcance y fuente de verdad
 
@@ -158,3 +160,39 @@ Limitación conocida a comprobar antes de pruebas multi-UID Linux: una
 documenta `XDG_RUNTIME_DIR` global apuntando al UID de `runner` en Ubuntu 24.04
 x64/ARM64. Si afecta una sesión requerida, la prueba falla y el entorno queda
 no apto; este método no corrige la imagen ni sustituye la sesión real.
+
+
+## Primera ejecución observada — 2026-09-13
+
+Preparación integrada en `cb023233c5680bb20854a610ffc602801c1c8ff4`, con
+`check.sh`, validación YAML/config/bash, clean offline y 17 labs Linux verdes.
+La sintaxis/ejecución real de PowerShell no se había validado localmente.
+El bootstrap `78d5f0f` publicó exclusivamente el workflow y sus dos scripts en
+`master`, sin fusionar el PR de producto. El workflow se despachó manualmente
+sobre la rama unificada, no sobre otro commit de aplicación.
+
+[Run 34761618195](https://github.com/SantanaJcp/passwordmanager/actions/runs/34761618195)
+terminó con **failure** en los cinco jobs. No hubo canario nativo final PASS ni
+pruebas de producto. Se observaron estos fallos, que no se descartan como una
+corrida de éxito:
+
+| Target | Resultado observado |
+| --- | --- |
+| Linux x86-64 | Ubuntu 24.04, kernel 6.17.0-1022-azure, glibc 2.39, systemd 255; el script termina por toolchain `1.98.1-x86_64-unknown-linux-gnu` no listado como previamente instalado. |
+| Linux AArch64 | Misma familia/versiones Linux; termina por toolchain `1.98.1-aarch64-unknown-linux-gnu` no listado como previamente instalado. |
+| macOS Intel | macOS 15.7.9, kernel 24.6.0; termina por toolchain `1.98.1-x86_64-apple-darwin` no listado como previamente instalado. |
+| macOS Apple silicon | macOS 15.7.9, kernel 24.6.0; termina por toolchain `1.98.1-aarch64-apple-darwin` no listado como previamente instalado. |
+| Windows ARM64 | La comprobación previa de OS y PowerShell ARM64 pasó; el script falla en línea 35 porque la propiedad `Count` no existe en el resultado de la consulta de toolchains. |
+
+Los logs también muestran que la llamada Rustup disparó sincronización y
+descarga automática de componentes, pese a la intención del preflight de no
+instalar. Además, GitHub avisó que `actions/checkout@v4.4.0`, declarado para
+Node 20, fue ejecutado forzosamente con Node 24. Son comportamientos implícitos
+observados, no cambios que este documento presente como aprobados o correctos.
+
+Se informó al usuario y se solicitó autorización para una preparación explícita
+del toolchain exacto, bloquear las descargas implícitas, corregir la cardinalidad
+de PowerShell y usar una versión fijada de checkout que declare Node 24
+nativamente. No repetir el mismo workflow ni contabilizar entornos aptos hasta
+corregir y verificar estos puntos. Esta solicitud de CI no sustituye la
+aprobación independiente pendiente del fallback de la TUI 23.
