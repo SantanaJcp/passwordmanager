@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 "use strict";
 
-const EXACT_ORIGIN = "https://passkey.test";
-const EXACT_RP = "passkey.test";
-const NATIVE_HOST = "org.passwordmanager.passkey";
+importScripts("config.js");
+const EXACT_ORIGIN = PM_PASSKEY_PROFILE.origin;
+const EXACT_RP = PM_PASSKEY_PROFILE.rpId;
+const NATIVE_HOST = PM_PASSKEY_PROFILE.nativeHost;
 const documents = new Map();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

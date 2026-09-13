@@ -574,6 +574,12 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                created_at_us INTEGER NOT NULL,
                expires_at_us INTEGER NOT NULL CHECK (expires_at_us>created_at_us)
              ) STRICT;
+             CREATE TABLE passkey_registration_staging (
+               transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id)=16),
+               request_id BLOB NOT NULL CHECK (length(request_id)=16),
+               item_id BLOB NOT NULL CHECK (length(item_id)=16),
+               response BLOB NOT NULL CHECK (length(response) BETWEEN 1 AND 262144)
+             ) STRICT;
              CREATE INDEX attempts_owner_state ON authentication_attempts(owner_subject,owner_generation,state);
              CREATE TABLE attempt_clock (
                singleton INTEGER PRIMARY KEY CHECK(singleton=1),

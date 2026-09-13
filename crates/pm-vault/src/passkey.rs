@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Custodial WebAuthn request binding and human confirmation. Browser-facing
+//! Custodial `WebAuthn` request binding and human confirmation. Browser-facing
 //! code transports these closed values; private credential seeds remain inside
 //! encrypted logical records and are only used by [`HumanVault`].
 
@@ -79,6 +79,10 @@ pub struct PasskeyRequest {
 }
 
 impl PasskeyRequest {
+    /// Constructs a closed registration request bound to one browser document.
+    ///
+    /// # Errors
+    /// Rejects malformed identifiers, origins, challenges, or user fields.
     #[allow(clippy::too_many_arguments)]
     pub fn registration(
         request_id: [u8; 16],
@@ -109,6 +113,10 @@ impl PasskeyRequest {
         Ok(value)
     }
 
+    /// Constructs an assertion request bound to one admitted attempt.
+    ///
+    /// # Errors
+    /// Rejects malformed identifiers, origins, challenges, or credential lists.
     #[allow(clippy::too_many_arguments)]
     pub fn assertion(
         request_id: [u8; 16],
@@ -138,43 +146,61 @@ impl PasskeyRequest {
         Ok(value)
     }
 
+    #[must_use]
     pub const fn request_id(&self) -> &[u8; 16] {
         &self.request_id
     }
+    #[must_use]
     pub const fn attempt_id(&self) -> Option<&[u8; 16]> {
         self.attempt_id.as_ref()
     }
+    #[must_use]
     pub const fn operation(&self) -> PasskeyOperation {
         self.operation
     }
+    #[must_use]
     pub fn document_id(&self) -> &str {
         &self.document_id
     }
+    #[must_use]
     pub fn origin(&self) -> &str {
         &self.origin
     }
+    #[must_use]
     pub fn rp_id(&self) -> &str {
         &self.rp_id
     }
+    #[must_use]
     pub fn challenge(&self) -> &[u8] {
         &self.challenge
     }
+    #[must_use]
     pub fn credential_ids(&self) -> &[Vec<u8>] {
         &self.credential_ids
     }
+    #[must_use]
     pub fn user_handle(&self) -> &[u8] {
         &self.user_handle
     }
+    #[must_use]
     pub fn user_name(&self) -> &str {
         &self.user_name
     }
+    #[must_use]
     pub fn display_name(&self) -> &str {
         &self.display_name
     }
+    #[must_use]
     pub const fn user_verification(&self) -> UserVerificationRequirement {
         self.uv
     }
 
+    /// Encodes the validated request in its canonical internal wire form.
+    ///
+    /// # Panics
+    /// A vector length cannot exceed the canonical encoder's `u64` bound on
+    /// supported targets; writes to an in-memory `Vec` are infallible.
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new(Vec::new());
         e.array(13)
@@ -213,6 +239,10 @@ impl PasskeyRequest {
         e.into_writer()
     }
 
+    /// Decodes and revalidates one canonical internal wire request.
+    ///
+    /// # Errors
+    /// Rejects malformed, non-canonical, oversized, or unknown request shapes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PasskeyError> {
         if bytes.len() > MAX_REQUEST {
             return Err(PasskeyError::InvalidRequest);
@@ -330,24 +360,31 @@ pub struct PasskeyPrompt {
     uv: UserVerificationRequirement,
 }
 impl PasskeyPrompt {
+    #[must_use]
     pub const fn operation(&self) -> PasskeyOperation {
         self.operation
     }
+    #[must_use]
     pub const fn request_id(&self) -> &[u8; 16] {
         &self.request_id
     }
+    #[must_use]
     pub fn rp_id(&self) -> &str {
         &self.rp_id
     }
+    #[must_use]
     pub fn account(&self) -> &str {
         &self.account
     }
+    #[must_use]
     pub fn origin(&self) -> &str {
         &self.origin
     }
+    #[must_use]
     pub fn document_id(&self) -> &str {
         &self.document_id
     }
+    #[must_use]
     pub const fn user_verification(&self) -> UserVerificationRequirement {
         self.uv
     }
@@ -387,33 +424,43 @@ impl PasskeyPublicCredential {
             backup_state,
         }
     }
+    #[must_use]
     pub fn credential_id(&self) -> &[u8] {
         &self.credential_id
     }
+    #[must_use]
     pub fn rp_id(&self) -> &str {
         &self.rp_id
     }
+    #[must_use]
     pub fn user_handle(&self) -> &[u8] {
         &self.user_handle
     }
+    #[must_use]
     pub const fn public_key(&self) -> &[u8; 32] {
         &self.public_key
     }
+    #[must_use]
     pub fn user_name(&self) -> &str {
         &self.user_name
     }
+    #[must_use]
     pub fn display_name(&self) -> &str {
         &self.display_name
     }
+    #[must_use]
     pub const fn cose_algorithm(&self) -> i64 {
         -8
     }
+    #[must_use]
     pub const fn sign_count(&self) -> u32 {
         0
     }
+    #[must_use]
     pub const fn backup_eligible(&self) -> bool {
         self.backup_eligible
     }
+    #[must_use]
     pub const fn backup_state(&self) -> bool {
         self.backup_state
     }
@@ -424,9 +471,11 @@ pub struct PreparedPasskeyRegistration {
     pub(crate) public: PasskeyPublicCredential,
 }
 impl PreparedPasskeyRegistration {
+    #[must_use]
     pub const fn prepared(&self) -> &crate::PreparedHumanCommand {
         &self.prepared
     }
+    #[must_use]
     pub const fn public(&self) -> &PasskeyPublicCredential {
         &self.public
     }
@@ -459,27 +508,35 @@ impl PasskeyAssertion {
             signed_message,
         }
     }
+    #[must_use]
     pub fn credential_id(&self) -> &[u8] {
         &self.credential_id
     }
+    #[must_use]
     pub fn authenticator_data(&self) -> &[u8] {
         &self.authenticator_data
     }
+    #[must_use]
     pub fn client_data_json(&self) -> &[u8] {
         &self.client_data_json
     }
+    #[must_use]
     pub const fn signature(&self) -> &[u8; 64] {
         &self.signature
     }
+    #[must_use]
     pub fn user_handle(&self) -> &[u8] {
         &self.user_handle
     }
+    #[must_use]
     pub fn signed_message(&self) -> &[u8] {
         &self.signed_message
     }
+    #[must_use]
     pub fn user_present(&self) -> bool {
         self.authenticator_data.get(32).is_some_and(|v| v & 1 != 0)
     }
+    #[must_use]
     pub fn user_verified(&self) -> bool {
         self.authenticator_data.get(32).is_some_and(|v| v & 4 != 0)
     }
@@ -567,48 +624,43 @@ pub struct PasskeyProvider {
     attempts: AttemptVault,
 }
 impl PasskeyProvider {
+    /// Attaches the provider to the existing durable attempt vault.
+    ///
+    /// # Errors
+    /// Reserved for failure-compatible construction as custody evolves.
     pub fn open(attempts: AttemptVault) -> Result<Self, PasskeyError> {
         Ok(Self { attempts })
     }
+    #[must_use]
     pub const fn attempts(&self) -> &AttemptVault {
         &self.attempts
     }
 
+    /// Begins or idempotently replays one bounded provider request.
+    ///
+    /// # Errors
+    /// Rejects invalid/conflicting requests and unavailable encrypted state.
     pub fn begin(&self, request: &PasskeyRequest) -> Result<PasskeyStatus, PasskeyError> {
         request.validate()?;
         let bytes = request.to_bytes();
         let request_digest = digest(&bytes);
         let connection = Connection::open(self.attempts.path())?;
-        if let Some((stored, state, response)) = connection
+        if let Some((stored, response)) = connection
             .query_row(
-                "SELECT request_digest,state,response FROM passkey_requests WHERE request_id=?1",
+                "SELECT request_digest,response FROM passkey_requests WHERE request_id=?1",
                 [request.request_id.as_slice()],
-                |row| {
-                    Ok((
-                        row.get::<_, Vec<u8>>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<Vec<u8>>>(2)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
             )
             .optional()?
         {
             if stored.as_slice() != request_digest {
                 return Err(PasskeyError::IdempotencyConflict);
             }
-            return if state == "complete" {
-                let response = self.attempts.open_passkey_blob(
-                    request.request_id,
-                    &response.ok_or(PasskeyError::Integrity)?,
-                )?;
-                decode_status(&response)
-            } else {
-                let response = self.attempts.open_passkey_blob(
-                    request.request_id,
-                    &response.ok_or(PasskeyError::Integrity)?,
-                )?;
-                decode_status(&response)
-            };
+            let response = self.attempts.open_passkey_blob(
+                request.request_id,
+                &response.ok_or(PasskeyError::Integrity)?,
+            )?;
+            return decode_status(&response);
         }
         if request.operation == PasskeyOperation::Get {
             return self.attempts.begin_passkey(request);
@@ -640,10 +692,16 @@ impl PasskeyProvider {
     ) -> Result<PasskeyStatus, PasskeyError> {
         if let Some(attempt) = request.attempt_id() {
             self.attempts.get(peer, *attempt)?;
+        } else {
+            self.attempts.validate_peer(peer)?;
         }
         self.begin(request)
     }
 
+    /// Records the public registration response after its signed human commit.
+    ///
+    /// # Errors
+    /// Rejects expired, unverified, mismatched, or unavailable durable state.
     pub fn complete_registration(
         &self,
         human: &HumanVault,
@@ -722,6 +780,10 @@ impl PasskeyProvider {
         Ok(result)
     }
 
+    /// Confirms one assertion with fresh human presence or verification.
+    ///
+    /// # Errors
+    /// Rejects insufficient verification, revoked authority, or corrupt state.
     pub fn confirm_assertion(
         &self,
         human: &HumanVault,
@@ -731,6 +793,10 @@ impl PasskeyProvider {
         self.attempts
             .confirm_passkey(human, request_id, verification)
     }
+    /// Reads a completed public response, or `None` while it is pending.
+    ///
+    /// # Errors
+    /// Rejects corrupt or unavailable encrypted provider state.
     pub fn response(&self, request_id: [u8; 16]) -> Result<Option<PasskeyStatus>, PasskeyError> {
         let connection = Connection::open(self.attempts.path())?;
         let row: Option<(String, Option<Vec<u8>>)> = connection
@@ -741,14 +807,13 @@ impl PasskeyProvider {
             )
             .optional()?;
         match row {
-            None => Ok(None),
             Some((state, response)) if state == "complete" => {
                 let response = self
                     .attempts
                     .open_passkey_blob(request_id, &response.ok_or(PasskeyError::Integrity)?)?;
                 Ok(Some(decode_status(&response)?))
             }
-            Some(_) => Ok(None),
+            None | Some(_) => Ok(None),
         }
     }
 
@@ -816,6 +881,29 @@ impl PasskeyProvider {
         }
     }
 
+    /// Returns the opaque vault item created by a completed registration so a
+    /// separate explicit human action can enable delegated use.
+    ///
+    /// # Errors
+    /// Rejects incomplete, non-registration, or corrupt request state.
+    pub fn registered_item(&self, request_id: [u8; 16]) -> Result<[u8; 16], PasskeyError> {
+        let connection = Connection::open(self.attempts.path())?;
+        let row: Option<(String, String, Option<Vec<u8>>)> = connection
+            .query_row(
+                "SELECT operation,state,item_id FROM passkey_requests WHERE request_id=?1",
+                [request_id.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((operation, state, item)) = row else {
+            return Err(PasskeyError::NotFound);
+        };
+        if operation != "create" || state != "complete" {
+            return Err(PasskeyError::HumanRequired);
+        }
+        fixed(&item.ok_or(PasskeyError::Integrity)?)
+    }
+
     /// Retrieves a response only for the RPK-bound owner and rechecks current
     /// revocation/suspension state before releasing an assertion.
     ///
@@ -827,14 +915,14 @@ impl PasskeyProvider {
         request_id: [u8; 16],
     ) -> Result<Option<PasskeyStatus>, PasskeyError> {
         let connection = Connection::open(self.attempts.path())?;
-        let attempt: Option<Vec<u8>> = connection
+        let attempt: Option<Option<Vec<u8>>> = connection
             .query_row(
                 "SELECT attempt_id FROM passkey_requests WHERE request_id=?1",
                 [request_id.as_slice()],
                 |row| row.get(0),
             )
             .optional()?;
-        if let Some(attempt) = attempt {
+        if let Some(attempt) = attempt.flatten() {
             self.attempts.get(peer, fixed(&attempt)?)?;
         }
         self.response(request_id)
@@ -867,7 +955,7 @@ pub(crate) fn prompt(request: &PasskeyRequest) -> PasskeyPrompt {
 
 pub(crate) fn prompt_for_account(request: &PasskeyRequest, account: &str) -> PasskeyPrompt {
     let mut value = prompt(request);
-    value.account = account.to_owned();
+    account.clone_into(&mut value.account);
     value
 }
 

@@ -163,6 +163,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-streaming-stall") => human_streaming_stall(&mut arguments),
         Some("human-csv-import") => human_csv_import(&mut arguments),
         Some("human-passkey-confirm") => human_passkey_confirm(&mut arguments),
+        Some("human-passkey-enable") => human_passkey_enable(&mut arguments),
         Some("human-history-exercise") => human_history_exercise(&mut arguments),
         Some("human-history-list") => human_history_list(&mut arguments),
         Some("human-history-purge-item") => human_history_purge_item(&mut arguments),
@@ -885,6 +886,56 @@ fn read_tty_line(tty: &mut File, maximum: usize) -> Result<String, Failure> {
         }
     }
     String::from_utf8(output).map_err(|_| Failure::Unavailable)
+}
+
+fn human_passkey_enable(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    let request_id = decode_hex_16(&take_path(arguments, "--request")?)?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut tty = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|_| Failure::Unavailable)?;
+    if unsafe { libc::isatty(tty.as_raw_fd()) } != 1 {
+        return Err(Failure::Unavailable);
+    }
+    writeln!(
+        tty,
+        "Enable delegated use for completed passkey request {}. Type ENABLE {} to continue:",
+        hex(&request_id),
+        hex(&request_id),
+    )
+    .and_then(|()| tty.flush())
+    .map_err(|_| Failure::Unavailable)?;
+    if read_tty_line(&mut tty, 128)? != format!("ENABLE {}", hex(&request_id)) {
+        return Err(Failure::Unavailable);
+    }
+    write!(tty, "Master password (fresh reauthentication): ")
+        .and_then(|()| tty.flush())
+        .map_err(|_| Failure::Unavailable)?;
+    let password = Zeroizing::new(read_tty_password(&mut tty)?);
+    writeln!(tty).map_err(|_| Failure::Unavailable)?;
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    let mut request = vec![34];
+    request.extend_from_slice(&request_id);
+    write_frame(&mut tls, &request)?;
+    expect_status(&read_frame(&mut tls)?, 0)?;
+    println!(
+        "PASS passkey-enable explicit=1 tls-rpk=1 alpn=pm-human/1 request={}",
+        hex(&request_id)
+    );
+    Ok(())
 }
 
 fn read_tty_password(tty: &mut File) -> Result<Vec<u8>, Failure> {
@@ -2424,6 +2475,7 @@ fn handle_agent_discovery(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_attempt_request(
     service: &VaultService,
     peer: &AgentPeer,
@@ -3459,17 +3511,11 @@ fn handle_human_request(
                 let registration = vault
                     .prepare_passkey_registration(&request)
                     .map_err(|_| Failure::Unavailable)?;
-                let item = *registration.prepared().item_id();
                 commit_authority(vault, registration.prepared())?;
                 provider
-                    .complete_registration(
-                        vault,
-                        request_id,
-                        item,
-                        registration.public(),
-                        verification,
-                    )
+                    .response(request_id)
                     .map_err(|_| Failure::Unavailable)?
+                    .ok_or(Failure::Unavailable)?
             } else {
                 provider
                     .confirm_assertion(vault, request_id, verification)
@@ -3478,6 +3524,18 @@ fn handle_human_request(
             let mut response = vec![0];
             push_bytes(&mut response, &status.to_bytes())?;
             Ok(response)
+        }
+        34 => {
+            let request_id = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let provider = passkey_provider(service)?;
+            let item = provider
+                .registered_item(request_id)
+                .map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_enable(item)
+                .map_err(|_| Failure::Unavailable)?;
+            commit_authority(vault, &prepared)?;
+            Ok(vec![0])
         }
         25 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;

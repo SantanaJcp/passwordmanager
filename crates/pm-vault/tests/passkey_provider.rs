@@ -29,14 +29,25 @@ const ORIGIN: &str = "https://passkey.test";
 const RP: &str = "passkey.test";
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+fn connection_count(path: &Path, table: &str) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
 #[test]
+#[allow(clippy::too_many_lines)]
 fn human_registration_generates_one_independent_g6_key_and_replays_public_response() {
     let directory = TestDir::new();
     let path = directory.vault();
     persist(&path);
     let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
-    let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let (mut human, _channel_peer) = open_human(&path, Arc::clone(&custody));
     initialize_device(&mut human);
+    let peer = AgentPeer::from_transport_rpk(&RPK).unwrap();
     let provider = PasskeyProvider::open(
         AttemptVault::open(DelegatedVault::open(&path, DEVICE, custody).unwrap()).unwrap(),
     )
@@ -59,6 +70,7 @@ fn human_registration_generates_one_independent_g6_key_and_replays_public_respon
     assert_eq!(prompt.operation(), PasskeyOperation::Create);
     assert_eq!(prompt.rp_id(), RP);
     assert_eq!(prompt.account(), "synthetic-user");
+    assert_eq!(provider.response_for_peer(&peer, [0x11; 16]).unwrap(), None);
 
     let prepared = human.prepare_passkey_registration(&request).unwrap();
     let public = prepared.public().clone();
@@ -80,7 +92,41 @@ fn human_registration_generates_one_independent_g6_key_and_replays_public_respon
         )
         .unwrap();
     assert!(matches!(completed, PasskeyStatus::Registration(_)));
+    assert_eq!(
+        provider
+            .response_for_peer(&peer, [0x11; 16])
+            .unwrap()
+            .unwrap(),
+        completed
+    );
+    assert_eq!(
+        connection_count(&path, "passkey_registration_staging"),
+        0,
+        "registration response is published by the same durable human transaction"
+    );
     assert_eq!(provider.begin(&request).unwrap(), completed);
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let stored: (Vec<u8>, Vec<u8>) = connection
+        .query_row(
+            "SELECT request,response FROM passkey_requests WHERE request_id=?1",
+            [request.request_id().as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    for package in [&stored.0, &stored.1] {
+        assert!(
+            !package
+                .windows(RP.len())
+                .any(|window| window == RP.as_bytes())
+        );
+        assert!(
+            !package
+                .windows(b"synthetic-user".len())
+                .any(|window| window == b"synthetic-user")
+        );
+        assert!(!package.windows(32).any(|window| window == [0x21; 32]));
+    }
 
     let altered = PasskeyRequest::registration(
         [0x11; 16],
@@ -250,6 +296,78 @@ fn assertion_needs_bound_up_uv_and_live_attempt_authority_before_signing() {
         AttemptState::Succeeded
     );
 
+    let rollback_attempt = provider
+        .attempts()
+        .start(
+            &peer,
+            &StartAttempt::new(
+                item,
+                "vault-webauthn-provider",
+                1,
+                "webauthn",
+                ORIGIN,
+                b"keycloak-webauthn/1".to_vec(),
+                IdempotencyKey::new(now, [0x47; 16]).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let rollback_request = PasskeyRequest::assertion(
+        [0x48; 16],
+        *rollback_attempt.attempt_id(),
+        "document-audit-rollback",
+        ORIGIN,
+        RP,
+        &[0x49; 32],
+        vec![public.credential_id().to_vec()],
+        UserVerificationRequirement::Preferred,
+    )
+    .unwrap();
+    provider.begin_for_peer(&peer, &rollback_request).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_ticket13_audit BEFORE INSERT ON encrypted_audit_records
+             BEGIN SELECT raise(ABORT, 'synthetic ticket13 audit failure'); END;",
+        )
+        .unwrap();
+    assert!(
+        provider
+            .confirm_assertion(
+                &human,
+                *rollback_request.request_id(),
+                HumanVerification::Verified,
+            )
+            .is_err()
+    );
+    assert!(
+        provider
+            .response(*rollback_request.request_id())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        provider
+            .attempts()
+            .get(&peer, *rollback_attempt.attempt_id())
+            .unwrap()
+            .state(),
+        AttemptState::WaitingForHuman
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_ticket13_audit")
+        .unwrap();
+    assert!(matches!(
+        provider
+            .confirm_assertion(
+                &human,
+                *rollback_request.request_id(),
+                HumanVerification::Verified,
+            )
+            .unwrap(),
+        PasskeyStatus::Assertion(_)
+    ));
+
     let pending_attempt = provider
         .attempts()
         .start(
@@ -287,6 +405,10 @@ fn assertion_needs_bound_up_uv_and_live_attempt_authority_before_signing() {
         Err(PasskeyError::Revoked)
     ));
     assert!(provider.response(*pending.request_id()).unwrap().is_none());
+    assert!(matches!(
+        provider.response_for_peer(&peer, *assertion_request.request_id()),
+        Err(PasskeyError::Revoked)
+    ));
 }
 
 fn enroll_and_enable(human: &mut HumanVault, item: [u8; 16]) {

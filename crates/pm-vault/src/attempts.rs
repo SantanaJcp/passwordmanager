@@ -361,6 +361,10 @@ impl AttemptVault {
         self.delegated.path()
     }
 
+    pub(crate) fn validate_peer(&self, peer: &AgentPeer) -> Result<(), AttemptError> {
+        Ok(self.delegated.validate_peer(peer)?)
+    }
+
     pub(crate) fn seal_passkey_blob(
         &self,
         request_id: [u8; 16],
@@ -389,6 +393,7 @@ impl AttemptVault {
         )?))
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn begin_passkey(
         &self,
         request: &PasskeyRequest,
@@ -503,6 +508,7 @@ impl AttemptVault {
         Ok(waiting)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn confirm_passkey(
         &self,
         human: &HumanVault,

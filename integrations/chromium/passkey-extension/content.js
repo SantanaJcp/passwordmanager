@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 "use strict";
 
-const EXACT_ORIGIN = "https://passkey.test";
+const EXACT_ORIGIN = PM_PASSKEY_PROFILE.origin;
 const REQUEST_EVENT = "pm-passkey-request-v1";
 const RESPONSE_EVENT = "pm-passkey-response-v1";
 

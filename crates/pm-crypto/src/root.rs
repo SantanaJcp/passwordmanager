@@ -1315,7 +1315,7 @@ impl PasskeyKeyPair {
         self.seed.0
     }
 
-    /// Signs the exact WebAuthn authenticator-data/client-data hash sequence.
+    /// Signs the exact `WebAuthn` authenticator-data/client-data hash sequence.
     ///
     /// # Errors
     /// Returns an error when native signing fails.
@@ -3981,7 +3981,7 @@ fn domain_message(domain: &[u8], payload: &[u8]) -> Vec<u8> {
     encoder.into_writer()
 }
 
-/// Verifies a raw Ed25519 WebAuthn signature against its credential public key.
+/// Verifies a raw Ed25519 `WebAuthn` signature against its credential public key.
 ///
 /// # Errors
 /// Returns authentication failure for any wrong key, message or signature.

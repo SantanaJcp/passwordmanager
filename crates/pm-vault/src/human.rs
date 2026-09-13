@@ -36,7 +36,7 @@ use crate::{
     AgentEnrollment, AuthRecord, AuthorizationError, AuthorizationReason, CausalEventDraft,
     Destination, GeneratedPassword, GeneratorConfig, HistoryEntry, HumanMetadata, ItemHistory,
     ItemLifecycle, ItemPurgeScope, LogicalRecord, PasskeyAssertion, PasskeyError, PasskeyOperation,
-    PasskeyPublicCredential, PasskeyRequest, PasswordRng, PreparedAgentEnrollment,
+    PasskeyPublicCredential, PasskeyRequest, PasskeyStatus, PasswordRng, PreparedAgentEnrollment,
     PreparedItemPurge, PreparedPasskeyRegistration, RecordKind, SearchHit, SearchQuery, VaultError,
     content, unlock_root,
 };
@@ -920,6 +920,7 @@ impl HumanVault {
             .map(|value| value.to_bytes());
 
         apply_staged(&transaction, &staged, event_digest, signed_grant.as_deref())?;
+        apply_passkey_registration(&transaction, &staged)?;
         transaction.execute(
             "INSERT INTO authority_events
              (event_digest,event_id,transaction_id,issuer_device,issuer_generation,seq,previous_digest,parents,kind,subject,subject_generation,event,human_signature,device_signature)
@@ -1106,6 +1107,31 @@ impl HumanVault {
             Vec::new(),
         )?;
         let prepared = self.prepare_create_record(&record)?;
+        let connection = open_connection(&self.path)?;
+        let generation: i64 = connection.query_row(
+            "SELECT generation FROM audit_state WHERE device_id=?1",
+            [self.device.as_slice()],
+            |row| row.get(0),
+        )?;
+        let generation = u64::try_from(generation).map_err(|_| HumanCommitError::Integrity)?;
+        let response = crate::passkey::encode_status(&PasskeyStatus::Registration(public.clone()));
+        let response = self.audit_custody.seal_attempt_state(
+            *self.root.vault_id(),
+            self.device,
+            generation,
+            *request.request_id(),
+            &response,
+        )?;
+        connection.execute(
+            "INSERT INTO passkey_registration_staging(transaction_id,request_id,item_id,response)
+             VALUES(?1,?2,?3,?4)",
+            params![
+                prepared.transaction_id().as_slice(),
+                request.request_id().as_slice(),
+                prepared.item_id().as_slice(),
+                response
+            ],
+        )?;
         Ok(PreparedPasskeyRegistration { prepared, public })
     }
 
@@ -3339,6 +3365,40 @@ fn commit_import_batch(
         committed_heads: vec![final_digest],
         committed_at_us,
     })
+}
+
+#[allow(clippy::too_many_lines)]
+fn apply_passkey_registration(
+    transaction: &Transaction<'_>,
+    staged: &Staged,
+) -> Result<(), HumanCommitError> {
+    let registration: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = transaction
+        .query_row(
+            "SELECT request_id,item_id,response FROM passkey_registration_staging
+             WHERE transaction_id=?1",
+            [staged.transaction_id.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((request_id, item_id, response)) = registration else {
+        return Ok(());
+    };
+    if staged.event_kind != "item-revision" || item_id.as_slice() != staged.item_id {
+        return Err(HumanCommitError::BodyChanged);
+    }
+    let changed = transaction.execute(
+        "UPDATE passkey_requests SET state='complete',item_id=?2,response=?3
+         WHERE request_id=?1 AND operation='create' AND state='waiting'",
+        params![request_id, item_id, response],
+    )?;
+    if changed != 1 {
+        return Err(HumanCommitError::StateChanged);
+    }
+    transaction.execute(
+        "DELETE FROM passkey_registration_staging WHERE transaction_id=?1",
+        [staged.transaction_id.as_slice()],
+    )?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]

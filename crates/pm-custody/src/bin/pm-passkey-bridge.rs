@@ -1,22 +1,29 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
-//! Chromium Native Messaging bridge for the custodial WebAuthn provider. It
+//! Chromium Native Messaging bridge for the custodial `WebAuthn` provider. It
 //! owns no passkey secret and accepts only a closed request derived by the
 //! packaged MV3 extension from a top-level, exact-origin document.
 
+use std::process::ExitCode;
+
+#[cfg(target_os = "linux")]
 use std::{
+    fmt::Write as _,
     fs,
     io::{Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::ExitCode,
 };
 
+#[cfg(target_os = "linux")]
 use pm_interface::{Json, encode_json, parse_json};
+#[cfg(target_os = "linux")]
 use pm_vault::{PasskeyOperation, PasskeyRequest, PasskeyStatus, UserVerificationRequirement};
 
+#[cfg(target_os = "linux")]
 const MAX_NATIVE_MESSAGE: usize = 256 * 1024;
+#[cfg(target_os = "linux")]
 const CONFIG_MAGIC: &str = "PMN1";
 
 fn main() -> ExitCode {
@@ -39,6 +46,7 @@ fn main() -> ExitCode {
 }
 
 #[derive(Debug)]
+#[cfg(target_os = "linux")]
 struct Config {
     profile: PathBuf,
     private: PathBuf,
@@ -48,6 +56,7 @@ struct Config {
     rp_id: String,
 }
 
+#[cfg(target_os = "linux")]
 fn run() -> Result<(), ()> {
     let executable = std::env::current_exe().map_err(|_| ())?;
     let config = read_config(PathBuf::from(format!("{}.conf", executable.display())).as_path())?;
@@ -69,6 +78,7 @@ fn run() -> Result<(), ()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn read_config(path: &Path) -> Result<Config, ()> {
     let metadata = fs::symlink_metadata(path).map_err(|_| ())?;
     if !metadata.file_type().is_file()
@@ -100,7 +110,7 @@ fn read_config(path: &Path) -> Result<Config, ()> {
             .trim_end_matches('/')
             .bytes()
             .all(|value| matches!(value, b'a'..=b'p'))
-        || origin != format!("https://{rp_id}")
+        || !valid_https_origin(&origin, &rp_id)
     {
         return Err(());
     }
@@ -114,6 +124,23 @@ fn read_config(path: &Path) -> Result<Config, ()> {
     })
 }
 
+#[cfg(target_os = "linux")]
+fn valid_https_origin(origin: &str, rp_id: &str) -> bool {
+    let authority = origin.strip_prefix("https://");
+    let Some(authority) = authority else {
+        return false;
+    };
+    if authority == rp_id {
+        return true;
+    }
+    authority
+        .strip_prefix(rp_id)
+        .and_then(|suffix| suffix.strip_prefix(':'))
+        .and_then(|port| port.parse::<u16>().ok())
+        .is_some_and(|port| port != 0)
+}
+
+#[cfg(target_os = "linux")]
 fn config_path(line: Option<&str>, prefix: &str) -> Result<PathBuf, ()> {
     let value = PathBuf::from(config_value(line, prefix)?);
     if !value.is_absolute() {
@@ -122,6 +149,7 @@ fn config_path(line: Option<&str>, prefix: &str) -> Result<PathBuf, ()> {
     Ok(value)
 }
 
+#[cfg(target_os = "linux")]
 fn config_value(line: Option<&str>, prefix: &str) -> Result<String, ()> {
     let value = line.and_then(|line| line.strip_prefix(prefix)).ok_or(())?;
     if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_control()) {
@@ -130,6 +158,8 @@ fn config_value(line: Option<&str>, prefix: &str) -> Result<String, ()> {
     Ok(value.to_owned())
 }
 
+#[allow(clippy::too_many_lines)]
+#[cfg(target_os = "linux")]
 fn process_message(config: &Config, bytes: &[u8]) -> Result<Json, ()> {
     let value = parse_json(bytes).map_err(|_| ())?;
     let Json::Object(fields) = &value else {
@@ -182,7 +212,9 @@ fn process_message(config: &Config, bytes: &[u8]) -> Result<Json, ()> {
                 &[
                     "op",
                     "requestId",
-                    "attemptId",
+                    "itemId",
+                    "issuedAt",
+                    "nonce",
                     "documentId",
                     "origin",
                     "rpId",
@@ -210,9 +242,26 @@ fn process_message(config: &Config, bytes: &[u8]) -> Result<Json, ()> {
                 .iter()
                 .map(|value| hex_bytes(value.string().ok_or(())?, 1024))
                 .collect::<Result<Vec<_>, _>>()?;
+            let item = fixed_hex::<16>(field(fields, "itemId")?.string().ok_or(())?)?;
+            let issued = field(fields, "issuedAt")?
+                .number()
+                .ok_or(())?
+                .parse::<u64>()
+                .map_err(|_| ())?;
+            let nonce = fixed_hex::<16>(field(fields, "nonce")?.string().ok_or(())?)?;
+            let mut start = vec![40];
+            start.extend_from_slice(&item);
+            start.extend_from_slice(&issued.to_be_bytes());
+            start.extend_from_slice(&nonce);
+            push_wire_bytes(&mut start, config.origin.as_bytes())?;
+            let started = agent_call(config, &start)?;
+            if started.first() != Some(&0) || started.len() < 17 {
+                return Err(());
+            }
+            let attempt_id = started[1..17].try_into().map_err(|_| ())?;
             PasskeyRequest::assertion(
                 request_id,
-                fixed_hex(field(fields, "attemptId")?.string().ok_or(())?)?,
+                attempt_id,
                 field(fields, "documentId")?.string().ok_or(())?,
                 &config.origin,
                 &config.rp_id,
@@ -250,6 +299,7 @@ fn process_message(config: &Config, bytes: &[u8]) -> Result<Json, ()> {
     call(config, &rpc)
 }
 
+#[cfg(target_os = "linux")]
 fn validate_sender(config: &Config, fields: &[(String, Json)]) -> Result<(), ()> {
     if field(fields, "topLevel")?.bool() != Some(true)
         || field(fields, "frameId")?.number() != Some("0")
@@ -271,6 +321,7 @@ fn validate_sender(config: &Config, fields: &[(String, Json)]) -> Result<(), ()>
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn uv(fields: &[(String, Json)]) -> Result<UserVerificationRequirement, ()> {
     match field(fields, "uv")?.string() {
         Some("required") => Ok(UserVerificationRequirement::Required),
@@ -280,10 +331,9 @@ fn uv(fields: &[(String, Json)]) -> Result<UserVerificationRequirement, ()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn call(config: &Config, rpc: &[u8]) -> Result<Json, ()> {
-    let response =
-        pm_custody::agent_rpc(&config.profile, &config.private, &config.socket, Some(rpc))
-            .map_err(|_| ())?;
+    let response = agent_call(config, rpc)?;
     if response.first() != Some(&0) {
         return Err(());
     }
@@ -295,10 +345,24 @@ fn call(config: &Config, rpc: &[u8]) -> Result<Json, ()> {
         ]));
     }
     let status = PasskeyStatus::from_bytes(payload).map_err(|_| ())?;
-    status_json(&status)
+    Ok(status_json(&status))
 }
 
-fn status_json(status: &PasskeyStatus) -> Result<Json, ()> {
+#[cfg(target_os = "linux")]
+fn agent_call(config: &Config, rpc: &[u8]) -> Result<Vec<u8>, ()> {
+    pm_custody::agent_rpc(&config.profile, &config.private, &config.socket, Some(rpc))
+        .map_err(|_| ())
+}
+
+#[cfg(target_os = "linux")]
+fn push_wire_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), ()> {
+    output.extend_from_slice(&u32::try_from(value.len()).map_err(|_| ())?.to_be_bytes());
+    output.extend_from_slice(value);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn status_json(status: &PasskeyStatus) -> Json {
     let mut fields = vec![("ok".into(), Json::Bool(true))];
     match status {
         PasskeyStatus::Waiting(prompt) => {
@@ -352,9 +416,10 @@ fn status_json(status: &PasskeyStatus) -> Result<Json, ()> {
             fields.push(("userHandle".into(), Json::String(hex(value.user_handle()))));
         }
     }
-    Ok(Json::Object(fields))
+    Json::Object(fields)
 }
 
+#[cfg(target_os = "linux")]
 fn exact_fields(fields: &[(String, Json)], expected: &[&str]) -> Result<(), ()> {
     if fields.len() != expected.len()
         || fields
@@ -367,6 +432,7 @@ fn exact_fields(fields: &[(String, Json)], expected: &[&str]) -> Result<(), ()> 
     }
 }
 
+#[cfg(target_os = "linux")]
 fn field<'a>(fields: &'a [(String, Json)], name: &str) -> Result<&'a Json, ()> {
     fields
         .iter()
@@ -375,6 +441,7 @@ fn field<'a>(fields: &'a [(String, Json)], name: &str) -> Result<&'a Json, ()> {
         .ok_or(())
 }
 
+#[cfg(target_os = "linux")]
 fn read_native() -> Result<Option<Vec<u8>>, ()> {
     let mut length = [0_u8; 4];
     let mut input = std::io::stdin().lock();
@@ -392,6 +459,7 @@ fn read_native() -> Result<Option<Vec<u8>>, ()> {
     Ok(Some(message))
 }
 
+#[cfg(target_os = "linux")]
 fn write_native(value: &Json) -> Result<(), ()> {
     let bytes = encode_json(value);
     if bytes.len() > MAX_NATIVE_MESSAGE {
@@ -404,6 +472,7 @@ fn write_native(value: &Json) -> Result<(), ()> {
     output.flush().map_err(|_| ())
 }
 
+#[cfg(target_os = "linux")]
 fn wire_bytes(bytes: &[u8]) -> Result<&[u8], ()> {
     let length: [u8; 4] = bytes.get(..4).ok_or(())?.try_into().map_err(|_| ())?;
     let length = usize::try_from(u32::from_be_bytes(length)).map_err(|_| ())?;
@@ -414,25 +483,28 @@ fn wire_bytes(bytes: &[u8]) -> Result<&[u8], ()> {
     Ok(value)
 }
 
+#[cfg(target_os = "linux")]
 fn fixed_hex<const N: usize>(value: &str) -> Result<[u8; N], ()> {
     hex_bytes(value, N)?.try_into().map_err(|_| ())
 }
 
+#[cfg(target_os = "linux")]
 fn hex_bytes(value: &str, maximum: usize) -> Result<Vec<u8>, ()> {
-    if value.len() % 2 != 0 || value.len() / 2 > maximum {
+    if !value.len().is_multiple_of(2) || value.len() / 2 > maximum {
         return Err(());
     }
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let high = digit(pair[0])?;
-            let low = digit(pair[1])?;
+    let bytes = value.as_bytes();
+    (0..bytes.len())
+        .step_by(2)
+        .map(|index| {
+            let high = digit(bytes[index])?;
+            let low = digit(bytes[index + 1])?;
             Ok(high << 4 | low)
         })
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn digit(value: u8) -> Result<u8, ()> {
     match value {
         b'0'..=b'9' => Ok(value - b'0'),
@@ -441,10 +513,18 @@ fn digit(value: u8) -> Result<u8, ()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn hex(value: &[u8]) -> String {
-    value.iter().map(|byte| format!("{byte:02x}")).collect()
+    value.iter().fold(
+        String::with_capacity(value.len() * 2),
+        |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        },
+    )
 }
 
+#[cfg(target_os = "linux")]
 fn current_uid() -> u32 {
     // SAFETY: `geteuid` has no preconditions.
     unsafe { libc::geteuid() }

@@ -409,6 +409,12 @@ impl DelegatedVault {
         self.verify_agent(&connection, peer)
     }
 
+    pub(crate) fn validate_peer(&self, peer: &AgentPeer) -> Result<(), AuthorizationError> {
+        self.verify_device_not_retired()?;
+        let connection = open_connection(&self.path)?;
+        self.verify_agent_and_global(&connection, peer)
+    }
+
     pub(crate) fn operational_credential_for_identity(
         &self,
         identity: AgentIdentity,
