@@ -194,6 +194,191 @@ pub struct TrustedRoot {
     public_key: [u8; KEY_BYTES],
 }
 
+/// Human-authorized E2EE material shared out-of-band by paired custodians.
+pub struct SyncPairing {
+    vault: [u8; ID_BYTES],
+    namespace: [u8; KEY_BYTES],
+    server_pin: [u8; 44],
+    key: Secret,
+    human_signature: [u8; 64],
+}
+
+impl SyncPairing {
+    #[must_use]
+    pub const fn namespace(&self) -> &[u8; KEY_BYTES] {
+        &self.namespace
+    }
+    #[must_use]
+    pub const fn server_pin(&self) -> &[u8; 44] {
+        &self.server_pin
+    }
+
+    /// Serializes pairing material for caller-enforced native/human custody.
+    ///
+    /// # Panics
+    /// Encoding into an in-memory `Vec` is infallible.
+    #[must_use]
+    pub fn to_protected_bytes(&self) -> Vec<u8> {
+        let mut e = Encoder::new(Vec::new());
+        e.array(6)
+            .unwrap()
+            .str("pm/sync-pairing/v1")
+            .unwrap()
+            .bytes(&self.vault)
+            .unwrap()
+            .bytes(&self.namespace)
+            .unwrap()
+            .bytes(&self.server_pin)
+            .unwrap()
+            .bytes(&self.key.0)
+            .unwrap()
+            .bytes(&self.human_signature)
+            .unwrap();
+        e.into_writer()
+    }
+
+    /// Imports pairing material only when its human signature and root match.
+    ///
+    /// # Errors
+    /// Rejects malformed, non-canonical, wrong-vault, or altered material.
+    pub fn from_protected_bytes(bytes: &[u8], trusted: &TrustedRoot) -> Result<Self, CryptoError> {
+        let mut d = Decoder::new(bytes);
+        if d.array().map_err(|_| CryptoError::InvalidFormat)? != Some(6)
+            || d.str().map_err(|_| CryptoError::InvalidFormat)? != "pm/sync-pairing/v1"
+        {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let vault = decode_bytes(&mut d)?;
+        let namespace = decode_bytes(&mut d)?;
+        let server_pin = decode_bytes(&mut d)?;
+        let key = Secret(decode_bytes(&mut d)?);
+        let human_signature = decode_bytes(&mut d)?;
+        let value = Self {
+            vault,
+            namespace,
+            server_pin,
+            key,
+            human_signature,
+        };
+        if d.position() != bytes.len()
+            || value.to_protected_bytes() != bytes
+            || vault != trusted.vault_id
+        {
+            return Err(CryptoError::Authentication);
+        }
+        verify_human_signature(
+            trusted,
+            &domain_message(b"pm/sync-pairing/v1", &value.unsigned_bytes()),
+            &human_signature,
+        )?;
+        Ok(value)
+    }
+
+    /// Encrypts one opaque synchronization object under the pairing key.
+    ///
+    /// # Errors
+    /// Rejects objects above 512 KiB or unavailable cryptography.
+    ///
+    /// # Panics
+    /// Encoding into an in-memory `Vec` is infallible.
+    pub fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        if plaintext.len() > 512 * 1024 - TAG_BYTES - 64 {
+            return Err(CryptoError::InvalidFormat);
+        }
+        sodium()?;
+        let nonce: [u8; NONCE_BYTES] = random_array()?;
+        let aad = self.unsigned_bytes();
+        let mut cipher = vec![0; plaintext.len() + TAG_BYTES];
+        let mut n = 0_u64;
+        let result = unsafe {
+            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_encrypt(
+                cipher.as_mut_ptr(),
+                &raw mut n,
+                plaintext.as_ptr(),
+                plaintext.len() as u64,
+                aad.as_ptr(),
+                aad.len() as u64,
+                std::ptr::null(),
+                nonce.as_ptr(),
+                self.key.0.as_ptr(),
+            )
+        };
+        if result != 0 || usize::try_from(n).ok() != Some(cipher.len()) {
+            return Err(CryptoError::Authentication);
+        }
+        let mut e = Encoder::new(Vec::new());
+        e.array(3)
+            .unwrap()
+            .u64(1)
+            .unwrap()
+            .bytes(&nonce)
+            .unwrap()
+            .bytes(&cipher)
+            .unwrap();
+        Ok(e.into_writer())
+    }
+
+    /// Authenticates and decrypts one complete opaque synchronization object.
+    ///
+    /// # Errors
+    /// Rejects malformed, oversized, truncated, or altered ciphertext.
+    pub fn open(&self, bytes: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        if bytes.len() > 512 * 1024 {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let mut d = Decoder::new(bytes);
+        if d.array().map_err(|_| CryptoError::InvalidFormat)? != Some(3)
+            || d.u64().map_err(|_| CryptoError::InvalidFormat)? != 1
+        {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let nonce: [u8; NONCE_BYTES] = decode_bytes(&mut d)?;
+        let cipher = d.bytes().map_err(|_| CryptoError::InvalidFormat)?;
+        if d.position() != bytes.len() || cipher.len() < TAG_BYTES {
+            return Err(CryptoError::InvalidFormat);
+        }
+        sodium()?;
+        let aad = self.unsigned_bytes();
+        let mut plain = vec![0; cipher.len() - TAG_BYTES];
+        let mut n = 0_u64;
+        let result = unsafe {
+            libsodium_sys::crypto_aead_xchacha20poly1305_ietf_decrypt(
+                plain.as_mut_ptr(),
+                &raw mut n,
+                std::ptr::null_mut(),
+                cipher.as_ptr(),
+                cipher.len() as u64,
+                aad.as_ptr(),
+                aad.len() as u64,
+                nonce.as_ptr(),
+                self.key.0.as_ptr(),
+            )
+        };
+        if result != 0 || usize::try_from(n).ok() != Some(plain.len()) {
+            wipe_vec(&mut plain);
+            return Err(CryptoError::Authentication);
+        }
+        Ok(plain)
+    }
+
+    fn unsigned_bytes(&self) -> Vec<u8> {
+        let mut e = Encoder::new(Vec::new());
+        e.array(5)
+            .unwrap()
+            .str("pm/sync-pairing/v1")
+            .unwrap()
+            .bytes(&self.vault)
+            .unwrap()
+            .bytes(&self.namespace)
+            .unwrap()
+            .bytes(&self.server_pin)
+            .unwrap()
+            .bytes(&sha256(&self.key.0))
+            .unwrap();
+        e.into_writer()
+    }
+}
+
 impl TrustedRoot {
     #[must_use]
     pub const fn vault_id(&self) -> &[u8; ID_BYTES] {
@@ -359,6 +544,24 @@ pub struct UnlockedRoot {
 }
 
 impl UnlockedRoot {
+    /// Creates a fresh namespace/key and binds the server pin with `SK_H`.
+    ///
+    /// # Errors
+    /// Returns an error when secure randomness or signing is unavailable.
+    pub fn create_sync_pairing(&self, server_pin: [u8; 44]) -> Result<SyncPairing, CryptoError> {
+        let mut pairing = SyncPairing {
+            vault: self.vault,
+            namespace: random_array()?,
+            server_pin,
+            key: Secret::random()?,
+            human_signature: [0; 64],
+        };
+        pairing.human_signature = sign_detached(
+            &self.human_signing_seed,
+            &domain_message(b"pm/sync-pairing/v1", &pairing.unsigned_bytes()),
+        )?;
+        Ok(pairing)
+    }
     #[must_use]
     pub const fn vault_id(&self) -> &[u8; ID_BYTES] {
         &self.vault

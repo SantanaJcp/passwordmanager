@@ -300,6 +300,18 @@ pub struct HumanVault {
 }
 
 impl HumanVault {
+    /// Creates human-authorized E2EE pairing material for a pinned sync server.
+    /// The returned secret bundle must remain in native/human custody.
+    ///
+    /// # Errors
+    /// Fails closed unless the human channel remains authenticated.
+    pub fn create_sync_pairing(
+        &self,
+        server_pin: [u8; 44],
+    ) -> Result<pm_crypto::SyncPairing, HumanCommitError> {
+        self.channel.verify()?;
+        Ok(self.root.create_sync_pairing(server_pin)?)
+    }
     /// Signs a canonical causal event with device provenance and, for authority
     /// events, the human root. This does not publish the event.
     ///
@@ -870,6 +882,7 @@ impl HumanVault {
                 committed_at_us,
                 staged.audit_generation,
                 staged.audit_through_seq,
+                body.object_manifest_digest,
             );
             &legacy_body
         };
@@ -1865,6 +1878,7 @@ impl HumanVault {
         for (id, plaintext) in record.attachment_inputs() {
             attachments.push((id, self.root.seal_file(id, revision, plaintext)?.to_bytes()));
         }
+        attachments.sort_by_key(|(id, _)| *id);
         let attachments = encode_staged_attachments(&attachments);
         self.prepare(
             "item_write",
@@ -2241,7 +2255,6 @@ fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn commit_restore(
     transaction: Transaction<'_>,
     root: &UnlockedRoot,
@@ -2427,6 +2440,7 @@ fn commit_restore(
     })
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn commit_import_batch(
     transaction: Transaction<'_>,
     root: &UnlockedRoot,
@@ -4181,9 +4195,10 @@ fn encode_legacy_event_body(
     modified_at: i64,
     audit_generation: Option<u64>,
     audit_through_seq: Option<u64>,
+    object_manifest_digest: Option<[u8; 32]>,
 ) -> Vec<u8> {
     let mut encoder = Encoder::new(Vec::new());
-    encoder.map(4).unwrap();
+    encoder.map(5).unwrap();
     encoder.str("revision_id").unwrap();
     encode_optional_bytes(&mut encoder, revision.as_ref().map(<[u8; 16]>::as_slice));
     encoder
@@ -4203,6 +4218,11 @@ fn encode_legacy_event_body(
     } else {
         encoder.null().unwrap();
     }
+    encoder.str("object_manifest_digest").unwrap();
+    encode_optional_bytes(
+        &mut encoder,
+        object_manifest_digest.as_ref().map(<[u8; 32]>::as_slice),
+    );
     encoder.into_writer()
 }
 
