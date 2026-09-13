@@ -36,4 +36,4 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Locked fetch failed with exit code $LASTEXITCODE" }
       - name: Run native custody product lab
         shell: pwsh
-        run: ./scripts/test-windows-custody-lab.ps1
+        run: ./scripts/test-windows-custody-lab.ps1 -EphemeralCI

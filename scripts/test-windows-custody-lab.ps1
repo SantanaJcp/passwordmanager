@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Native, destructive-only-to-ephemeral-fixtures Windows 11 ticket-27 lab.
 [CmdletBinding()]
-param()
+param(
+    [switch]$EphemeralCI
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+if (-not $EphemeralCI) {
+    throw 'This destructive lab requires the explicit -EphemeralCI flag.'
+}
+if ($env:GITHUB_ACTIONS -ne 'true' -or $env:CI -ne 'true') {
+    throw 'This destructive lab runs only in the authorized ephemeral CI environment.'
+}
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -56,14 +65,12 @@ Assert-True ($osArch -eq $processArch) "native process required: OS=$osArch proc
 Assert-True ($osArch -in @('Arm64', 'X64')) "unsupported native CPU $osArch"
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-Push-Location $repo
 $gitCommon = (& git -C $repo rev-parse --path-format=absolute --git-common-dir).Trim()
 Assert-True ($LASTEXITCODE -eq 0) 'git common directory unavailable'
 $repositoryRoot = Split-Path $gitCommon -Parent
 $env:RUSTUP_HOME = Join-Path $repositoryRoot '.toolchain\rustup'
 $env:CARGO_HOME = Join-Path $repositoryRoot '.toolchain\cargo'
 $env:PATH = (Join-Path $env:CARGO_HOME 'bin') + ';' + $env:PATH
-Invoke-Checked 'cargo' @('fetch', '--locked')
 $root = Join-Path $env:ProgramData ("PasswordManager-ticket27-" + [Guid]::NewGuid().ToString('N'))
 $serviceDir = Join-Path $root 'service'
 $agentDir = Join-Path $root 'agent'
@@ -74,23 +81,49 @@ $serviceName = 'PasswordManager'
 $syntheticPassword = ConvertTo-SecureString 'T27!Synthetic-Only-8472a' -AsPlainText -Force
 $agentCredential = [PSCredential]::new("$env:COMPUTERNAME\$agentName", $syntheticPassword)
 $humanCredential = [PSCredential]::new("$env:COMPUTERNAME\$humanName", $syntheticPassword)
+$rootOwned = $false
+$agentOwned = $false
+$humanOwned = $false
+$serviceOwned = $false
+$locationPushed = $false
+$bodyError = $null
+$cleanupErrors = [System.Collections.Generic.List[string]]::new()
+$passMessage = $null
 
 try {
     Assert-True ((whoami /groups) -match 'S-1-5-32-544') 'lab requires an elevated ephemeral runner'
+
+    # Refuse every collision before creating or changing a fixture. The fixed
+    # names are deliberate so the test also exercises the installed names.
+    Assert-True (-not (Test-Path -LiteralPath $root)) "fixture root already exists: $root"
+    Assert-True ($null -eq (Get-CimInstance Win32_UserAccount -Filter "LocalAccount=TRUE AND Name='$agentName'")) "local user already exists: $agentName"
+    Assert-True ($null -eq (Get-CimInstance Win32_UserAccount -Filter "LocalAccount=TRUE AND Name='$humanName'")) "local user already exists: $humanName"
+    Assert-True ($null -eq (Get-CimInstance Win32_Service -Filter "Name='$serviceName'")) "service already exists: $serviceName"
+
+    Push-Location $repo
+    $locationPushed = $true
+    Invoke-Checked 'cargo' @('fetch', '--locked')
+
+    New-Item -ItemType Directory -Path $root | Out-Null
+    $rootOwned = $true
     New-LocalUser -Name $agentName -Password $syntheticPassword -PasswordNeverExpires | Out-Null
+    $agentOwned = $true
     New-LocalUser -Name $humanName -Password $syntheticPassword -PasswordNeverExpires | Out-Null
+    $humanOwned = $true
     Assert-True (-not ((Get-LocalGroupMember Administrators).Name -contains "$env:COMPUTERNAME\$agentName")) 'agent must not be administrator'
     New-Item -ItemType Directory -Path $serviceDir, $agentDir, $humanDir | Out-Null
 
     Invoke-Checked 'cargo' @('test', '-p', 'pm-native-channel', '--all-targets', '--locked', '--offline')
     Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
     $custody = Join-Path $repo 'target\debug\pm-custody.exe'
-    $cli = Join-Path $repo 'target\debug\pm-cli.exe'
+    $cli = Join-Path $repo 'target\debug\pm.exe'
     Assert-True ((Get-Item $custody).VersionInfo.FileName.EndsWith('.exe')) 'native PE custody binary missing'
+    Assert-True ((Get-Item $cli).VersionInfo.FileName.EndsWith('.exe')) 'native PE CLI binary missing'
 
     $agentSid = Get-Sid "$env:COMPUTERNAME\$agentName"
     $humanSid = Get-Sid "$env:COMPUTERNAME\$humanName"
     Invoke-Checked 'sc.exe' @('create', $serviceName, 'type=', 'own', 'start=', 'demand', 'obj=', "NT SERVICE\$serviceName", 'password=', '', 'binPath=', 'cmd /c exit 0')
+    $serviceOwned = $true
     Invoke-Checked 'sc.exe' @('sidtype', $serviceName, 'unrestricted')
     $serviceSid = Get-Sid "NT SERVICE\$serviceName"
 
@@ -173,16 +206,43 @@ try {
     $p = Start-AsUser $agentCredential $custody @('probe', '--profile', $agentProfile, '--private', $agentPrivate, '--vault-id', $vaultId) $emptyInput $agentOut $agentErr
     Assert-True ($p.ExitCode -eq 0) 'persistent vault failed after service restart'
 
-    Write-Output "PASS ticket27 windows=$product cpu=$osArch service-virtual-account=1 dacl=protected dpapi=machine pipe=bilateral tls=1.3-rpk human=unlock-lock restart=1 agent-admin=0"
+    $passMessage = "PASS ticket27 windows=$product cpu=$osArch service-virtual-account=1 dacl=protected dpapi=machine pipe=bilateral tls=1.3-rpk human=unlock-lock restart=1 agent-admin=0"
+}
+catch {
+    $bodyError = $_
 }
 finally {
-    $installed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
-    if ($null -ne $installed -and $installed.ProcessId -gt 0) {
-        Stop-Process -Id $installed.ProcessId -Force -ErrorAction SilentlyContinue
+    if ($serviceOwned) {
+        try {
+            $installed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+            if ($null -ne $installed -and $installed.State -ne 'Stopped') {
+                Stop-Service -Name $serviceName -Force -ErrorAction Stop
+            }
+            Invoke-Checked 'sc.exe' @('delete', $serviceName)
+        }
+        catch { $cleanupErrors.Add("service cleanup failed: $($_.Exception.Message)") }
     }
-    sc.exe delete $serviceName 2>$null | Out-Null
-    Remove-LocalUser -Name $agentName -ErrorAction SilentlyContinue
-    Remove-LocalUser -Name $humanName -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
-    Pop-Location
+    if ($agentOwned) {
+        try { Remove-LocalUser -Name $agentName -ErrorAction Stop }
+        catch { $cleanupErrors.Add("agent user cleanup failed: $($_.Exception.Message)") }
+    }
+    if ($humanOwned) {
+        try { Remove-LocalUser -Name $humanName -ErrorAction Stop }
+        catch { $cleanupErrors.Add("human user cleanup failed: $($_.Exception.Message)") }
+    }
+    if ($rootOwned) {
+        try { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop }
+        catch { $cleanupErrors.Add("fixture cleanup failed: $($_.Exception.Message)") }
+    }
+    if ($locationPushed) {
+        try { Pop-Location -ErrorAction Stop }
+        catch { $cleanupErrors.Add("location cleanup failed: $($_.Exception.Message)") }
+    }
 }
+
+if ($cleanupErrors.Count -gt 0) {
+    $prefix = if ($null -ne $bodyError) { "$($bodyError.Exception.Message); " } else { '' }
+    throw ($prefix + ($cleanupErrors -join '; '))
+}
+if ($null -ne $bodyError) { throw $bodyError }
+Write-Output $passMessage

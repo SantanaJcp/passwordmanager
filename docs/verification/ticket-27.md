@@ -12,6 +12,15 @@ probar producto salvo que observe Windows 11 nativo, proceso/PE de la CPU del
 job y Rust 1.98.1. No acepta Windows Server, WoW64, WSL, emulación, mocks ni
 cross-compilation como evidencia.
 
+La protección de fixtures forma parte del método antes de cualquier ejecución:
+el workflow debe pasar el flag explícito `-EphemeralCI` y el lab exige además
+las señales `GITHUB_ACTIONS=true` y `CI=true` del entorno efímero autorizado.
+Comprueba que no existan ya el servicio, las cuentas sintéticas ni la raíz
+descartable antes de crear nada. Registra propiedad solo después de cada
+creación exitosa y el cleanup elimina exclusivamente esos recursos propios.
+Cualquier fallo de cleanup mantiene el job en error y no se imprime `PASS`
+antes de terminarlo.
+
 El workflow manual preparado es
 `.github/workflows/ticket-27-windows.yml`. Instala Rust 1.98.1 ARM64 en los
 homes `.toolchain` del repositorio, ejecuta el preflight aprobado, hace
@@ -54,6 +63,10 @@ Se observó RED en el seam público antes de implementar:
 ```text
 ./scripts/cargo-local.sh test -p pm-native-channel --test windows_contract --locked --offline
 # error E0432: WindowsEndpoint/windows_pipe_sddl no existían
+
+# Comprobación estática enfocada del harness, antes del hardening
+# FAIL explicit ephemeral flag; workflow flag; correct CLI binary;
+# ownership tracking; visible cleanup; PASS after cleanup (exit 1)
 ```
 
 La implementación local añade al canal nativo, sin segundo ledger:
@@ -86,7 +99,19 @@ Comprobaciones locales, que **no sustituyen ejecución Windows**:
 RUSTFLAGS='--cfg target_os="windows" -Aexplicit_builtin_cfgs_in_flags' \
   ./scripts/cargo-local.sh clippy -p pm-native-channel --all-targets --locked --offline -- -D warnings
 # exit 0; chequeo sintáctico cfg únicamente, no target ni runtime Windows
+
+# Comprobación estática enfocada tras el hardening
+# PASS: guard CI, workflow flag, target/debug/pm.exe, colisiones previas,
+# ownership por recurso, cleanup visible y PASS posterior (exit 0)
+
+git diff --check && ./scripts/check.sh
+# exit 0
 ```
+
+El host Linux no dispone de `pwsh`; solo se comprobó balance de delimitadores
+del script, además del chequeo estático anterior. La sintaxis PowerShell real y
+el comportamiento de cleanup continúan pendientes de la ejecución Windows
+nativa, sin inferirse del chequeo Linux.
 
 ## Pendiente que bloquea aceptación
 
