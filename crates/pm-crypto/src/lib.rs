@@ -15,8 +15,8 @@ pub use root::{
     KdfProfile, OpenedRevisionPackage, PendingGrantVector, Pmf1Vector, RecoveryCode,
     RevisionPackage, RevisionPackageInput, RootBundle, SignedGrantVector, TrustedRoot,
     UnlockedRoot, create_human_root, digest, fill_random, open_human_root, random_id,
-    recover_human_root, verify_audit_signature, verify_device_event, verify_human_command,
-    verify_human_event,
+    recover_human_root, verify_audit_key_package, verify_audit_signature, verify_device_event,
+    verify_human_command, verify_human_event,
 };
 
 /// Returns the version reported by the linked libsodium C artifact.

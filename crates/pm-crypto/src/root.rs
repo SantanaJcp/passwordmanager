@@ -1487,6 +1487,30 @@ pub fn verify_audit_signature(
     Ok(())
 }
 
+/// Verifies that an audit/device signing key was bound to this vault and
+/// device generation by `SK_H`.
+///
+/// # Errors
+/// Returns authentication failure for a mismatched or altered package.
+pub fn verify_audit_key_package(
+    trusted_root: &TrustedRoot,
+    package: &AuditKeyPackage,
+    device: [u8; ID_BYTES],
+    generation: u64,
+) -> Result<(), CryptoError> {
+    if package.vault != trusted_root.vault_id
+        || package.device != device
+        || package.generation != generation
+    {
+        return Err(CryptoError::Authentication);
+    }
+    verify_human_signature(
+        trusted_root,
+        &domain_message(b"pm/audit-key/v1", &package.unsigned_bytes()),
+        &package.human_signature,
+    )
+}
+
 /// Logical item type used only to validate revision-format membership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ItemKind {
