@@ -1,12 +1,9 @@
 # Método CI nativo efímero
 
-Estado: método adicional autorizado; primera ejecución real de preparación
-**fallida en los cinco targets** y remediación autorizada preparada (evidencia
-al final). Este documento no acredita
-soporte de producto, no resuelve los tickets 26--32 y no sustituye sus laboratorios
-humanos, de reboot/FDE o de firma real. La instalación explícita y obligatoria
-del toolchain Rust exacto es la única instalación ahora autorizada; toda
-autoinstalación implícita continúa prohibida.
+Estado: método adicional autorizado. La primera corrida falló en cinco targets;
+la remediación autorizada se integró y la segunda corrida pasó los cinco
+preflights nativos de entorno. **No es aceptación del producto**, no resuelve
+26--32 ni sustituye laboratorios humanos, reboot/FDE o firma real.
 
 ## Alcance y fuente de verdad
 
@@ -258,3 +255,32 @@ una ejecución PowerShell local: su sintaxis y comportamiento corregido deben
 observarse en la nueva corrida Windows ARM64. El tag v7.0.1 se resolvió en el
 remoto oficial al SHA fijado y su `action.yml` observado declara
 `runs.using: node24`.
+
+## Segunda ejecución observada — 2026-09-13
+
+[Run 34763094631](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631)
+ejecutó `ef81db72e8c2f6aec20511f14fa59a16bdfe3446` y terminó **success 5/5**.
+El merger separado verificó config/YAML/shell, `check.sh`, clean offline y los
+17 labs Linux antes de publicar. El bootstrap mínimo de tres archivos quedó
+en `master` como `a583678`; el PR de producto no fue fusionado.
+
+| Target | Job | OS e imagen observados | Resultado |
+| --- | --- | --- | --- |
+| Linux x86-64 | [103739225302](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631/job/103739225302) | Ubuntu 24.04, kernel 6.17.0-1022-azure, glibc 2.39, systemd 255; ubuntu24 20260907.300.1 | PASS |
+| Linux AArch64 | [103739225310](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631/job/103739225310) | Mismas versiones base Linux; ubuntu24-arm64 20260907.118.1 | PASS |
+| macOS Intel | [103739225256](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631/job/103739225256) | macOS 15.7.9, kernel 24.6.0; macos15 20260824.0482.1 | PASS |
+| macOS Apple silicon | [103739225318](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631/job/103739225318) | macOS 15.7.9, kernel 24.6.0; macos15 20260907.0337.1 | PASS |
+| Windows ARM64 | [103739225200](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631/job/103739225200) | Windows 11 Enterprise 10.0.26200; win11-vs2026-arm64 20260907.151.1 | PASS |
+
+Cada job instaló Rust/Cargo 1.98.1 explícitamente, comprobó el host exacto,
+compiló/inspeccionó/ejecutó el canario de su CPU y emitió
+`scope=environment-only product-validation=NOT_RUN`. Las descargas registradas
+pertenecen a la etapa explícita de instalación; no se observaron descargas en
+la etapa de verificación ni sustitución Node 20 -> 24. PowerShell real ejecutó
+la consulta de arrays sin el error `Count` anterior.
+
+Windows reportó `uac_enable_lua=1`, aunque la documentación genérica hospedada
+mencionada arriba describe UAC desactivado. Prima el hecho observado: el token
+pasó la comprobación administrativa, pero ningún laboratorio debe asumir UAC
+desactivado. No se ejecutó custodia, clipboard de producto, reboot/FDE ni
+firma; los gates nativos y Windows 11 x64 continúan pendientes.
