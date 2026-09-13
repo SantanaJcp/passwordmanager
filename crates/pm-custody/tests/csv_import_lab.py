@@ -11,9 +11,11 @@ def start(binary, bootstrap, runtime, vault):
     daemon=start_as(CUSTODIAN,[binary,"serve-vault","--bootstrap",bootstrap,"--agent-socket",runtime/"agent.sock","--human-socket",runtime/"human.sock","--vault",vault,"--device",DEVICE])
     wait_for_sockets(daemon,[runtime/"agent.sock",runtime/"human.sock"]); return daemon
 
-def run_import(binary,key,profile,socket,password,source,format,ok=True,response_loss=False):
+def run_import(binary,key,profile,socket,password,source,format,ok=True,response_loss=False,enable_after=False,replace_candidates=False):
     command=[binary,"human-csv-import","--profile",profile,"--private",key,"--socket",socket,"--source",source,"--format",format,"--confirm"]
     if response_loss: command.append("--simulate-response-loss")
+    if enable_after: command.append("--enable-after")
+    if replace_candidates: command.append("--replace-candidates")
     result=as_uid(HUMAN,command,input=wire_fields([password]),check=False)
     if not ok: expect_unavailable(result); return b""
     assert result.returncode == 0 and result.stderr == b"", result
@@ -43,33 +45,37 @@ def main():
         rows=['name,url,username,password,note\n']+[f'row-{i},https://page.invalid/{i},u{i},synthetic-page-{i},n\n' for i in range(70)]
         mapped.write_text('title;user;site;secret;opaque\nMapeable;ñ;https://mapped.invalid;synthetic-mapped-canary;未知\n',encoding='utf-8')
         malformed.write_bytes(b'name,url,username,password\nBad,https://bad.invalid,u,"unterminated')
-        atomic.write_text('name,url,username,password,note\nAtomic,https://atomic.invalid,u,synthetic-atomic-canary,n\n',encoding='utf-8')
+        atomic.write_text('name,url,username,password,note,Future Column\n"Cuenta, 🔐",https://chrome.invalid,u,synthetic-atomic-canary,replaced,opaque\n',encoding='utf-8')
         for path in (chrome,apple,mapped,malformed,atomic): os.chown(path,HUMAN,HUMAN); path.chmod(0o400)
-        hashes={p:hashlib.sha256(p.read_bytes()).digest() for p in (chrome,apple,mapped)}
+        hashes={p:hashlib.sha256(p.read_bytes()).digest() for p in (chrome,apple,mapped,atomic)}
         daemon=start(binary,bootstrap,runtime,vault)
-        assert b'total=1 new=1' in run_import(binary,human_key,human_profile,runtime/'human.sock',password,chrome,'chrome')
+        assert b'total=1 new=1' in run_import(binary,human_key,human_profile,runtime/'human.sock',password,chrome,'chrome',enable_after=True)
         assert b'total=1 new=1' in run_import(binary,human_key,human_profile,runtime/'human.sock',password,apple,'apple')
         assert b'total=1 new=1' in run_import(binary,human_key,human_profile,runtime/'human.sock',password,mapped,'mappable',response_loss=True)
         source_link=human_home/'source-link.csv'; source_link.symlink_to(chrome); os.lchown(source_link,HUMAN,HUMAN)
         run_import(binary,human_key,human_profile,runtime/'human.sock',password,source_link,'chrome',ok=False)
-        database=sqlite3.connect(vault); before=tuple(database.execute(f'select count(*) from {t}').fetchone()[0] for t in ('vault_items','authority_events','outbox','human_receipts','encrypted_audit_records','import_reports'))
+        database=sqlite3.connect(vault)
+        enabled=database.execute("select c.item_id,i.visible_revision,c.event_digest,c.status from credential_authorizations c join vault_items i using(item_id)").fetchone(); assert enabled is not None and enabled[3]=='enabled'
+        before=tuple(database.execute(f'select count(*) from {t}').fetchone()[0] for t in ('vault_items','revision_parts','authority_events','outbox','human_receipts','encrypted_audit_records','import_reports'))
         database.execute("create trigger fail_ticket19_public_audit before insert on encrypted_audit_records begin select raise(abort,'ticket19 audit'); end"); database.commit(); database.close()
-        run_import(binary,human_key,human_profile,runtime/'human.sock',password,atomic,'chrome',ok=False)
-        database=sqlite3.connect(vault); after=tuple(database.execute(f'select count(*) from {t}').fetchone()[0] for t in ('vault_items','authority_events','outbox','human_receipts','encrypted_audit_records','import_reports')); assert before==after
+        run_import(binary,human_key,human_profile,runtime/'human.sock',password,atomic,'chrome',ok=False,replace_candidates=True)
+        database=sqlite3.connect(vault); after=tuple(database.execute(f'select count(*) from {t}').fetchone()[0] for t in ('vault_items','revision_parts','authority_events','outbox','human_receipts','encrypted_audit_records','import_reports')); assert before==after
+        still_enabled=database.execute("select i.visible_revision,c.event_digest,c.status from credential_authorizations c join vault_items i using(item_id) where c.item_id=?",(enabled[0],)).fetchone(); assert still_enabled==(enabled[1],enabled[2],'enabled')
         database.execute('drop trigger fail_ticket19_public_audit'); database.commit(); database.close()
+        replaced=run_import(binary,human_key,human_profile,runtime/'human.sock',password,atomic,'chrome',replace_candidates=True); assert b'replaced=1' in replaced and b'new=0' in replaced
         run_import(binary,human_key,human_profile,runtime/'human.sock',password,malformed,'chrome',ok=False)
         stop(daemon); daemon=start(binary,bootstrap,runtime,vault)
-        duplicate=run_import(binary,human_key,human_profile,runtime/'human.sock',password,chrome,'chrome'); assert b'new=0' in duplicate and b'skipped_exact=1' in duplicate
+        duplicate=run_import(binary,human_key,human_profile,runtime/'human.sock',password,atomic,'chrome'); assert b'new=0' in duplicate and b'skipped_exact=1' in duplicate
         paged=human_home/'paged.csv'; paged.write_text(''.join(rows),encoding='utf-8'); os.chown(paged,HUMAN,HUMAN); paged.chmod(0o400)
         paged_result=run_import(binary,human_key,human_profile,runtime/'human.sock',password,paged,'chrome')
         assert b'total=70 new=70' in paged_result and b'pages=2' in paged_result
         stop(daemon)
-        database=sqlite3.connect(vault); assert database.execute('select count(*) from credential_authorizations').fetchone()==(0,); assert database.execute("select count(*) from authority_events where kind='item-revision'").fetchone()[0] == 73; database.close()
+        database=sqlite3.connect(vault); assert database.execute("select status from credential_authorizations").fetchone()==('disabled',); assert database.execute("select count(*) from authority_events where kind='item-revision'").fetchone()[0] == 74; assert database.execute("select count(*) from authority_events where kind='disable'").fetchone()==(1,); database.close()
         for p,digest in hashes.items(): assert hashlib.sha256(p.read_bytes()).digest()==digest
         for path in state.iterdir():
             if path.is_file():
                 data=path.read_bytes()
                 for canary in (b'synthetic-chrome-canary',b'synthetic-apple-canary',b'synthetic-mapped-canary',b'synthetic-atomic-canary'): assert canary not in data
-        print('PASS csv-import-e2e chrome=1 apple-explicit=1 mappable=1 unicode=1 unknown-preserved=1 malformed=no-effect symlink=rejected audit-failure=atomic response-loss=recovered restart=durable duplicate=explicit-skip paginated=2 source-unchanged=1 raw-canaries=absent')
+        print('PASS csv-import-e2e chrome=1 apple-explicit=1 mappable=1 unicode=1 unknown-preserved=1 malformed=no-effect symlink=rejected audit-failure=replace-atomic-enabled response-loss=recovered restart=durable duplicate=replace+explicit-skip disable=g5+reducer-compatible paginated=2 source-unchanged=1 raw-canaries=absent')
     finally: shutil.rmtree(root,ignore_errors=True)
 if __name__=='__main__': main()

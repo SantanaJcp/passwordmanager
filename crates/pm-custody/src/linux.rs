@@ -476,11 +476,17 @@ fn human_csv_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<()
     if format_flag != "--format" || confirm != "--confirm" {
         return Err(Failure::Usage);
     }
-    let response_loss = match arguments.next() {
-        None => false,
-        Some(value) if value == "--simulate-response-loss" => true,
-        Some(_) => return Err(Failure::Usage),
-    };
+    let mut response_loss = false;
+    let mut enable_after = false;
+    let mut replace_candidates = false;
+    for value in arguments.by_ref() {
+        match value.to_str() {
+            Some("--simulate-response-loss") if !response_loss => response_loss = true,
+            Some("--enable-after") if !enable_after => enable_after = true,
+            Some("--replace-candidates") if !replace_candidates => replace_candidates = true,
+            _ => return Err(Failure::Usage),
+        }
+    }
     finish_arguments(arguments)?;
     let format = match format.to_str() {
         Some("chrome") => 0,
@@ -500,7 +506,7 @@ fn human_csv_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<()
     tls.write_all(HUMAN_MAGIC)
         .map_err(|_| Failure::Unavailable)?;
     rpc_unlock(&mut tls, &password)?;
-    let mut request = vec![23, format];
+    let mut request = vec![23, format, u8::from(replace_candidates)];
     push_bytes(&mut request, &source)?;
     write_frame(&mut tls, &request)?;
     let response = read_frame(&mut tls)?;
@@ -568,11 +574,24 @@ fn human_csv_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<()
     {
         return Err(Failure::Unavailable);
     }
+    if enable_after {
+        let item = *item_ids
+            .first()
+            .filter(|_| item_ids.len() == 1)
+            .ok_or(Failure::Unavailable)?;
+        let mut enable = vec![24];
+        enable.extend_from_slice(&item);
+        write_frame(&mut tls, &enable)?;
+        let enable = decode_prepared_response(&read_frame(&mut tls)?)?;
+        rpc_commit(&mut tls, &enable)?;
+    }
     println!(
-        "PASS csv-import format={} total={total} new={new_items} replaced={replaced} skipped_exact={skipped} excluded={excluded} preserved_fields={preserved} pages={pages} items={} tls-rpk=1 alpn=pm-human/1 signed=1 receipt-replay=1 response-loss={} source-unchanged=1 auto-enable=0",
+        "PASS csv-import format={} total={total} new={new_items} replaced={replaced} skipped_exact={skipped} excluded={excluded} preserved_fields={preserved} pages={pages} items={} tls-rpk=1 alpn=pm-human/1 signed=1 receipt-replay=1 response-loss={} explicit-enable={} replace-candidates={} source-unchanged=1 auto-enable=0",
         format_name(format),
         item_ids.len(),
         u8::from(response_loss),
+        u8::from(enable_after),
+        u8::from(replace_candidates),
     );
     Ok(())
 }
@@ -1935,6 +1954,11 @@ fn handle_human_request(
         23 => {
             let mut cursor = Cursor::new(rest);
             let format = *cursor.fixed(1)?.first().ok_or(Failure::Unavailable)?;
+            let replace_candidates = match cursor.fixed(1)? {
+                [0] => false,
+                [1] => true,
+                _ => return Err(Failure::Unavailable),
+            };
             let source = Zeroizing::new(cursor.bytes()?);
             cursor.finish()?;
             let profile = match format {
@@ -1982,11 +2006,18 @@ fn handle_human_request(
                 let page = preview
                     .page(offset, 100)
                     .map_err(|_| Failure::Unavailable)?;
-                decisions.extend(page.iter().map(|row| match row.status() {
-                    CsvRowStatus::New => CsvImportDecision::ImportNew,
-                    CsvRowStatus::ExactDuplicate => CsvImportDecision::SkipExact,
-                    CsvRowStatus::CandidateDuplicate => CsvImportDecision::KeepBoth,
-                }));
+                for row in page {
+                    decisions.push(match row.status() {
+                        CsvRowStatus::New => CsvImportDecision::ImportNew,
+                        CsvRowStatus::ExactDuplicate => CsvImportDecision::SkipExact,
+                        CsvRowStatus::CandidateDuplicate if replace_candidates => {
+                            CsvImportDecision::Replace(
+                                *row.duplicate_item().ok_or(Failure::Unavailable)?,
+                            )
+                        }
+                        CsvRowStatus::CandidateDuplicate => CsvImportDecision::KeepBoth,
+                    });
+                }
                 offset += page.len();
             }
             let prepared = vault
@@ -2026,6 +2057,13 @@ fn handle_human_request(
             push_bytes(&mut response, prepared.prepared().body())?;
             response.extend_from_slice(&signature);
             Ok(response)
+        }
+        24 => {
+            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_enable(item)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
         }
         _ => Err(Failure::Unavailable),
     }

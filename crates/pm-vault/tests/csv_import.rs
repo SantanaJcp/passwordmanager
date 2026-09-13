@@ -283,6 +283,9 @@ fn explicit_replace_disables_prior_delegation_and_input_limits_fail_closed() {
         1
     );
     drop(db);
+    let reduced = CausalReducer::open(&path).unwrap().view().unwrap();
+    assert!(reduced.item(&item).is_some());
+    assert!(!reduced.item_enabled(&item, 1));
 
     let mapping = CsvMapping::new(
         CsvDelimiter::Tab,

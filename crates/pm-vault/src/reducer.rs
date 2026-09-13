@@ -882,6 +882,22 @@ fn decode_legacy_body(
             .then_some(CausalEventBody::Reason)
             .ok_or(ReductionError::InvalidEvent);
     }
+    if matches!(
+        kind,
+        CausalEventKind::AgentRevoke | CausalEventKind::Disable | CausalEventKind::Suspend
+    ) {
+        let mut d = Decoder::new(bytes);
+        expect_map(&mut d, 1)?;
+        expect_key(&mut d, "reason_code")?;
+        if !matches!(
+            d.str().map_err(|_| ReductionError::InvalidEvent)?,
+            "owner_request" | "replacement" | "suspected_compromise"
+        ) || d.position() != bytes.len()
+        {
+            return Err(ReductionError::InvalidEvent);
+        }
+        return Ok(CausalEventBody::Reason);
+    }
     if !matches!(kind, CausalEventKind::ItemRevision | CausalEventKind::Trash) {
         return Err(ReductionError::InvalidEvent);
     }
