@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use pm_web_auth::{ExchangeProfile, Profile, ProfileError};
+use pm_web_auth::{ExchangeProfile, GithubProfile, Profile, ProfileError};
 
 const VALID: &str = concat!(
     "version=1\n",
@@ -36,6 +36,15 @@ const EXCHANGE: &str = concat!(
     "audience=pm-target\n",
     "scopes=target.read\n",
     "ca_der=/opt/pm-lab/ca.der\n",
+);
+
+const GITHUB: &str = concat!(
+    "version=1\n",
+    "profile_id=github-assigned-issues/1\n",
+    "integration_id=github-rest-bearer\n",
+    "origin=https://api.github.com\n",
+    "connect_port=18443\n",
+    "ca_der=/opt/pm-lab/github-ca.der\n",
 );
 
 #[test]
@@ -134,4 +143,26 @@ fn accepts_only_a_pinned_passkey_extension_profile() {
         Profile::parse(missing_adapter.as_bytes()),
         Err(ProfileError::Invalid)
     );
+}
+
+#[test]
+fn github_profile_fixes_origin_path_headers_and_request_profile() {
+    let profile = GithubProfile::parse(GITHUB.as_bytes()).unwrap();
+    assert_eq!(profile.profile_id(), "github-assigned-issues/1");
+    assert_eq!(profile.origin(), "https://api.github.com");
+    assert_eq!(profile.connect_port(), 18443);
+    assert_eq!(profile.path(), "/issues");
+    assert_eq!(profile.api_version(), "2026-03-10");
+
+    for invalid in [
+        GITHUB.replace("https://api.github.com", "https://evil.invalid"),
+        GITHUB.replace("github-assigned-issues/1", "github-proxy/1"),
+        format!("{GITHUB}path=/user\n"),
+        format!("{GITHUB}authorization=agent-value\n"),
+    ] {
+        assert_eq!(
+            GithubProfile::parse(invalid.as_bytes()),
+            Err(ProfileError::Invalid)
+        );
+    }
 }

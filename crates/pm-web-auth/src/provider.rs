@@ -14,7 +14,7 @@ use std::{
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{ExchangeProfile, Profile, browser, exchange};
+use crate::{ExchangeProfile, GithubProfile, Profile, browser, exchange, github};
 
 const MAX_FRAME: usize = 128 * 1024;
 
@@ -46,9 +46,14 @@ pub fn serve(
     custodian_uid: u32,
 ) -> Result<(), ServeError> {
     let bytes = read_private(profile_path)?;
-    let profile = match (Profile::parse(&bytes), ExchangeProfile::parse(&bytes)) {
-        (Ok(profile), Err(_)) => InstalledProfile::Browser(profile),
-        (Err(_), Ok(profile)) => InstalledProfile::Exchange(profile),
+    let profile = match (
+        Profile::parse(&bytes),
+        ExchangeProfile::parse(&bytes),
+        GithubProfile::parse(&bytes),
+    ) {
+        (Ok(profile), Err(_), Err(_)) => InstalledProfile::Browser(profile),
+        (Err(_), Ok(profile), Err(_)) => InstalledProfile::Exchange(profile),
+        (Err(_), Err(_), Ok(profile)) => InstalledProfile::Github(profile),
         _ => return Err(ServeError),
     };
     let parent = socket_path.parent().ok_or(())?;
@@ -101,6 +106,7 @@ pub fn serve(
 enum InstalledProfile {
     Browser(Profile),
     Exchange(ExchangeProfile),
+    Github(GithubProfile),
 }
 
 fn handle(
@@ -130,7 +136,9 @@ fn handle(
             InstalledProfile::Browser(_) if waiting.contains(&attempt) => {
                 response(1, b"KEYCLOAK_HUMAN_REQUIRED")
             }
-            InstalledProfile::Browser(_) | InstalledProfile::Exchange(_) => response(3, b""),
+            InstalledProfile::Browser(_)
+            | InstalledProfile::Exchange(_)
+            | InstalledProfile::Github(_) => response(3, b""),
         };
     }
     match (profile, opcode) {
@@ -141,7 +149,37 @@ fn handle(
             handle_passkey(profile, attempt, &mut cursor, passkey_sessions)
         }
         (InstalledProfile::Exchange(profile), 4) => handle_exchange(profile, cursor),
+        (InstalledProfile::Github(profile), 5) => handle_github(profile, cursor),
         _ => response(4, b""),
+    }
+}
+
+fn handle_github(profile: &GithubProfile, mut cursor: Cursor<'_>) -> Vec<u8> {
+    let parsed = (|| {
+        let integration = cursor.text()?;
+        let method = cursor.text()?;
+        let destination = cursor.text()?;
+        let context = cursor.bytes()?;
+        let token = Zeroizing::new(cursor.bytes()?.to_vec());
+        cursor.finish()?;
+        if integration != "github-rest-bearer"
+            || method != "bearer"
+            || destination != profile.profile_id()
+        {
+            return Err(());
+        }
+        Ok((context, token))
+    })();
+    let Ok((context, token)) = parsed else {
+        return response(4, b"");
+    };
+    match github::perform(profile, &token, context) {
+        Ok(github::GithubOutcome::Succeeded(result)) => response(0, &result),
+        Ok(github::GithubOutcome::WaitingForSso) => response(1, b"GITHUB_SSO_REQUIRED"),
+        Ok(github::GithubOutcome::Rejected) => response(2, b""),
+        Ok(github::GithubOutcome::Indeterminate) => response(3, b""),
+        Ok(github::GithubOutcome::IntegrityFailure) | Err(()) => response(5, b""),
+        Ok(github::GithubOutcome::RateLimited) => response(6, b""),
     }
 }
 
