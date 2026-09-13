@@ -1,8 +1,8 @@
 # 20 — Importador 1PUX3 y adjuntos hostiles
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-20
 Blocked by: 19
 Spec: ../spec.md
 Requirements: R04,R07,R19
@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-13 — Reclamado tras19 integrado, mientras se coordina integración17 y se conserva trabajo18 aislado.
