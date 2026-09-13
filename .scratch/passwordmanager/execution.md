@@ -32,6 +32,8 @@ El push ordinario de `01a74a7` anunció una excepción de administrador al rules
 
 Solo Linux x86_64 está observado en este host. El usuario confirmó disponibilidad de este Linux/Omarchy y una Mac Apple Silicon; acceso/ejecución en la Mac aún no verificados. Linux ARM64, macOS Intel y Windows x64/ARM64 no tienen entorno confirmado. El usuario asumirá la validación final del gate 34 y pidió que Astra también verifique todo lo posible: pruebas/review del agente son evidencia técnica, no auditoría externa certificada ni sustitución de la aceptación humana pendiente. Las pruebas nativas, Chromium propio y firma/notarización necesitan sus entornos/artefactos. No simular resultados ni retirar esas puertas del alcance; documentar evidencia real y qué no se ejecutó.
 
+El usuario autorizó preparar el [método CI nativo efímero](../../docs/verification/native-ci.md) y su workflow manual para cinco runners estándar compatibles, sin coste, secrets de firma ni publicación automática. La preparación separa preflight de entorno de validación del producto y no cambia el estado de evidencia anterior. GitHub exige que un workflow con `workflow_dispatch` exista primero en la rama por defecto `master`; integrar este archivo solo en la rama unificada o un PR no habilita todavía su ejecución. Un merger/publicador separado colocará el mismo workflow manual mínimo en `master` y después elegirá el ref confiable que también contiene workflow y scripts, sin fusionar por ello el PR de producto ni cambiar protecciones. No se modifica `master` desde el worktree de preparación.
+
 La especificación y contratos están en [spec.md](spec.md). Este documento registra ejecución, no sustituye el estado de diseño de §15 ni redefine contratos.
 
 ## Preparación comprobada
