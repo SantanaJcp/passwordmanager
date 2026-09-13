@@ -260,8 +260,10 @@ pub struct AttemptLease {
     context: Vec<u8>,
     integration_id: String,
     method: String,
+    owner: AgentIdentity,
     username: String,
     password: Zeroizing<Vec<u8>>,
+    subject_token: Option<Zeroizing<Vec<u8>>>,
     totp: Option<TotpLease>,
     reconciliation: bool,
 }
@@ -292,6 +294,12 @@ impl AttemptLease {
     }
     pub fn password(&self) -> &[u8] {
         &self.password
+    }
+    /// Returns the subject token only for the closed Keycloak exchange
+    /// adapter. It remains inside the custodian/provider boundary.
+    #[must_use]
+    pub fn subject_token(&self) -> Option<&[u8]> {
+        self.subject_token.as_ref().map(|value| value.as_slice())
     }
     pub const fn totp(&self) -> Option<&TotpLease> {
         self.totp.as_ref()
@@ -387,12 +395,19 @@ impl AttemptVault {
             .delegated
             .operational_credential(peer, request.credential_id)?;
         let supported = request.integration_version == 1
-            && op.descriptor.kind() == RecordKind::Password
             && op.descriptor.destination() == Some(request.destination.as_str())
             && match request.integration_id.as_str() {
-                "controlled.external" => request.method == "password",
+                "controlled.external" => {
+                    op.descriptor.kind() == RecordKind::Password && request.method == "password"
+                }
                 "keycloak-browser-oidc" => {
-                    matches!(request.method.as_str(), "password" | "password_totp")
+                    op.descriptor.kind() == RecordKind::Password
+                        && matches!(request.method.as_str(), "password" | "password_totp")
+                        && request.context == request.destination.as_bytes()
+                }
+                "keycloak-token-exchange" => {
+                    request.method == "token_exchange"
+                        && op.descriptor.kind() == RecordKind::Token
                         && request.context == request.destination.as_bytes()
                 }
                 _ => false,
@@ -616,15 +631,14 @@ impl AttemptVault {
             self.generation,
             attempt,
         )?)?;
-        let material = if reconcile {
-            CredentialMaterial {
-                username: String::new(),
-                password: Zeroizing::new(Vec::new()),
-                totp: None,
-            }
-        } else {
-            password_material(&op.auth, &method)?
-        };
+        let material = credential_material(
+            reconcile,
+            &snap.integration_id,
+            &op.auth,
+            &destination,
+            &method,
+            now,
+        )?;
         let token = random_id().map_err(|_| AttemptError::Integrity)?;
         snap.state = AttemptState::Running;
         let replacement = self.custody.update_attempt_state(
@@ -667,11 +681,57 @@ impl AttemptVault {
             context,
             integration_id: snap.integration_id,
             method,
+            owner: identity,
             username: material.username,
             password: material.password,
+            subject_token: material.subject_token,
             totp: material.totp,
             reconciliation: reconcile,
         }))
+    }
+
+    /// Executes the single provider-use boundary while holding a SQLite
+    /// immediate transaction. A human suspension/revocation that commits first
+    /// is observed and the closure is not called; one that commits afterwards
+    /// is serialized after the already-issued provider request.
+    ///
+    /// # Errors
+    /// Returns a stable authority or integrity error when the lease is no
+    /// longer the running, current-revision attempt.
+    pub fn with_authorized_provider_use<T>(
+        &self,
+        lease: &AttemptLease,
+        use_once: impl FnOnce() -> T,
+    ) -> Result<T, AttemptError> {
+        let mut connection = open(self.delegated.path())?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(Vec<u8>, Vec<u8>, i64, Vec<u8>)> = transaction
+            .query_row(
+                "SELECT revision_id,owner_subject,owner_generation,lease_token
+                 FROM authentication_attempts
+                 WHERE attempt_id=?1 AND item_id=?2 AND state='running'",
+                params![lease.attempt_id.as_slice(), lease.credential_id.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let (revision, subject, generation, token) = row.ok_or(AttemptError::NotFound)?;
+        if fixed::<16>(&revision)? != lease.revision_id
+            || fixed::<16>(&subject)? != *lease.owner.subject()
+            || u64::try_from(generation).map_err(|_| AttemptError::Integrity)?
+                != lease.owner.generation()
+            || fixed::<16>(&token)? != lease.lease_token
+        {
+            return Err(AttemptError::Integrity);
+        }
+        let current = self
+            .delegated
+            .operational_credential_for_identity(lease.owner, lease.credential_id)?;
+        if current.descriptor.revision_id() != &lease.revision_id {
+            return Err(AttemptError::CredentialUnavailable);
+        }
+        let result = use_once();
+        transaction.commit()?;
+        Ok(result)
     }
 
     pub fn settle(
@@ -1007,7 +1067,30 @@ fn decode_execution(bytes: &[u8]) -> Result<(String, Vec<u8>, String), AttemptEr
 struct CredentialMaterial {
     username: String,
     password: Zeroizing<Vec<u8>>,
+    subject_token: Option<Zeroizing<Vec<u8>>>,
     totp: Option<TotpLease>,
+}
+
+fn credential_material(
+    reconcile: bool,
+    integration: &str,
+    auth: &[u8],
+    destination: &str,
+    method: &str,
+    now: i64,
+) -> Result<CredentialMaterial, AttemptError> {
+    if reconcile {
+        Ok(CredentialMaterial {
+            username: String::new(),
+            password: Zeroizing::new(Vec::new()),
+            subject_token: None,
+            totp: None,
+        })
+    } else if integration == "keycloak-token-exchange" {
+        token_exchange_material(auth, destination, now)
+    } else {
+        password_material(auth, method)
+    }
 }
 
 fn password_material(
@@ -1097,7 +1180,84 @@ fn password_material(
     Ok(CredentialMaterial {
         username,
         password,
+        subject_token: None,
         totp,
+    })
+}
+
+fn token_exchange_material(
+    auth: &[u8],
+    destination: &str,
+    now: i64,
+) -> Result<CredentialMaterial, AttemptError> {
+    let mut decoder = Decoder::new(auth);
+    if decoder.array().map_err(|_| AttemptError::Integrity)? != Some(1)
+        || decoder.map().map_err(|_| AttemptError::Integrity)? != Some(8)
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "method"
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "token_exchange"
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "subject_token"
+    {
+        return Err(AttemptError::Integrity);
+    }
+    let subject_token = Zeroizing::new(
+        decoder
+            .bytes()
+            .map_err(|_| AttemptError::Integrity)?
+            .to_vec(),
+    );
+    if decoder.str().map_err(|_| AttemptError::Integrity)? != "requester_client_id" {
+        return Err(AttemptError::Integrity);
+    }
+    let requester_client_id = decoder
+        .str()
+        .map_err(|_| AttemptError::Integrity)?
+        .to_owned();
+    if decoder.str().map_err(|_| AttemptError::Integrity)? != "requester_client_secret" {
+        return Err(AttemptError::Integrity);
+    }
+    let requester_client_secret = Zeroizing::new(
+        decoder
+            .bytes()
+            .map_err(|_| AttemptError::Integrity)?
+            .to_vec(),
+    );
+    if decoder.str().map_err(|_| AttemptError::Integrity)? != "provider"
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "keycloak"
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "profile_id"
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != destination
+        || decoder.str().map_err(|_| AttemptError::Integrity)? != "destination_refs"
+    {
+        return Err(AttemptError::Integrity);
+    }
+    let refs = decoder
+        .array()
+        .map_err(|_| AttemptError::Integrity)?
+        .ok_or(AttemptError::Integrity)?;
+    for _ in 0..refs {
+        decoder.u16().map_err(|_| AttemptError::Integrity)?;
+    }
+    if decoder.str().map_err(|_| AttemptError::Integrity)? != "expires_at" {
+        return Err(AttemptError::Integrity);
+    }
+    let expires =
+        if decoder.datatype().map_err(|_| AttemptError::Integrity)? == minicbor::data::Type::Null {
+            decoder.null().map_err(|_| AttemptError::Integrity)?;
+            None
+        } else {
+            Some(decoder.i64().map_err(|_| AttemptError::Integrity)?)
+        };
+    if decoder.position() != auth.len()
+        || subject_token.is_empty()
+        || requester_client_secret.is_empty()
+        || expires.is_some_and(|value| value <= now)
+    {
+        return Err(AttemptError::CredentialUnavailable);
+    }
+    Ok(CredentialMaterial {
+        username: requester_client_id,
+        password: requester_client_secret,
+        subject_token: Some(subject_token),
+        totp: None,
     })
 }
 fn load_owned(

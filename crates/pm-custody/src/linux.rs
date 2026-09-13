@@ -605,6 +605,7 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
         Some("resume-revoke-a") => (21, vec![21]),
         Some("reenroll-a") => (22, vec![22]),
         Some("add-keycloak") => (40, vec![40]),
+        Some("add-keycloak-exchange") => (41, vec![41]),
         _ => return Err(Failure::Usage),
     };
     if matches!(opcode, 19 | 22) {
@@ -620,6 +621,12 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
             }
             request.extend_from_slice(&second);
         }
+    }
+    if opcode == 41 {
+        let subject_token = Zeroizing::new(read_wire_field(&mut input, 64 * 1024)?);
+        let requester_secret = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+        push_bytes(&mut request, &subject_token)?;
+        push_bytes(&mut request, &requester_secret)?;
     }
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
@@ -2392,7 +2399,29 @@ fn run_provider_once(service: &VaultService) -> Result<(), Failure> {
     } else {
         return Ok(());
     };
-    let result = call_controlled_provider(provider, &lease);
+    let guarded = if lease.integration_id() == "keycloak-token-exchange" {
+        attempts.with_authorized_provider_use(&lease, || call_controlled_provider(provider, &lease))
+    } else {
+        Ok(call_controlled_provider(provider, &lease))
+    };
+    let result = match guarded {
+        Ok(result) => result,
+        Err(
+            pm_vault::AttemptError::AccessSuspended
+            | pm_vault::AttemptError::AgentRevoked
+            | pm_vault::AttemptError::CredentialUnavailable,
+        ) => {
+            let _ = attempts.settle(
+                &lease,
+                AttemptOutcome::Failed {
+                    reason: "AUTHORITY_REVOKED",
+                },
+            );
+            return Ok(());
+        }
+        Err(pm_vault::AttemptError::NotFound) => return Ok(()),
+        Err(_) => return Err(Failure::Unavailable),
+    };
     let outcome = match result {
         Ok(v) => v,
         Err(()) => AttemptOutcome::Indeterminate,
@@ -2419,14 +2448,16 @@ fn call_controlled_provider(
         2
     } else if lease.integration_id() == "keycloak-browser-oidc" {
         3
+    } else if lease.integration_id() == "keycloak-token-exchange" {
+        4
     } else {
         1
     };
-    let mut request = vec![opcode];
+    let mut request = Zeroizing::new(vec![opcode]);
     request.extend_from_slice(lease.attempt_id());
     request.extend_from_slice(lease.revision_id());
     if !lease.reconciliation_only() {
-        if opcode == 3 {
+        if matches!(opcode, 3 | 4) {
             push_bytes(&mut request, lease.integration_id().as_bytes()).map_err(|_| ())?;
             push_bytes(&mut request, lease.method().as_bytes()).map_err(|_| ())?;
         }
@@ -2453,6 +2484,8 @@ fn call_controlled_provider(
                 request.extend_from_slice(&0_u16.to_be_bytes());
                 request.extend_from_slice(&0_u64.to_be_bytes());
             }
+        } else if opcode == 4 {
+            push_bytes(&mut request, lease.subject_token().ok_or(())?).map_err(|_| ())?;
         }
     }
     write_frame(&mut stream, &request).map_err(|_| ())?;
@@ -2652,6 +2685,40 @@ fn authorization_add_keycloak(vault: &mut HumanVault) -> Result<(), Failure> {
     )
     .map_err(|_| Failure::Unavailable)?;
     create_and_enable(vault, &charlie)
+}
+
+fn authorization_add_keycloak_exchange(
+    vault: &mut HumanVault,
+    subject_token: &[u8],
+    requester_secret: &[u8],
+) -> Result<(), Failure> {
+    let record = LogicalRecord::new(
+        RecordKind::Token,
+        HumanMetadata {
+            title: "Synthetic Keycloak P2 relationship".to_owned(),
+            destinations: vec![Destination {
+                label: "installed profile".to_owned(),
+                value: "keycloak-exchange-lab".to_owned(),
+            }],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![AuthRecord::TokenExchange {
+            subject_token: subject_token.to_vec(),
+            requester_client_id: "pm-exchanger".to_owned(),
+            requester_client_secret: requester_secret.to_vec(),
+            provider: "keycloak".to_owned(),
+            profile_id: "keycloak-exchange-lab".to_owned(),
+            destination_refs: vec![0],
+            expires_at: None,
+        }],
+        vec![],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    create_and_enable(vault, &record)
 }
 
 fn create_and_enable(vault: &mut HumanVault, record: &LogicalRecord) -> Result<(), Failure> {
@@ -3309,6 +3376,14 @@ fn handle_human_request(
                 return Err(Failure::Unavailable);
             }
             authorization_add_keycloak(vault)?;
+            Ok(vec![0])
+        }
+        41 => {
+            let mut cursor = Cursor::new(rest);
+            let subject_token = Zeroizing::new(cursor.bytes()?);
+            let requester_secret = Zeroizing::new(cursor.bytes()?);
+            cursor.finish()?;
+            authorization_add_keycloak_exchange(vault, &subject_token, &requester_secret)?;
             Ok(vec![0])
         }
         _ => Err(Failure::Unavailable),

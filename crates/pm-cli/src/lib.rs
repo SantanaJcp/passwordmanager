@@ -446,7 +446,11 @@ fn decode_attempt(raw: &[u8]) -> Result<Json, ErrorCode> {
         return Err(ErrorCode::Internal);
     }
     let integration = std::str::from_utf8(integration).map_err(|_| ErrorCode::Internal)?;
-    let public_result = if integration == "keycloak-browser-oidc" && !result.is_empty() {
+    let public_result = if matches!(
+        integration,
+        "keycloak-browser-oidc" | "keycloak-token-exchange"
+    ) && !result.is_empty()
+    {
         public_attempt_result(integration, Some(result))?
     } else {
         Json::Null
@@ -482,6 +486,8 @@ fn credential_integrations(destination: &[u8]) -> Json {
     let mut values = vec![Json::String("controlled.external".into())];
     if destination == b"keycloak-lab" {
         values.push(Json::String("keycloak-browser-oidc".into()));
+    } else if destination == b"keycloak-exchange-lab" {
+        values.push(Json::String("keycloak-token-exchange".into()));
     }
     Json::Array(values)
 }

@@ -426,6 +426,23 @@ pub fn capabilities_result() -> Result<Json, ErrorCode> {
                         Json::Object(vec![("kind".into(), Json::String("oidc_tokens".into()))]),
                     ),
                 ]),
+                Json::Object(vec![
+                    ("id".into(), Json::String("keycloak-token-exchange".into())),
+                    ("version".into(), Json::Number("1".into())),
+                    (
+                        "methods".into(),
+                        Json::Array(vec![Json::String("token_exchange".into())]),
+                    ),
+                    ("availability".into(), Json::String("verified".into())),
+                    ("input_schema".into(), schema_start()),
+                    (
+                        "result_schema".into(),
+                        Json::Object(vec![(
+                            "kind".into(),
+                            Json::String("exchanged_access_token".into()),
+                        )]),
+                    ),
+                ]),
             ]),
         ),
         (
@@ -594,6 +611,8 @@ fn discovery_integrations(destination: Option<&str>) -> Json {
     let mut values = vec![Json::String("controlled.external".into())];
     if destination == Some("keycloak-lab") {
         values.push(Json::String("keycloak-browser-oidc".into()));
+    } else if destination == Some("keycloak-exchange-lab") {
+        values.push(Json::String("keycloak-token-exchange".into()));
     }
     Json::Array(values)
 }
@@ -643,7 +662,7 @@ pub fn public_attempt_result(
     integration_id: &str,
     result: Option<&[u8]>,
 ) -> Result<Json, ErrorCode> {
-    const REQUIRED: [&str; 10] = [
+    const OIDC_REQUIRED: [&str; 10] = [
         "kind",
         "issuer",
         "subject",
@@ -655,7 +674,20 @@ pub fn public_attempt_result(
         "expires_at",
         "scope",
     ];
-    if integration_id != "keycloak-browser-oidc" {
+    const EXCHANGE_REQUIRED: [&str; 8] = [
+        "kind",
+        "issuer",
+        "audience",
+        "token_type",
+        "access_token",
+        "issued_token_type",
+        "expires_at",
+        "scope",
+    ];
+    if !matches!(
+        integration_id,
+        "keycloak-browser-oidc" | "keycloak-token-exchange"
+    ) {
         return Ok(Json::Null);
     }
     let Some(result) = result else {
@@ -665,20 +697,34 @@ pub fn public_attempt_result(
     let Json::Object(fields) = &value else {
         return Err(ErrorCode::Internal);
     };
-    if fields.len() != REQUIRED.len()
+    let required: &[&str] = if integration_id == "keycloak-browser-oidc" {
+        &OIDC_REQUIRED
+    } else {
+        &EXCHANGE_REQUIRED
+    };
+    let expected_kind = if integration_id == "keycloak-browser-oidc" {
+        "oidc_tokens"
+    } else {
+        "exchanged_access_token"
+    };
+    if fields.len() != required.len()
         || fields
             .iter()
-            .any(|(key, item)| !REQUIRED.contains(&key.as_str()) || item.string().is_none())
-        || value.field("kind").and_then(Json::string) != Some("oidc_tokens")
+            .any(|(key, item)| !required.contains(&key.as_str()) || item.string().is_none())
+        || value.field("kind").and_then(Json::string) != Some(expected_kind)
         || value.field("token_type").and_then(Json::string) != Some("Bearer")
         || value
             .field("access_token")
             .and_then(Json::string)
             .is_none_or(str::is_empty)
-        || value
-            .field("id_token")
-            .and_then(Json::string)
-            .is_none_or(str::is_empty)
+        || integration_id == "keycloak-browser-oidc"
+            && value
+                .field("id_token")
+                .and_then(Json::string)
+                .is_none_or(str::is_empty)
+        || integration_id == "keycloak-token-exchange"
+            && value.field("issued_token_type").and_then(Json::string)
+                != Some("urn:ietf:params:oauth:token-type:access_token")
     {
         return Err(ErrorCode::Internal);
     }
@@ -1074,6 +1120,18 @@ mod tests {
         assert_eq!(
             public_attempt_result("unknown", Some(valid)).unwrap(),
             Json::Null
+        );
+
+        let exchanged = br#"{"kind":"exchanged_access_token","issuer":"https://auth.invalid/realms/pm","audience":"pm-target","token_type":"Bearer","access_token":"new-B","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","expires_at":"42","scope":"openid target.read"}"#;
+        let output = public_attempt_result("keycloak-token-exchange", Some(exchanged)).unwrap();
+        assert_eq!(
+            output.field("access_token").and_then(Json::string),
+            Some("new-B")
+        );
+        let reflected = br#"{"kind":"exchanged_access_token","issuer":"x","audience":"x","token_type":"Bearer","access_token":"new-B","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","expires_at":"42","scope":"x","subject_token":"secret-A"}"#;
+        assert_eq!(
+            public_attempt_result("keycloak-token-exchange", Some(reflected)),
+            Err(ErrorCode::Internal)
         );
     }
 }

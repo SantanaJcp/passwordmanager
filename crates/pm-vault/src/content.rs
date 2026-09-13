@@ -229,6 +229,19 @@ pub enum AuthRecord {
         destination_refs: Vec<u16>,
         expires_at: Option<i64>,
     },
+    /// One indivisible Standard Token Exchange relationship. Keeping the
+    /// subject token and confidential requester credential in the same
+    /// human-created authorization object prevents agent-selected auxiliary
+    /// credentials or an ambient client secret.
+    TokenExchange {
+        subject_token: Vec<u8>,
+        requester_client_id: String,
+        requester_client_secret: Vec<u8>,
+        provider: String,
+        profile_id: String,
+        destination_refs: Vec<u16>,
+        expires_at: Option<i64>,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -802,7 +815,10 @@ impl LogicalRecord {
             RecordKind::Totp => matches!(self.auth.as_slice(), [AuthRecord::Totp { .. }]),
             RecordKind::Passkey => matches!(self.auth.as_slice(), [AuthRecord::Passkey { .. }]),
             RecordKind::Ssh => matches!(self.auth.as_slice(), [AuthRecord::Ssh { .. }]),
-            RecordKind::Token => matches!(self.auth.as_slice(), [AuthRecord::Token { .. }]),
+            RecordKind::Token => matches!(
+                self.auth.as_slice(),
+                [AuthRecord::Token { .. } | AuthRecord::TokenExchange { .. }]
+            ),
             RecordKind::Note => self.auth.is_empty(),
             RecordKind::File => self.auth.is_empty() && !self.attachments.is_empty(),
         };
@@ -866,6 +882,14 @@ impl Drop for LogicalRecord {
                 | AuthRecord::Token {
                     secret: password, ..
                 } => password.zeroize(),
+                AuthRecord::TokenExchange {
+                    subject_token,
+                    requester_client_secret,
+                    ..
+                } => {
+                    subject_token.zeroize();
+                    requester_client_secret.zeroize();
+                }
                 AuthRecord::Passkey { private_key, .. } => private_key.zeroize(),
                 AuthRecord::Ssh {
                     private_key,
@@ -983,7 +1007,33 @@ fn valid_auth(auth: &AuthRecord, destinations: usize) -> bool {
                 && profile_id.len() <= MAX_TITLE
                 && valid_refs(destination_refs, destinations)
         }
+        AuthRecord::TokenExchange {
+            subject_token,
+            requester_client_id,
+            requester_client_secret,
+            provider,
+            profile_id,
+            destination_refs,
+            ..
+        } => {
+            !subject_token.is_empty()
+                && subject_token.len() <= MAX_FIELD
+                && is_closed_identifier(requester_client_id, MAX_TITLE)
+                && !requester_client_secret.is_empty()
+                && requester_client_secret.len() <= MAX_FIELD
+                && provider == "keycloak"
+                && is_closed_identifier(profile_id, MAX_TITLE)
+                && valid_refs(destination_refs, destinations)
+        }
     }
+}
+
+fn is_closed_identifier(value: &str, max: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn key(encoder: &mut Encoder<Vec<u8>>, value: &str) {
@@ -1210,6 +1260,37 @@ fn encode_auth(encoder: &mut Encoder<Vec<u8>>, auth: &AuthRecord) {
                 encoder.null().unwrap();
             }
         }
+        AuthRecord::TokenExchange {
+            subject_token,
+            requester_client_id,
+            requester_client_secret,
+            provider,
+            profile_id,
+            destination_refs,
+            expires_at,
+        } => {
+            encoder.map(8).unwrap();
+            key(encoder, "method");
+            encoder.str("token_exchange").unwrap();
+            key(encoder, "subject_token");
+            encoder.bytes(subject_token).unwrap();
+            key(encoder, "requester_client_id");
+            encoder.str(requester_client_id).unwrap();
+            key(encoder, "requester_client_secret");
+            encoder.bytes(requester_client_secret).unwrap();
+            key(encoder, "provider");
+            encoder.str(provider).unwrap();
+            key(encoder, "profile_id");
+            encoder.str(profile_id).unwrap();
+            key(encoder, "destination_refs");
+            encode_refs(encoder, destination_refs);
+            key(encoder, "expires_at");
+            if let Some(value) = expires_at {
+                encoder.i64(*value).unwrap();
+            } else {
+                encoder.null().unwrap();
+            }
+        }
     }
 }
 
@@ -1402,6 +1483,36 @@ fn decode_auth(d: &mut Decoder<'_>) -> Result<AuthRecord, HumanCommitError> {
             };
             Ok(AuthRecord::Token {
                 secret,
+                provider,
+                profile_id,
+                destination_refs,
+                expires_at,
+            })
+        }
+        "token_exchange" if fields == 8 => {
+            expect_key(d, "subject_token")?;
+            let subject_token = d.bytes().map_err(invalid)?.to_vec();
+            expect_key(d, "requester_client_id")?;
+            let requester_client_id = d.str().map_err(invalid)?.to_owned();
+            expect_key(d, "requester_client_secret")?;
+            let requester_client_secret = d.bytes().map_err(invalid)?.to_vec();
+            expect_key(d, "provider")?;
+            let provider = d.str().map_err(invalid)?.to_owned();
+            expect_key(d, "profile_id")?;
+            let profile_id = d.str().map_err(invalid)?.to_owned();
+            expect_key(d, "destination_refs")?;
+            let destination_refs = decode_refs(d)?;
+            expect_key(d, "expires_at")?;
+            let expires_at = if d.datatype().map_err(invalid)? == Type::Null {
+                d.null().map_err(invalid)?;
+                None
+            } else {
+                Some(d.i64().map_err(invalid)?)
+            };
+            Ok(AuthRecord::TokenExchange {
+                subject_token,
+                requester_client_id,
+                requester_client_secret,
                 provider,
                 profile_id,
                 destination_refs,
