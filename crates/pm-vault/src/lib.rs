@@ -35,8 +35,8 @@ pub use content::{
 };
 pub use history::{HistoryEntry, ItemHistory, ItemPurgeScope, PreparedItemPurge};
 pub use human::{
-    AttachmentReader, HumanChannel, HumanCommitError, HumanReceipt, HumanVault, PasswordRecord,
-    PreparedHumanCommand,
+    AttachmentReader, HumanCatalogEntry, HumanChannel, HumanCommitError, HumanReceipt, HumanVault,
+    PasswordRecord, PreparedHumanCommand,
 };
 pub use migration::{
     CsvDelimiter, CsvEncoding, CsvField, CsvImportDecision, CsvImportPreview, CsvImportProfile,

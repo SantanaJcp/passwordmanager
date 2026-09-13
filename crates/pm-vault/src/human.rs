@@ -305,7 +305,126 @@ pub struct HumanVault {
     audit_custody: Arc<AuditDeviceCustody>,
 }
 
+/// Secret-free metadata used by the interactive human catalog.
+#[derive(Debug, Eq, PartialEq)]
+pub struct HumanCatalogEntry {
+    item_id: [u8; 16],
+    kind: RecordKind,
+    title: String,
+    tags: Vec<String>,
+    favorite: bool,
+    lifecycle: ItemLifecycle,
+}
+
+impl HumanCatalogEntry {
+    #[must_use]
+    pub const fn item_id(&self) -> &[u8; 16] {
+        &self.item_id
+    }
+    #[must_use]
+    pub const fn kind(&self) -> RecordKind {
+        self.kind
+    }
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    #[must_use]
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+    #[must_use]
+    pub const fn favorite(&self) -> bool {
+        self.favorite
+    }
+    #[must_use]
+    pub const fn lifecycle(&self) -> ItemLifecycle {
+        self.lifecycle
+    }
+}
+
 impl HumanVault {
+    /// Lists authenticated, secret-free human metadata for active and trashed items.
+    ///
+    /// # Errors
+    /// Fails closed if any visible revision or lifecycle row is inconsistent.
+    pub fn human_catalog(&self) -> Result<Vec<HumanCatalogEntry>, HumanCommitError> {
+        self.channel.verify()?;
+        let connection = open_connection(&self.path)?;
+        let mut statement = connection.prepare(
+            "SELECT item_id,visible_revision,kind,status FROM vault_items ORDER BY item_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut entries = Vec::with_capacity(rows.len());
+        for (item, revision, expected_kind, status) in rows {
+            let item_id = bytes::<16>(&item)?;
+            let revision_id = bytes::<16>(&revision)?;
+            let lifecycle = match status.as_str() {
+                "active" => ItemLifecycle::Active,
+                "trash" => ItemLifecycle::Trash,
+                _ => return Err(HumanCommitError::InvalidCommand),
+            };
+            let record =
+                self.read_revision_from(&connection, item_id, revision_id, Some(&expected_kind))?;
+            entries.push(HumanCatalogEntry {
+                item_id,
+                kind: record.kind(),
+                title: record.human().title.clone(),
+                tags: record.human().tags.clone(),
+                favorite: record.human().favorite,
+                lifecycle,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Appends a human-session audit fact without exposing audit storage internals.
+    ///
+    /// # Errors
+    /// Rejects non-interactive audit actions and fails atomically on storage error.
+    pub fn record_human_interaction(
+        &self,
+        action: AuditAction,
+        item: Option<[u8; 16]>,
+    ) -> Result<(), HumanCommitError> {
+        self.channel.verify()?;
+        if !matches!(
+            action,
+            AuditAction::HumanUnlock | AuditAction::Reveal | AuditAction::Copy
+        ) {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let authority = current_head(&transaction)?.unwrap_or([0; 32]);
+        let mut event =
+            AuditEvent::new(AuditActorKind::Human, None, action, AuditOutcome::Succeeded);
+        if let Some(item) = item {
+            event = event.with_item(item, None);
+        }
+        audit::append_event(
+            &transaction,
+            &self.trusted_root,
+            Some(&self.root),
+            self.device,
+            &self.audit_custody,
+            &event,
+            now_us()?,
+            authority,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
     /// Writes a complete logical PMB1 snapshot through bounded PMF1 frames.
     ///
     /// # Errors
