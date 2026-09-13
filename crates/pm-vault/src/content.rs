@@ -65,6 +65,10 @@ impl RecordKind {
             _ => Err(HumanCommitError::InvalidInput),
         }
     }
+
+    pub(crate) fn from_name(value: &str) -> Option<Self> {
+        Self::parse(value).ok()
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]

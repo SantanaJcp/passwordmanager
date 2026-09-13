@@ -40,8 +40,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
 use pm_vault::{
-    Attachment, AttachmentReader, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent,
-    AuditOutcome, AuthRecord, AutonomousAuditVault, CustomField, Destination, GeneratorConfig,
+    AgentEnrollment, AgentPeer, Attachment, AttachmentReader, AuditAction, AuditActorKind,
+    AuditDeviceCustody, AuditEvent, AuditOutcome, AuthRecord, AuthorizationReason,
+    AutonomousAuditVault, CustomField, DelegatedVault, Destination, GeneratorConfig,
     HumanCommitError, HumanMetadata, HumanVault, LogicalRecord, LogicalValue, PasswordRecord,
     PreparedHumanCommand, PrivateKeyFormat, RecordKind, SearchQuery, SourceEncoding, SourceField,
     TotpAlgorithm,
@@ -59,8 +60,11 @@ const SPKI_BYTES: usize = 44;
 const MAX_PROTECTED_BYTES: u64 = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const HUMAN_MAGIC: &[u8; 5] = b"PMH1\n";
+const AGENT_MAGIC: &[u8; 5] = b"PMA1\n";
 const MAX_HUMAN_FRAME: usize = 18 * 1024 * 1024;
 const STREAM_CHUNK_BYTES: usize = 1024 * 1024;
+const LAB_AGENT_A: [u8; 16] = [0xa1; 16];
+const LAB_AGENT_B: [u8; 16] = [0xb2; 16];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Role {
@@ -134,6 +138,8 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("serve") => serve(&mut arguments),
         Some("serve-vault") => serve_vault(&mut arguments),
         Some("probe") => probe(&mut arguments),
+        Some("agent-discover") => agent_discover(&mut arguments),
+        Some("human-authorization") => human_authorization(&mut arguments),
         Some("human-password-crud") => human_password_crud(&mut arguments),
         Some("human-content-flow") => human_content_flow(&mut arguments),
         Some("human-audit-lifecycle") => human_audit_lifecycle(&mut arguments),
@@ -305,7 +311,8 @@ fn serve_loop(
             bootstrap.agent_uid,
             Role::Agent,
             &agent_config,
-            None,
+            vault,
+            Some(&bootstrap.agent_spki),
         );
         accept_one(
             &human_listener,
@@ -313,6 +320,7 @@ fn serve_loop(
             Role::Human,
             &human_config,
             vault,
+            None,
         );
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -356,6 +364,100 @@ fn probe(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> 
         profile.role.name(),
         observed_uid,
         String::from_utf8_lossy(profile.role.alpn())
+    );
+    Ok(())
+}
+
+fn agent_discover(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Agent {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(AGENT_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    let response = read_frame(&mut tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let count = usize::from(u16::from_be_bytes(
+        cursor
+            .fixed(2)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    ));
+    let mut rendered = Vec::with_capacity(count);
+    for _ in 0..count {
+        let item = cursor.fixed(16)?;
+        let _revision = cursor.fixed(16)?;
+        let kind = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        let title = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        let destination = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        let account = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        rendered.push(format!(
+            "{}:{kind}:{title}:{destination}:{account}",
+            hex(item)
+        ));
+    }
+    cursor.finish()?;
+    println!(
+        "PASS delegated-discovery count={count} set={}",
+        rendered.join(",")
+    );
+    Ok(())
+}
+
+fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    let action_flag = arguments.next().ok_or(Failure::Usage)?;
+    let action = arguments.next().ok_or(Failure::Usage)?;
+    if action_flag != "--action" {
+        return Err(Failure::Usage);
+    }
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let (opcode, mut request) = match action.to_str() {
+        Some("setup") => (19, vec![19]),
+        Some("suspend") => (20, vec![20]),
+        Some("resume-revoke-a") => (21, vec![21]),
+        Some("reenroll-a") => (22, vec![22]),
+        _ => return Err(Failure::Usage),
+    };
+    if matches!(opcode, 19 | 22) {
+        let first = read_wire_field(&mut input, SPKI_BYTES)?;
+        if first.len() != SPKI_BYTES {
+            return Err(Failure::Unavailable);
+        }
+        request.extend_from_slice(&first);
+        if opcode == 19 {
+            let second = read_wire_field(&mut input, SPKI_BYTES)?;
+            if second.len() != SPKI_BYTES {
+                return Err(Failure::Unavailable);
+            }
+            request.extend_from_slice(&second);
+        }
+    }
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    write_frame(&mut tls, &request)?;
+    expect_status(&read_frame(&mut tls)?, 0)?;
+    println!(
+        "PASS human-authorization action={}",
+        action.to_string_lossy()
     );
     Ok(())
 }
@@ -1193,6 +1295,169 @@ fn handle_human_rpc(
     }
 }
 
+fn handle_agent_discovery(
+    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
+    service: &VaultService,
+    observed_rpk: &[u8],
+) -> Result<(), Failure> {
+    let peer = AgentPeer::from_transport_rpk(observed_rpk).map_err(|_| Failure::Unavailable)?;
+    let vault = DelegatedVault::open(
+        &service.path,
+        service.device,
+        Arc::clone(&service.audit_custody),
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let credentials = vault.discover(&peer).map_err(|_| Failure::Unavailable)?;
+    let mut response = vec![0];
+    response.extend_from_slice(
+        &u16::try_from(credentials.len())
+            .map_err(|_| Failure::Unavailable)?
+            .to_be_bytes(),
+    );
+    for credential in credentials {
+        response.extend_from_slice(credential.item_id());
+        response.extend_from_slice(credential.revision_id());
+        push_bytes(
+            &mut response,
+            record_kind_name(credential.kind()).as_bytes(),
+        )?;
+        push_bytes(&mut response, credential.title().as_bytes())?;
+        push_bytes(
+            &mut response,
+            credential.destination().unwrap_or("").as_bytes(),
+        )?;
+        push_bytes(&mut response, credential.account().unwrap_or("").as_bytes())?;
+    }
+    write_frame(tls, &response)
+}
+
+fn record_kind_name(kind: RecordKind) -> &'static str {
+    match kind {
+        RecordKind::Password => "password",
+        RecordKind::Totp => "totp",
+        RecordKind::Passkey => "passkey",
+        RecordKind::Ssh => "ssh",
+        RecordKind::Token => "token",
+        RecordKind::Note => "note",
+        RecordKind::File => "file",
+    }
+}
+
+fn commit_authority(
+    vault: &mut HumanVault,
+    prepared: &PreparedHumanCommand,
+) -> Result<(), Failure> {
+    let signature = vault.sign(prepared).map_err(|_| Failure::Unavailable)?;
+    let receipt = vault
+        .commit(prepared.command(), &signature, prepared.body())
+        .map_err(|_| Failure::Unavailable)?;
+    if vault
+        .receipt(*prepared.transaction_id())
+        .map_err(|_| Failure::Unavailable)?
+        != receipt
+        || vault
+            .commit(prepared.command(), &signature, prepared.body())
+            .map_err(|_| Failure::Unavailable)?
+            != receipt
+    {
+        return Err(Failure::Unavailable);
+    }
+    Ok(())
+}
+
+fn authorization_setup(vault: &mut HumanVault, first: &[u8], second: &[u8]) -> Result<(), Failure> {
+    if first.len() != SPKI_BYTES || second.len() != SPKI_BYTES || first == second {
+        return Err(Failure::Unavailable);
+    }
+    let record = PasswordRecord::new(
+        "Synthetic TLS shared account",
+        "ticket07-user",
+        b"ticket07-secret-canary",
+        "https://ticket07.invalid/login",
+        "",
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let prepared = vault
+        .prepare_create(&record)
+        .map_err(|_| Failure::Unavailable)?;
+    let item = *prepared.item_id();
+    commit_authority(vault, &prepared)?;
+    let note = LogicalRecord::new(
+        RecordKind::Note,
+        HumanMetadata {
+            title: "Synthetic excluded note".to_owned(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: "not authorized".to_owned(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let prepared = vault
+        .prepare_create_record(&note)
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)?;
+    for (subject, request, rpk, label) in [
+        (LAB_AGENT_A, [0x31; 16], first, "Synthetic agent A"),
+        (LAB_AGENT_B, [0x32; 16], second, "Synthetic agent B"),
+    ] {
+        let enrollment = AgentEnrollment::new(subject, request, rpk, label, "ticket07-userns")
+            .map_err(|_| Failure::Unavailable)?;
+        let prepared = vault
+            .prepare_agent_enrollment(&enrollment)
+            .map_err(|_| Failure::Unavailable)?;
+        commit_authority(vault, prepared.prepared())?;
+    }
+    let prepared = vault
+        .prepare_delegated_resume()
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)?;
+    let prepared = vault
+        .prepare_enable(item)
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)
+}
+
+fn authorization_suspend(vault: &mut HumanVault) -> Result<(), Failure> {
+    let prepared = vault
+        .prepare_delegated_suspend(AuthorizationReason::OwnerRequest)
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)
+}
+
+fn authorization_resume_revoke(vault: &mut HumanVault) -> Result<(), Failure> {
+    let prepared = vault
+        .prepare_delegated_resume()
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)?;
+    let prepared = vault
+        .prepare_agent_revocation(LAB_AGENT_A, AuthorizationReason::OwnerRequest)
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)
+}
+
+fn authorization_reenroll(vault: &mut HumanVault, rpk: &[u8]) -> Result<(), Failure> {
+    let enrollment = AgentEnrollment::new(
+        LAB_AGENT_A,
+        [0x33; 16],
+        rpk,
+        "Synthetic agent A replacement",
+        "ticket07-userns",
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let prepared = vault
+        .prepare_agent_enrollment(&enrollment)
+        .map_err(|_| Failure::Unavailable)?;
+    if prepared.generation() != 2 {
+        return Err(Failure::Unavailable);
+    }
+    commit_authority(vault, prepared.prepared())
+}
+
 fn handle_stream_upload(
     tls_vault: &mut HumanVault,
     tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
@@ -1515,6 +1780,34 @@ fn handle_human_request(
                 .map_err(|_| Failure::Unavailable)?;
             encode_prepared(vault, purge.prepared())
         }
+        19 => {
+            if rest.len() != SPKI_BYTES * 2 {
+                return Err(Failure::Unavailable);
+            }
+            authorization_setup(vault, &rest[..SPKI_BYTES], &rest[SPKI_BYTES..])?;
+            Ok(vec![0])
+        }
+        20 => {
+            if !rest.is_empty() {
+                return Err(Failure::Unavailable);
+            }
+            authorization_suspend(vault)?;
+            Ok(vec![0])
+        }
+        21 => {
+            if !rest.is_empty() {
+                return Err(Failure::Unavailable);
+            }
+            authorization_resume_revoke(vault)?;
+            Ok(vec![0])
+        }
+        22 => {
+            if rest.len() != SPKI_BYTES {
+                return Err(Failure::Unavailable);
+            }
+            authorization_reenroll(vault, rest)?;
+            Ok(vec![0])
+        }
         _ => Err(Failure::Unavailable),
     }
 }
@@ -1623,17 +1916,28 @@ fn hex_nibble(value: u8) -> Result<u8, Failure> {
     }
 }
 
+fn hex(value: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(value.len() * 2);
+    for byte in value {
+        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
 fn accept_one(
     listener: &UnixListener,
     expected_uid: u32,
     role: Role,
     config: &Arc<ServerConfig>,
     vault: Option<&VaultService>,
+    peer_rpk: Option<&[u8]>,
 ) {
     let Ok((stream, _)) = listener.accept() else {
         return;
     };
-    let _ = handle_connection(stream, expected_uid, role, config, vault);
+    let _ = handle_connection(stream, expected_uid, role, config, vault, peer_rpk);
 }
 
 fn handle_connection(
@@ -1642,6 +1946,7 @@ fn handle_connection(
     role: Role,
     config: &Arc<ServerConfig>,
     vault: Option<&VaultService>,
+    peer_rpk: Option<&[u8]>,
 ) -> Result<(), Failure> {
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
@@ -1678,6 +1983,10 @@ fn handle_connection(
             service,
             human_channel.ok_or(Failure::Unavailable)?,
         );
+    }
+    if request == *AGENT_MAGIC && role == Role::Agent {
+        let service = vault.ok_or(Failure::Unavailable)?;
+        return handle_agent_discovery(&mut tls, service, peer_rpk.ok_or(Failure::Unavailable)?);
     }
     if request != *b"PING\n" {
         return Err(Failure::Unavailable);
