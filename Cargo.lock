@@ -416,6 +416,7 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "libc",
+ "pm-crypto",
  "pm-native-channel",
  "pm-vault",
  "rustls",

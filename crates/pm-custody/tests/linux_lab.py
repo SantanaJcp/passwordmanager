@@ -11,6 +11,7 @@ invented by this script or by a client.
 import hashlib
 import os
 import pathlib
+import select
 import shutil
 import signal
 import sqlite3
@@ -41,7 +42,7 @@ def as_uid(uid, command, *, check=True, input=None):
     )
 
 
-def start_as(uid, command):
+def start_as(uid, command, *, stdin=None):
     def change_identity():
         os.setgroups([])
         os.setgid(uid)
@@ -49,6 +50,7 @@ def start_as(uid, command):
 
     return subprocess.Popen(
         command,
+        stdin=stdin,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         preexec_fn=change_identity,
@@ -364,6 +366,17 @@ def main():
                     b"search=1 organize=tag+favorite generator=configured passkey=storage-only\n"
                 )
                 assert content.stderr == b""
+                streamed = as_uid(
+                    HUMAN,
+                    [binary, "human-streaming-file", "--profile", human_profile,
+                     "--private", human_private, "--socket", human_socket],
+                    input=wire_fields([master]),
+                )
+                assert streamed.stdout == (
+                    b"PASS streaming-file bytes=16781312 chunks=17 max_plain_chunk=1048576 "
+                    b"short-input=rolled-back limit-16gib=accepted oversize-16gib=rejected\n"
+                )
+                assert streamed.stderr == b""
                 canaries = [
                     b"ticket05-e2e-password-canary",
                     b"ticket05-e2e-totp-canary",
@@ -372,10 +385,53 @@ def main():
                     b"ticket05-e2e-attachment-canary",
                     b"ticket05-e2e-source-canary",
                     b"ticket05-e2e-search-canary",
+                    b"ticket05-large-stream-canary",
                 ]
                 for candidate in vault.parent.glob(vault.name + "*"):
                     persisted = candidate.read_bytes()
                     assert all(canary not in persisted for canary in canaries)
+                database = sqlite3.connect(vault)
+                assert database.execute("select count(*) from attachment_stream_chunks").fetchone() == (17,)
+                assert database.execute("select max(length(ciphertext)) from attachment_stream_chunks").fetchone()[0] <= 1024 * 1024 + 21
+                assert database.execute("select count(*) from human_staging_streams").fetchone() == (0,)
+                published_before_crash = database.execute(
+                    "select (select count(*) from vault_items), "
+                    "(select count(*) from authority_events), "
+                    "(select count(*) from attachment_stream_chunks)"
+                ).fetchone()
+                database.close()
+
+                interrupted = start_as(
+                    HUMAN,
+                    [binary, "human-streaming-stall", "--profile", human_profile,
+                     "--private", human_private, "--socket", human_socket],
+                    stdin=subprocess.PIPE,
+                )
+                interrupted.stdin.write(wire_fields([master]))
+                interrupted.stdin.close()
+                interrupted.stdin = None
+                ready, _, _ = select.select([interrupted.stdout], [], [], 10)
+                assert ready, "streaming crash client did not reach its open transaction"
+                assert interrupted.stdout.readline() == b"READY streaming-upload-transaction=open\n"
+                daemon.kill()
+                daemon_stdout, daemon_stderr = daemon.communicate(timeout=5)
+                assert daemon.returncode == -signal.SIGKILL
+                assert daemon_stdout == b"" and daemon_stderr == b""
+                client_stdout, client_stderr = interrupted.communicate(timeout=5)
+                assert interrupted.returncode == 4
+                assert client_stdout == b""
+                assert client_stderr == b"CUSTODY_UNAVAILABLE\n"
+                daemon = start_as(CUSTODIAN, serve)
+                wait_for_sockets(daemon, [agent_socket, human_socket])
+                database = sqlite3.connect(vault)
+                assert database.execute("select count(*) from human_staging_streams").fetchone() == (0,)
+                assert database.execute("select count(*) from human_staging_stream_chunks").fetchone() == (0,)
+                assert database.execute(
+                    "select (select count(*) from vault_items), "
+                    "(select count(*) from authority_events), "
+                    "(select count(*) from attachment_stream_chunks)"
+                ).fetchone() == published_before_crash
+                database.close()
 
         os.chmod(agent_private, 0o600)
         key_acl_fault = as_uid(
@@ -421,7 +477,7 @@ def main():
                 "atomicity=no-partial replay=receipt response-loss=recovered"
             )
             if run_content:
-                print("PASS content=all-types+organization+generator tls=1.3 rpk=mutual alpn=pm-human/1")
+                print("PASS content=all-types+organization+generator+streaming-file stream-crash=rolled-back tls=1.3 rpk=mutual alpn=pm-human/1")
         print("LIMIT reboot_host=NOT_RUN production_systemd_fde=NOT_RUN")
     finally:
         shutil.rmtree(root, ignore_errors=True)

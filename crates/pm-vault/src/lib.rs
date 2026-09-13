@@ -11,7 +11,8 @@ pub use content::{
     SearchHit, SearchQuery, SourceEncoding, SourceField, TotpAlgorithm,
 };
 pub use human::{
-    HumanChannel, HumanCommitError, HumanReceipt, HumanVault, PasswordRecord, PreparedHumanCommand,
+    AttachmentReader, HumanChannel, HumanCommitError, HumanReceipt, HumanVault, PasswordRecord,
+    PreparedHumanCommand,
 };
 
 use std::{
@@ -278,6 +279,16 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                package BLOB NOT NULL CHECK (length(package) BETWEEN 1 AND 17825792),
                PRIMARY KEY (attachment_id, revision_id)
              ) STRICT;
+             CREATE TABLE attachment_streams (
+               attachment_id BLOB NOT NULL CHECK (length(attachment_id) = 16), revision_id BLOB NOT NULL CHECK (length(revision_id) = 16),
+               header BLOB NOT NULL CHECK (length(header) BETWEEN 1 AND 16384), chunk_count INTEGER NOT NULL CHECK (chunk_count > 0),
+               PRIMARY KEY (attachment_id, revision_id)
+             ) STRICT;
+             CREATE TABLE attachment_stream_chunks (
+               attachment_id BLOB NOT NULL CHECK (length(attachment_id) = 16), revision_id BLOB NOT NULL CHECK (length(revision_id) = 16),
+               chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0), ciphertext BLOB NOT NULL CHECK (length(ciphertext) BETWEEN 21 AND 1048597),
+               PRIMARY KEY (attachment_id, revision_id, chunk_index)
+             ) STRICT;
              CREATE TABLE authority_events (
                event_digest BLOB PRIMARY KEY CHECK (length(event_digest) = 32),
                event_id BLOB NOT NULL UNIQUE CHECK (length(event_id) = 16),
@@ -308,6 +319,16 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                package BLOB CHECK (package IS NULL OR length(package) BETWEEN 1 AND 16777216),
                item_kind TEXT CHECK (item_kind IS NULL OR item_kind IN ('password','totp','passkey','ssh','token','note','file')),
                attachments BLOB CHECK (attachments IS NULL OR length(attachments) BETWEEN 1 AND 18874368)
+             ) STRICT;
+             CREATE TABLE human_staging_streams (
+               transaction_id BLOB NOT NULL CHECK (length(transaction_id) = 16), attachment_id BLOB NOT NULL CHECK (length(attachment_id) = 16),
+               header BLOB NOT NULL CHECK (length(header) BETWEEN 1 AND 16384), chunk_count INTEGER NOT NULL CHECK (chunk_count > 0),
+               PRIMARY KEY (transaction_id, attachment_id)
+             ) STRICT;
+             CREATE TABLE human_staging_stream_chunks (
+               transaction_id BLOB NOT NULL CHECK (length(transaction_id) = 16), attachment_id BLOB NOT NULL CHECK (length(attachment_id) = 16),
+               chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0), ciphertext BLOB NOT NULL CHECK (length(ciphertext) BETWEEN 21 AND 1048597),
+               PRIMARY KEY (transaction_id, attachment_id, chunk_index)
              ) STRICT;
              CREATE TABLE human_receipts (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),

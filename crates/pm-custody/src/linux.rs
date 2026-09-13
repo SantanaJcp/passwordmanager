@@ -40,9 +40,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
 use pm_vault::{
-    Attachment, AuthRecord, CustomField, Destination, GeneratorConfig, HumanCommitError,
-    HumanMetadata, HumanVault, LogicalRecord, LogicalValue, PasswordRecord, PreparedHumanCommand,
-    PrivateKeyFormat, RecordKind, SearchQuery, SourceEncoding, SourceField, TotpAlgorithm,
+    Attachment, AttachmentReader, AuthRecord, CustomField, Destination, GeneratorConfig,
+    HumanCommitError, HumanMetadata, HumanVault, LogicalRecord, LogicalValue, PasswordRecord,
+    PreparedHumanCommand, PrivateKeyFormat, RecordKind, SearchQuery, SourceEncoding, SourceField,
+    TotpAlgorithm,
 };
 
 use crate::{Failure, take_path};
@@ -58,6 +59,7 @@ const MAX_PROTECTED_BYTES: u64 = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const HUMAN_MAGIC: &[u8; 5] = b"PMH1\n";
 const MAX_HUMAN_FRAME: usize = 18 * 1024 * 1024;
+const STREAM_CHUNK_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Role {
@@ -132,6 +134,8 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("probe") => probe(&mut arguments),
         Some("human-password-crud") => human_password_crud(&mut arguments),
         Some("human-content-flow") => human_content_flow(&mut arguments),
+        Some("human-streaming-file") => human_streaming_file(&mut arguments),
+        Some("human-streaming-stall") => human_streaming_stall(&mut arguments),
         _ => Err(Failure::Usage),
     }
 }
@@ -516,6 +520,222 @@ fn human_content_flow(arguments: &mut impl Iterator<Item = OsString>) -> Result<
 }
 
 #[allow(clippy::too_many_lines)]
+fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    const SIZE: u64 = 16 * 1024 * 1024 + 4096;
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let hash = pattern_digest(SIZE)?;
+    let descriptor = Attachment::descriptor(
+        [0x7b; 16],
+        "large-雪.bin",
+        "application/octet-stream",
+        SIZE,
+        hash,
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let record = LogicalRecord::new_streaming(
+        RecordKind::File,
+        HumanMetadata {
+            title: "Large stream".to_owned(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![descriptor],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    let mut start = vec![17];
+    push_bytes(&mut start, &record.to_descriptor_bytes())?;
+    write_frame(&mut tls, &start)?;
+    send_pattern(&mut tls, SIZE)?;
+    write_frame(&mut tls, &[0])?;
+    let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
+    rpc_commit(&mut tls, &prepared)?;
+    let mut request = vec![18];
+    request.extend_from_slice(&prepared.item_id);
+    request.extend_from_slice(&[0x7b; 16]);
+    write_frame(&mut tls, &request)?;
+    expect_status(&read_frame(&mut tls)?, 0)?;
+    let mut digest = pm_crypto::DigestState::new().map_err(|_| Failure::Unavailable)?;
+    let mut received = 0_u64;
+    loop {
+        let frame = Zeroizing::new(read_frame_bounded(&mut tls, STREAM_CHUNK_BYTES)?);
+        if frame.as_slice() == [0] {
+            break;
+        }
+        received += u64::try_from(frame.len()).map_err(|_| Failure::Unavailable)?;
+        digest.update(&frame);
+    }
+    if received != SIZE || digest.finish() != hash {
+        return Err(Failure::Unavailable);
+    }
+    drop(tls);
+    if Attachment::descriptor(
+        [0; 16],
+        "limit",
+        "application/octet-stream",
+        16 * 1024 * 1024 * 1024,
+        [0; 32],
+    )
+    .is_err()
+        || Attachment::descriptor(
+            [0; 16],
+            "oversize",
+            "application/octet-stream",
+            16 * 1024 * 1024 * 1024 + 1,
+            [0; 32],
+        )
+        .is_ok()
+    {
+        return Err(Failure::Unavailable);
+    }
+    let short_size = 2 * 1024 * 1024;
+    let descriptor = Attachment::descriptor(
+        [0x7c; 16],
+        "short.bin",
+        "application/octet-stream",
+        short_size,
+        pattern_digest(short_size)?,
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let short_record = LogicalRecord::new_streaming(
+        RecordKind::File,
+        HumanMetadata {
+            title: "Short".to_owned(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![descriptor],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let mut short = connect(&profile, &key, &socket_path)?;
+    short
+        .write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut short, &password)?;
+    let mut start = vec![17];
+    push_bytes(&mut start, &short_record.to_descriptor_bytes())?;
+    write_frame(&mut short, &start)?;
+    send_pattern(&mut short, 1024 * 1024)?;
+    drop(short);
+    std::thread::sleep(Duration::from_millis(100));
+    println!(
+        "PASS streaming-file bytes={SIZE} chunks=17 max_plain_chunk=1048576 short-input=rolled-back limit-16gib=accepted oversize-16gib=rejected"
+    );
+    Ok(())
+}
+
+/// Lab client that deliberately leaves a live upload transaction incomplete so
+/// the process harness can crash and restart the custodian at that exact seam.
+fn human_streaming_stall(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    const SIZE: u64 = 2 * 1024 * 1024;
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let descriptor = Attachment::descriptor(
+        [0x7d; 16],
+        "interrupted.bin",
+        "application/octet-stream",
+        SIZE,
+        pattern_digest(SIZE)?,
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let record = LogicalRecord::new_streaming(
+        RecordKind::File,
+        HumanMetadata {
+            title: "Interrupted stream".to_owned(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![descriptor],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    let mut start = vec![17];
+    push_bytes(&mut start, &record.to_descriptor_bytes())?;
+    write_frame(&mut tls, &start)?;
+    send_pattern(&mut tls, 1024 * 1024)?;
+    println!("READY streaming-upload-transaction=open");
+    std::io::stdout()
+        .flush()
+        .map_err(|_| Failure::Unavailable)?;
+    let _ = read_frame(&mut tls)?;
+    Err(Failure::Unavailable)
+}
+
+fn send_pattern(output: &mut impl Write, size: u64) -> Result<(), Failure> {
+    let mut position = 0_u64;
+    while position < size {
+        let count = usize::try_from((size - position).min(1024 * 1024))
+            .map_err(|_| Failure::Unavailable)?;
+        let mut chunk = vec![0; count];
+        fill_pattern(&mut chunk, position);
+        write_frame(output, &chunk)?;
+        position += u64::try_from(count).map_err(|_| Failure::Unavailable)?;
+    }
+    Ok(())
+}
+fn fill_pattern(bytes: &mut [u8], start: u64) {
+    const CANARY: &[u8] = b"ticket05-large-stream-canary-";
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        let offset = usize::try_from(start + u64::try_from(index).unwrap()).unwrap();
+        *byte = CANARY[offset % CANARY.len()];
+    }
+}
+fn pattern_digest(size: u64) -> Result<[u8; 32], Failure> {
+    let mut state = pm_crypto::DigestState::new().map_err(|_| Failure::Unavailable)?;
+    let mut position = 0;
+    let mut chunk = vec![0; 8192];
+    while position < size {
+        let count = chunk
+            .len()
+            .min(usize::try_from(size - position).map_err(|_| Failure::Unavailable)?);
+        fill_pattern(&mut chunk[..count], position);
+        state.update(&chunk[..count]);
+        position += u64::try_from(count).map_err(|_| Failure::Unavailable)?;
+    }
+    Ok(state.finish())
+}
+
+#[allow(clippy::too_many_lines)]
 fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
     let metadata = |title: &str, notes: &str| HumanMetadata {
         title: title.to_owned(),
@@ -828,6 +1048,14 @@ fn handle_human_rpc(
         let Ok(request) = read_frame(tls) else {
             return Ok(());
         };
+        if request.first() == Some(&17) {
+            handle_stream_upload(&mut vault, tls, &request[1..])?;
+            continue;
+        }
+        if request.first() == Some(&18) {
+            handle_stream_download(&vault, tls, &request[1..])?;
+            continue;
+        }
         let drop_response = request.first() == Some(&8);
         let response = handle_human_request(&mut vault, &request);
         if drop_response {
@@ -835,6 +1063,100 @@ fn handle_human_rpc(
             return response.map(|_| ());
         }
         write_frame(tls, &response?)?;
+    }
+}
+
+fn handle_stream_upload(
+    tls_vault: &mut HumanVault,
+    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
+    request: &[u8],
+) -> Result<(), Failure> {
+    let mut cursor = Cursor::new(request);
+    let bytes = cursor.bytes()?;
+    cursor.finish()?;
+    let record = LogicalRecord::from_descriptor_bytes(&bytes).map_err(|_| Failure::Unavailable)?;
+    if record.attachments().len() != 1 {
+        return Err(Failure::Unavailable);
+    }
+    let id = *record.attachments()[0].id();
+    let mut reader = FrameReader {
+        tls,
+        buffer: Vec::new(),
+        position: 0,
+        ended: false,
+    };
+    let mut sources = [AttachmentReader::new(id, &mut reader)];
+    let prepared = tls_vault
+        .prepare_create_record_streaming(&record, &mut sources)
+        .map_err(|_| Failure::Unavailable)?;
+    let response = encode_prepared(tls_vault, &prepared)?;
+    write_frame(reader.tls, &response)
+}
+fn handle_stream_download(
+    vault: &HumanVault,
+    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
+    request: &[u8],
+) -> Result<(), Failure> {
+    if request.len() != 32 {
+        return Err(Failure::Unavailable);
+    }
+    let item = request[..16].try_into().map_err(|_| Failure::Unavailable)?;
+    let attachment = request[16..].try_into().map_err(|_| Failure::Unavailable)?;
+    write_frame(tls, &[0])?;
+    let mut writer = FrameWriter { tls };
+    vault
+        .read_attachment_to(item, attachment, &mut writer)
+        .map_err(|_| Failure::Unavailable)?;
+    write_frame(writer.tls, &[0])
+}
+struct FrameReader<'a> {
+    tls: &'a mut rustls::StreamOwned<ServerConnection, UnixStream>,
+    buffer: Vec<u8>,
+    position: usize,
+    ended: bool,
+}
+impl Read for FrameReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if self.position == self.buffer.len() {
+            if self.ended {
+                return Ok(0);
+            }
+            self.buffer.zeroize();
+            self.buffer = read_frame_bounded(self.tls, STREAM_CHUNK_BYTES).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "stream frame unavailable",
+                )
+            })?;
+            self.position = 0;
+            if self.buffer == [0] {
+                self.ended = true;
+                return Ok(0);
+            }
+        }
+        let count = output.len().min(self.buffer.len() - self.position);
+        output[..count].copy_from_slice(&self.buffer[self.position..self.position + count]);
+        self.position += count;
+        Ok(count)
+    }
+}
+impl Drop for FrameReader<'_> {
+    fn drop(&mut self) {
+        self.buffer.zeroize();
+    }
+}
+struct FrameWriter<'a> {
+    tls: &'a mut rustls::StreamOwned<ServerConnection, UnixStream>,
+}
+impl Write for FrameWriter<'_> {
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        write_frame(self.tls, input).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stream frame failed")
+        })?;
+        Ok(input.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.tls.flush()
     }
 }
 
@@ -1074,12 +1396,16 @@ fn write_frame(output: &mut impl Write, value: &[u8]) -> Result<(), Failure> {
 }
 
 fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, Failure> {
+    read_frame_bounded(input, MAX_HUMAN_FRAME)
+}
+
+fn read_frame_bounded(input: &mut impl Read, maximum: usize) -> Result<Vec<u8>, Failure> {
     let mut length = [0_u8; 4];
     input
         .read_exact(&mut length)
         .map_err(|_| Failure::Unavailable)?;
     let length = usize::try_from(u32::from_be_bytes(length)).map_err(|_| Failure::Unavailable)?;
-    if length == 0 || length > MAX_HUMAN_FRAME {
+    if length == 0 || length > maximum {
         return Err(Failure::Unavailable);
     }
     let mut value = vec![0_u8; length];
