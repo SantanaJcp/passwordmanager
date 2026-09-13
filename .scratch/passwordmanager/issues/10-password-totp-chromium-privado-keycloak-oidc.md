@@ -1,7 +1,7 @@
 # 10 — Password/TOTP Chromium privado + Keycloak OIDC
 
 Type: task
-Status: claimed
+Status: resolved
 Owner: sol-10
 Blocked by: 08
 Spec: ../spec.md
@@ -28,23 +28,20 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [x] seis targets se completan en 33.
 - [x] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
 
-- [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
+- [x] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
 ## Answer
-Candidato Linux x86_64 implementado en `codex/pm-10`; evidencia exacta en
+Resuelto por el candidato `5a25586ac9addd65194c000d9a48bf5f459bd284`,
+integrado sin reescritura mediante
+`b7404c305b1433ed65d0a3031ec47b599b7588b1` sobre la rama unificada. El
+perfil P1 real de laboratorio recorre Keycloak 26.7.3, CFT fijado, password y
+TOTP, Authorization Code + PKCE, callback/claims cerrados y aislamiento
+multi-UID. La evidencia TDD, adversaria y de integración está en
 [`docs/verification/ticket-10.md`](../../../docs/verification/ticket-10.md).
-Keycloak 26.7.3 real y CFT 153.0.8010.36 fijado recorren password+TOTP,
-Authorization Code+PKCE S256, callback TLS 1.3, validación OIDC y salida cerrada
-de tokens nuevos. Un required action real pausa solo el intento y su cancelación
-es terminal. CFT es instrumento desechable: no sustituye Chromium propio de
-producto ni completa ticket 29/33 o los seis targets.
 
-No se marca resuelto antes del merger. Form-action e iframe hostiles reales no
-reciben secreto; cuenta instalada discordante no abre el browser; el agente no
-lee perfil/home, memoria del proveedor/browser ni fds CDP. Callback/state y JWT
-firmados adversarios fallan antes del éxito/entrega. La revisión formal Astra
-final sigue separada.
-
+La resolución es únicamente del corte Linux/CFT de este ticket: CFT continúa
+siendo instrumento de laboratorio y no sustituye Chromium propio ni cierra la
+matriz de seis targets de ticket 33 o R09 global.
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
@@ -56,3 +53,11 @@ final sigue separada.
 incluidos DOM/iframe hostiles y denegaciones `/proc`/fds. CFT no sustituye
 Chromium propio ni cierra R09/matriz nativa; no resolver antes del merger.
 
+
+
+2026-09-13 — El merger dedicado conservó CSV/historia/1PUX y movió la
+operación humana aditiva `add-keycloak` al opcode 40 para evitar la colisión
+con CSV 23. `check.sh`, build limpio offline, los nueve laboratorios base y el
+laboratorio web real pasaron. Se preservaron sync17, historia18, CSV19, 1PUX20
+e interfaces09; no se integró 13/12/21, no hubo push, cleanup de worktrees ni
+review formal Astra.

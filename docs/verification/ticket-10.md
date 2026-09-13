@@ -139,4 +139,60 @@ Consequently this is a complete implementation candidate for Ticket 10's
 observable Linux/CFT laboratory slice, not evidence that production P1
 delivery, own-Chromium packaging, R09 as a whole, or six-target compatibility
 is closed. Formal Astra review remains the final DAG gate and merger
-verification is still separate.
+verification is recorded below.
+
+
+## Unified merger verification
+
+Candidate `5a25586ac9addd65194c000d9a48bf5f459bd284`, based on
+`cd52eba20f6b06f338fa027bf05ba64a104b977e`, was merged without history
+rewriting as `b7404c305b1433ed65d0a3031ec47b599b7588b1` on top of unified HEAD
+`cb5654d`. The single semantic code conflict was an additive human-opcode
+collision: CSV keeps opcode 23 and Keycloak enrollment moved to human opcode
+40 in both client and handler. History 25–30, 1PUX's separate streamed route,
+agent attempt opcodes, sync graph handling, and ticket-09 public interfaces
+were preserved. The already-integrated timing clarification was deduplicated.
+
+Merger commands on the integrated tree:
+
+```text
+./scripts/check.sh
+# pinned-input verification, fmt, all workspace targets/tests and clippy: exit 0
+
+./scripts/clean-offline-build.sh
+# removed 10,461 files / 2.4 GiB; locked/offline build in 27.88 s: exit 0
+
+PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.worktrees/10-web-auth/.scratch/lab-artifacts/keycloak/keycloak-26.7.3 \
+PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.worktrees/10-web-auth/.scratch/lab-artifacts/cft/chrome-linux64 \
+./scripts/test-linux-web-auth-lab.sh
+PASS web-auth-p1 keycloak=26.7.3 browser=CFT-153.0.8010.36 oidc=code+PKCE-S256 password+totp=real callback=TLS1.3
+PASS web-auth-isolation provider-uid=5 agent-uid=3 cdp=pipe profile=private original-secrets=absent tokens=new
+PASS web-auth-adversarial dom=form-action+iframe presecret=denied proc-mem+cdp-fds=denied
+PASS web-auth-challenge keycloak-required-action=UPDATE_PASSWORD state=WAITING_FOR_HUMAN cancel=CANCELLED no-resume
+LIMIT product-browser=Chromium-own-NOT_RUN six-native-targets=ticket33 cross-platform=NOT_RUN
+
+sha256sum <CFT>/chrome
+# 79a4ebf6da53e4ceab11844257aabc5166f17b595dc694d6382cbee8ff50565f
+# observed size: 293100864 bytes
+
+git diff --check
+grep -RInE 'TODO|FIXME|todo!|unimplemented!' <ticket-10 changed source/test files>
+# exit 0; no matches
+```
+
+A sequential regression run of all nine previously integrated Linux labs also
+returned exit 0: custody, human transaction, content, authorization, attempts,
+CSV import, three-custodian sync, history, and 1PUX. The ticket-10 process lab
+therefore remained the positive integration evidence rather than being
+replaced by unit tests. It exercised the real fixed Keycloak/CFT processes,
+real password+TOTP, hostile form-action and iframe rejection before secret
+insertion, OIDC callback/claim rejection before success/token release,
+per-attempt profile destruction, inaccessible provider/browser process memory
+and CDP pipe descriptors, WAITING_FOR_HUMAN, and terminal cancellation.
+
+The merger reused the already-extracted candidate instruments. It independently
+rechecked the CFT executable version/hash/size and Keycloak reported version;
+the fetch script retains the exact archive size/hash gates documented above.
+No archive was re-downloaded and no production/browser-host configuration was
+changed. No ticket 13, 12 or 21 code, push, worktree cleanup, or formal Astra
+review was performed.
