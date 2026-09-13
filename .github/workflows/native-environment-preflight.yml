@@ -1,0 +1,65 @@
+name: Native environment preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unix-environments:
+    name: Preflight ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+            platform: linux
+            machine: x86_64
+            runner_arch: X64
+            rust_host: x86_64-unknown-linux-gnu
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux
+            machine: aarch64
+            runner_arch: ARM64
+            rust_host: aarch64-unknown-linux-gnu
+          - target: macos-intel
+            runner: macos-15-intel
+            platform: macos
+            machine: x86_64
+            runner_arch: X64
+            rust_host: x86_64-apple-darwin
+          - target: macos-apple-silicon
+            runner: macos-15
+            platform: macos
+            machine: arm64
+            runner_arch: ARM64
+            rust_host: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Verify native environment only
+        shell: bash
+        run: >-
+          ./scripts/ci/native-preflight-unix.sh
+          '${{ matrix.platform }}'
+          '${{ matrix.machine }}'
+          '${{ matrix.runner_arch }}'
+          '${{ matrix.rust_host }}'
+
+  windows-arm64-environment:
+    name: Preflight windows-arm64
+    runs-on: windows-11-vs2026-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Verify native environment only
+        shell: pwsh
+        run: ./scripts/ci/native-preflight-windows.ps1
