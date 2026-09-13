@@ -160,3 +160,58 @@ OIDC login result.
   compatibility remain ticket 33.
 - Formal Astra review remains the final DAG gate. Ticket resolution and unified
   integration verification belong to the separate merger.
+
+## Unified merger verification
+
+Candidate `6e614d065457cac6f2bdf4aa7289a5ff5f560502`, based on
+`776b0b7bfa906350d000d81d377596f70f8af0f7`, was merged without rewriting
+history as `cb5fcc0bfc542f909b56fb73bf5f8ed49ecb38d5` on top of unified HEAD
+`3e03a897a29fda754a7a5c0f3655265fa91f959b`. The crypto re-export conflict
+was resolved by retaining both Ticket 21's backup types and Ticket 13's passkey
+types. The custody command conflict retained passkey, 1PUX and backup commands.
+
+The first integrated passkey laboratory found an actual wire collision rather
+than being accepted from source inspection: Ticket 13's provisional human
+opcodes 32--34 overlapped Ticket 21's native backup/plaintext/restore opcodes.
+The integrated contract keeps 1PUX 31, backup 32--34 and web setup 40, and moves
+the three internal passkey human operations together to unused closed opcodes
+35--37. Both the passkey and backup real-process laboratories then passed. The
+combined dispatcher also crossed the repository's 100-line clippy limit; only
+the initial passkey-prompt/unlock read was extracted into a helper, preserving
+the same TLS channel and fail-closed parsing.
+
+Final integrated verification reported:
+
+```text
+./scripts/cargo-local.sh test -p pm-vault --test passkey_provider --locked --offline
+# 2 passed; 0 failed
+
+./scripts/check.sh
+# pinned inputs, fmt, workspace/all-target tests and clippy: exit 0
+
+./scripts/clean-offline-build.sh
+# Removed 11,599 files / 3.0 GiB; locked/offline build in 25.90 s: exit 0
+
+git diff --check
+# exit 0
+```
+
+All twelve current `scripts/test-linux-*-lab.sh` laboratories passed on the
+integrated tree: 1PUX, attempts, authorization, backup, content, CSV, custody,
+history, human transaction, passkey, sync and web authentication. The exact
+Ticket 13 observations were:
+
+```text
+PASS passkey-e2e browser=CFT-153.0.8010.36 mv3=real native-messaging=real bridge-uid=3 untrusted-agent-uid=4 agent-channel=tls1.3+rpk+alpn/pm-agent/1 human=tls1.3+rpk+alpn/pm-human/1
+PASS passkey-custody key=independent+encrypted g6=exact registration=explicit-enable assertion=UP+UV audit=atomic restart=durable replay=idempotent
+PASS passkey-adversarial origin+document+extension+host+unknown=denied iframe=no-content-script rogue-rpk=denied revoke-before-sign=denied secrets=absent
+LIMIT cft=laboratory-instrument product-browser=ticket33-NOT_RUN passkey-login=ticket14-NOT_RUN cross-platform=NOT_RUN
+```
+
+The separate web regression also passed real Keycloak 26.7.3 password+TOTP
+OIDC code/PKCE through the private CDP pipe, while the backup regression passed
+PMB1/PMF1, confirmed plaintext and restore over the preserved opcodes. These
+regressions do not convert the passkey assertion into Ticket 14 login evidence
+or CFT into the Ticket 33 product-owned Chromium/six-target deliverable. No
+Ticket 12 code was integrated, no worktree was removed, and no push or formal
+Astra review was performed.
