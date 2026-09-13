@@ -12,11 +12,16 @@ publish = false
 name = "pm-custody"
 path = "src/main.rs"
 
+[[bin]]
+name = "pm-passkey-bridge"
+path = "src/bin/pm-passkey-bridge.rs"
+
 [dependencies]
 aws-lc-rs.workspace = true
 libc.workspace = true
 pm-native-channel.workspace = true
 pm-crypto.workspace = true
+pm-interface.workspace = true
 pm-vault.workspace = true
 rustls.workspace = true
 zeroize.workspace = true

@@ -48,9 +48,10 @@ use pm_vault::{
     AttemptVault, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome,
     AuthRecord, AuthorizationReason, AutonomousAuditVault, CsvDelimiter, CsvEncoding, CsvField,
     CsvImportDecision, CsvImportProfile, CsvMapping, CsvRowStatus, CustomField, DelegatedVault,
-    Destination, GeneratorConfig, HumanCommitError, HumanMetadata, HumanVault, IdempotencyKey,
-    LogicalRecord, LogicalValue, PasswordRecord, PreparedHumanCommand, PrivateKeyFormat,
-    RecordKind, SearchQuery, SourceEncoding, SourceField, StartAttempt, TotpAlgorithm,
+    Destination, GeneratorConfig, HumanCommitError, HumanMetadata, HumanVault, HumanVerification,
+    IdempotencyKey, LogicalRecord, LogicalValue, PasskeyOperation, PasskeyProvider, PasskeyRequest,
+    PasskeyStatus, PasswordRecord, PreparedHumanCommand, PrivateKeyFormat, RecordKind, SearchQuery,
+    SourceEncoding, SourceField, StartAttempt, TotpAlgorithm,
 };
 
 use crate::{Failure, take_path};
@@ -161,6 +162,8 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-streaming-file") => human_streaming_file(&mut arguments),
         Some("human-streaming-stall") => human_streaming_stall(&mut arguments),
         Some("human-csv-import") => human_csv_import(&mut arguments),
+        Some("human-passkey-confirm") => human_passkey_confirm(&mut arguments),
+        Some("human-passkey-enable") => human_passkey_enable(&mut arguments),
         Some("human-history-exercise") => human_history_exercise(&mut arguments),
         Some("human-history-list") => human_history_list(&mut arguments),
         Some("human-history-purge-item") => human_history_purge_item(&mut arguments),
@@ -766,6 +769,192 @@ fn human_csv_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<()
         u8::from(replace_candidates),
     );
     Ok(())
+}
+
+fn human_passkey_confirm(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    let request_id = decode_hex_16(&take_path(arguments, "--request")?)?;
+    let verification_flag = arguments.next().ok_or(Failure::Usage)?;
+    let verification_value = arguments.next().ok_or(Failure::Usage)?;
+    if verification_flag != "--verification" {
+        return Err(Failure::Usage);
+    }
+    let verification = match verification_value.to_str() {
+        Some("presence") => 1,
+        Some("verified") => 2,
+        _ => return Err(Failure::Usage),
+    };
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    let mut peek = vec![0];
+    peek.extend_from_slice(&request_id);
+    write_frame(&mut tls, &peek)?;
+    let response = read_frame(&mut tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let operation = match cursor.fixed(1)? {
+        [1] => "register",
+        [2] => "assert",
+        _ => return Err(Failure::Unavailable),
+    };
+    let required_uv = match cursor.fixed(1)? {
+        [1] => true,
+        [2 | 3] => false,
+        _ => return Err(Failure::Unavailable),
+    };
+    let rp_id = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+    let account = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+    let origin = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+    let document = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+    cursor.finish()?;
+    if required_uv && verification != 2 {
+        return Err(Failure::Unavailable);
+    }
+    let mut tty = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|_| Failure::Unavailable)?;
+    if unsafe { libc::isatty(tty.as_raw_fd()) } != 1 {
+        return Err(Failure::Unavailable);
+    }
+    writeln!(
+        tty,
+        "Passkey {operation}\nRP: {rp_id}\nAccount: {account}\nOrigin: {origin}\nDocument: {document}\nVerification: {}\nType APPROVE {} to continue:",
+        if verification == 2 { "UP+UV" } else { "UP" },
+        hex(&request_id),
+    )
+    .and_then(|()| tty.flush())
+    .map_err(|_| Failure::Unavailable)?;
+    let approval = read_tty_line(&mut tty, 128)?;
+    if approval != format!("APPROVE {}", hex(&request_id)) {
+        return Err(Failure::Unavailable);
+    }
+    write!(tty, "Master password (fresh reauthentication): ")
+        .and_then(|()| tty.flush())
+        .map_err(|_| Failure::Unavailable)?;
+    let password = Zeroizing::new(read_tty_password(&mut tty)?);
+    writeln!(tty).map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    let mut confirm = vec![if operation == "register" { 35 } else { 36 }];
+    confirm.extend_from_slice(&request_id);
+    confirm.push(verification);
+    write_frame(&mut tls, &confirm)?;
+    let response = read_frame(&mut tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let status = PasskeyStatus::from_bytes(&cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+    cursor.finish()?;
+    if matches!(status, PasskeyStatus::Waiting(_)) {
+        return Err(Failure::Unavailable);
+    }
+    println!(
+        "PASS passkey-human operation={operation} presence=1 verification={} tls-rpk=1 alpn=pm-human/1 request={}",
+        if verification == 2 {
+            "fresh"
+        } else {
+            "presence-only"
+        },
+        hex(&request_id)
+    );
+    Ok(())
+}
+
+fn read_tty_line(tty: &mut File, maximum: usize) -> Result<String, Failure> {
+    let mut output = Vec::new();
+    loop {
+        let mut byte = [0_u8; 1];
+        tty.read_exact(&mut byte)
+            .map_err(|_| Failure::Unavailable)?;
+        if byte[0] == b'\n' {
+            break;
+        }
+        if byte[0] != b'\r' {
+            output.push(byte[0]);
+        }
+        if output.len() > maximum {
+            output.zeroize();
+            return Err(Failure::Unavailable);
+        }
+    }
+    String::from_utf8(output).map_err(|_| Failure::Unavailable)
+}
+
+fn human_passkey_enable(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    let request_id = decode_hex_16(&take_path(arguments, "--request")?)?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut tty = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|_| Failure::Unavailable)?;
+    if unsafe { libc::isatty(tty.as_raw_fd()) } != 1 {
+        return Err(Failure::Unavailable);
+    }
+    writeln!(
+        tty,
+        "Enable delegated use for completed passkey request {}. Type ENABLE {} to continue:",
+        hex(&request_id),
+        hex(&request_id),
+    )
+    .and_then(|()| tty.flush())
+    .map_err(|_| Failure::Unavailable)?;
+    if read_tty_line(&mut tty, 128)? != format!("ENABLE {}", hex(&request_id)) {
+        return Err(Failure::Unavailable);
+    }
+    write!(tty, "Master password (fresh reauthentication): ")
+        .and_then(|()| tty.flush())
+        .map_err(|_| Failure::Unavailable)?;
+    let password = Zeroizing::new(read_tty_password(&mut tty)?);
+    writeln!(tty).map_err(|_| Failure::Unavailable)?;
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    let mut request = vec![37];
+    request.extend_from_slice(&request_id);
+    write_frame(&mut tls, &request)?;
+    expect_status(&read_frame(&mut tls)?, 0)?;
+    println!(
+        "PASS passkey-enable explicit=1 tls-rpk=1 alpn=pm-human/1 request={}",
+        hex(&request_id)
+    );
+    Ok(())
+}
+
+fn read_tty_password(tty: &mut File) -> Result<Vec<u8>, Failure> {
+    let fd = tty.as_raw_fd();
+    let mut original: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &raw mut original) } != 0 {
+        return Err(Failure::Unavailable);
+    }
+    let mut hidden = original;
+    hidden.c_lflag &= !libc::ECHO;
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw const hidden) } != 0 {
+        return Err(Failure::Unavailable);
+    }
+    let result = read_tty_line(tty, 1024).map(String::into_bytes);
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw const original) } != 0 {
+        return Err(Failure::Unavailable);
+    }
+    result
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2308,7 +2497,7 @@ fn handle_human_rpc(
     service: &VaultService,
     channel: AuthenticatedHumanChannel,
 ) -> Result<(), Failure> {
-    let unlock = read_frame(tls)?;
+    let unlock = read_human_unlock_frame(tls, service)?;
     let mut cursor = Cursor::new(&unlock);
     cursor.expect(&[1])?;
     let mut password = Zeroizing::new(cursor.bytes()?);
@@ -2371,13 +2560,64 @@ fn handle_human_rpc(
             continue;
         }
         let drop_response = request.first() == Some(&8);
-        let response = handle_human_request(&mut vault, service.device, &request);
+        let response = handle_human_request(&mut vault, service, &request);
         if drop_response {
             let _ = tls.sock.shutdown(Shutdown::Both);
             return response.map(|_| ());
         }
         write_frame(tls, &response?)?;
     }
+}
+
+fn read_human_unlock_frame(
+    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
+    service: &VaultService,
+) -> Result<Vec<u8>, Failure> {
+    let mut unlock = read_frame(tls)?;
+    if unlock.first() == Some(&0) {
+        let request_id: [u8; 16] = unlock
+            .get(1..)
+            .ok_or(Failure::Unavailable)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?;
+        let provider = passkey_provider(service)?;
+        let prompt = provider
+            .pending_prompt(request_id)
+            .map_err(|_| Failure::Unavailable)?
+            .ok_or(Failure::Unavailable)?;
+        let mut response = vec![0];
+        response.push(match prompt.operation() {
+            PasskeyOperation::Create => 1,
+            PasskeyOperation::Get => 2,
+        });
+        response.push(match prompt.user_verification() {
+            pm_vault::UserVerificationRequirement::Required => 1,
+            pm_vault::UserVerificationRequirement::Preferred => 2,
+            pm_vault::UserVerificationRequirement::Discouraged => 3,
+        });
+        for field in [
+            prompt.rp_id().as_bytes(),
+            prompt.account().as_bytes(),
+            prompt.origin().as_bytes(),
+            prompt.document_id().as_bytes(),
+        ] {
+            push_bytes(&mut response, field)?;
+        }
+        write_frame(tls, &response)?;
+        unlock = read_frame(tls)?;
+    }
+    Ok(unlock)
+}
+
+fn passkey_provider(service: &VaultService) -> Result<PasskeyProvider, Failure> {
+    let delegated = DelegatedVault::open(
+        &service.path,
+        service.device,
+        Arc::clone(&service.audit_custody),
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let attempts = AttemptVault::open(delegated).map_err(|_| Failure::Unavailable)?;
+    PasskeyProvider::open(attempts).map_err(|_| Failure::Unavailable)
 }
 
 fn handle_agent_discovery(
@@ -2430,6 +2670,7 @@ fn handle_agent_discovery(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_attempt_request(
     service: &VaultService,
     peer: &AgentPeer,
@@ -2445,6 +2686,22 @@ fn handle_attempt_request(
         .map_err(|_| Failure::Unavailable)?,
     )
     .map_err(|_| Failure::Unavailable)?;
+    if opcode == 41 {
+        let request = PasskeyRequest::from_bytes(rest).map_err(|_| Failure::Unavailable)?;
+        let provider = PasskeyProvider::open(attempts).map_err(|_| Failure::Unavailable)?;
+        return match provider.begin_for_peer(peer, &request) {
+            Ok(status) => encode_passkey_status(Some(status)),
+            Err(_) => Ok(vec![1]),
+        };
+    }
+    if opcode == 42 {
+        let request_id = rest.try_into().map_err(|_| Failure::Unavailable)?;
+        let provider = PasskeyProvider::open(attempts).map_err(|_| Failure::Unavailable)?;
+        return match provider.response_for_peer(peer, request_id) {
+            Ok(status) => encode_passkey_status(status),
+            Err(_) => Ok(vec![1]),
+        };
+    }
     let outcome = match opcode {
         30 => {
             let mut c = Cursor::new(rest);
@@ -2497,12 +2754,48 @@ fn handle_attempt_request(
         }
         31 => attempts.get(peer, rest.try_into().map_err(|_| Failure::Unavailable)?),
         32 => attempts.cancel(peer, rest.try_into().map_err(|_| Failure::Unavailable)?),
+        40 => {
+            let mut cursor = Cursor::new(rest);
+            let item = cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            let issued = i64::try_from(cursor.u64()?).map_err(|_| Failure::Unavailable)?;
+            let nonce = cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            let origin = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+            cursor.finish()?;
+            let key = IdempotencyKey::new(issued, nonce).map_err(|_| Failure::Unavailable)?;
+            let start = StartAttempt::new(
+                item,
+                "vault-webauthn-provider",
+                1,
+                "webauthn",
+                &origin,
+                b"keycloak-webauthn/1".to_vec(),
+                key,
+            )
+            .map_err(|_| Failure::Unavailable)?;
+            attempts.start(peer, &start)
+        }
         _ => return Err(Failure::Unavailable),
     };
     match outcome {
         Ok(snapshot) => encode_attempt_snapshot(&snapshot),
         Err(error) => Ok(vec![attempt_error_status(&error)]),
     }
+}
+
+fn encode_passkey_status(status: Option<PasskeyStatus>) -> Result<Vec<u8>, Failure> {
+    let mut response = vec![0];
+    if let Some(status) = status {
+        push_bytes(&mut response, &status.to_bytes())?;
+    } else {
+        push_bytes(&mut response, &[])?;
+    }
+    Ok(response)
 }
 
 fn encode_attempt_snapshot(snapshot: &pm_vault::AttemptSnapshot) -> Result<Vec<u8>, Failure> {
@@ -3082,7 +3375,7 @@ fn handle_1pux_import(
 #[allow(clippy::too_many_lines)]
 fn handle_human_request(
     vault: &mut HumanVault,
-    device: [u8; 16],
+    service: &VaultService,
     request: &[u8],
 ) -> Result<Vec<u8>, Failure> {
     let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
@@ -3277,7 +3570,7 @@ fn handle_human_request(
             let limit = usize::try_from(cursor.u32()?).map_err(|_| Failure::Unavailable)?;
             cursor.finish()?;
             let query = vault
-                .query_audit(device, generation, from_seq, limit)
+                .query_audit(service.device, generation, from_seq, limit)
                 .map_err(|_| Failure::Unavailable)?;
             let mut response = vec![0];
             response.extend_from_slice(
@@ -3303,7 +3596,7 @@ fn handle_human_request(
             let through_seq = cursor.u64()?;
             cursor.finish()?;
             let purge = vault
-                .prepare_audit_purge(device, generation, through_seq)
+                .prepare_audit_purge(service.device, generation, through_seq)
                 .map_err(|_| Failure::Unavailable)?;
             encode_prepared(vault, purge.prepared())
         }
@@ -3449,6 +3742,54 @@ fn handle_human_request(
                 .map_err(|_| Failure::Unavailable)?;
             encode_prepared(vault, &prepared)
         }
+        35 | 36 => {
+            let mut cursor = Cursor::new(rest);
+            let request_id = cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            let verification = match cursor.fixed(1)? {
+                [1] => HumanVerification::Presence,
+                [2] => HumanVerification::Verified,
+                _ => return Err(Failure::Unavailable),
+            };
+            cursor.finish()?;
+            let provider = passkey_provider(service)?;
+            let status = if opcode == 35 {
+                let request = provider
+                    .pending_request(request_id)
+                    .map_err(|_| Failure::Unavailable)?
+                    .filter(|value| value.operation() == PasskeyOperation::Create)
+                    .ok_or(Failure::Unavailable)?;
+                let registration = vault
+                    .prepare_passkey_registration(&request)
+                    .map_err(|_| Failure::Unavailable)?;
+                commit_authority(vault, registration.prepared())?;
+                provider
+                    .response(request_id)
+                    .map_err(|_| Failure::Unavailable)?
+                    .ok_or(Failure::Unavailable)?
+            } else {
+                provider
+                    .confirm_assertion(vault, request_id, verification)
+                    .map_err(|_| Failure::Unavailable)?
+            };
+            let mut response = vec![0];
+            push_bytes(&mut response, &status.to_bytes())?;
+            Ok(response)
+        }
+        37 => {
+            let request_id = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let provider = passkey_provider(service)?;
+            let item = provider
+                .registered_item(request_id)
+                .map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_enable(item)
+                .map_err(|_| Failure::Unavailable)?;
+            commit_authority(vault, &prepared)?;
+            Ok(vec![0])
+        }
         25 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
             let history = vault.history(item).map_err(|_| Failure::Unavailable)?;
@@ -3566,6 +3907,7 @@ fn handle_human_request(
             authorization_add_keycloak(vault)?;
             Ok(vec![0])
         }
+
         _ => Err(Failure::Unavailable),
     }
 }

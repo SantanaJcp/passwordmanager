@@ -17,7 +17,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     AgentIdentity, AgentPeer, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent,
-    AuditOutcome, AuthorizationError, DelegatedVault, RecordKind, TotpAlgorithm, audit,
+    AuditOutcome, AuthorizationError, DelegatedVault, HumanVault, HumanVerification, PasskeyError,
+    PasskeyOperation, PasskeyRequest, PasskeyStatus, RecordKind, TotpAlgorithm, audit,
 };
 
 const ATTEMPT_LIFETIME_US: i64 = 24 * 60 * 60 * 1_000_000;
@@ -356,6 +357,280 @@ impl AttemptVault {
         })
     }
 
+    pub(crate) fn path(&self) -> &std::path::Path {
+        self.delegated.path()
+    }
+
+    pub(crate) fn validate_peer(&self, peer: &AgentPeer) -> Result<(), AttemptError> {
+        Ok(self.delegated.validate_peer(peer)?)
+    }
+
+    pub(crate) fn seal_passkey_blob(
+        &self,
+        request_id: [u8; 16],
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, AttemptError> {
+        Ok(self.custody.seal_attempt_state(
+            *self.trusted.vault_id(),
+            self.device,
+            self.generation,
+            request_id,
+            bytes,
+        )?)
+    }
+
+    pub(crate) fn open_passkey_blob(
+        &self,
+        request_id: [u8; 16],
+        package: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, AttemptError> {
+        Ok(Zeroizing::new(self.custody.open_attempt_state(
+            package,
+            *self.trusted.vault_id(),
+            self.device,
+            self.generation,
+            request_id,
+        )?))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn begin_passkey(
+        &self,
+        request: &PasskeyRequest,
+    ) -> Result<PasskeyStatus, PasskeyError> {
+        if request.operation() != PasskeyOperation::Get {
+            return Err(PasskeyError::InvalidRequest);
+        }
+        let attempt = *request.attempt_id().ok_or(PasskeyError::InvalidRequest)?;
+        let now = now_us()?;
+        let mut connection = open(self.delegated.path())?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_clock(&tx, now)?;
+        let (package, subject, generation): (Vec<u8>, Vec<u8>, i64) = tx
+            .query_row(
+                "SELECT state_package,owner_subject,owner_generation FROM authentication_attempts WHERE attempt_id=?1",
+                [attempt.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or(PasskeyError::NotFound)?;
+        let identity = AgentIdentity {
+            subject: fixed(&subject)?,
+            generation: u64::try_from(generation).map_err(|_| PasskeyError::Integrity)?,
+        };
+        let mut snapshot = decode_snapshot(&self.custody.open_attempt_state(
+            &package,
+            *self.trusted.vault_id(),
+            self.device,
+            self.generation,
+            attempt,
+        )?)?;
+        if snapshot.state != AttemptState::Created || now >= snapshot.expires_at_us {
+            return Err(if now >= snapshot.expires_at_us {
+                PasskeyError::Expired
+            } else {
+                PasskeyError::InvalidRequest
+            });
+        }
+        let (destination, context, method) = decode_execution(&self.custody.open_attempt_state(
+            &package,
+            *self.trusted.vault_id(),
+            self.device,
+            self.generation,
+            attempt,
+        )?)?;
+        if destination != request.origin()
+            || context != b"keycloak-webauthn/1"
+            || method != "webauthn"
+        {
+            return Err(PasskeyError::InvalidRequest);
+        }
+        let operational = self
+            .delegated
+            .operational_credential_for_identity_in(&tx, identity, snapshot.credential_id)
+            .map_err(AttemptError::from)?;
+        if operational.descriptor.kind() != RecordKind::Passkey
+            || operational.descriptor.revision_id() != &snapshot.revision_id
+            || operational.descriptor.destination() != Some(request.origin())
+        {
+            return Err(PasskeyError::Revoked);
+        }
+        let material = passkey_material(&operational.auth)?;
+        if material.rp_id != request.rp_id()
+            || !request
+                .credential_ids()
+                .iter()
+                .any(|id| id == &material.credential_id)
+        {
+            return Err(PasskeyError::InvalidRequest);
+        }
+        let request_bytes = request.to_bytes();
+        let request_digest = digest(&request_bytes);
+        let request_package = self.seal_passkey_blob(*request.request_id(), &request_bytes)?;
+        let expires = now
+            .saturating_add(5 * 60 * 1_000_000)
+            .min(snapshot.expires_at_us);
+        let waiting = PasskeyStatus::Waiting(crate::passkey::prompt_for_account(
+            request,
+            &material.user_name,
+        ));
+        let waiting_package = self.seal_passkey_blob(
+            *request.request_id(),
+            &crate::passkey::encode_status(&waiting),
+        )?;
+        tx.execute(
+            "INSERT INTO passkey_requests(request_id,request_digest,operation,attempt_id,request,state,item_id,response,created_at_us,expires_at_us) VALUES(?1,?2,'get',?3,?4,'waiting',?5,?6,?7,?8)",
+            params![request.request_id().as_slice(), request_digest.as_slice(), attempt.as_slice(), request_package, snapshot.credential_id.as_slice(), waiting_package, now, expires],
+        )?;
+        snapshot.state = AttemptState::WaitingForHuman;
+        snapshot.reason = Some("PASSKEY_HUMAN_CONFIRMATION".into());
+        update_snapshot(
+            &tx,
+            &self.custody,
+            *self.trusted.vault_id(),
+            self.device,
+            self.generation,
+            &snapshot,
+            Some((&destination, &context, &method)),
+            now,
+        )?;
+        append_audit(
+            &tx,
+            &self.trusted,
+            self.device,
+            &self.custody,
+            &snapshot,
+            AuditAction::AuthState,
+            AuditOutcome::Accepted,
+            now,
+        )?;
+        tx.commit()?;
+        Ok(waiting)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn confirm_passkey(
+        &self,
+        human: &HumanVault,
+        request_id: [u8; 16],
+        verification: HumanVerification,
+    ) -> Result<PasskeyStatus, PasskeyError> {
+        let now = now_us()?;
+        let mut connection = open(self.delegated.path())?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_clock(&tx, now)?;
+        let (request_bytes, state, expires): (Vec<u8>, String, i64) = tx
+            .query_row(
+                "SELECT request,state,expires_at_us FROM passkey_requests WHERE request_id=?1 AND operation='get'",
+                [request_id.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or(PasskeyError::NotFound)?;
+        let request_plain = self.open_passkey_blob(request_id, &request_bytes)?;
+        let request = PasskeyRequest::from_bytes(&request_plain)?;
+        if state == "complete" {
+            let response: Vec<u8> = tx.query_row(
+                "SELECT response FROM passkey_requests WHERE request_id=?1",
+                [request_id.as_slice()],
+                |row| row.get(0),
+            )?;
+            let response = self.open_passkey_blob(request_id, &response)?;
+            return crate::passkey::decode_status(&response);
+        }
+        if state != "waiting" || now >= expires {
+            return Err(if now >= expires {
+                PasskeyError::Expired
+            } else {
+                PasskeyError::Integrity
+            });
+        }
+        crate::passkey::require_verification(request.user_verification(), verification)?;
+        let attempt = *request.attempt_id().ok_or(PasskeyError::Integrity)?;
+        let (package, subject, generation): (Vec<u8>, Vec<u8>, i64) = tx.query_row(
+            "SELECT state_package,owner_subject,owner_generation FROM authentication_attempts WHERE attempt_id=?1",
+            [attempt.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let identity = AgentIdentity {
+            subject: fixed(&subject)?,
+            generation: u64::try_from(generation).map_err(|_| PasskeyError::Integrity)?,
+        };
+        let mut snapshot = decode_snapshot(&self.custody.open_attempt_state(
+            &package,
+            *self.trusted.vault_id(),
+            self.device,
+            self.generation,
+            attempt,
+        )?)?;
+        if snapshot.state != AttemptState::WaitingForHuman || now >= snapshot.expires_at_us {
+            return Err(PasskeyError::Expired);
+        }
+        let operational = self
+            .delegated
+            .operational_credential_for_identity_in(&tx, identity, snapshot.credential_id)
+            .map_err(AttemptError::from)?;
+        if operational.descriptor.kind() != RecordKind::Passkey
+            || operational.descriptor.revision_id() != &snapshot.revision_id
+            || operational.descriptor.destination() != Some(request.origin())
+        {
+            return Err(PasskeyError::Revoked);
+        }
+        let material = passkey_material(&operational.auth)?;
+        if material.rp_id != request.rp_id()
+            || !request
+                .credential_ids()
+                .iter()
+                .any(|id| id == &material.credential_id)
+        {
+            return Err(PasskeyError::InvalidRequest);
+        }
+        let assertion = human.sign_passkey_assertion(
+            snapshot.credential_id,
+            &request,
+            verification == HumanVerification::Verified,
+        )?;
+        let result = PasskeyStatus::Assertion(assertion);
+        let response = crate::passkey::encode_status(&result);
+        let response_package = self.seal_passkey_blob(request_id, &response)?;
+        let (destination, context, method) = decode_execution(&self.custody.open_attempt_state(
+            &package,
+            *self.trusted.vault_id(),
+            self.device,
+            self.generation,
+            attempt,
+        )?)?;
+        snapshot.state = AttemptState::Succeeded;
+        snapshot.reason = None;
+        snapshot.result = Some(response.clone());
+        update_snapshot(
+            &tx,
+            &self.custody,
+            *self.trusted.vault_id(),
+            self.device,
+            self.generation,
+            &snapshot,
+            Some((&destination, &context, &method)),
+            now,
+        )?;
+        tx.execute(
+            "UPDATE passkey_requests SET state='complete',response=?2 WHERE request_id=?1 AND state='waiting'",
+            params![request_id.as_slice(), response_package],
+        )?;
+        append_audit(
+            &tx,
+            &self.trusted,
+            self.device,
+            &self.custody,
+            &snapshot,
+            AuditAction::AuthState,
+            AuditOutcome::Succeeded,
+            now,
+        )?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     pub fn start(
         &self,
         peer: &AgentPeer,
@@ -383,12 +658,13 @@ impl AttemptVault {
         {
             return Err(AttemptError::InvalidArgument);
         }
-        let op = self
-            .delegated
-            .operational_credential(peer, request.credential_id)?;
-        let supported = request.integration_version == 1
-            && op.descriptor.kind() == RecordKind::Password
-            && op.descriptor.destination() == Some(request.destination.as_str())
+        let op = self.delegated.operational_credential_for_identity_in(
+            &tx,
+            identity,
+            request.credential_id,
+        )?;
+        let password_profile = op.descriptor.kind() == RecordKind::Password
+            && request.integration_version == 1
             && match request.integration_id.as_str() {
                 "controlled.external" => request.method == "password",
                 "keycloak-browser-oidc" => {
@@ -397,7 +673,14 @@ impl AttemptVault {
                 }
                 _ => false,
             };
-        if !supported {
+        let passkey_profile = op.descriptor.kind() == RecordKind::Passkey
+            && request.method == "webauthn"
+            && request.integration_id == "vault-webauthn-provider"
+            && request.integration_version == 1
+            && request.context == b"keycloak-webauthn/1";
+        if op.descriptor.destination() != Some(request.destination.as_str())
+            || !(password_profile || passkey_profile)
+        {
             return Err(AttemptError::CredentialUnavailable);
         }
         let per_agent:i64=tx.query_row("SELECT count(*) FROM authentication_attempts WHERE owner_subject=?1 AND owner_generation=?2 AND state IN ('created','running','waiting_for_human','indeterminate')",params![identity.subject().as_slice(),i64::try_from(identity.generation()).map_err(|_|AttemptError::Integrity)?],|r|r.get(0))?;
@@ -1099,6 +1382,75 @@ fn password_material(
         password,
         totp,
     })
+}
+
+struct PasskeyMaterial {
+    rp_id: String,
+    credential_id: Vec<u8>,
+    user_name: String,
+}
+
+fn passkey_material(auth: &[u8]) -> Result<PasskeyMaterial, AttemptError> {
+    let mut decoder = Decoder::new(auth);
+    let count = decoder
+        .array()
+        .map_err(|_| AttemptError::Integrity)?
+        .ok_or(AttemptError::Integrity)?;
+    for _ in 0..count {
+        let fields = decoder
+            .map()
+            .map_err(|_| AttemptError::Integrity)?
+            .ok_or(AttemptError::Integrity)?;
+        let mut method = None;
+        let mut rp_id = None;
+        let mut credential_id = None;
+        let mut user_name = None;
+        for _ in 0..fields {
+            match decoder.str().map_err(|_| AttemptError::Integrity)? {
+                "method" => {
+                    method = Some(
+                        decoder
+                            .str()
+                            .map_err(|_| AttemptError::Integrity)?
+                            .to_owned(),
+                    );
+                }
+                "rp_id" => {
+                    rp_id = Some(
+                        decoder
+                            .str()
+                            .map_err(|_| AttemptError::Integrity)?
+                            .to_owned(),
+                    );
+                }
+                "credential_id" => {
+                    credential_id = Some(
+                        decoder
+                            .bytes()
+                            .map_err(|_| AttemptError::Integrity)?
+                            .to_vec(),
+                    );
+                }
+                "user_name" => {
+                    user_name = Some(
+                        decoder
+                            .str()
+                            .map_err(|_| AttemptError::Integrity)?
+                            .to_owned(),
+                    );
+                }
+                _ => decoder.skip().map_err(|_| AttemptError::Integrity)?,
+            }
+        }
+        if method.as_deref() == Some("passkey") {
+            return Ok(PasskeyMaterial {
+                rp_id: rp_id.ok_or(AttemptError::Integrity)?,
+                credential_id: credential_id.ok_or(AttemptError::Integrity)?,
+                user_name: user_name.ok_or(AttemptError::Integrity)?,
+            });
+        }
+    }
+    Err(AttemptError::CredentialUnavailable)
 }
 fn load_owned(
     tx: &Transaction<'_>,
