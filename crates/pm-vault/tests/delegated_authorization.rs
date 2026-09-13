@@ -22,6 +22,94 @@ use pm_vault::{
 };
 
 #[test]
+fn keycloak_attempt_lease_carries_password_and_matching_totp_only_to_trusted_adapter() {
+    use pm_vault::{AuthRecord, Destination, HumanMetadata, TotpAlgorithm};
+
+    let directory = TestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let record = LogicalRecord::new(
+        RecordKind::Password,
+        HumanMetadata {
+            title: "Synthetic Keycloak account".to_owned(),
+            destinations: vec![Destination {
+                label: "profile".to_owned(),
+                value: "keycloak-lab".to_owned(),
+            }],
+            tags: Vec::new(),
+            favorite: false,
+            notes: String::new(),
+            fields: Vec::new(),
+            source_fields: Vec::new(),
+        },
+        vec![
+            AuthRecord::Password {
+                username: "alice".to_owned(),
+                password: b"synthetic-keycloak-password-canary".to_vec(),
+                destination_refs: vec![0],
+            },
+            AuthRecord::Totp {
+                secret: b"12345678901234567890".to_vec(),
+                algorithm: TotpAlgorithm::Sha1,
+                digits: 6,
+                period: 30,
+                t0: 0,
+                issuer: "pm".to_owned(),
+                account: "alice".to_owned(),
+                destination_refs: vec![0],
+            },
+        ],
+        Vec::new(),
+    )
+    .unwrap();
+    let item = commit_create(&mut human, &record);
+    enroll(&mut human, &enrollment(AGENT_A, REQUEST_A, &RPK_A), 1);
+    let prepared = human.prepare_delegated_resume().unwrap();
+    commit(&mut human, &prepared);
+    let prepared = human.prepare_enable(item).unwrap();
+    commit(&mut human, &prepared);
+    drop(human);
+
+    let peer = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
+    let attempts =
+        AttemptVault::open(DelegatedVault::open(&path, DEVICE, custody).unwrap()).unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
+    )
+    .unwrap();
+    let request = StartAttempt::new(
+        item,
+        "keycloak-browser-oidc",
+        1,
+        "password_totp",
+        "keycloak-lab",
+        b"keycloak-lab".to_vec(),
+        IdempotencyKey::new(now, [0x10; 16]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        attempts.start(&peer, &request).unwrap().state(),
+        AttemptState::Created
+    );
+    let lease = attempts.claim_next().unwrap().unwrap();
+    assert_eq!(lease.integration_id(), "keycloak-browser-oidc");
+    assert_eq!(lease.method(), "password_totp");
+    assert_eq!(lease.username(), "alice");
+    assert_eq!(lease.password(), b"synthetic-keycloak-password-canary");
+    let totp = lease.totp().unwrap();
+    assert_eq!(totp.secret(), b"12345678901234567890");
+    assert_eq!(totp.algorithm(), TotpAlgorithm::Sha1);
+    assert_eq!(totp.digits(), 6);
+    assert_eq!(totp.period(), 30);
+    assert_eq!(totp.t0(), 0);
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn durable_attempts_pin_revision_owner_idempotency_and_never_reexecute_indeterminate() {
     let directory = TestDir::new();

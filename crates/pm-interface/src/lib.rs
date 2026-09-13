@@ -390,26 +390,43 @@ impl Engine for VaultEngine {
 /// This currently returns no runtime error; the result is fallible to keep
 /// the adapter seam uniform with future capability providers.
 pub fn capabilities_result() -> Result<Json, ErrorCode> {
-    // controlled.external is the only integration with an executed provider
-    // laboratory in this release; designs without evidence are not listed.
     Ok(Json::Object(vec![
         ("protocol".into(), Json::Number("1".into())),
         (
             "integrations".into(),
-            Json::Array(vec![Json::Object(vec![
-                ("id".into(), Json::String("controlled.external".into())),
-                ("version".into(), Json::Number("1".into())),
-                (
-                    "methods".into(),
-                    Json::Array(vec![Json::String("password".into())]),
-                ),
-                ("availability".into(), Json::String("verified".into())),
-                ("input_schema".into(), schema_start()),
-                (
-                    "result_schema".into(),
-                    Json::Object(vec![("type".into(), Json::String("object".into()))]),
-                ),
-            ])]),
+            Json::Array(vec![
+                Json::Object(vec![
+                    ("id".into(), Json::String("controlled.external".into())),
+                    ("version".into(), Json::Number("1".into())),
+                    (
+                        "methods".into(),
+                        Json::Array(vec![Json::String("password".into())]),
+                    ),
+                    ("availability".into(), Json::String("verified".into())),
+                    ("input_schema".into(), schema_start()),
+                    (
+                        "result_schema".into(),
+                        Json::Object(vec![("type".into(), Json::String("object".into()))]),
+                    ),
+                ]),
+                Json::Object(vec![
+                    ("id".into(), Json::String("keycloak-browser-oidc".into())),
+                    ("version".into(), Json::Number("1".into())),
+                    (
+                        "methods".into(),
+                        Json::Array(vec![
+                            Json::String("password".into()),
+                            Json::String("password_totp".into()),
+                        ]),
+                    ),
+                    ("availability".into(), Json::String("verified".into())),
+                    ("input_schema".into(), schema_start()),
+                    (
+                        "result_schema".into(),
+                        Json::Object(vec![("kind".into(), Json::String("oidc_tokens".into()))]),
+                    ),
+                ]),
+            ]),
         ),
         (
             "limits".into(),
@@ -487,7 +504,7 @@ impl VaultEngine {
                     ),
                     (
                         "integrations".into(),
-                        Json::Array(vec![Json::String("controlled.external".into())]),
+                        discovery_integrations(credential.destination()),
                     ),
                 ])
             })
@@ -551,7 +568,7 @@ impl VaultEngine {
         self.attempts
             .start(&self.peer, &request)
             .map_err(|error| map_attempt(&error))
-            .map(|value| snapshot(&value))
+            .and_then(|value| snapshot(&value))
     }
     fn get(&self, params: &Json) -> Result<Json, ErrorCode> {
         reject_unknown(params, &["attempt_id"])?;
@@ -560,7 +577,7 @@ impl VaultEngine {
         self.attempts
             .get(&self.peer, id)
             .map_err(|error| map_attempt(&error))
-            .map(|value| snapshot(&value))
+            .and_then(|value| snapshot(&value))
     }
     fn cancel(&self, params: &Json) -> Result<Json, ErrorCode> {
         reject_unknown(params, &["attempt_id"])?;
@@ -569,12 +586,21 @@ impl VaultEngine {
         self.attempts
             .cancel(&self.peer, id)
             .map_err(|error| map_attempt(&error))
-            .map(|value| snapshot(&value))
+            .and_then(|value| snapshot(&value))
     }
 }
 
-fn snapshot(value: &pm_vault::AttemptSnapshot) -> Json {
-    Json::Object(vec![
+fn discovery_integrations(destination: Option<&str>) -> Json {
+    let mut values = vec![Json::String("controlled.external".into())];
+    if destination == Some("keycloak-lab") {
+        values.push(Json::String("keycloak-browser-oidc".into()));
+    }
+    Json::Array(values)
+}
+
+fn snapshot(value: &pm_vault::AttemptSnapshot) -> Result<Json, ErrorCode> {
+    let result = public_attempt_result(value.integration_id(), value.result())?;
+    Ok(Json::Object(vec![
         ("attempt_id".into(), Json::String(hex(value.attempt_id()))),
         (
             "credential_id".into(),
@@ -604,9 +630,59 @@ fn snapshot(value: &pm_vault::AttemptSnapshot) -> Json {
                 .reason()
                 .map_or(Json::Null, |v| Json::String(v.into())),
         ),
-        // Provider bytes never cross the delegated interface without a typed G3 schema.
-        ("result".into(), Json::Null),
-    ])
+        ("result".into(), result),
+    ]))
+}
+
+/// Converts opaque provider bytes to the integration's closed public schema.
+/// Unknown integrations and absent results remain redacted.
+///
+/// # Errors
+/// Returns `Internal` if a Keycloak result is malformed or has extra fields.
+pub fn public_attempt_result(
+    integration_id: &str,
+    result: Option<&[u8]>,
+) -> Result<Json, ErrorCode> {
+    const REQUIRED: [&str; 10] = [
+        "kind",
+        "issuer",
+        "subject",
+        "client_id",
+        "audience",
+        "token_type",
+        "access_token",
+        "id_token",
+        "expires_at",
+        "scope",
+    ];
+    if integration_id != "keycloak-browser-oidc" {
+        return Ok(Json::Null);
+    }
+    let Some(result) = result else {
+        return Ok(Json::Null);
+    };
+    let value = parse_json(result).map_err(|_| ErrorCode::Internal)?;
+    let Json::Object(fields) = &value else {
+        return Err(ErrorCode::Internal);
+    };
+    if fields.len() != REQUIRED.len()
+        || fields
+            .iter()
+            .any(|(key, item)| !REQUIRED.contains(&key.as_str()) || item.string().is_none())
+        || value.field("kind").and_then(Json::string) != Some("oidc_tokens")
+        || value.field("token_type").and_then(Json::string) != Some("Bearer")
+        || value
+            .field("access_token")
+            .and_then(Json::string)
+            .is_none_or(str::is_empty)
+        || value
+            .field("id_token")
+            .and_then(Json::string)
+            .is_none_or(str::is_empty)
+    {
+        return Err(ErrorCode::Internal);
+    }
+    Ok(value)
 }
 
 fn optional_string<'a>(params: &'a Json, name: &str) -> Result<Option<&'a str>, ErrorCode> {
@@ -981,5 +1057,23 @@ mod tests {
                 Err(ParseError::DuplicateKey | ParseError::InvalidJson | ParseError::TrailingBytes)
             ));
         }
+    }
+    #[test]
+    fn only_the_closed_oidc_result_crosses_the_delegated_boundary() {
+        let valid = br#"{"kind":"oidc_tokens","issuer":"https://auth.invalid/realms/pm","subject":"synthetic","client_id":"pm-browser","audience":"pm-browser","token_type":"Bearer","access_token":"new-access","id_token":"new-id","expires_at":"42","scope":"openid"}"#;
+        let output = public_attempt_result("keycloak-browser-oidc", Some(valid)).unwrap();
+        assert_eq!(
+            output.field("access_token").and_then(Json::string),
+            Some("new-access")
+        );
+        let reflected = br#"{"kind":"oidc_tokens","issuer":"x","subject":"x","client_id":"x","audience":"x","token_type":"Bearer","access_token":"x","id_token":"x","expires_at":"42","scope":"openid","password":"original"}"#;
+        assert_eq!(
+            public_attempt_result("keycloak-browser-oidc", Some(reflected)),
+            Err(ErrorCode::Internal)
+        );
+        assert_eq!(
+            public_attempt_result("unknown", Some(valid)).unwrap(),
+            Json::Null
+        );
     }
 }

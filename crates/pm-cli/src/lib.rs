@@ -5,7 +5,8 @@
 use pm_crypto::{KdfProfile, RecoveryCode};
 use pm_custody::agent_rpc;
 use pm_interface::{
-    Engine, ErrorCode, Json, Request, capabilities_result, dispatch, encode_json, parse_mcp_request,
+    Engine, ErrorCode, Json, Request, capabilities_result, dispatch, encode_json,
+    parse_mcp_request, public_attempt_result,
 };
 use pm_vault::{PendingVault, open_vault};
 use std::{
@@ -329,14 +330,41 @@ fn start_request(params: &Json) -> Result<Vec<u8>, ErrorCode> {
         .and_then(Json::string)
         .unwrap_or("")
         .as_bytes();
-    let mut value = vec![30];
+    let integration = params
+        .field("integration_id")
+        .and_then(Json::string)
+        .ok_or(ErrorCode::InvalidArgument)?;
+    let version = params
+        .field("integration_version")
+        .and_then(Json::number)
+        .ok_or(ErrorCode::InvalidArgument)?
+        .parse::<u32>()
+        .map_err(|_| ErrorCode::InvalidArgument)?;
+    let method = params
+        .field("method")
+        .and_then(Json::string)
+        .ok_or(ErrorCode::InvalidArgument)?;
+    let destination = params
+        .field("destination")
+        .and_then(Json::string)
+        .ok_or(ErrorCode::InvalidArgument)?;
+    let mut value = vec![33];
     value.extend_from_slice(&item);
     value.extend_from_slice(&issued.to_be_bytes());
     value.extend_from_slice(&nonce);
-    let len = u32::try_from(context.len()).map_err(|_| ErrorCode::InvalidArgument)?;
-    value.extend_from_slice(&len.to_be_bytes());
-    value.extend_from_slice(context);
+    push_wire_bytes(&mut value, integration.as_bytes())?;
+    value.extend_from_slice(&version.to_be_bytes());
+    push_wire_bytes(&mut value, method.as_bytes())?;
+    push_wire_bytes(&mut value, destination.as_bytes())?;
+    push_wire_bytes(&mut value, context)?;
     Ok(value)
+}
+
+fn push_wire_bytes(value: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ErrorCode> {
+    let len = u32::try_from(bytes.len()).map_err(|_| ErrorCode::InvalidArgument)?;
+    value.extend_from_slice(&len.to_be_bytes());
+    value.extend_from_slice(bytes);
+    Ok(())
 }
 fn decode_discovery(raw: &[u8]) -> Result<Json, ErrorCode> {
     if raw.first() != Some(&0) {
@@ -377,10 +405,7 @@ fn decode_discovery(raw: &[u8]) -> Result<Json, ErrorCode> {
                 "account".into(),
                 Json::String(String::from_utf8_lossy(account).into()),
             ),
-            (
-                "integrations".into(),
-                Json::Array(vec![Json::String("controlled.external".into())]),
-            ),
+            ("integrations".into(), credential_integrations(destination)),
         ]));
     }
     Ok(Json::Object(vec![
@@ -408,11 +433,33 @@ fn decode_attempt(raw: &[u8]) -> Result<Json, ErrorCode> {
     let revision = take_fixed(raw, &mut at)?;
     let state = take_bytes(raw, &mut at)?;
     let reason = take_bytes(raw, &mut at)?;
-    let _result = take_bytes(raw, &mut at)?;
+    let result = take_bytes(raw, &mut at)?;
+    let integration = take_bytes(raw, &mut at)?;
+    let version = raw
+        .get(at..at + 4)
+        .ok_or(ErrorCode::Internal)?
+        .try_into()
+        .map(u32::from_be_bytes)
+        .map_err(|_| ErrorCode::Internal)?;
+    at += 4;
+    if at != raw.len() {
+        return Err(ErrorCode::Internal);
+    }
+    let integration = std::str::from_utf8(integration).map_err(|_| ErrorCode::Internal)?;
+    let public_result = if integration == "keycloak-browser-oidc" && !result.is_empty() {
+        public_attempt_result(integration, Some(result))?
+    } else {
+        Json::Null
+    };
     Ok(Json::Object(vec![
         ("attempt_id".into(), Json::String(hex(attempt))),
         ("credential_id".into(), Json::String(hex(credential))),
         ("revision_id".into(), Json::String(hex(revision))),
+        ("integration_id".into(), Json::String(integration.into())),
+        (
+            "integration_version".into(),
+            Json::Number(version.to_string()),
+        ),
         (
             "state".into(),
             Json::String(String::from_utf8_lossy(state).into()),
@@ -427,8 +474,16 @@ fn decode_attempt(raw: &[u8]) -> Result<Json, ErrorCode> {
                 Json::String(String::from_utf8_lossy(reason).into())
             },
         ),
-        ("result".into(), Json::Null),
+        ("result".into(), public_result),
     ]))
+}
+
+fn credential_integrations(destination: &[u8]) -> Json {
+    let mut values = vec![Json::String("controlled.external".into())];
+    if destination == b"keycloak-lab" {
+        values.push(Json::String("keycloak-browser-oidc".into()));
+    }
+    Json::Array(values)
 }
 fn take_fixed<'a>(raw: &'a [u8], at: &mut usize) -> Result<&'a [u8], ErrorCode> {
     let end = at.checked_add(16).ok_or(ErrorCode::Internal)?;

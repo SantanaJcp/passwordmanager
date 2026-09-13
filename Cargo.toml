@@ -8,6 +8,7 @@ members = [
     "crates/pm-sync",
     "crates/pm-vault",
     "crates/pm-interface",
+    "crates/pm-web-auth",
 ]
 resolver = "3"
 
