@@ -5172,20 +5172,22 @@ fn send_file_descriptor(socket: &UnixStream, descriptor: RawFd) -> Result<(), Fa
         message.msg_iov = &raw mut vector;
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = usize::try_from(libc::CMSG_SPACE(
-            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?,
-        ))
-        .map_err(|_| Failure::Unavailable)?;
+        let descriptor_size =
+            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?;
+        let control_space = libc::CMSG_SPACE(descriptor_size);
+        if usize::try_from(control_space).map_err(|_| Failure::Unavailable)?
+            > mem::size_of_val(&control)
+        {
+            return Err(Failure::Unavailable);
+        }
+        message.msg_controllen = ancillary_field(control_space)?;
         let header = libc::CMSG_FIRSTHDR(&raw const message);
         if header.is_null() {
             return Err(Failure::Unavailable);
         }
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = usize::try_from(libc::CMSG_LEN(
-            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?,
-        ))
-        .map_err(|_| Failure::Unavailable)?;
+        (*header).cmsg_len = ancillary_field(libc::CMSG_LEN(descriptor_size))?;
         std::ptr::copy_nonoverlapping(
             &raw const descriptor,
             libc::CMSG_DATA(header).cast::<RawFd>(),
@@ -5208,67 +5210,122 @@ fn receive_file_descriptor(socket: &UnixStream) -> Result<File, Failure> {
     };
     let mut control = [0_usize; 4];
     // SAFETY: recvmsg owns valid aligned buffers for the duration of the call.
-    let (received, flags, descriptors, extra) = unsafe {
+    let (received, flags, descriptors, malformed) = unsafe {
         let mut message: libc::msghdr = mem::zeroed();
         message.msg_iov = &raw mut vector;
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = usize::try_from(libc::CMSG_SPACE(
-            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?,
-        ))
-        .map_err(|_| Failure::Unavailable)?;
+        let descriptor_size =
+            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?;
+        let control_space = libc::CMSG_SPACE(descriptor_size);
+        if usize::try_from(control_space).map_err(|_| Failure::Unavailable)?
+            > mem::size_of_val(&control)
+        {
+            return Err(Failure::Unavailable);
+        }
+        message.msg_controllen = ancillary_field(control_space)?;
         let received = libc::recvmsg(socket.as_raw_fd(), &raw mut message, receive_fd_flags());
         let header = libc::CMSG_FIRSTHDR(&raw const message);
         let mut descriptors = Vec::new();
-        let mut extra = false;
+        let mut malformed = false;
         if !header.is_null()
             && (*header).cmsg_level == libc::SOL_SOCKET
             && (*header).cmsg_type == libc::SCM_RIGHTS
         {
-            let base = usize::try_from(libc::CMSG_LEN(0)).map_err(|_| Failure::Unavailable)?;
-            let payload = (*header).cmsg_len.saturating_sub(base);
-            if payload % mem::size_of::<RawFd>() == 0 {
-                for index in 0..payload / mem::size_of::<RawFd>() {
-                    descriptors.push(std::ptr::read_unaligned(
-                        libc::CMSG_DATA(header).cast::<RawFd>().add(index),
-                    ));
+            let available = ancillary_usize(message.msg_controllen)?;
+            match ancillary_payload_size((*header).cmsg_len, libc::CMSG_LEN(0), available) {
+                Ok(payload) => {
+                    for index in 0..payload / mem::size_of::<RawFd>() {
+                        descriptors.push(std::ptr::read_unaligned(
+                            libc::CMSG_DATA(header).cast::<RawFd>().add(index),
+                        ));
+                    }
+                    if payload % mem::size_of::<RawFd>() != 0 {
+                        malformed = true;
+                    }
                 }
+                Err(_) => malformed = true,
             }
-            extra = !libc::CMSG_NXTHDR(&raw const message, header).is_null();
+        } else {
+            malformed = true;
         }
-        (received, message.msg_flags, descriptors, extra)
+        let extra = !header.is_null() && !libc::CMSG_NXTHDR(&raw const message, header).is_null();
+        if extra {
+            malformed = true;
+        }
+        (received, message.msg_flags, descriptors, malformed)
     };
-    let mut files = descriptors
+    let invalid_descriptor = descriptors.iter().any(|descriptor| *descriptor < 0);
+    let files = descriptors
         .into_iter()
         .filter(|descriptor| *descriptor >= 0)
         .map(|descriptor| {
-            #[cfg(target_os = "macos")]
-            if unsafe {
-                // SAFETY: descriptor was received above and is still owned by
-                // this process. Darwin lacks MSG_CMSG_CLOEXEC, so mark it
-                // before constructing or exposing the File.
-                libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC)
-            } != 0
-            {
-                unsafe {
-                    // SAFETY: failure leaves this received descriptor owned.
-                    libc::close(descriptor);
-                }
-                return Err(Failure::Unavailable);
-            }
-            // SAFETY: every SCM_RIGHTS descriptor is newly owned by this process.
-            Ok(unsafe { File::from_raw_fd(descriptor) })
+            // SAFETY: every nonnegative SCM_RIGHTS descriptor is newly owned by
+            // this process. Constructing every File before later checks ensures
+            // every received descriptor closes on every failure path.
+            unsafe { File::from_raw_fd(descriptor) }
         })
-        .collect::<Result<Vec<_>, Failure>>()?;
+        .collect::<Vec<_>>();
+    #[cfg(target_os = "macos")]
+    for file in &files {
+        let descriptor = file.as_raw_fd();
+        // SAFETY: `descriptor` remains owned by `file` throughout both calls.
+        let descriptor_flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        if descriptor_flags < 0
+            || unsafe {
+                libc::fcntl(
+                    descriptor,
+                    libc::F_SETFD,
+                    descriptor_flags | libc::FD_CLOEXEC,
+                )
+            } != 0
+        {
+            return Err(Failure::Unavailable);
+        }
+    }
     if received != 1
         || carrier != 0x20
         || flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0
-        || extra
+        || malformed
+        || invalid_descriptor
         || files.len() != 1
     {
         return Err(Failure::Unavailable);
     }
-    files.pop().ok_or(Failure::Unavailable)
+    files.into_iter().next().ok_or(Failure::Unavailable)
+}
+
+fn ancillary_field<T>(value: u32) -> Result<T, Failure>
+where
+    T: TryFrom<u32>,
+{
+    value.try_into().map_err(|_| Failure::Unavailable)
+}
+
+fn ancillary_usize<T>(value: T) -> Result<usize, Failure>
+where
+    T: TryInto<usize>,
+{
+    value.try_into().map_err(|_| Failure::Unavailable)
+}
+
+fn ancillary_payload_size<L, B>(
+    header_length: L,
+    base_length: B,
+    available: usize,
+) -> Result<usize, Failure>
+where
+    L: TryInto<usize>,
+    B: TryInto<usize>,
+{
+    let header_length = header_length.try_into().map_err(|_| Failure::Unavailable)?;
+    let base_length = base_length.try_into().map_err(|_| Failure::Unavailable)?;
+    if header_length > available {
+        return Err(Failure::Unavailable);
+    }
+    header_length
+        .checked_sub(base_length)
+        .ok_or(Failure::Unavailable)
 }
 
 #[cfg(target_os = "linux")]
@@ -5455,5 +5512,22 @@ impl<'a> Cursor<'a> {
         } else {
             Err(Failure::Unavailable)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ancillary_widths_and_payload_bounds_are_checked() {
+        let darwin_field: Result<u32, _> = ancillary_field(24);
+        let linux_field: Result<usize, _> = ancillary_field(24);
+        assert!(matches!(darwin_field, Ok(24)));
+        assert!(matches!(linux_field, Ok(24)));
+        assert!(matches!(ancillary_payload_size(20_u32, 16_u32, 24), Ok(4)));
+        assert!(ancillary_payload_size(15_u32, 16_u32, 24).is_err());
+        assert!(ancillary_payload_size(25_u32, 16_u32, 24).is_err());
+        assert!(ancillary_field::<u8>(u32::MAX).is_err());
     }
 }

@@ -113,6 +113,21 @@ conversions, rejects multiplication overflow explicitly, and keeps rejecting
 non-regular/non-directory ZIP entry kinds. Both native targets must rerun the
 unchanged product entry point before any GREEN claim.
 
+The second native product run
+[`34763755579`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763755579)
+on checkpoint `7f63429` is a further observed **RED** on both targets. The
+portable 1PUX repair compiled, exposing the next Darwin boundary in the shared
+human import transport: Darwin represents `msghdr.msg_controllen` and
+`cmsghdr.cmsg_len` as `u32`, whereas Linux represents them as `usize`. Both
+jobs stopped at the same checked ancillary-message code in `pm-custody` before
+the native custody assertions ran. The repair now converts the send and
+receive control lengths to each platform field type through checked generic
+boundaries, validates returned header and payload lengths before indexing,
+rejects truncated, malformed, additional or multiple-descriptor messages, and
+owns every received descriptor before later validation so every failure path
+closes it. This remains native compile evidence only; another two-target run
+of the unchanged entry point is required.
+
 The acceptance-workflow checker was written before the workflow existed:
 
 ```text
