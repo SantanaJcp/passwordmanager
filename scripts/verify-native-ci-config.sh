@@ -50,7 +50,7 @@ for label in ubuntu-24.04 ubuntu-24.04-arm macos-15-intel macos-15 windows-11-vs
     fi
 done
 
-checkout='actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0'
+checkout='actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)'
 if ! uses_lines=$(grep -E '^[[:space:]]+- uses:' "$workflow"); then
     echo 'native preflight has no pinned action' >&2
     exit 1
@@ -62,6 +62,15 @@ if test "$uses_count" -ne 2; then
 fi
 if printf '%s\n' "$uses_lines" | grep -Fv -- "- uses: $checkout"; then
     echo 'native preflight has an unexpected action reference' >&2
+    exit 1
+fi
+
+require_count "  RUSTUP_AUTO_INSTALL: '0'" 1 "$workflow"
+require_count "rustup toolchain install '1.98.1-\${{ matrix.rust_host }}' --profile minimal --no-self-update" 1 "$workflow"
+require_count "rustup toolchain install '1.98.1-aarch64-pc-windows-msvc' --profile minimal --no-self-update" 1 "$workflow"
+require_literal '$matchingToolchains = @(' "$windows_preflight"
+if grep -Fq '}).Count' "$windows_preflight"; then
+    echo 'Windows native preflight reads Count from a possibly scalar pipeline result' >&2
     exit 1
 fi
 
