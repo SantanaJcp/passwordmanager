@@ -264,6 +264,27 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
     } else {
         None
     };
+    let mut cursor = None;
+    let mut limit = 128_usize;
+    if method == "list" {
+        while let Some(flag) = a.next() {
+            match flag.to_str() {
+                Some("--cursor") => {
+                    cursor = Some(a.next().ok_or(())?.into_string().map_err(|_| ())?);
+                }
+                Some("--limit") => {
+                    limit = a
+                        .next()
+                        .ok_or(())?
+                        .into_string()
+                        .map_err(|_| ())?
+                        .parse()
+                        .map_err(|_| ())?;
+                }
+                _ => return Err(()),
+            }
+        }
+    }
     if a.next().is_some() {
         return Err(());
     }
@@ -290,10 +311,19 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
             hex(&namespace),
             hex(&hash.unwrap())
         ),
-        "list" => format!(
-            "{{\"method\":\"sync.list\",\"namespace\":\"{}\",\"limit\":128}}",
-            hex(&namespace)
-        ),
+        "list" => {
+            if let Some(cursor) = cursor {
+                format!(
+                    "{{\"method\":\"sync.list\",\"namespace\":\"{}\",\"cursor\":\"{cursor}\",\"limit\":{limit}}}",
+                    hex(&namespace)
+                )
+            } else {
+                format!(
+                    "{{\"method\":\"sync.list\",\"namespace\":\"{}\",\"limit\":{limit}}}",
+                    hex(&namespace)
+                )
+            }
+        }
         "delete" => format!(
             "{{\"method\":\"sync.delete\",\"namespace\":\"{}\",\"hashes\":[\"{}\"]}}",
             hex(&namespace),

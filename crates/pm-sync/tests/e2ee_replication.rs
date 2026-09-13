@@ -2,7 +2,9 @@
 #![cfg(target_os = "linux")]
 
 use pm_crypto::{KdfProfile, SyncPairing};
-use pm_sync::{MAX_BLOCK_BYTES, OpaqueSyncStore, SyncError, SyncReplica};
+use pm_sync::{
+    MAX_BLOCK_BYTES, OpaqueSyncStore, ProcessTlsTransport, SyncError, SyncReplica, SyncTransport,
+};
 use pm_vault::{
     AuditDeviceCustody, CausalEventBody, CausalEventDraft, CausalEventKind, CausalReducer,
     HumanChannel, HumanVault, PendingVault, open_vault,
@@ -11,12 +13,175 @@ use std::{
     fs,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process,
+    process::{self, Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
+
+#[test]
+fn replica_push_and_pull_cross_the_real_tls_rpc_process() {
+    use std::{
+        os::unix::fs::PermissionsExt,
+        thread,
+        time::{Duration, Instant},
+    };
+    let dir = TestDir::new();
+    let seed = dir.path("seed-tls.sqlite3");
+    persist(&seed);
+    let (server_key, server_public) = tls_key(&dir, "server");
+    let (client_key, client_public) = tls_key(&dir, "client");
+    let pin: [u8; 44] = fs::read(&server_public).unwrap().try_into().unwrap();
+    let sender = dir.path("tls-a.sqlite3");
+    let receiver = dir.path("tls-b.sqlite3");
+    fs::copy(&seed, &sender).unwrap();
+    let (human, _peer) = human(&sender, [0xe1; 16]);
+    let pairing = human.create_sync_pairing(pin).unwrap();
+    let protected = pairing.to_protected_bytes();
+    let namespace = *pairing.namespace();
+    let event = human
+        .sign_causal_event(&revision([9; 16], [8; 16], 8))
+        .unwrap();
+    let trusted = *open_vault(&sender, MASTER).unwrap().trusted_root();
+    rusqlite::Connection::open(&sender)
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    fs::copy(&sender, &receiver).unwrap();
+    CausalReducer::open(&sender)
+        .unwrap()
+        .apply(&[event])
+        .unwrap();
+    let socket = dir.path("sync.sock");
+    let database = dir.path("opaque.sqlite3");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pm-sync"))
+        .args(["serve", "--db"])
+        .arg(&database)
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--server-key")
+        .arg(&server_key)
+        .arg("--namespace")
+        .arg(hex_test(&namespace))
+        .arg("--client-pub")
+        .arg(&client_public)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    fs::set_permissions(
+        client_key.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let transport = ProcessTlsTransport::new(
+        Path::new(env!("CARGO_BIN_EXE_pm-sync")),
+        &socket,
+        &client_key,
+        &server_public,
+    );
+    let client_rpk: [u8; 44] = fs::read(&client_public).unwrap().try_into().unwrap();
+    let mut tx = SyncReplica::new(&sender, pairing, client_rpk, pin).unwrap();
+    let mut rx = SyncReplica::new(
+        &receiver,
+        SyncPairing::from_protected_bytes(&protected, &trusted).unwrap(),
+        client_rpk,
+        pin,
+    )
+    .unwrap();
+    let flaky = LostFirstPut {
+        inner: &transport,
+        calls: AtomicU64::new(0),
+    };
+    let retry_started = Instant::now();
+    assert_eq!(tx.push(&flaky).unwrap(), 1);
+    assert!(retry_started.elapsed() >= Duration::from_secs(1));
+    assert_eq!(rx.pull(&transport).unwrap(), 1);
+    assert_eq!(
+        rx.reducer()
+            .unwrap()
+            .view()
+            .unwrap()
+            .item(&ITEM)
+            .unwrap()
+            .visible_revision(),
+        Some(&[8; 16])
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+struct LostFirstPut<'a> {
+    inner: &'a ProcessTlsTransport,
+    calls: AtomicU64,
+}
+impl SyncTransport for LostFirstPut<'_> {
+    fn put(&self, n: [u8; 32], h: [u8; 32], b: &[u8]) -> Result<(), SyncError> {
+        self.inner.put(n, h, b)?;
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(SyncError::Unavailable)
+        } else {
+            Ok(())
+        }
+    }
+    fn get(&self, n: [u8; 32], h: [u8; 32]) -> Result<Vec<u8>, SyncError> {
+        self.inner.get(n, h)
+    }
+    fn publish(&self, n: [u8; 32], h: [u8; 32]) -> Result<(), SyncError> {
+        self.inner.publish(n, h)
+    }
+    fn list(
+        &self,
+        n: [u8; 32],
+        c: Option<u64>,
+        l: usize,
+    ) -> Result<Vec<(u64, [u8; 32])>, SyncError> {
+        self.inner.list(n, c, l)
+    }
+}
+
+fn tls_key(dir: &TestDir, name: &str) -> (PathBuf, PathBuf) {
+    use aws_lc_rs::{
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
+    use std::os::unix::fs::PermissionsExt;
+    let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+    let pair = Ed25519KeyPair::from_pkcs8(document.as_ref()).unwrap();
+    let mut public = vec![
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    public.extend_from_slice(pair.public_key().as_ref());
+    let private = dir.path(&format!("{name}.key"));
+    let public_path = dir.path(&format!("{name}.pub"));
+    let mut bytes = b"PMK1".to_vec();
+    bytes.extend_from_slice(
+        &u32::try_from(document.as_ref().len())
+            .unwrap()
+            .to_be_bytes(),
+    );
+    bytes.extend_from_slice(document.as_ref());
+    bytes.extend_from_slice(&public);
+    fs::write(&private, bytes).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o400)).unwrap();
+    fs::write(&public_path, public).unwrap();
+    (private, public_path)
+}
+fn hex_test(bytes: &[u8]) -> String {
+    const D: &[u8; 16] = b"0123456789abcdef";
+    let mut o = String::new();
+    for b in bytes {
+        o.push(char::from(D[usize::from(b >> 4)]));
+        o.push(char::from(D[usize::from(b & 15)]));
+    }
+    o
+}
 
 const MASTER: &[u8] = b"synthetic ticket 17 master";
 const ITEM: [u8; 16] = [0x17; 16];
@@ -81,15 +246,15 @@ fn three_paired_replicas_converge_through_opaque_ciphertext_without_copying_sqli
             .unwrap()
         })
         .collect();
-    for replica in &mut replicas {
-        assert_eq!(replica.push(&server).unwrap(), 1);
+    for (index, replica) in replicas.iter_mut().enumerate() {
+        assert_eq!(replica.push(&(&server, &rpks[index][..])).unwrap(), 1);
     }
     let before_server = fs::read(&store_path).unwrap();
     assert!(!contains(&before_server, MASTER));
     assert!(!contains(&before_server, b"synthetic ticket 17"));
     let mut digests = Vec::new();
-    for replica in &mut replicas {
-        assert_eq!(replica.pull(&server).unwrap(), 3);
+    for (index, replica) in replicas.iter_mut().enumerate() {
+        assert_eq!(replica.pull(&(&server, &rpks[index][..])).unwrap(), 3);
         let view = replica.reducer().unwrap().view().unwrap();
         assert_eq!(
             view.item(&ITEM).unwrap().visible_revision(),
@@ -123,7 +288,7 @@ fn three_paired_replicas_converge_through_opaque_ciphertext_without_copying_sqli
         )
         .unwrap();
     replicas[0].reducer().unwrap().apply(&[retire]).unwrap();
-    assert_eq!(replicas[0].push(&server).unwrap(), 1);
+    assert_eq!(replicas[0].push(&(&server, &rpks[0][..])).unwrap(), 1);
     assert!(
         !replicas[1]
             .reducer()
@@ -132,7 +297,7 @@ fn three_paired_replicas_converge_through_opaque_ciphertext_without_copying_sqli
             .unwrap()
             .device_retired(&[0xb2; 16])
     );
-    assert_eq!(replicas[1].pull(&server).unwrap(), 1);
+    assert_eq!(replicas[1].pull(&(&server, &rpks[1][..])).unwrap(), 1);
     assert!(
         replicas[1]
             .reducer()
@@ -141,10 +306,10 @@ fn three_paired_replicas_converge_through_opaque_ciphertext_without_copying_sqli
             .unwrap()
             .device_retired(&[0xb2; 16])
     );
-    for replica in &mut replicas {
-        assert_eq!(replica.push(&server).unwrap(), 0);
-        let _ = replica.pull(&server).unwrap();
-        assert_eq!(replica.pull(&server).unwrap(), 0);
+    for (index, replica) in replicas.iter_mut().enumerate() {
+        assert_eq!(replica.push(&(&server, &rpks[index][..])).unwrap(), 0);
+        let _ = replica.pull(&(&server, &rpks[index][..])).unwrap();
+        assert_eq!(replica.pull(&(&server, &rpks[index][..])).unwrap(), 0);
     }
     assert!(!paths.iter().any(|p| p == &store_path));
 }
@@ -217,7 +382,7 @@ fn omitted_block_never_activates_half_of_one_published_root_and_retry_is_atomic(
         [0x51; 44],
     )
     .unwrap();
-    assert_eq!(tx.push(&server).unwrap(), 2);
+    assert_eq!(tx.push(&(&server, &rpk[..])).unwrap(), 2);
     let db = rusqlite::Connection::open(&server_path).unwrap();
     let root: Vec<u8> = db
         .query_row("SELECT hash FROM roots LIMIT 1", [], |r| r.get(0))
@@ -231,7 +396,7 @@ fn omitted_block_never_activates_half_of_one_published_root_and_retry_is_atomic(
         .unwrap();
     db.execute("DELETE FROM blocks WHERE hash=?1", [&hash])
         .unwrap();
-    assert!(rx.pull(&server).is_err());
+    assert!(rx.pull(&(&server, &rpk[..])).is_err());
     assert_eq!(
         rx.reducer()
             .unwrap()
@@ -246,7 +411,7 @@ fn omitted_block_never_activates_half_of_one_published_root_and_retry_is_atomic(
     )
     .unwrap();
     drop(db);
-    assert_eq!(rx.pull(&server).unwrap(), 2);
+    assert_eq!(rx.pull(&(&server, &rpk[..])).unwrap(), 2);
     let view = rx.reducer().unwrap().view().unwrap();
     assert_eq!(view.retained_header_count(), 2);
     assert_eq!(
