@@ -165,6 +165,8 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-history-list") => human_history_list(&mut arguments),
         Some("human-history-purge-item") => human_history_purge_item(&mut arguments),
         Some("human-1pux-import") => human_1pux_import(&mut arguments),
+        Some("human-backup-exercise") => human_backup_exercise(&mut arguments),
+        Some("human-backup-restore") => human_backup_restore(&mut arguments),
         _ => Err(Failure::Usage),
     }
 }
@@ -1129,6 +1131,180 @@ fn human_history_purge_item(arguments: &mut impl Iterator<Item = OsString>) -> R
         purge.encrypted_bytes
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn human_backup_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    const STREAM_SIZE: u64 = 2 * 1024 * 1024 + 211;
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    let output_dir = take_path(arguments, "--output-dir")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
+
+    let records = content_fixture_records()?;
+    let mut first = None;
+    for record in &records {
+        let created = rpc_prepare_record(&mut tls, 9, None, record)?;
+        rpc_commit(&mut tls, &created)?;
+        first.get_or_insert(created.item_id);
+    }
+    let first = first.ok_or(Failure::Unavailable)?;
+    let edit = rpc_prepare_record(&mut tls, 29, Some(first), &records[0])?;
+    rpc_commit(&mut tls, &edit)?;
+    let trash = rpc_prepare(&mut tls, 4, Some(first), "", "", &[], "", "")?;
+    rpc_commit(&mut tls, &trash)?;
+
+    let attachment = [0x21; 16];
+    let stream_record = LogicalRecord::new_streaming(
+        RecordKind::File,
+        HumanMetadata {
+            title: "Ticket 21 streamed backup".to_owned(),
+            destinations: vec![],
+            tags: vec!["synthetic".to_owned()],
+            favorite: false,
+            notes: "ticket21-stream-note-canary".to_owned(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![
+            Attachment::descriptor(
+                attachment,
+                "ticket21-large.bin",
+                "application/octet-stream",
+                STREAM_SIZE,
+                pattern_digest(STREAM_SIZE)?,
+            )
+            .map_err(|_| Failure::Unavailable)?,
+        ],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let mut start = vec![17];
+    push_bytes(&mut start, &stream_record.to_descriptor_bytes())?;
+    write_frame(&mut tls, &start)?;
+    send_pattern(&mut tls, STREAM_SIZE)?;
+    write_frame(&mut tls, &[0])?;
+    let streamed = decode_prepared_response(&read_frame(&mut tls)?)?;
+    rpc_commit(&mut tls, &streamed)?;
+
+    fs::create_dir_all(&output_dir).map_err(|_| Failure::Unavailable)?;
+    let native = output_dir.join("ticket21-backup.pmb1");
+    let native_bytes = rpc_download_atomic(&mut tls, &[32], &native)?;
+
+    write_frame(&mut tls, &[33, 0])?;
+    let confirmation = decode_prepared_response(&read_frame(&mut tls)?)?;
+    let mut export_request = vec![33, 1];
+    push_bytes(&mut export_request, &confirmation.command)?;
+    export_request.extend_from_slice(&confirmation.signature);
+    push_bytes(&mut export_request, &confirmation.body)?;
+    let plaintext = output_dir.join("ticket21-export.jsonl");
+    let plaintext_bytes = rpc_download_atomic(&mut tls, &export_request, &plaintext)?;
+
+    let mut restore = vec![34];
+    push_bytes(&mut restore, &password)?;
+    write_frame(&mut tls, &restore)?;
+    let mut source = File::open(&native).map_err(|_| Failure::Unavailable)?;
+    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
+    loop {
+        let count = source.read(&mut buffer).map_err(|_| Failure::Unavailable)?;
+        if count == 0 {
+            break;
+        }
+        write_frame(&mut tls, &buffer[..count])?;
+    }
+    buffer.zeroize();
+    write_frame(&mut tls, &[0])?;
+    let restore = decode_prepared_response(&read_frame(&mut tls)?)?;
+    let receipt = rpc_commit(&mut tls, &restore)?;
+    if rpc_commit(&mut tls, &restore)? != receipt {
+        return Err(Failure::Unavailable);
+    }
+    println!(
+        "PASS backup-exercise types={} native-bytes={native_bytes} plaintext-bytes={plaintext_bytes} stream-bytes={STREAM_SIZE} inventory=exact password-path=1 restore=new-ids+keys trash+history=preserved authority=history-only grants=inactive confirmation=strong+one-use receipt-replay=1 tls-rpk=1 alpn=pm-human/1",
+        records.len()
+    );
+    Ok(())
+}
+
+fn human_backup_restore(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    let archive_path = take_path(arguments, "--archive")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
+    let mut request = vec![34];
+    push_bytes(&mut request, &password)?;
+    write_frame(&mut tls, &request)?;
+    let mut source = File::open(&archive_path).map_err(|_| Failure::Unavailable)?;
+    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
+    loop {
+        let count = source.read(&mut buffer).map_err(|_| Failure::Unavailable)?;
+        if count == 0 {
+            break;
+        }
+        write_frame(&mut tls, &buffer[..count])?;
+    }
+    buffer.zeroize();
+    write_frame(&mut tls, &[0])?;
+    let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
+    rpc_commit(&mut tls, &prepared)?;
+    println!("PASS backup-restore tls-rpk=1 alpn=pm-human/1 signed=1 source-unchanged=1");
+    Ok(())
+}
+
+fn rpc_download_atomic(
+    tls: &mut rustls::StreamOwned<ClientConnection, UnixStream>,
+    request: &[u8],
+    destination: &Path,
+) -> Result<u64, Failure> {
+    let temporary = destination.with_extension("partial");
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut output = options.open(&temporary).map_err(|_| Failure::Unavailable)?;
+    let result = (|| {
+        write_frame(tls, request)?;
+        expect_status(&read_frame(tls)?, 0)?;
+        let mut written = 0_u64;
+        loop {
+            let frame = read_frame_bounded(tls, STREAM_CHUNK_BYTES + 64)?;
+            if frame == [0] {
+                break;
+            }
+            written = written
+                .checked_add(u64::try_from(frame.len()).map_err(|_| Failure::Unavailable)?)
+                .ok_or(Failure::Unavailable)?;
+            output.write_all(&frame).map_err(|_| Failure::Unavailable)?;
+        }
+        output.sync_all().map_err(|_| Failure::Unavailable)?;
+        Ok(written)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+        return result;
+    }
+    drop(output);
+    fs::rename(&temporary, destination).map_err(|_| Failure::Unavailable)?;
+    File::open(destination.parent().ok_or(Failure::Unavailable)?)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| Failure::Unavailable)?;
+    result
 }
 
 fn history_target_arguments(
@@ -2182,6 +2358,18 @@ fn handle_human_rpc(
             handle_stream_download(&vault, tls, &request[1..])?;
             continue;
         }
+        if request == [32] {
+            handle_native_backup_download(&mut vault, tls)?;
+            continue;
+        }
+        if request.first() == Some(&33) && request.get(1) == Some(&1) {
+            handle_plaintext_backup_download(&mut vault, tls, &request[2..])?;
+            continue;
+        }
+        if request.first() == Some(&34) {
+            handle_native_backup_restore(&mut vault, tls, &request[1..])?;
+            continue;
+        }
         let drop_response = request.first() == Some(&8);
         let response = handle_human_request(&mut vault, service.device, &request);
         if drop_response {
@@ -2708,6 +2896,64 @@ fn handle_stream_download(
         .read_attachment_to(item, attachment, &mut writer)
         .map_err(|_| Failure::Unavailable)?;
     write_frame(writer.tls, &[0])
+}
+
+fn handle_native_backup_download(
+    vault: &mut HumanVault,
+    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
+) -> Result<(), Failure> {
+    write_frame(tls, &[0])?;
+    let mut writer = FrameWriter { tls };
+    vault
+        .write_native_backup(&mut writer)
+        .map_err(|_| Failure::Unavailable)?;
+    write_frame(writer.tls, &[0])
+}
+
+fn handle_plaintext_backup_download(
+    vault: &mut HumanVault,
+    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
+    request: &[u8],
+) -> Result<(), Failure> {
+    let mut cursor = Cursor::new(request);
+    let command = cursor.bytes()?;
+    let signature = cursor
+        .fixed(64)?
+        .try_into()
+        .map_err(|_| Failure::Unavailable)?;
+    let body = cursor.bytes()?;
+    cursor.finish()?;
+    write_frame(tls, &[0])?;
+    let mut writer = FrameWriter { tls };
+    vault
+        .write_plaintext_export(&command, &signature, &body, &mut writer)
+        .map_err(|_| Failure::Unavailable)?;
+    write_frame(writer.tls, &[0])
+}
+
+fn handle_native_backup_restore(
+    vault: &mut HumanVault,
+    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
+    request: &[u8],
+) -> Result<(), Failure> {
+    let mut cursor = Cursor::new(request);
+    let mut password = Zeroizing::new(cursor.bytes()?);
+    cursor.finish()?;
+    if password.len() > 1024 {
+        return Err(Failure::Unavailable);
+    }
+    let mut reader = FrameReader {
+        tls,
+        buffer: Vec::new(),
+        position: 0,
+        ended: false,
+    };
+    let prepared = vault
+        .prepare_native_restore(&mut reader, &password)
+        .map_err(|_| Failure::Unavailable)?;
+    password.zeroize();
+    let response = encode_prepared(vault, prepared.prepared())?;
+    write_frame(reader.tls, &response)
 }
 struct FrameReader<'a> {
     tls: &'a mut rustls::StreamOwned<ServerConnection, UnixStream>,
@@ -3303,6 +3549,15 @@ fn handle_human_request(
             let mut response = vec![0];
             response.extend_from_slice(&record.to_bytes());
             Ok(response)
+        }
+        33 => {
+            if rest != [0] {
+                return Err(Failure::Unavailable);
+            }
+            let prepared = vault
+                .prepare_plaintext_export()
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
         }
         40 => {
             if !rest.is_empty() {

@@ -421,6 +421,18 @@ impl RootBundle {
         encode_envelope(&self.recovery_envelope)
     }
 
+    /// Returns only the two encrypted paths to `K_H` needed by a portable
+    /// backup. The historical human signing seed is deliberately excluded.
+    #[must_use]
+    pub fn backup_root_envelopes(&self) -> BackupRootEnvelopes {
+        BackupRootEnvelopes {
+            vault: self.trusted_root.vault_id,
+            key_generation: self.password_envelope.header.key_generation,
+            password_envelope: encode_envelope(&self.password_envelope),
+            recovery_envelope: encode_envelope(&self.recovery_envelope),
+        }
+    }
+
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         encode_bundle(self)
@@ -561,6 +573,14 @@ impl UnlockedRoot {
             &domain_message(b"pm/sync-pairing/v1", &pairing.unsigned_bytes()),
         )?;
         Ok(pairing)
+    }
+
+    /// Starts the independent PMF1 stream used by one PMB1 snapshot.
+    ///
+    /// # Errors
+    /// Returns an error when randomness or native authenticated encryption is unavailable.
+    pub fn start_backup(&self, backup_id: [u8; ID_BYTES]) -> Result<BackupSealer, CryptoError> {
+        Ok(BackupSealer(self.start_file(backup_id, backup_id)?))
     }
     #[must_use]
     pub const fn vault_id(&self) -> &[u8; ID_BYTES] {
@@ -2141,6 +2161,8 @@ pub struct FileSealer {
     target: Header,
     stream_header: [u8; 24],
     header: Vec<u8>,
+    key_envelope: Vec<u8>,
+    pmf1_header: Vec<u8>,
     index: u64,
     finished: bool,
 }
@@ -2159,13 +2181,14 @@ impl FileSealer {
             return Err(CryptoError::RandomUnavailable);
         }
         let pmf = encode_pmf1_header(&target, &stream_header);
+        let mut framed_pmf = b"PMF1".to_vec();
+        framed_pmf.extend_from_slice(&u32::try_from(pmf.len()).map_err(invalid)?.to_be_bytes());
+        framed_pmf.extend_from_slice(&pmf);
+        let key_envelope = encode_envelope(envelope);
         let mut e = Encoder::new(Vec::new());
         e.map(3).unwrap();
         e.str("v").unwrap().u64(1).unwrap();
-        e.str("key_envelope")
-            .unwrap()
-            .bytes(&encode_envelope(envelope))
-            .unwrap();
+        e.str("key_envelope").unwrap().bytes(&key_envelope).unwrap();
         e.str("pmf1_header").unwrap().bytes(&pmf).unwrap();
         let payload = e.into_writer();
         let mut header = b"PMFS1".to_vec();
@@ -2176,6 +2199,8 @@ impl FileSealer {
             target,
             stream_header,
             header,
+            key_envelope,
+            pmf1_header: framed_pmf,
             index: 0,
             finished: false,
         })
@@ -2235,7 +2260,325 @@ impl FileSealer {
 impl Drop for FileSealer {
     fn drop(&mut self) {
         self.header.fill(0);
+        self.key_envelope.fill(0);
+        self.pmf1_header.fill(0);
     }
+}
+
+/// The two encrypted human root paths embedded in a PMB1 outer header.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackupRootEnvelopes {
+    vault: [u8; ID_BYTES],
+    key_generation: u64,
+    password_envelope: Vec<u8>,
+    recovery_envelope: Vec<u8>,
+}
+
+impl BackupRootEnvelopes {
+    /// Parses and cross-checks the two encrypted root paths from a PMB1 header.
+    ///
+    /// # Errors
+    /// Rejects malformed, foreign, mismatched-purpose or out-of-bounds envelopes.
+    pub fn from_parts(
+        vault: [u8; ID_BYTES],
+        key_generation: u64,
+        password_envelope: &[u8],
+        recovery_envelope: &[u8],
+    ) -> Result<Self, CryptoError> {
+        if key_generation == 0
+            || password_envelope.len() > MAX_OBJECT_BYTES
+            || recovery_envelope.len() > MAX_OBJECT_BYTES
+        {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let password = decode_envelope(password_envelope)?;
+        let recovery = decode_envelope(recovery_envelope)?;
+        if password.header.vault != vault
+            || recovery.header.vault != vault
+            || password.header.purpose != Purpose::RootPassword
+            || recovery.header.purpose != Purpose::RootRecovery
+            || password.header.key_generation != key_generation
+            || recovery.header.key_generation != key_generation
+            || password.header.target_object != recovery.header.target_object
+            || password.header.wrapped_purpose != Purpose::KeyWrap
+            || recovery.header.wrapped_purpose != Purpose::KeyWrap
+            || password.header.kdf.is_none()
+            || recovery.header.kdf.is_some()
+        {
+            return Err(CryptoError::InvalidFormat);
+        }
+        password
+            .header
+            .kdf
+            .as_ref()
+            .ok_or(CryptoError::InvalidKdf)?
+            .profile
+            .validate()?;
+        Ok(Self {
+            vault,
+            key_generation,
+            password_envelope: password_envelope.to_vec(),
+            recovery_envelope: recovery_envelope.to_vec(),
+        })
+    }
+
+    #[must_use]
+    pub const fn vault_id(&self) -> &[u8; ID_BYTES] {
+        &self.vault
+    }
+
+    #[must_use]
+    pub const fn key_generation(&self) -> u64 {
+        self.key_generation
+    }
+
+    #[must_use]
+    pub fn password_envelope(&self) -> &[u8] {
+        &self.password_envelope
+    }
+
+    #[must_use]
+    pub fn recovery_envelope(&self) -> &[u8] {
+        &self.recovery_envelope
+    }
+}
+
+/// Bounded-memory PMF1 writer for a native backup payload.
+pub struct BackupSealer(FileSealer);
+
+impl BackupSealer {
+    #[must_use]
+    pub fn key_envelope(&self) -> &[u8] {
+        &self.0.key_envelope
+    }
+
+    #[must_use]
+    pub fn pmf1_header(&self) -> &[u8] {
+        &self.0.pmf1_header
+    }
+
+    /// Encrypts one bounded backup plaintext chunk.
+    ///
+    /// # Errors
+    /// Rejects chunks over 1 MiB and any write after the final chunk.
+    pub fn seal_chunk(
+        &mut self,
+        plaintext: &[u8],
+        final_chunk: bool,
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.0.seal_chunk(plaintext, final_chunk)
+    }
+}
+
+/// Bounded-memory PMF1 reader opened through a password or external recovery key.
+pub struct BackupOpener {
+    stream: FileOpener,
+    source_human_root: Secret,
+    source_vault: [u8; ID_BYTES],
+}
+
+impl BackupOpener {
+    /// Opens a backup using an already unlocked matching `K_H`.
+    ///
+    /// # Errors
+    /// Rejects a foreign root or any altered PMB1/PMF1 binding.
+    pub fn with_unlocked_root(
+        root: &UnlockedRoot,
+        roots: &BackupRootEnvelopes,
+        backup_id: [u8; ID_BYTES],
+        key_envelope: &[u8],
+        pmf1_header: &[u8],
+    ) -> Result<Self, CryptoError> {
+        if root.vault != roots.vault {
+            return Err(CryptoError::Authentication);
+        }
+        Self::from_human_root(
+            roots,
+            backup_id,
+            key_envelope,
+            pmf1_header,
+            &root.human_root,
+        )
+    }
+
+    /// Opens a backup stream through the password envelope without recovering
+    /// the historical human signing seed.
+    ///
+    /// # Errors
+    /// Rejects wrong passwords, altered envelopes/headers, foreign IDs and invalid KDF bounds.
+    pub fn with_password(
+        roots: &BackupRootEnvelopes,
+        backup_id: [u8; ID_BYTES],
+        key_envelope: &[u8],
+        pmf1_header: &[u8],
+        password: &[u8],
+    ) -> Result<Self, CryptoError> {
+        validate_password(password)?;
+        let envelope = decode_envelope(&roots.password_envelope)?;
+        let kdf = envelope
+            .header
+            .kdf
+            .as_ref()
+            .ok_or(CryptoError::InvalidKdf)?;
+        kdf.profile.validate()?;
+        let wrapping = derive_password(password, &kdf.salt, kdf.profile)?;
+        let human_root = open_backup_root(roots, &envelope, &wrapping, Purpose::RootPassword)?;
+        Self::from_human_root(roots, backup_id, key_envelope, pmf1_header, &human_root)
+    }
+
+    /// Opens the same stream through its independent external recovery path.
+    ///
+    /// # Errors
+    /// Rejects foreign/wrong recovery material or altered backup headers.
+    pub fn with_recovery(
+        roots: &BackupRootEnvelopes,
+        backup_id: [u8; ID_BYTES],
+        key_envelope: &[u8],
+        pmf1_header: &[u8],
+        recovery: &RecoveryCode,
+    ) -> Result<Self, CryptoError> {
+        if recovery.vault != roots.vault || recovery.generation != roots.key_generation {
+            return Err(CryptoError::Authentication);
+        }
+        let envelope = decode_envelope(&roots.recovery_envelope)?;
+        let human_root = open_backup_root(roots, &envelope, &recovery.key, Purpose::RootRecovery)?;
+        Self::from_human_root(roots, backup_id, key_envelope, pmf1_header, &human_root)
+    }
+
+    fn from_human_root(
+        roots: &BackupRootEnvelopes,
+        backup_id: [u8; ID_BYTES],
+        key_envelope: &[u8],
+        pmf1_header: &[u8],
+        human_root: &Secret,
+    ) -> Result<Self, CryptoError> {
+        if key_envelope.len() > MAX_HEADER_BYTES || pmf1_header.len() < 8 {
+            return Err(CryptoError::InvalidFormat);
+        }
+        if &pmf1_header[..4] != b"PMF1" {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let pmf_len = usize::try_from(u32::from_be_bytes(
+            pmf1_header[4..8].try_into().map_err(invalid)?,
+        ))
+        .map_err(invalid)?;
+        if pmf_len > MAX_HEADER_BYTES || pmf1_header.len() != 8 + pmf_len {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let pmf1_payload = &pmf1_header[8..];
+        let mut e = Encoder::new(Vec::new());
+        e.map(3).unwrap();
+        e.str("v").unwrap().u64(1).unwrap();
+        e.str("key_envelope").unwrap().bytes(key_envelope).unwrap();
+        e.str("pmf1_header").unwrap().bytes(pmf1_payload).unwrap();
+        let payload = e.into_writer();
+        let mut header = b"PMFS1".to_vec();
+        header.extend_from_slice(&u32::try_from(payload.len()).map_err(invalid)?.to_be_bytes());
+        header.extend_from_slice(&payload);
+        Ok(Self {
+            stream: FileOpener::new(human_root, roots.vault, backup_id, backup_id, &header)?,
+            source_human_root: Secret(human_root.0),
+            source_vault: roots.vault,
+        })
+    }
+
+    /// Authenticates and opens one sequential backup frame.
+    ///
+    /// # Errors
+    /// Rejects corruption, reordering, truncation indicators and wrong final tags.
+    pub fn open_chunk(&mut self, frame: &[u8], final_chunk: bool) -> Result<Vec<u8>, CryptoError> {
+        self.stream.open_chunk(frame, final_chunk)
+    }
+
+    /// Rewraps a source audit key exclusively for a new human root while
+    /// retaining the source vault/device/generation target needed to read the
+    /// unchanged historical audit ciphertext.
+    ///
+    /// # Errors
+    /// Rejects a forged, foreign or context-mismatched source envelope.
+    pub fn rewrap_imported_audit_key(
+        &self,
+        destination: &UnlockedRoot,
+        source_envelope: &[u8],
+        device: [u8; ID_BYTES],
+        generation: u64,
+    ) -> Result<Vec<u8>, CryptoError> {
+        let envelope = decode_envelope(source_envelope)?;
+        if encode_envelope(&envelope) != source_envelope {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let (key, target) = open_key(&self.source_human_root, &envelope)?;
+        validate_audit_target(&target, self.source_vault, device, generation)?;
+        let mut wrapping = wrapping_header(
+            self.source_vault,
+            random_array()?,
+            device,
+            Purpose::KeyWrap,
+            &target,
+            None,
+        );
+        wrapping.key_generation = generation;
+        Ok(encode_envelope(&seal_key(
+            &destination.human_root,
+            &key,
+            &target,
+            wrapping,
+        )?))
+    }
+}
+
+impl UnlockedRoot {
+    /// Opens a historical audit key rewrapped during backup restoration.
+    /// The returned key remains bound to the source vault so it can only open
+    /// the preserved source audit ciphertext, never current audit records.
+    ///
+    /// # Errors
+    /// Rejects a wrong destination root or mismatched source provenance.
+    pub fn open_imported_audit_key(
+        &self,
+        envelope: &[u8],
+        source_vault: [u8; ID_BYTES],
+        device: [u8; ID_BYTES],
+        generation: u64,
+    ) -> Result<AuditKey, CryptoError> {
+        let encoded = envelope;
+        let envelope = decode_envelope(encoded)?;
+        if encode_envelope(&envelope) != encoded
+            || envelope.header.vault != source_vault
+            || envelope.header.purpose != Purpose::KeyWrap
+        {
+            return Err(CryptoError::InvalidFormat);
+        }
+        let (key, target) = open_key(&self.human_root, &envelope)?;
+        validate_audit_target(&target, source_vault, device, generation)?;
+        Ok(AuditKey {
+            vault: source_vault,
+            generation,
+            key,
+        })
+    }
+}
+
+fn open_backup_root(
+    roots: &BackupRootEnvelopes,
+    envelope: &Envelope,
+    wrapping: &Secret,
+    purpose: Purpose,
+) -> Result<Secret, CryptoError> {
+    if envelope.header.vault != roots.vault
+        || envelope.header.purpose != purpose
+        || envelope.header.key_generation != roots.key_generation
+    {
+        return Err(CryptoError::Authentication);
+    }
+    let (human_root, target) = open_key(wrapping, envelope)?;
+    if target.vault != roots.vault
+        || target.purpose != Purpose::KeyWrap
+        || target.key_generation != roots.key_generation
+    {
+        return Err(CryptoError::Authentication);
+    }
+    Ok(human_root)
 }
 
 pub struct FileOpener {

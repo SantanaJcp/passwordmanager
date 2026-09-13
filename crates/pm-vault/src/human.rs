@@ -303,6 +303,245 @@ pub struct HumanVault {
 }
 
 impl HumanVault {
+    /// Writes a complete logical PMB1 snapshot through bounded PMF1 frames.
+    ///
+    /// # Errors
+    /// Aborts on any missing/corrupt referenced object, size bound, channel,
+    /// cryptographic, storage or output error; callers must publish atomically.
+    pub fn write_native_backup(
+        &self,
+        output: &mut dyn Write,
+    ) -> Result<crate::BackupSummary, HumanCommitError> {
+        self.channel.verify()?;
+        let summary = crate::backup::write_backup(&self.path, &self.root, output)?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let authority = current_head(&transaction)?.unwrap_or([0; 32]);
+        audit::append_event(
+            &transaction,
+            &self.trusted_root,
+            Some(&self.root),
+            self.device,
+            &self.audit_custody,
+            &AuditEvent::new(
+                AuditActorKind::Human,
+                None,
+                AuditAction::Backup,
+                AuditOutcome::Succeeded,
+            ),
+            now_us()?,
+            authority,
+        )?;
+        transaction.commit()?;
+        Ok(summary)
+    }
+
+    /// Authenticates and verifies a PMB1 from this already unlocked human root.
+    ///
+    /// # Errors
+    /// Rejects foreign/corrupt/incomplete/trailing backups and invalid inventory.
+    pub fn verify_native_backup(
+        &self,
+        input: &mut dyn Read,
+    ) -> Result<crate::BackupSummary, HumanCommitError> {
+        self.channel.verify()?;
+        crate::backup::verify_with_root(&self.root, input)
+    }
+
+    /// Authenticates a PMB1 completely and stages every logical revision and
+    /// attachment under fresh destination IDs/keys. Nothing becomes visible
+    /// until the returned command is signed and committed.
+    ///
+    /// # Errors
+    /// Rejects invalid passwords, incomplete inventories/references, corrupt
+    /// streams, limits and storage failures without changing active content.
+    pub fn prepare_native_restore(
+        &mut self,
+        input: &mut dyn Read,
+        backup_password: &[u8],
+    ) -> Result<crate::PreparedBackupRestore, HumanCommitError> {
+        self.channel.verify()?;
+        let transaction_id = random_id()?;
+        let challenge = random_challenge()?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expected_state = state_digest(&transaction, self.root.vault_id(), 1)?;
+        let (summary, item_ids, object_digest) = crate::backup::prepare_restore(
+            &transaction,
+            &self.root,
+            self.device,
+            transaction_id,
+            input,
+            backup_password,
+        )?;
+        let manifest = encode_event_manifest(
+            "backup-restore",
+            *summary.backup_id(),
+            None,
+            Some(object_digest),
+            None,
+            None,
+            None,
+        );
+        let event_count = crate::backup::restore_event_count(&transaction, transaction_id)?;
+        let body = encode_body(&Body {
+            transaction_id,
+            events_manifest_digest: digest(&manifest),
+            event_count,
+            object_manifest_digest: Some(object_digest),
+        });
+        let body_hash = digest(&body);
+        let expires_at_us = now_us()?
+            .checked_add(CHALLENGE_LIFETIME_US)
+            .ok_or(HumanCommitError::InvalidCommand)?;
+        let command = encode_command(&CommandFields {
+            vault: *self.root.vault_id(),
+            challenge,
+            expected_state,
+            operation: "backup_restore",
+            body_hash,
+            expires_at_us,
+        });
+        transaction.execute(
+            "INSERT INTO human_challenges(challenge,transaction_id,command,body_hash,expected_state,expires_at_us,consumed) VALUES(?1,?2,?3,?4,?5,?6,0)",
+            params![challenge.as_slice(),transaction_id.as_slice(),command,body_hash.as_slice(),expected_state.as_slice(),expires_at_us],
+        )?;
+        transaction.execute(
+            "INSERT INTO human_staging(transaction_id,operation,event_kind,item_id,revision_id,body,package,item_kind,attachments) VALUES(?1,'backup_restore','backup-restore',?2,NULL,?3,NULL,NULL,NULL)",
+            params![transaction_id.as_slice(),summary.backup_id().as_slice(),body],
+        )?;
+        transaction.commit()?;
+        Ok(crate::PreparedBackupRestore::new(
+            PreparedHumanCommand {
+                transaction_id,
+                item_id: *summary.backup_id(),
+                command,
+                body,
+            },
+            summary,
+            item_ids,
+        ))
+    }
+
+    /// Prepares a one-use, state-bound confirmation for a full plaintext export.
+    /// The export does not share the native backup confirmation and must be
+    /// signed separately for every operation.
+    ///
+    /// # Errors
+    /// Returns an error when the human channel, RNG, clock or durable challenge
+    /// persistence is unavailable.
+    pub fn prepare_plaintext_export(&mut self) -> Result<PreparedHumanCommand, HumanCommitError> {
+        self.channel.verify()?;
+        let transaction_id = random_id()?;
+        let challenge = random_challenge()?;
+        let body = encode_body(&Body {
+            transaction_id,
+            events_manifest_digest: digest(b"pm/plaintext-export/full/v1"),
+            event_count: 0,
+            object_manifest_digest: None,
+        });
+        let body_hash = digest(&body);
+        let expires_at_us = now_us()?
+            .checked_add(CHALLENGE_LIFETIME_US)
+            .ok_or(HumanCommitError::InvalidCommand)?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expected_state = state_digest(&transaction, self.root.vault_id(), 1)?;
+        let command = encode_command(&CommandFields {
+            vault: *self.root.vault_id(),
+            challenge,
+            expected_state,
+            operation: "plaintext_export",
+            body_hash,
+            expires_at_us,
+        });
+        transaction.execute(
+            "INSERT INTO human_challenges
+             (challenge,transaction_id,command,body_hash,expected_state,expires_at_us,consumed)
+             VALUES(?1,?2,?3,?4,?5,?6,0)",
+            params![
+                challenge.as_slice(),
+                transaction_id.as_slice(),
+                command,
+                body_hash.as_slice(),
+                expected_state.as_slice(),
+                expires_at_us
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(PreparedHumanCommand {
+            transaction_id,
+            item_id: transaction_id,
+            command,
+            body,
+        })
+    }
+
+    /// Writes the complete logical JSONL export only after verifying and
+    /// consuming its fresh signed human confirmation.
+    ///
+    /// # Errors
+    /// Rejects replay, altered body, stale state, wrong signature, corrupt
+    /// source objects or output failure. The caller publishes its exclusive
+    /// private temporary file only after this method returns success.
+    pub fn write_plaintext_export(
+        &mut self,
+        command_bytes: &[u8],
+        signature: &[u8; 64],
+        body_bytes: &[u8],
+        output: &mut dyn Write,
+    ) -> Result<crate::BackupSummary, HumanCommitError> {
+        self.channel.verify()?;
+        let command = decode_command(command_bytes)?;
+        let body = decode_body(body_bytes).map_err(|_| HumanCommitError::BodyChanged)?;
+        if command.vault != *self.root.vault_id()
+            || command.operation != "plaintext_export"
+            || command.body_hash != digest(body_bytes)
+            || body.events_manifest_digest != digest(b"pm/plaintext-export/full/v1")
+            || body.event_count != 0
+            || body.object_manifest_digest.is_some()
+        {
+            return Err(HumanCommitError::BodyChanged);
+        }
+        verify_human_command(&self.trusted_root, command_bytes, signature)
+            .map_err(|_| HumanCommitError::InvalidSignature)?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let challenge = load_challenge(&transaction, body.transaction_id)?;
+        if challenge.command != command_bytes || challenge.body_hash != command.body_hash {
+            return Err(HumanCommitError::BodyChanged);
+        }
+        if challenge.consumed || now_us()? > challenge.expires_at_us {
+            return Err(HumanCommitError::ChallengeExpired);
+        }
+        if state_digest(&transaction, self.root.vault_id(), 1)? != command.expected_state {
+            return Err(HumanCommitError::StateChanged);
+        }
+        let summary = crate::backup::write_plaintext(&transaction, &self.root, output)?;
+        let authority = current_head(&transaction)?.unwrap_or([0; 32]);
+        audit::append_event(
+            &transaction,
+            &self.trusted_root,
+            Some(&self.root),
+            self.device,
+            &self.audit_custody,
+            &AuditEvent::new(
+                AuditActorKind::Human,
+                None,
+                AuditAction::Export,
+                AuditOutcome::Succeeded,
+            ),
+            now_us()?,
+            authority,
+        )?;
+        transaction.execute(
+            "UPDATE human_challenges SET consumed=1 WHERE transaction_id=?1 AND consumed=0",
+            [body.transaction_id.as_slice()],
+        )?;
+        transaction.commit()?;
+        Ok(summary)
+    }
+
     /// Creates human-authorized E2EE pairing material for a pinned sync server.
     /// The returned secret bundle must remain in native/human custody.
     ///
@@ -860,6 +1099,18 @@ impl HumanVault {
                 self.device,
                 &self.audit_custody,
                 &staged,
+                &body,
+                actual_body_hash,
+                committed_at_us,
+            );
+        }
+        if staged.event_kind == "backup-restore" {
+            return commit_backup_restore(
+                transaction,
+                &self.root,
+                &self.trusted_root,
+                self.device,
+                &self.audit_custody,
                 &body,
                 actual_body_hash,
                 committed_at_us,
@@ -2968,6 +3219,453 @@ fn commit_restore(
     })
 }
 
+struct BackupRestoreBatch {
+    backup_id: [u8; 16],
+    source_vault: [u8; 16],
+    object_digest: [u8; 32],
+    item_count: usize,
+    revision_count: usize,
+}
+
+struct BackupRestoreItem {
+    target_item: [u8; 16],
+    visible_revision: [u8; 16],
+    kind: String,
+    status: String,
+}
+
+struct BackupRestoreRevision {
+    source_revision: [u8; 16],
+    target_revision: [u8; 16],
+    modified_at_us: i64,
+    kind: String,
+    package: Vec<u8>,
+    object_digest: [u8; 32],
+}
+
+fn load_backup_restore_batch(
+    transaction: &Transaction<'_>,
+    transaction_id: [u8; 16],
+) -> Result<BackupRestoreBatch, HumanCommitError> {
+    let raw = transaction
+        .query_row(
+            "SELECT backup_id,source_vault,object_digest,item_count,revision_count
+             FROM backup_restore_batches WHERE transaction_id=?1",
+            [transaction_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(HumanCommitError::BodyChanged)?;
+    Ok(BackupRestoreBatch {
+        backup_id: bytes(&raw.0)?,
+        source_vault: bytes(&raw.1)?,
+        object_digest: bytes(&raw.2)?,
+        item_count: usize::try_from(raw.3).map_err(|_| HumanCommitError::BodyChanged)?,
+        revision_count: usize::try_from(raw.4).map_err(|_| HumanCommitError::BodyChanged)?,
+    })
+}
+
+fn load_backup_restore_items(
+    transaction: &Transaction<'_>,
+    transaction_id: [u8; 16],
+) -> Result<Vec<BackupRestoreItem>, HumanCommitError> {
+    let mut statement = transaction.prepare(
+        "SELECT target_item,target_visible_revision,item_kind,status
+         FROM backup_restore_items WHERE transaction_id=?1 ORDER BY target_item",
+    )?;
+    statement
+        .query_map([transaction_id.as_slice()], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .map(|row| {
+            let row = row?;
+            Ok(BackupRestoreItem {
+                target_item: bytes(&row.0)?,
+                visible_revision: bytes(&row.1)?,
+                kind: row.2,
+                status: row.3,
+            })
+        })
+        .collect()
+}
+
+fn load_backup_restore_revisions(
+    transaction: &Transaction<'_>,
+    transaction_id: [u8; 16],
+    item: &BackupRestoreItem,
+) -> Result<Vec<BackupRestoreRevision>, HumanCommitError> {
+    let mut statement = transaction.prepare(
+        "SELECT source_revision,target_revision,modified_at_us,item_kind,package,object_digest
+         FROM backup_restore_revisions
+         WHERE transaction_id=?1 AND target_item=?2
+         ORDER BY (target_revision=?3),modified_at_us,target_revision",
+    )?;
+    statement
+        .query_map(
+            params![
+                transaction_id.as_slice(),
+                item.target_item.as_slice(),
+                item.visible_revision.as_slice()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            },
+        )?
+        .map(|row| {
+            let row = row?;
+            Ok(BackupRestoreRevision {
+                source_revision: bytes(&row.0)?,
+                target_revision: bytes(&row.1)?,
+                modified_at_us: row.2,
+                kind: row.3,
+                package: row.4,
+                object_digest: bytes(&row.5)?,
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn commit_backup_restore(
+    transaction: Transaction<'_>,
+    root: &UnlockedRoot,
+    trusted_root: &TrustedRoot,
+    device: [u8; 16],
+    audit_custody: &AuditDeviceCustody,
+    body: &Body,
+    body_hash: [u8; 32],
+    committed_at_us: i64,
+) -> Result<HumanReceipt, HumanCommitError> {
+    let batch = load_backup_restore_batch(&transaction, body.transaction_id)?;
+    let items = load_backup_restore_items(&transaction, body.transaction_id)?;
+    if items.len() != batch.item_count
+        || crate::backup::restore_batch_digest(&transaction, body.transaction_id)?
+            != batch.object_digest
+    {
+        return Err(HumanCommitError::BodyChanged);
+    }
+
+    let mut revision_total = 0_usize;
+    for item in &items {
+        if transaction
+            .query_row(
+                "SELECT 1 FROM vault_items WHERE item_id=?1
+                 UNION ALL SELECT 1 FROM purged_items WHERE item_id=?1 LIMIT 1",
+                [item.target_item.as_slice()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Err(HumanCommitError::StateChanged);
+        }
+        let revisions = load_backup_restore_revisions(&transaction, body.transaction_id, item)?;
+        if revisions.is_empty()
+            || !revisions
+                .iter()
+                .any(|revision| revision.target_revision == item.visible_revision)
+        {
+            return Err(HumanCommitError::BodyChanged);
+        }
+        revision_total = revision_total
+            .checked_add(revisions.len())
+            .ok_or(HumanCommitError::InvalidCommand)?;
+        for revision in revisions {
+            let opened = root.open_revision_package(&revision.package)?;
+            let record =
+                LogicalRecord::decode_parts(opened.human_plaintext(), opened.auth_plaintext())?;
+            if opened.item() != &item.target_item
+                || opened.revision() != &revision.target_revision
+                || opened.modified_at() != revision.modified_at_us
+                || record.kind().name() != revision.kind
+                || revision.kind != item.kind
+                || record.kind().crypto() != opened.kind()
+                || crate::backup::restore_graph_digest(
+                    &transaction,
+                    body.transaction_id,
+                    revision.source_revision,
+                    &revision.package,
+                )? != revision.object_digest
+            {
+                return Err(HumanCommitError::BodyChanged);
+            }
+            let stream_count: i64 = transaction.query_row(
+                "SELECT count(*) FROM backup_restore_streams
+                 WHERE transaction_id=?1 AND source_revision=?2",
+                params![
+                    body.transaction_id.as_slice(),
+                    revision.source_revision.as_slice()
+                ],
+                |row| row.get(0),
+            )?;
+            if usize::try_from(stream_count).map_err(|_| HumanCommitError::BodyChanged)?
+                != record.attachments().len()
+            {
+                return Err(HumanCommitError::BodyChanged);
+            }
+        }
+    }
+    if revision_total != batch.revision_count {
+        return Err(HumanCommitError::BodyChanged);
+    }
+
+    let mut previous = current_head(&transaction)?;
+    let mut final_digest = previous;
+    let mut ordinal = 0_i64;
+    let mut first_event = true;
+    for item in &items {
+        let revisions = load_backup_restore_revisions(&transaction, body.transaction_id, item)?;
+        let mut item_revision_digests = Vec::with_capacity(revisions.len());
+        for revision in revisions {
+            ordinal = ordinal
+                .checked_add(1)
+                .ok_or(HumanCommitError::InvalidCommand)?;
+            let event_id = random_id()?;
+            let seq = next_authority_seq(&transaction, device, 1)?;
+            let mut parents = item_revision_digests.clone();
+            if let Some(head) = previous {
+                parents.push(head);
+            }
+            parents.sort_unstable();
+            parents.dedup();
+            let modified_at = committed_at_us
+                .checked_add(ordinal)
+                .ok_or(HumanCommitError::InvalidCommand)?;
+            let revision_body = encode_legacy_event_body(
+                Some(revision.target_revision),
+                modified_at,
+                None,
+                None,
+                Some(revision.object_digest),
+            );
+            let event = encode_g5_event(&G5EventInput {
+                vault: root.vault_id(),
+                event_id,
+                authority_epoch: 1,
+                issuer_device: device,
+                issuer_generation: 1,
+                seq,
+                previous,
+                parents: &parents,
+                kind: "item-revision",
+                subject: item.target_item,
+                subject_generation: 1,
+                body: &revision_body,
+            });
+            let human_signature = root.sign_human_event(&event)?;
+            let device_signature = audit_custody.sign_device_event(&event)?;
+            let event_digest = digest(&event);
+            let event_transaction = if first_event {
+                first_event = false;
+                body.transaction_id
+            } else {
+                random_id()?
+            };
+            transaction.execute(
+                "INSERT INTO revision_parts(revision_id,item_id,package) VALUES(?1,?2,?3)",
+                params![
+                    revision.target_revision.as_slice(),
+                    item.target_item.as_slice(),
+                    revision.package
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO attachment_streams(attachment_id,revision_id,header,chunk_count)
+                 SELECT target_attachment,target_revision,header,chunk_count
+                 FROM backup_restore_streams
+                 WHERE transaction_id=?1 AND source_revision=?2",
+                params![
+                    body.transaction_id.as_slice(),
+                    revision.source_revision.as_slice()
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO attachment_stream_chunks(attachment_id,revision_id,chunk_index,ciphertext)
+                 SELECT stream.target_attachment,stream.target_revision,chunk.chunk_index,chunk.ciphertext
+                 FROM backup_restore_stream_chunks AS chunk
+                 JOIN backup_restore_streams AS stream
+                   ON stream.transaction_id=chunk.transaction_id
+                  AND stream.source_revision=chunk.source_revision
+                  AND stream.source_attachment=chunk.source_attachment
+                 WHERE chunk.transaction_id=?1 AND chunk.source_revision=?2",
+                params![body.transaction_id.as_slice(), revision.source_revision.as_slice()],
+            )?;
+            transaction.execute(
+                "INSERT INTO authority_events
+                 (event_digest,event_id,transaction_id,issuer_device,issuer_generation,seq,previous_digest,parents,kind,subject,subject_generation,event,human_signature,device_signature)
+                 VALUES(?1,?2,?3,?4,1,?5,?6,?7,'item-revision',?8,1,?9,?10,?11)",
+                params![
+                    event_digest.as_slice(), event_id.as_slice(), event_transaction.as_slice(),
+                    device.as_slice(), i64::try_from(seq).map_err(|_| HumanCommitError::InvalidCommand)?,
+                    previous.as_ref().map(<[u8; 32]>::as_slice), encode_heads_allow_empty(&parents),
+                    item.target_item.as_slice(), event, human_signature.as_slice(), device_signature.as_slice(),
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO outbox(event_digest,event) VALUES(?1,?2)",
+                params![
+                    event_digest.as_slice(),
+                    encode_signed_event(&event, &device_signature, &human_signature)
+                ],
+            )?;
+            item_revision_digests.push(event_digest);
+            previous = Some(event_digest);
+            final_digest = Some(event_digest);
+        }
+        transaction.execute(
+            "INSERT INTO vault_items(item_id,visible_revision,kind,status) VALUES(?1,?2,?3,?4)",
+            params![
+                item.target_item.as_slice(),
+                item.visible_revision.as_slice(),
+                item.kind,
+                item.status
+            ],
+        )?;
+        if item.status == "trash" {
+            ordinal = ordinal
+                .checked_add(1)
+                .ok_or(HumanCommitError::InvalidCommand)?;
+            let event_id = random_id()?;
+            let seq = next_authority_seq(&transaction, device, 1)?;
+            let mut parents = item_revision_digests;
+            if let Some(head) = previous {
+                parents.push(head);
+            }
+            parents.sort_unstable();
+            parents.dedup();
+            let lifecycle_body = encode_lifecycle_body(&[]);
+            let event = encode_g5_event(&G5EventInput {
+                vault: root.vault_id(),
+                event_id,
+                authority_epoch: 1,
+                issuer_device: device,
+                issuer_generation: 1,
+                seq,
+                previous,
+                parents: &parents,
+                kind: "trash",
+                subject: item.target_item,
+                subject_generation: 1,
+                body: &lifecycle_body,
+            });
+            let human_signature = root.sign_human_event(&event)?;
+            let device_signature = audit_custody.sign_device_event(&event)?;
+            let event_digest = digest(&event);
+            let event_transaction = if first_event {
+                first_event = false;
+                body.transaction_id
+            } else {
+                random_id()?
+            };
+            transaction.execute(
+                "INSERT INTO authority_events
+                 (event_digest,event_id,transaction_id,issuer_device,issuer_generation,seq,previous_digest,parents,kind,subject,subject_generation,event,human_signature,device_signature)
+                 VALUES(?1,?2,?3,?4,1,?5,?6,?7,'trash',?8,1,?9,?10,?11)",
+                params![
+                    event_digest.as_slice(), event_id.as_slice(), event_transaction.as_slice(),
+                    device.as_slice(), i64::try_from(seq).map_err(|_| HumanCommitError::InvalidCommand)?,
+                    previous.as_ref().map(<[u8; 32]>::as_slice), encode_heads_allow_empty(&parents),
+                    item.target_item.as_slice(), event, human_signature.as_slice(), device_signature.as_slice(),
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO outbox(event_digest,event) VALUES(?1,?2)",
+                params![
+                    event_digest.as_slice(),
+                    encode_signed_event(&event, &device_signature, &human_signature)
+                ],
+            )?;
+            previous = Some(event_digest);
+            final_digest = Some(event_digest);
+        }
+    }
+    let final_digest = final_digest.unwrap_or(batch.object_digest);
+    transaction.execute(
+        "INSERT INTO imported_backup_history(source_vault,backup_id,record_type,record_id,package)
+         SELECT ?2,?3,record_type,record_id,package FROM backup_restore_history
+         WHERE transaction_id=?1",
+        params![
+            body.transaction_id.as_slice(),
+            batch.source_vault.as_slice(),
+            batch.backup_id.as_slice()
+        ],
+    )?;
+    audit::append_event(
+        &transaction,
+        trusted_root,
+        Some(root),
+        device,
+        audit_custody,
+        &AuditEvent::new(
+            AuditActorKind::Human,
+            None,
+            AuditAction::Restore,
+            AuditOutcome::Succeeded,
+        )
+        .with_item(batch.backup_id, None),
+        committed_at_us,
+        final_digest,
+    )?;
+    transaction.execute(
+        "UPDATE human_challenges SET consumed=1 WHERE transaction_id=?1 AND consumed=0",
+        [body.transaction_id.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM human_staging WHERE transaction_id=?1",
+        [body.transaction_id.as_slice()],
+    )?;
+    for table in [
+        "backup_restore_stream_chunks",
+        "backup_restore_streams",
+        "backup_restore_revisions",
+        "backup_restore_items",
+        "backup_restore_history",
+        "backup_restore_batches",
+    ] {
+        transaction.execute(
+            &format!("DELETE FROM {table} WHERE transaction_id=?1"),
+            [body.transaction_id.as_slice()],
+        )?;
+    }
+    transaction.execute(
+        "INSERT INTO human_receipts(transaction_id,body_hash,committed_heads,committed_at_us,outcome)
+         VALUES(?1,?2,?3,?4,'committed')",
+        params![
+            body.transaction_id.as_slice(),
+            body_hash.as_slice(),
+            encode_heads(&[final_digest]),
+            committed_at_us
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(HumanReceipt {
+        transaction_id: body.transaction_id,
+        body_hash,
+        committed_heads: vec![final_digest],
+        committed_at_us,
+    })
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn commit_import_batch(
     transaction: Transaction<'_>,
@@ -3528,6 +4226,50 @@ fn validate_staged(
             || body.event_count
                 != u64::try_from(selected + batch.report.replaced)
                     .map_err(|_| HumanCommitError::BodyChanged)?
+            || body.object_manifest_digest != Some(object_digest)
+            || body.events_manifest_digest != digest(&manifest)
+        {
+            return Err(HumanCommitError::BodyChanged);
+        }
+        return Ok(());
+    }
+    if staged.event_kind == "backup-restore" {
+        let (backup_id, object_digest): (Vec<u8>, Vec<u8>) = transaction
+            .query_row(
+                "SELECT backup_id,object_digest FROM backup_restore_batches WHERE transaction_id=?1",
+                [staged.transaction_id.as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(HumanCommitError::BodyChanged)?;
+        let backup_id = bytes::<16>(&backup_id)?;
+        let object_digest = bytes::<32>(&object_digest)?;
+        let actual_digest =
+            crate::backup::restore_batch_digest(transaction, staged.transaction_id)?;
+        let event_count = crate::backup::restore_event_count(transaction, staged.transaction_id)?;
+        let manifest = encode_event_manifest(
+            "backup-restore",
+            backup_id,
+            None,
+            Some(object_digest),
+            None,
+            None,
+            None,
+        );
+        let valid_shape = staged.operation == "backup_restore"
+            && staged.item_id == backup_id
+            && staged.revision_id.is_none()
+            && staged.package.is_none()
+            && staged.item_kind.is_none()
+            && staged.attachments.is_none()
+            && staged.audit_generation.is_none()
+            && staged.audit_through_seq.is_none()
+            && staged.subject_generation.is_none()
+            && staged.authority_body.is_none()
+            && staged.staged_grant.is_none();
+        if !valid_shape
+            || actual_digest != object_digest
+            || body.event_count != event_count
             || body.object_manifest_digest != Some(object_digest)
             || body.events_manifest_digest != digest(&manifest)
         {
@@ -4520,6 +5262,8 @@ fn decode_command(bytes_value: &[u8]) -> Result<CommandFields<'_>, HumanCommitEr
             | "identity_change"
             | "availability_change"
             | "import_commit"
+            | "plaintext_export"
+            | "backup_restore"
     ) {
         return Err(HumanCommitError::InvalidCommand);
     }
