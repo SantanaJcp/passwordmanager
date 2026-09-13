@@ -284,3 +284,23 @@ mencionada arriba describe UAC desactivado. Prima el hecho observado: el token
 pasó la comprobación administrativa, pero ningún laboratorio debe asumir UAC
 desactivado. No se ejecutó custodia, clipboard de producto, reboot/FDE ni
 firma; los gates nativos y Windows 11 x64 continúan pendientes.
+
+## Laboratorio macOS de candidato — evidencia parcial
+
+El workflow manual `macOS custody acceptance` se habilitó mediante bootstrap
+`c4e8779` en `master`; el código de producto se publicó únicamente en
+`codex/pm-26`, sin integrarlo en la rama unificada ni fusionar el PR.
+
+| Corrida | Commit candidato | Resultado observado |
+| --- | --- | --- |
+| [34763192705](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763192705) | `3409f5b` | Falló compilación de 1PUX en ambas CPU por anchuras distintas de tipos Darwin. |
+| [34763755579](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763755579) | `7f63429` | 1PUX compiló; falló el canal ancillary por campos Darwin `u32` frente a `usize`. |
+| [34764564812](https://github.com/SantanaJcp/passwordmanager/actions/runs/34764564812) | `45af206` | Ambas CPU compilaron y ejecutaron nueve tests nativos; binarios Mach-O correctos. Falló la preparación multi-UID: raíz temporal privada del runner impedía `keygen` del agente. |
+| [34765246514](https://github.com/SantanaJcp/passwordmanager/actions/runs/34765246514) | `8b54d20` | Ambas CPU compilaron. ARM rechazó explícitamente el prerrequisito de traversal de `/Users/runner/work/_temp` para el custodio; no se modificaron permisos ajenos. Intel llegó a launchd y falló el primer probe del agente con `CUSTODY_UNAVAILABLE`; causa aún no aislada. |
+
+Los nueve tests por CPU no representan toda la suite: varios tests conservan
+`cfg` Linux y ejecutaron cero casos. Ninguna corrida pasó la aceptación de
+custodia completa; no acreditan TUI compuesta, reboot/FDE, firma ni los gates
+26/31. Los ajustes de anchuras y preparación siguen en el candidato aislado.
+Una raíz efímera compartida fuera del home privado del runner requiere acordar
+su método antes de cambiar el requisito actual; no se aplicará como fallback.
