@@ -1,8 +1,8 @@
 # 17 — Sync autohospedado y emparejamiento E2EE
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-17
 Blocked by: 16
 Spec: ../spec.md
 Requirements: R06,R15,R16,R17
@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-13 — Reclamado por Sol en frontera real17/19; 08candidato listo para integraciónserial delmerger. ReviewformalAstraalfinal.
