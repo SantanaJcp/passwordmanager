@@ -343,6 +343,33 @@ def main():
             assert database.execute("select status from vault_items").fetchone() == ("trash",)
             database.close()
 
+            audit_command = [
+                binary,
+                "human-audit-lifecycle",
+                "--profile",
+                human_profile,
+                "--private",
+                human_private,
+                "--socket",
+                human_socket,
+            ]
+            audit = as_uid(HUMAN, audit_command, input=wire_fields([master]))
+            assert audit.stdout == (
+                b"PASS audit-e2e autonomous-without-kh=1 signed-device=1 "
+                b"purge-gap=1 authority-retained=1\n"
+            )
+            assert audit.stderr == b""
+            database = sqlite3.connect(vault)
+            assert database.execute("select count(*) from audit_purge_ranges").fetchone() == (1,)
+            assert database.execute("select count(*) from authority_events").fetchone() == (4,)
+            assert database.execute("select count(*) from outbox").fetchone() == (4,)
+            database.close()
+            audit_custody = pathlib.Path(str(vault) + ".audit-custody")
+            custody_stat = audit_custody.stat()
+            assert custody_stat.st_uid == CUSTODIAN
+            assert stat.S_IMODE(custody_stat.st_mode) == 0o400
+            custody_hash = hashlib.sha256(audit_custody.read_bytes()).hexdigest()
+
         os.chmod(agent_private, 0o600)
         key_acl_fault = as_uid(
             AGENT,
@@ -375,6 +402,11 @@ def main():
             [binary, "probe", "--profile", agent_profile, "--private", agent_private, "--socket", agent_socket],
         )
         assert restarted.stdout == agent_ok.stdout
+        if source_cli is not None:
+            restarted_audit = as_uid(HUMAN, audit_command, input=wire_fields([master]))
+            assert restarted_audit.stdout == audit.stdout
+            assert restarted_audit.stderr == b""
+            assert hashlib.sha256(audit_custody.read_bytes()).hexdigest() == custody_hash
         stop(daemon)
 
         print(f"PASS uid_map={pathlib.Path('/proc/self/uid_map').read_text().strip()!r}")
@@ -385,6 +417,10 @@ def main():
             print(
                 "PASS human_negatives=wrong-role,body-change,audit-failure "
                 "atomicity=no-partial replay=receipt response-loss=recovered"
+            )
+            print(
+                "PASS audit=encrypted,signed,segmented,query,purge "
+                "autonomous_without_kh=device-custody human_path=mutual-tls-rpk"
             )
         print("LIMIT reboot_host=NOT_RUN production_systemd_fde=NOT_RUN")
     finally:

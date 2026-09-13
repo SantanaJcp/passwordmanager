@@ -10,11 +10,11 @@ mod root;
 use std::ffi::CStr;
 
 pub use root::{
-    AuditCiphertext, CreatedRoot, CryptoError, DeviceKeyPair, GrantVectorInput, ItemKind,
-    KdfProfile, OpenedRevisionPackage, PendingGrantVector, Pmf1Vector, RecoveryCode,
-    RevisionPackage, RevisionPackageInput, RootBundle, SignedGrantVector, TrustedRoot,
-    UnlockedRoot, create_human_root, digest, open_human_root, random_id, recover_human_root,
-    verify_human_command, verify_human_event,
+    AuditDeviceKeyPair, AuditKey, AuditKeyPackage, CreatedRoot, CryptoError, DeviceKeyPair,
+    GrantVectorInput, ItemKind, KdfProfile, OpenedRevisionPackage, PendingGrantVector, Pmf1Vector,
+    RecoveryCode, RevisionPackage, RevisionPackageInput, RootBundle, SignedGrantVector,
+    TrustedRoot, UnlockedRoot, create_human_root, digest, open_human_root, random_id,
+    recover_human_root, verify_audit_signature, verify_human_command, verify_human_event,
 };
 
 /// Returns the version reported by the linked libsodium C artifact.

@@ -22,14 +22,16 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [Tracker](../../../docs/agents/issue-tracker.md).
 
 ## Acceptance criteria
-- [ ] Eventos de actor/credencial/operación/resultado se escriben atómicamente con las mutaciones y sin KH durante autonomía.
-- [ ] errores/crashes no guardan payloads secretos.
-- [ ] purga humana con alcance confirmado deja evidencia visible de discontinuidad y no borra autoridad antirreplay.
-- [ ] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
+- [x] Eventos de actor/credencial/operación/resultado se escriben atómicamente con las mutaciones y sin KH durante autonomía.
+- [x] errores/crashes no guardan payloads secretos.
+- [x] purga humana con alcance confirmado deja evidencia visible de discontinuidad y no borra autoridad antirreplay.
+- [x] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
 - [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
 ## Answer
-Pendiente de implementación y evidencia.
+Candidato implementado en `codex/pm-06`; evidencia reproducible en
+[ticket-06](../../../docs/verification/ticket-06.md). Pendiente de integración
+y verificación por merger; no resolver todavía.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.

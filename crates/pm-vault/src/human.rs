@@ -5,6 +5,7 @@
 use std::{
     fmt,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -17,10 +18,13 @@ pub use pm_native_channel::AuthenticatedHumanChannel as HumanChannel;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use zeroize::Zeroize;
 
+use crate::audit::{
+    self, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome,
+    AuditPurgeScope, AuditQuery, PreparedAuditPurge,
+};
 use crate::{VaultError, unlock_root};
 
 const CHALLENGE_LIFETIME_US: i64 = 60_000_000;
-const AUDIT_GENERATION: i64 = 1;
 const MAX_TITLE: usize = 1024;
 const MAX_URL: usize = 8 * 1024;
 const MAX_FIELD: usize = 1024 * 1024;
@@ -33,6 +37,8 @@ pub enum HumanCommitError {
     Crypto(CryptoError),
     InvalidCommand,
     InvalidInput,
+    Integrity,
+    AuditKeyUnavailable,
     InvalidSignature,
     ItemNotFound,
     StateChanged,
@@ -50,6 +56,8 @@ impl fmt::Display for HumanCommitError {
             Self::Crypto(_) => "human transaction cryptography failed",
             Self::InvalidCommand => "invalid human command",
             Self::InvalidInput => "invalid password record",
+            Self::Integrity => "audit integrity verification failed",
+            Self::AuditKeyUnavailable => "device audit custody is unavailable",
             Self::InvalidSignature => "invalid human signature",
             Self::ItemNotFound => "password item not found",
             Self::StateChanged => "vault authority state changed",
@@ -254,6 +262,7 @@ pub struct HumanVault {
     channel: HumanChannel,
     root: UnlockedRoot,
     trusted_root: TrustedRoot,
+    audit_custody: Arc<AuditDeviceCustody>,
 }
 
 impl HumanVault {
@@ -268,6 +277,29 @@ impl HumanVault {
         device: [u8; 16],
         channel: HumanChannel,
     ) -> Result<Self, HumanCommitError> {
+        Self::unlock_with_audit_custody(
+            path,
+            password,
+            device,
+            channel,
+            Arc::new(AuditDeviceCustody::generate()?),
+        )
+    }
+
+    /// Opens a human session attached to stable device audit custody. Sharing
+    /// this opaque handle with the custodian permits later audit writes after KH
+    /// and the human session have been dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a wrong channel, password, root, custody, or storage format.
+    pub fn unlock_with_audit_custody(
+        path: &Path,
+        password: &[u8],
+        device: [u8; 16],
+        channel: HumanChannel,
+        audit_custody: Arc<AuditDeviceCustody>,
+    ) -> Result<Self, HumanCommitError> {
         channel.verify()?;
         let connection = open_connection(path)?;
         let root = unlock_root(&connection, password)?;
@@ -278,6 +310,7 @@ impl HumanVault {
             channel,
             root,
             trusted_root,
+            audit_custody,
         })
     }
 
@@ -318,7 +351,90 @@ impl HumanVault {
         item: [u8; 16],
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
         self.require_active(item)?;
-        self.prepare("item_lifecycle", "trash", item, None, None)
+        self.prepare("item_lifecycle", "trash", item, None, None, None, None)
+    }
+
+    /// Stages a human-confirmed purge of an earlier audit prefix. The returned
+    /// scope is the exact visible range/count bound by the signed transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid/non-earlier range or unavailable storage.
+    pub fn prepare_audit_purge(
+        &mut self,
+        device: [u8; 16],
+        generation: u64,
+        through_seq: u64,
+    ) -> Result<PreparedAuditPurge, HumanCommitError> {
+        self.channel.verify()?;
+        if device != self.device {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let connection = open_connection(&self.path)?;
+        let head: i64 = connection
+            .query_row(
+                "SELECT last_seq FROM audit_segments WHERE device_id=?1 AND generation=?2
+                 ORDER BY last_seq DESC LIMIT 1",
+                params![
+                    device.as_slice(),
+                    i64::try_from(generation).map_err(|_| HumanCommitError::InvalidInput)?
+                ],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(HumanCommitError::InvalidInput)?;
+        if through_seq == 0
+            || through_seq >= u64::try_from(head).map_err(|_| HumanCommitError::InvalidInput)?
+        {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let count: i64 = connection.query_row(
+            "SELECT count(*) FROM encrypted_audit_records WHERE device_id=?1 AND generation=?2 AND seq<=?3",
+            params![device.as_slice(), i64::try_from(generation).map_err(|_| HumanCommitError::InvalidInput)?, i64::try_from(through_seq).map_err(|_| HumanCommitError::InvalidInput)?], |row| row.get(0),
+        )?;
+        if count == 0 {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let prepared = self.prepare(
+            "audit_purge",
+            "audit-purge",
+            device,
+            None,
+            None,
+            Some(generation),
+            Some(through_seq),
+        )?;
+        Ok(PreparedAuditPurge {
+            prepared,
+            scope: AuditPurgeScope {
+                first_seq: 1,
+                last_seq: through_seq,
+                record_count: u64::try_from(count).map_err(|_| HumanCommitError::InvalidInput)?,
+            },
+        })
+    }
+
+    /// Authenticates, verifies and decrypts a bounded local audit query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a wrong channel, invalid bound, or any integrity failure.
+    pub fn query_audit(
+        &self,
+        device: [u8; 16],
+        generation: u64,
+        from_seq: u64,
+        limit: usize,
+    ) -> Result<AuditQuery, HumanCommitError> {
+        self.channel.verify()?;
+        audit::query(
+            &open_connection(&self.path)?,
+            &self.root,
+            device,
+            generation,
+            from_seq,
+            limit,
+        )
     }
 
     /// Signs exactly the canonical prepared command under the `SK_H` domain.
@@ -416,18 +532,39 @@ impl HumanVault {
             "INSERT INTO outbox (event_digest,event) VALUES (?1,?2)",
             params![event_digest.as_slice(), signed_event],
         )?;
-        persist_audit(
-            &transaction,
-            &self.root,
-            &AuditInput {
-                device: self.device,
-                event_id,
-                item: staged.item_id,
-                revision: staged.revision_id,
-                frontier: event_digest,
-                wall_time_us: committed_at_us,
-            },
-        )?;
+        if staged.event_kind == "audit-purge" {
+            audit::purge(
+                &transaction,
+                &self.root,
+                &self.trusted_root,
+                staged.item_id,
+                &self.audit_custody,
+                staged
+                    .audit_generation
+                    .ok_or(HumanCommitError::BodyChanged)?,
+                staged
+                    .audit_through_seq
+                    .ok_or(HumanCommitError::BodyChanged)?,
+                committed_at_us,
+            )?;
+        } else {
+            audit::append_event(
+                &transaction,
+                &self.trusted_root,
+                Some(&self.root),
+                self.device,
+                &self.audit_custody,
+                &AuditEvent::new(
+                    AuditActorKind::Human,
+                    None,
+                    AuditAction::ItemChange,
+                    AuditOutcome::Succeeded,
+                )
+                .with_item(staged.item_id, staged.revision_id),
+                committed_at_us,
+                event_digest,
+            )?;
+        }
         transaction.execute(
             "UPDATE human_challenges SET consumed=1 WHERE transaction_id=?1 AND consumed=0",
             [body.transaction_id.as_slice()],
@@ -516,9 +653,12 @@ impl HumanVault {
             item,
             Some(revision),
             Some(&package),
+            None,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare(
         &mut self,
         operation: &'static str,
@@ -526,6 +666,8 @@ impl HumanVault {
         item: [u8; 16],
         revision: Option<[u8; 16]>,
         package: Option<&[u8]>,
+        audit_generation: Option<u64>,
+        audit_through_seq: Option<u64>,
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
         self.channel.verify()?;
         let transaction_id = random_id()?;
@@ -533,7 +675,14 @@ impl HumanVault {
         let connection = open_connection(&self.path)?;
         let expected_state = state_digest(&connection, self.root.vault_id(), 1)?;
         let object_digest = package.map(digest);
-        let event_manifest = encode_event_manifest(event_kind, item, revision, object_digest);
+        let event_manifest = encode_event_manifest(
+            event_kind,
+            item,
+            revision,
+            object_digest,
+            audit_generation,
+            audit_through_seq,
+        );
         let body = encode_body(&Body {
             transaction_id,
             events_manifest_digest: digest(&event_manifest),
@@ -568,8 +717,8 @@ impl HumanVault {
         )?;
         transaction.execute(
             "INSERT INTO human_staging
-             (transaction_id,operation,event_kind,item_id,revision_id,body,package)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+             (transaction_id,operation,event_kind,item_id,revision_id,body,package,audit_generation,audit_through_seq)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 transaction_id.as_slice(),
                 operation,
@@ -578,6 +727,8 @@ impl HumanVault {
                 revision.as_ref().map(<[u8; 16]>::as_slice),
                 body,
                 package,
+                audit_generation.map(i64::try_from).transpose().map_err(|_| HumanCommitError::InvalidInput)?,
+                audit_through_seq.map(i64::try_from).transpose().map_err(|_| HumanCommitError::InvalidInput)?,
             ],
         )?;
         transaction.commit()?;
@@ -631,6 +782,8 @@ struct Staged {
     revision_id: Option<[u8; 16]>,
     body: Vec<u8>,
     package: Option<Vec<u8>>,
+    audit_generation: Option<u64>,
+    audit_through_seq: Option<u64>,
 }
 
 struct EventInput<'a> {
@@ -642,15 +795,6 @@ struct EventInput<'a> {
     revision: Option<[u8; 16]>,
     previous: Option<[u8; 32]>,
     modified_at: i64,
-}
-
-struct AuditInput {
-    device: [u8; 16],
-    event_id: [u8; 16],
-    item: [u8; 16],
-    revision: Option<[u8; 16]>,
-    frontier: [u8; 32],
-    wall_time_us: i64,
 }
 
 fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
@@ -686,6 +830,7 @@ fn apply_staged(transaction: &Transaction<'_>, staged: &Staged) -> rusqlite::Res
                 [staged.item_id.as_slice()],
             )?;
         }
+        "audit-purge" => {}
         _ => unreachable!("validated staging event kind"),
     }
     Ok(())
@@ -704,6 +849,13 @@ fn validate_staged(staged: &Staged, body: &Body) -> Result<(), HumanCommitError>
                 && staged.revision_id.is_none()
                 && staged.package.is_none()
         }
+        "audit-purge" => {
+            staged.operation == "audit_purge"
+                && staged.revision_id.is_none()
+                && staged.package.is_none()
+                && staged.audit_generation.is_some()
+                && staged.audit_through_seq.is_some()
+        }
         _ => false,
     };
     let event_manifest = encode_event_manifest(
@@ -711,6 +863,8 @@ fn validate_staged(staged: &Staged, body: &Body) -> Result<(), HumanCommitError>
         staged.item_id,
         staged.revision_id,
         object_digest,
+        staged.audit_generation,
+        staged.audit_through_seq,
     );
     if !valid_shape
         || body.event_count != 1
@@ -719,85 +873,6 @@ fn validate_staged(staged: &Staged, body: &Body) -> Result<(), HumanCommitError>
     {
         return Err(HumanCommitError::BodyChanged);
     }
-    Ok(())
-}
-
-fn persist_audit(
-    transaction: &Transaction<'_>,
-    root: &UnlockedRoot,
-    input: &AuditInput,
-) -> Result<(), HumanCommitError> {
-    let state: Option<(i64, i64, Vec<u8>)> = transaction
-        .query_row(
-            "SELECT generation,seq,last_hash FROM audit_state WHERE device_id=?1",
-            [input.device.as_slice()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-    let (generation, seq, previous_hash) = match state {
-        Some((generation, seq, hash)) => (
-            generation,
-            seq.checked_add(1).ok_or(HumanCommitError::InvalidCommand)?,
-            bytes::<32>(&hash)?,
-        ),
-        None => (AUDIT_GENERATION, 1, [0_u8; 32]),
-    };
-    let key_envelope: Option<Vec<u8>> = transaction
-        .query_row(
-            "SELECT envelope FROM audit_keys WHERE device_id=?1 AND generation=?2",
-            params![input.device.as_slice(), generation],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let audit_plaintext = encode_audit(
-        root.vault_id(),
-        input.device,
-        u64::try_from(generation).map_err(|_| HumanCommitError::InvalidCommand)?,
-        u64::try_from(seq).map_err(|_| HumanCommitError::InvalidCommand)?,
-        input.event_id,
-        input.wall_time_us,
-        input.item,
-        input.revision,
-        input.frontier,
-        previous_hash,
-    );
-    let sealed = root.seal_audit_record(
-        key_envelope.as_deref(),
-        input.device,
-        u64::try_from(generation).map_err(|_| HumanCommitError::InvalidCommand)?,
-        input.event_id,
-        random_id()?,
-        &audit_plaintext,
-    )?;
-    if let Some(envelope) = sealed.key_envelope() {
-        transaction.execute(
-            "INSERT INTO audit_keys (device_id,generation,envelope) VALUES (?1,?2,?3)",
-            params![input.device.as_slice(), generation, envelope],
-        )?;
-    }
-    transaction.execute(
-        "INSERT INTO encrypted_audit_records (device_id,generation,seq,event_id,record)
-         VALUES (?1,?2,?3,?4,?5)",
-        params![
-            input.device.as_slice(),
-            generation,
-            seq,
-            input.event_id.as_slice(),
-            sealed.record()
-        ],
-    )?;
-    let record_hash = digest(sealed.record());
-    transaction.execute(
-        "INSERT INTO audit_state (device_id,generation,seq,last_hash) VALUES (?1,?2,?3,?4)
-         ON CONFLICT(device_id) DO UPDATE SET
-           generation=excluded.generation,seq=excluded.seq,last_hash=excluded.last_hash",
-        params![
-            input.device.as_slice(),
-            generation,
-            seq,
-            record_hash.as_slice()
-        ],
-    )?;
     Ok(())
 }
 
@@ -941,7 +1016,7 @@ fn decode_command(bytes_value: &[u8]) -> Result<CommandFields<'_>, HumanCommitEr
     let expected_state = decode_fixed(&mut decoder)?;
     expect_key(&mut decoder, "operation")?;
     let operation = decoder.str().map_err(invalid)?;
-    if !matches!(operation, "item_write" | "item_lifecycle") {
+    if !matches!(operation, "item_write" | "item_lifecycle" | "audit_purge") {
         return Err(HumanCommitError::InvalidCommand);
     }
     expect_key(&mut decoder, "body_hash")?;
@@ -1034,9 +1109,11 @@ fn encode_event_manifest(
     item: [u8; 16],
     revision: Option<[u8; 16]>,
     object_digest: Option<[u8; 32]>,
+    audit_generation: Option<u64>,
+    audit_through_seq: Option<u64>,
 ) -> Vec<u8> {
     let mut encoder = Encoder::new(Vec::new());
-    encoder.array(1).unwrap().map(4).unwrap();
+    encoder.array(1).unwrap().map(6).unwrap();
     encoder.str("kind").unwrap().str(kind).unwrap();
     encoder.str("item").unwrap().bytes(&item).unwrap();
     encoder.str("revision").unwrap();
@@ -1046,6 +1123,18 @@ fn encode_event_manifest(
         &mut encoder,
         object_digest.as_ref().map(<[u8; 32]>::as_slice),
     );
+    encoder.str("audit_generation").unwrap();
+    if let Some(value) = audit_generation {
+        encoder.u64(value).unwrap();
+    } else {
+        encoder.null().unwrap();
+    }
+    encoder.str("audit_through_seq").unwrap();
+    if let Some(value) = audit_through_seq {
+        encoder.u64(value).unwrap();
+    } else {
+        encoder.null().unwrap();
+    }
     encoder.into_writer()
 }
 
@@ -1095,60 +1184,6 @@ fn encode_signed_event(event: &[u8], human_signature: &[u8; 64]) -> Vec<u8> {
         .str("human_signature")
         .unwrap()
         .bytes(human_signature)
-        .unwrap();
-    encoder.into_writer()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn encode_audit(
-    vault: &[u8; 16],
-    device: [u8; 16],
-    generation: u64,
-    seq: u64,
-    event_id: [u8; 16],
-    wall_time_us: i64,
-    item: [u8; 16],
-    revision: Option<[u8; 16]>,
-    frontier: [u8; 32],
-    previous_hash: [u8; 32],
-) -> Vec<u8> {
-    let mut encoder = Encoder::new(Vec::new());
-    encoder.map(19).unwrap();
-    encoder.str("v").unwrap().u64(1).unwrap();
-    encoder.str("vault").unwrap().bytes(vault).unwrap();
-    encoder.str("device").unwrap().bytes(&device).unwrap();
-    encoder
-        .str("audit_generation")
-        .unwrap()
-        .u64(generation)
-        .unwrap();
-    encoder.str("seq").unwrap().u64(seq).unwrap();
-    encoder.str("event_id").unwrap().bytes(&event_id).unwrap();
-    encoder
-        .str("wall_time_us")
-        .unwrap()
-        .i64(wall_time_us)
-        .unwrap();
-    encoder.str("monotonic_us").unwrap().u64(0).unwrap();
-    encoder.str("boot_id").unwrap().null().unwrap();
-    encoder.str("actor_kind").unwrap().str("human").unwrap();
-    encoder.str("actor_id").unwrap().null().unwrap();
-    encoder.str("action").unwrap().str("item_change").unwrap();
-    encoder.str("outcome").unwrap().str("succeeded").unwrap();
-    encoder.str("reason").unwrap().null().unwrap();
-    encoder.str("item_id").unwrap().bytes(&item).unwrap();
-    encoder.str("revision_id").unwrap();
-    encode_optional_bytes(&mut encoder, revision.as_ref().map(<[u8; 16]>::as_slice));
-    encoder.str("attempt_id").unwrap().null().unwrap();
-    encoder
-        .str("authority_frontier_hash")
-        .unwrap()
-        .bytes(&frontier)
-        .unwrap();
-    encoder
-        .str("previous_record_hash")
-        .unwrap()
-        .bytes(&previous_hash)
         .unwrap();
     encoder.into_writer()
 }
@@ -1211,7 +1246,7 @@ fn load_staging(
 ) -> Result<Staged, HumanCommitError> {
     connection
         .query_row(
-            "SELECT operation,event_kind,item_id,revision_id,body,package FROM human_staging
+            "SELECT operation,event_kind,item_id,revision_id,body,package,audit_generation,audit_through_seq FROM human_staging
              WHERE transaction_id=?1",
             [transaction_id.as_slice()],
             |row| {
@@ -1226,6 +1261,16 @@ fn load_staging(
                         .transpose()?,
                     body: row.get(4)?,
                     package: row.get(5)?,
+                    audit_generation: row
+                        .get::<_, Option<i64>>(6)?
+                        .map(u64::try_from)
+                        .transpose()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    audit_through_seq: row
+                        .get::<_, Option<i64>>(7)?
+                        .map(u64::try_from)
+                        .transpose()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 })
             },
         )

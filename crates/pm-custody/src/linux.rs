@@ -39,7 +39,10 @@ use rustls::{
 use zeroize::{Zeroize, Zeroizing};
 
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
-use pm_vault::{HumanCommitError, HumanVault, PasswordRecord, PreparedHumanCommand};
+use pm_vault::{
+    AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome,
+    AutonomousAuditVault, HumanCommitError, HumanVault, PasswordRecord, PreparedHumanCommand,
+};
 
 use crate::{Failure, take_path};
 
@@ -114,6 +117,7 @@ struct Profile {
 struct VaultService {
     path: std::path::PathBuf,
     device: [u8; 16],
+    audit_custody: Arc<AuditDeviceCustody>,
 }
 
 pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
@@ -127,6 +131,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("serve-vault") => serve_vault(&mut arguments),
         Some("probe") => probe(&mut arguments),
         Some("human-password-crud") => human_password_crud(&mut arguments),
+        Some("human-audit-lifecycle") => human_audit_lifecycle(&mut arguments),
         _ => Err(Failure::Usage),
     }
 }
@@ -238,9 +243,11 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
     let device_value = take_path(arguments, "--device")?;
     finish_arguments(arguments)?;
     let device = decode_hex_16(&device_value)?;
+    let audit_path = std::path::PathBuf::from(format!("{}.audit-custody", vault_path.display()));
     let service = VaultService {
         path: vault_path,
         device,
+        audit_custody: Arc::new(load_or_create_audit_custody(&audit_path)?),
     };
     serve_loop(
         &bootstrap_path,
@@ -248,6 +255,19 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
         &human_socket,
         Some(&service),
     )
+}
+
+fn load_or_create_audit_custody(path: &Path) -> Result<AuditDeviceCustody, Failure> {
+    if path.exists() {
+        let bytes = read_regular(path, current_uid(), 0o400)?;
+        return AuditDeviceCustody::from_protected_bytes(&bytes).map_err(|_| Failure::Unavailable);
+    }
+    let custody = AuditDeviceCustody::generate().map_err(|_| Failure::Unavailable)?;
+    let mut bytes = Zeroizing::new(custody.to_protected_bytes());
+    let result = write_new(path, &bytes, 0o400);
+    bytes.zeroize();
+    result?;
+    Ok(custody)
 }
 
 fn serve_loop(
@@ -433,6 +453,90 @@ fn human_password_crud(arguments: &mut impl Iterator<Item = OsString>) -> Result
     Ok(())
 }
 
+fn human_audit_lifecycle(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    write_frame(&mut tls, &[9])?;
+    expect_status(&read_frame(&mut tls)?, 0)?;
+    drop(tls);
+
+    let mut tls = connect(&profile, &key, &socket_path)?;
+    tls.write_all(HUMAN_MAGIC)
+        .map_err(|_| Failure::Unavailable)?;
+    rpc_unlock(&mut tls, &password)?;
+    let before = rpc_audit_query(&mut tls, 1, 1, 64)?;
+    if before.0 < 4 || before.1 > 1 || before.2 != 1 {
+        return Err(Failure::Unavailable);
+    }
+    let through_seq = if before.1 == 0 { 1_u64 } else { 2_u64 };
+    let mut request = vec![11];
+    request.extend_from_slice(&1_u64.to_be_bytes());
+    request.extend_from_slice(&through_seq.to_be_bytes());
+    write_frame(&mut tls, &request)?;
+    let response = read_frame(&mut tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let prepared = WirePrepared {
+        transaction_id: cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+        item_id: cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+        command: cursor.bytes()?,
+        body: cursor.bytes()?,
+        signature: cursor
+            .fixed(64)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    };
+    cursor.finish()?;
+    rpc_commit(&mut tls, &prepared)?;
+    let after = rpc_audit_query(&mut tls, 1, 1, 64)?;
+    if after.1 != 1 || after.0 != before.0 {
+        return Err(Failure::Unavailable);
+    }
+    println!(
+        "PASS audit-e2e autonomous-without-kh=1 signed-device=1 purge-gap=1 authority-retained=1"
+    );
+    Ok(())
+}
+
+fn rpc_audit_query(
+    tls: &mut rustls::StreamOwned<ClientConnection, UnixStream>,
+    generation: u64,
+    from_seq: u64,
+    limit: u32,
+) -> Result<(u64, u64, u64), Failure> {
+    let mut request = vec![10];
+    request.extend_from_slice(&generation.to_be_bytes());
+    request.extend_from_slice(&from_seq.to_be_bytes());
+    request.extend_from_slice(&limit.to_be_bytes());
+    write_frame(tls, &request)?;
+    let response = read_frame(tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let result = (cursor.u64()?, cursor.u64()?, cursor.u64()?);
+    cursor.finish()?;
+    Ok(result)
+}
+
 struct WirePrepared {
     transaction_id: [u8; 16],
     item_id: [u8; 16],
@@ -615,16 +719,41 @@ fn handle_human_rpc(
     cursor.expect(&[1])?;
     let mut password = Zeroizing::new(cursor.bytes()?);
     cursor.finish()?;
-    let mut vault = HumanVault::unlock(&service.path, &password, service.device, channel)
-        .map_err(|_| Failure::Unavailable)?;
+    let mut vault = HumanVault::unlock_with_audit_custody(
+        &service.path,
+        &password,
+        service.device,
+        channel,
+        Arc::clone(&service.audit_custody),
+    )
+    .map_err(|_| Failure::Unavailable)?;
     password.zeroize();
     write_frame(tls, &[0])?;
     loop {
         let Ok(request) = read_frame(tls) else {
             return Ok(());
         };
+        if request == [9] {
+            drop(vault);
+            let mut autonomous = AutonomousAuditVault::open(
+                &service.path,
+                service.device,
+                Arc::clone(&service.audit_custody),
+            )
+            .map_err(|_| Failure::Unavailable)?;
+            autonomous
+                .append(&AuditEvent::new(
+                    AuditActorKind::System,
+                    None,
+                    AuditAction::HumanLock,
+                    AuditOutcome::Succeeded,
+                ))
+                .map_err(|_| Failure::Unavailable)?;
+            write_frame(tls, &[0])?;
+            return Ok(());
+        }
         let drop_response = request.first() == Some(&8);
-        let response = handle_human_request(&mut vault, &request);
+        let response = handle_human_request(&mut vault, service.device, &request);
         if drop_response {
             let _ = tls.sock.shutdown(Shutdown::Both);
             return response.map(|_| ());
@@ -633,7 +762,12 @@ fn handle_human_rpc(
     }
 }
 
-fn handle_human_request(vault: &mut HumanVault, request: &[u8]) -> Result<Vec<u8>, Failure> {
+#[allow(clippy::too_many_lines)]
+fn handle_human_request(
+    vault: &mut HumanVault,
+    device: [u8; 16],
+    request: &[u8],
+) -> Result<Vec<u8>, Failure> {
     let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
     match opcode {
         2 | 3 => {
@@ -714,6 +848,43 @@ fn handle_human_request(vault: &mut HumanVault, request: &[u8]) -> Result<Vec<u8
                 }
                 Err(_) => Ok(vec![3]),
             }
+        }
+        10 => {
+            let mut cursor = Cursor::new(rest);
+            let generation = cursor.u64()?;
+            let from_seq = cursor.u64()?;
+            let limit = usize::try_from(cursor.u32()?).map_err(|_| Failure::Unavailable)?;
+            cursor.finish()?;
+            let query = vault
+                .query_audit(device, generation, from_seq, limit)
+                .map_err(|_| Failure::Unavailable)?;
+            let mut response = vec![0];
+            response.extend_from_slice(
+                &u64::try_from(query.records().len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            response.extend_from_slice(
+                &u64::try_from(query.discontinuities().len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            response.extend_from_slice(
+                &u64::try_from(query.segment_count())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            Ok(response)
+        }
+        11 => {
+            let mut cursor = Cursor::new(rest);
+            let generation = cursor.u64()?;
+            let through_seq = cursor.u64()?;
+            cursor.finish()?;
+            let purge = vault
+                .prepare_audit_purge(device, generation, through_seq)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, purge.prepared())
         }
         _ => Err(Failure::Unavailable),
     }
@@ -1285,6 +1456,14 @@ impl<'a> Cursor<'a> {
             .try_into()
             .map_err(|_| Failure::Unavailable)?;
         Ok(u32::from_be_bytes(bytes))
+    }
+
+    fn u64(&mut self) -> Result<u64, Failure> {
+        let bytes: [u8; 8] = self
+            .fixed(8)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?;
+        Ok(u64::from_be_bytes(bytes))
     }
 
     fn bytes(&mut self) -> Result<Vec<u8>, Failure> {
