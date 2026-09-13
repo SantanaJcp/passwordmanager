@@ -30,7 +30,7 @@ the existing boundaries:
   not daemonize itself or accept identity through its request body.
 
 Primary platform references used for these narrow primitives are Apple's
-archived [`getpeereid(2)` manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/getpeereid.2.html),
+archived [`getpeereid(2)` manual](https://github.com/apple-oss-distributions/Libc/blob/main/gen/FreeBSD/getpeereid.3),
 [`setrlimit(2)` manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/setrlimit.2.html),
 [`launchd` job guidance](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html),
 and current [`NSPasteboard`](https://developer.apple.com/documentation/appkit/nspasteboard)
