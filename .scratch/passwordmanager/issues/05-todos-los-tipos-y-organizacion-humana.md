@@ -29,9 +29,11 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
 ## Answer
-Pendiente de implementación y evidencia.
+Integración parcial `ca1309d` del candidato `1f63086`, sin resolución: clean offline build, check (30 tests) y labs 03/04/05 pasan, pero no acreditan streaming de adjuntos >16 MiB. El autor está corrigiendo el límite in-memory heredado de `FileCiphertext`/RPC para cumplir G6 hasta 16 GiB. No bajar el límite del contrato ni desbloquear 07 con esta entrega parcial.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-13 — Reclamado por Sol en frontera paralela 05/06 tras integración verificada de 04. Conservar motor/commit compartidos, sin revisión formal Astra por ticket.
+
+2026-09-13 — Merger conservó merge parcial no destructivo y checks verdes; autor reportó gap de streaming/rango de archivos antes del cierre. 05 sigue claimed hasta implementar y verificar ese criterio.
