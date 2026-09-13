@@ -9,6 +9,7 @@ function Assert-True([bool] $Condition, [string] $Message) {
 }
 
 Assert-True ($env:CI -eq 'true') 'CI=true is required'
+Assert-True ($env:RUSTUP_AUTO_INSTALL -eq '0') 'RUSTUP_AUTO_INSTALL=0 is required before invoking rustup'
 Assert-True ($env:RUNNER_OS -eq 'Windows') "Runner OS mismatch: expected Windows, got $($env:RUNNER_OS)"
 Assert-True ($env:RUNNER_ARCH -eq 'ARM64') "Runner architecture mismatch: expected ARM64, got $($env:RUNNER_ARCH)"
 Assert-True (-not [string]::IsNullOrWhiteSpace($env:ImageOS)) 'ImageOS is absent'
@@ -30,9 +31,12 @@ foreach ($commandName in @('cargo', 'rustc', 'rustup', 'sc.exe', 'icacls.exe', '
 }
 
 $toolchain = '1.98.1-aarch64-pc-windows-msvc'
-$installedToolchains = & rustup toolchain list
+$installedToolchains = @(& rustup toolchain list)
 Assert-True ($LASTEXITCODE -eq 0) "Listing installed Rust toolchains failed with exit code $LASTEXITCODE"
-Assert-True (($installedToolchains | Where-Object { $_ -match '^1\.98\.1-aarch64-pc-windows-msvc(?:\s|$)' }).Count -gt 0) "Required native Rust toolchain is not already installed: $toolchain"
+$matchingToolchains = @(
+    $installedToolchains | Where-Object { $_ -match '^1\.98\.1-aarch64-pc-windows-msvc(?:\s|$)' }
+)
+Assert-True ($matchingToolchains.Count -gt 0) "Required explicitly installed native Rust toolchain is absent: $toolchain"
 $env:RUSTUP_TOOLCHAIN = $toolchain
 $rustVersion = & rustc --version
 $cargoVersion = & cargo --version

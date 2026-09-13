@@ -1,11 +1,12 @@
 # Método CI nativo efímero
 
 Estado: método adicional autorizado; primera ejecución real de preparación
-**fallida en los cinco targets** (evidencia al final). Este documento no acredita
+**fallida en los cinco targets** y remediación autorizada preparada (evidencia
+al final). Este documento no acredita
 soporte de producto, no resuelve los tickets 26--32 y no sustituye sus laboratorios
-humanos, de reboot/FDE o de firma real. Las reglas de no instalación implícita
-describen el contrato del método; la primera corrida detectó que Rustup lo
-incumplía mediante autoinstalación y esa corrección sigue pendiente.
+humanos, de reboot/FDE o de firma real. La instalación explícita y obligatoria
+del toolchain Rust exacto es la única instalación ahora autorizada; toda
+autoinstalación implícita continúa prohibida.
 
 ## Alcance y fuente de verdad
 
@@ -59,12 +60,20 @@ usa exactamente estos cinco targets estándar:
 Los labels fijan familia de OS y CPU, **no** `ImageVersion`; GitHub actualiza
 las imágenes regularmente. Cada corrida debe conservar el commit, label,
 `ImageOS`, `ImageVersion`, versión/build del OS, CPU y host Rust observados.
-El preflight exige Rust/Cargo 1.98.1 y compila, inspecciona y ejecuta un binario
-mínimo de la arquitectura nativa. El toolchain exacto debe estar ya instalado;
-el preflight no lo descarga ni instala. También comprueba privilegio administrativo,
+El workflow instala obligatoriamente `1.98.1-<host-nativo>` con perfil `minimal`
+y `--no-self-update`, y el preflight exige Rust/Cargo 1.98.1 antes de compilar,
+inspeccionar y ejecutar un binario mínimo de la arquitectura nativa.
+`RUSTUP_AUTO_INSTALL=0` se fija globalmente antes de cualquier invocación de
+Rustup: una selección ausente falla, nunca descarga otra versión implícitamente.
+También comprueba privilegio administrativo,
 gestor de servicios y herramientas nativas necesarias. Un preflight verde solo
 significa que el entorno es candidato; no demuestra custodia, aislamiento,
 crash-safety, empaquetado ni soporte.
+
+Esta instalación de entorno usa los homes efímeros provistos por el runner. No
+prepara ni acredita el build offline del producto: esa fase distinta seguirá
+usando `scripts/cargo-local.sh` y los homes `<repo>/.toolchain` fijados por el
+repositorio cuando exista el workflow de aceptación correspondiente.
 
 Windows x64 queda fuera: los runners estándar x64 publicados son Windows Server
 2022/2025, no el Windows 11 requerido por G1. El Windows 11 Desktop x64 de larger
@@ -78,15 +87,18 @@ ARM64.
 - Único trigger: `workflow_dispatch`; no hay `push`, PR, schedule ni ejecución
   automática.
 - `permissions: contents: read`; `actions/checkout` se fija al commit
-  `11d5960a326750d5838078e36cf38b85af677262` de v4.4.0 y no persiste
-  credenciales.
+  `3d3c42e5aac5ba805825da76410c181273ba90b1` de v7.0.1 y no persiste
+  credenciales. Su `action.yml` declara `runs.using: node24`; se verificaron el
+  tag y commit en el repositorio oficial de
+  [`actions/checkout`](https://github.com/actions/checkout/releases/tag/v7.0.1)
+  y el [manifiesto fijado](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/action.yml#L116).
 - No hay secrets propios, credenciales/certificados de firma, datos reales,
   cache, artifact upload, publicación ni larger runner.
 - No se imprime el entorno completo. Solo metadata de runner/OS/CPU/usuario,
   versiones de herramientas y el canario público `PM_NATIVE_CI_PROBE`.
 - Un comando, versión, arquitectura o prerrequisito ausente termina el job en
-  error. No se descarga una alternativa, no se cambia de label y no se acepta
-  emulación.
+  error. Fuera de la instalación obligatoria del toolchain exacto no se
+  descarga una alternativa, no se cambia de label y no se acepta emulación.
 - `fail-fast: false` permite observar los cinco resultados independientes; un
   fallo de cualquier instancia mantiene fallido el workflow completo y no se
   convierte en éxito.
@@ -196,3 +208,53 @@ de PowerShell y usar una versión fijada de checkout que declare Node 24
 nativamente. No repetir el mismo workflow ni contabilizar entornos aptos hasta
 corregir y verificar estos puntos. Esta solicitud de CI no sustituye la
 aprobación independiente pendiente del fallback de la TUI 23.
+
+## Remediación autorizada después de la primera ejecución
+
+El usuario autorizó explícitamente, el 2026-09-13, estas correcciones acotadas:
+
+1. instalar en cada job solamente `1.98.1-<host-nativo>` mediante
+   `rustup toolchain install`, perfil `minimal` y `--no-self-update`, como etapa
+   obligatoria y visible;
+2. fijar `RUSTUP_AUTO_INSTALL=0` a nivel del workflow antes de cualquier llamada
+   a Rustup, de modo que la selección/verificación no pueda instalar una
+   versión ausente como comportamiento implícito;
+3. materializar las salidas PowerShell en arrays con `@(...)` antes de consultar
+   `Count`, evitando el fallo de StrictMode para cero o un resultado;
+4. sustituir checkout v4 por el commit exacto
+   `3d3c42e5aac5ba805825da76410c181273ba90b1` de v7.0.1, cuyo manifiesto
+   oficial declara Node 24.
+
+No se autorizó caché, artifacts, secrets, larger runners, una versión Rust
+alternativa, gasto, validación de producto ni el fallback pendiente de TUI 23.
+El checker local requiere las dos instalaciones exactas (una etapa matricial
+Unix y una Windows), la variable global, el SHA/Node correctos y la conversión
+PowerShell segura; conserva las prohibiciones de instalaciones dentro de los
+scripts de verificación, sustituciones de éxito, emulación y acciones no
+fijadas. La remediación aún requiere integración/publicación separada y una
+nueva corrida manual; no convierte el run fallido anterior en evidencia verde.
+
+La comprobación se cambió primero y se ejecutó contra el workflow anterior:
+
+```text
+./scripts/verify-native-ci-config.sh
+# RED exit 1: native preflight has an unexpected action reference
+# (mostró las dos referencias checkout v4.4.0 anteriores)
+```
+
+Después de aplicar solamente la remediación autorizada:
+
+```text
+./scripts/verify-native-ci-config.sh
+sh -n scripts/ci/native-preflight-unix.sh scripts/verify-native-ci-config.sh
+git diff --check
+# GREEN: exit 0
+```
+
+PyYAML 6.0.3, ya disponible localmente, también cargó el workflow y comprobó
+dos jobs, cinco targets y `RUSTUP_AUTO_INSTALL=0`; no se instaló nada para esa
+comprobación. No hay `pwsh` en el host Linux actual, por lo que no se inventa
+una ejecución PowerShell local: su sintaxis y comportamiento corregido deben
+observarse en la nueva corrida Windows ARM64. El tag v7.0.1 se resolvió en el
+remoto oficial al SHA fijado y su `action.yml` observado declara
+`runs.using: node24`.
