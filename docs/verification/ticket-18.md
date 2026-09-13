@@ -141,3 +141,42 @@ restart and response-loss injection in a disposable user namespace. Ticket 18
 does not implement backup/export, 1PUX, WebAuthn sessions or TUI flows; those
 remain owned by their later tickets and must consume these transaction seams
 rather than bypassing them.
+
+## Unified merger verification
+
+Candidate `14d21a10b4de84fa5132321d8f9944680ad1af0b` was confirmed as a
+descendant of synchronized ticket-17 base `4451880956490024e1959b5134647b27116d85b0`
+and merged without history rewriting as
+`58b67801ca7bc489ca3f538b08ce2d838c6f8f0e` on top of unified HEAD
+`ceaad08`. Git reported no conflicts. The resulting ancestry retains ticket
+17's map-5 ciphertext graph/reducer and the independent ticket 10/13 timing
+documentation; ticket 20 was not merged or changed.
+
+Focused verification on the unified tree reported:
+
+```text
+./scripts/cargo-local.sh test -p pm-vault --test history_lifecycle --locked --offline
+# 3 passed; 0 failed
+
+./scripts/cargo-local.sh test -p pm-vault --test causal_reducer --locked --offline
+# 7 passed; 0 failed (including all 120 lifecycle delivery permutations)
+
+./scripts/check.sh
+# pinned inputs, fmt, workspace/all-target check and tests, clippy: exit 0
+
+./scripts/clean-offline-build.sh
+# removed 11409 files / 2.1 GiB; locked/offline build in 26.91 s: exit 0
+```
+
+The final sorted run of all eight Linux laboratories returned exit 0. Its
+ticket-specific line was:
+
+```text
+PASS history-e2e tls=rpk+alpn/pm-human/1 types=7 inline+stream=exact restore=new-revision response-loss=recovered restart=trash-durable scope=signed audit-failure=atomic purge=terminal markers=retained replay=blocked raw-canaries=absent
+```
+
+The same run also passed attempts, authorization, content, CSV, custody,
+human-transaction and sync, including sync's three opaque custodians and
+attempts' no-blind-retry crash path. No transient laboratory failure occurred
+in this merger run. The repository had no conflict markers or unfinished
+implementation markers and was clean before the resolution evidence commit.
