@@ -244,8 +244,44 @@ pub(crate) fn prepare_restore(
     input: &mut dyn Read,
     password: &[u8],
 ) -> Result<PreparedRestore, HumanCommitError> {
+    prepare_restore_from(
+        tx,
+        root,
+        device,
+        transaction_id,
+        input,
+        OpenPath::Password(password),
+    )
+}
+
+pub(crate) fn prepare_recovery(
+    tx: &Transaction<'_>,
+    root: &UnlockedRoot,
+    device: [u8; 16],
+    transaction_id: [u8; 16],
+    input: &mut dyn Read,
+    recovery: &RecoveryCode,
+) -> Result<PreparedRestore, HumanCommitError> {
+    prepare_restore_from(
+        tx,
+        root,
+        device,
+        transaction_id,
+        input,
+        OpenPath::Recovery(recovery),
+    )
+}
+
+fn prepare_restore_from(
+    tx: &Transaction<'_>,
+    root: &UnlockedRoot,
+    device: [u8; 16],
+    transaction_id: [u8; 16],
+    input: &mut dyn Read,
+    source: OpenPath<'_>,
+) -> Result<PreparedRestore, HumanCommitError> {
     let mut collector = RestoreCollector::new(tx, root, device, transaction_id);
-    let summary = parse_backup(input, OpenPath::Password(password), Some(&mut collector))?;
+    let summary = parse_backup(input, source, Some(&mut collector))?;
     let item_ids = collector.item_ids();
     let object_digest: [u8; 32] = tx
         .query_row(

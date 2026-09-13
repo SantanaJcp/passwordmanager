@@ -34,7 +34,7 @@ pub use content::{
 pub use history::{HistoryEntry, ItemHistory, ItemPurgeScope, PreparedItemPurge};
 pub use human::{
     AttachmentReader, HumanChannel, HumanCommitError, HumanReceipt, HumanVault, PasswordRecord,
-    PreparedHumanCommand,
+    PendingRecoveryChange, PreparedHumanCommand,
 };
 pub use migration::{
     CsvDelimiter, CsvEncoding, CsvField, CsvImportDecision, CsvImportPreview, CsvImportProfile,
@@ -374,8 +374,8 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              ) STRICT;
              CREATE TABLE human_staging (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
-               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'history_restore', 'item_purge', 'audit_purge', 'availability_change', 'identity_change', 'import_commit', 'backup_restore')),
-               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'restore', 'purge-item', 'purge-revisions', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'import-batch', 'backup-restore')),
+               operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'history_restore', 'item_purge', 'audit_purge', 'availability_change', 'identity_change', 'import_commit', 'backup_restore', 'root_rotation')),
+               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'restore', 'purge-item', 'purge-revisions', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'import-batch', 'backup-restore', 'root-password-rotate', 'root-recovery-rotate')),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB CHECK (revision_id IS NULL OR length(revision_id) = 16),
                body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144),
@@ -521,7 +521,7 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              CREATE TABLE human_receipts (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
                body_hash BLOB NOT NULL CHECK (length(body_hash) = 32),
-               committed_heads BLOB NOT NULL CHECK (length(committed_heads) BETWEEN 2 AND 262144),
+               committed_heads BLOB NOT NULL CHECK (length(committed_heads) BETWEEN 1 AND 262144),
                committed_at_us INTEGER NOT NULL,
                outcome TEXT NOT NULL CHECK (outcome = 'committed')
              ) STRICT;

@@ -22,14 +22,20 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [Tracker](../../../docs/agents/issue-tracker.md).
 
 ## Acceptance criteria
-- [ ] Clave externa+backup recuperan en entorno limpio sin keyring original y crean linaje/identidades nuevos.
-- [ ] restore a bóveda existente conserva autoridad actual/revocaciones, clave errónea o contenido alterado no mutan.
-- [ ] cambio de master/recovery es verificable sin perder acceso y comunica validez/límites de copias viejas, flujo de compromiso desde entorno sano no promete borrar copias expuestas.
-- [ ] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
+- [x] Clave externa+backup recuperan en entorno limpio sin keyring original y crean linaje/identidades nuevos.
+- [x] restore a bóveda existente conserva autoridad actual/revocaciones, clave errónea o contenido alterado no mutan.
+- [x] cambio de master/recovery es verificable sin perder acceso y comunica validez/límites de copias viejas, flujo de compromiso desde entorno sano no promete borrar copias expuestas.
+- [x] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
 - [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
 ## Answer
-Pendiente de implementación y evidencia.
+
+Candidato implementado: recuperación PMB1 mediante clave externa sin estado del
+equipo fuente, importación bajo linaje/identidades nuevos o autoridad vigente
+del destino, y rotación firmada/atómica de master y recuperación. Evidencia
+exacta, negativas y límites en
+[ticket-22](../../../docs/verification/ticket-22.md). Permanece pendiente la
+integración/verificación por merger separado.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.

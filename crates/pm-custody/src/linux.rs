@@ -42,6 +42,8 @@ use rustls::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+use pm_crypto::{KdfProfile, RecoveryCode};
+
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
 use pm_vault::{
     AgentEnrollment, AgentPeer, Attachment, AttachmentReader, AttemptOutcome, AttemptState,
@@ -63,7 +65,10 @@ const ED25519_SPKI_PREFIX: &[u8] = &[
 ];
 const SPKI_BYTES: usize = 44;
 const MAX_PROTECTED_BYTES: u64 = 16 * 1024;
-const IO_TIMEOUT: Duration = Duration::from_secs(5);
+// Password and recovery rotations deliberately perform multiple memory-hard
+// derivations before replying. Keep the transport deadline bounded, but do not
+// confuse a healthy, loaded custodian with an unavailable one mid-rotation.
+const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const HUMAN_MAGIC: &[u8; 5] = b"PMH1\n";
 const AGENT_MAGIC: &[u8; 5] = b"PMA1\n";
 const MAX_HUMAN_FRAME: usize = 18 * 1024 * 1024;
@@ -167,6 +172,9 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-1pux-import") => human_1pux_import(&mut arguments),
         Some("human-backup-exercise") => human_backup_exercise(&mut arguments),
         Some("human-backup-restore") => human_backup_restore(&mut arguments),
+        Some("human-recovery-restore") => human_recovery_restore(&mut arguments),
+        Some("human-master-rotate") => human_master_rotate(&mut arguments),
+        Some("human-recovery-rotate") => human_recovery_rotate(&mut arguments),
         _ => Err(Failure::Usage),
     }
 }
@@ -1266,6 +1274,133 @@ fn human_backup_restore(arguments: &mut impl Iterator<Item = OsString>) -> Resul
     let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
     rpc_commit(&mut tls, &prepared)?;
     println!("PASS backup-restore tls-rpk=1 alpn=pm-human/1 signed=1 source-unchanged=1");
+    Ok(())
+}
+
+fn human_recovery_restore(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    let archive_path = take_path(arguments, "--archive")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut recovery = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
+    let mut request = vec![42];
+    push_bytes(&mut request, &recovery)?;
+    recovery.zeroize();
+    write_frame(&mut tls, &request)?;
+    request.zeroize();
+    let mut source = File::open(&archive_path).map_err(|_| Failure::Unavailable)?;
+    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
+    loop {
+        let count = source.read(&mut buffer).map_err(|_| Failure::Unavailable)?;
+        if count == 0 {
+            break;
+        }
+        write_frame(&mut tls, &buffer[..count])?;
+    }
+    buffer.zeroize();
+    write_frame(&mut tls, &[0])?;
+    let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
+    let receipt = rpc_commit(&mut tls, &prepared)?;
+    if rpc_commit(&mut tls, &prepared)? != receipt {
+        return Err(Failure::Unavailable);
+    }
+    println!(
+        "PASS recovery-restore tls-rpk=1 alpn=pm-human/1 source-keyring=absent destination-authority=preserved signed=1 receipt-replay=1"
+    );
+    println!(
+        "WARN recovered data does not revoke exposed backups, offline copies, or external provider credentials; review current authority and rotate affected provider credentials from the healthy environment"
+    );
+    Ok(())
+}
+
+fn human_master_rotate(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut replacement = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
+    let mut request = vec![43];
+    push_bytes(&mut request, &replacement)?;
+    replacement.zeroize();
+    write_frame(&mut tls, &request)?;
+    request.zeroize();
+    let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
+    let receipt = rpc_commit(&mut tls, &prepared)?;
+    if rpc_commit(&mut tls, &prepared)? != receipt
+        || rpc_receipt(&mut tls, prepared.transaction_id)? != receipt
+    {
+        return Err(Failure::Unavailable);
+    }
+    println!(
+        "PASS master-rotate tls-rpk=1 alpn=pm-human/1 signed=1 receipt-replay=1 current-vault=preserved old-backups=historical-paths"
+    );
+    println!(
+        "WARN older backups remain usable through their historical password/recovery paths and are not erased or remotely invalidated"
+    );
+    Ok(())
+}
+
+fn human_recovery_rotate(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let profile_path = take_path(arguments, "--profile")?;
+    let private_path = take_path(arguments, "--private")?;
+    let socket_path = take_path(arguments, "--socket")?;
+    finish_arguments(arguments)?;
+    let profile = read_profile(&profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_key(&private_path, current_uid())?;
+    let mut input = std::io::stdin().lock();
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
+    write_frame(&mut tls, &[44])?;
+    let response = read_frame(&mut tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let mut code = Zeroizing::new(cursor.bytes()?);
+    cursor.finish()?;
+    println!(
+        "Recovery code (store externally): {}",
+        std::str::from_utf8(&code).map_err(|_| Failure::Unavailable)?
+    );
+    println!("Reintroduce recovery code to confirm the external copy:");
+    std::io::stdout()
+        .flush()
+        .map_err(|_| Failure::Unavailable)?;
+    let mut confirmation = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    write_frame(&mut tls, &confirmation)?;
+    confirmation.zeroize();
+    code.zeroize();
+    let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
+    let receipt = rpc_commit(&mut tls, &prepared)?;
+    if rpc_commit(&mut tls, &prepared)? != receipt
+        || rpc_receipt(&mut tls, prepared.transaction_id)? != receipt
+    {
+        return Err(Failure::Unavailable);
+    }
+    println!(
+        "PASS recovery-rotate tls-rpk=1 alpn=pm-human/1 signed=1 receipt-replay=1 verified-before-commit=1 old-current-code=invalid old-backups=remain-valid"
+    );
+    println!(
+        "WARN the old code no longer opens current backups, but older backups and exposed copies remain usable through their historical paths"
+    );
     Ok(())
 }
 
@@ -2370,6 +2505,14 @@ fn handle_human_rpc(
             handle_native_backup_restore(&mut vault, tls, &request[1..])?;
             continue;
         }
+        if request.first() == Some(&42) {
+            handle_native_recovery(&mut vault, tls, &request[1..])?;
+            continue;
+        }
+        if request.first() == Some(&44) {
+            handle_recovery_rotation(&mut vault, tls, &request[1..])?;
+            continue;
+        }
         let drop_response = request.first() == Some(&8);
         let response = handle_human_request(&mut vault, service.device, &request);
         if drop_response {
@@ -2955,6 +3098,59 @@ fn handle_native_backup_restore(
     let response = encode_prepared(vault, prepared.prepared())?;
     write_frame(reader.tls, &response)
 }
+
+fn handle_native_recovery(
+    vault: &mut HumanVault,
+    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
+    request: &[u8],
+) -> Result<(), Failure> {
+    let mut cursor = Cursor::new(request);
+    let mut encoded = Zeroizing::new(cursor.bytes()?);
+    cursor.finish()?;
+    let text = std::str::from_utf8(&encoded).map_err(|_| Failure::Unavailable)?;
+    let recovery: RecoveryCode = text.parse().map_err(|_| Failure::Unavailable)?;
+    let mut reader = FrameReader {
+        tls,
+        buffer: Vec::new(),
+        position: 0,
+        ended: false,
+    };
+    let prepared = vault
+        .prepare_native_recovery(&mut reader, &recovery)
+        .map_err(|_| Failure::Unavailable)?;
+    encoded.zeroize();
+    let response = encode_prepared(vault, prepared.prepared())?;
+    write_frame(reader.tls, &response)
+}
+
+fn handle_recovery_rotation(
+    vault: &mut HumanVault,
+    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
+    request: &[u8],
+) -> Result<(), Failure> {
+    if !request.is_empty() {
+        return Err(Failure::Unavailable);
+    }
+    let pending = vault
+        .begin_recovery_rotation()
+        .map_err(|_| Failure::Unavailable)?;
+    let mut code = Zeroizing::new(pending.recovery_code().to_string());
+    let mut response = vec![0];
+    push_bytes(&mut response, code.as_bytes())?;
+    write_frame(tls, &response)?;
+    let mut confirmation = Zeroizing::new(read_frame_bounded(tls, 1024)?);
+    let parsed: RecoveryCode = std::str::from_utf8(&confirmation)
+        .map_err(|_| Failure::Unavailable)?
+        .parse()
+        .map_err(|_| Failure::Unavailable)?;
+    let prepared = pending
+        .confirm(vault, &parsed)
+        .map_err(|_| Failure::Unavailable)?;
+    confirmation.zeroize();
+    code.zeroize();
+    let response = encode_prepared(vault, &prepared)?;
+    write_frame(tls, &response)
+}
 struct FrameReader<'a> {
     tls: &'a mut rustls::StreamOwned<ServerConnection, UnixStream>,
     buffer: Vec<u8>,
@@ -3107,6 +3303,16 @@ fn handle_human_request(
                 vault.prepare_create(&record)
             }
             .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
+        }
+        43 => {
+            let mut cursor = Cursor::new(rest);
+            let mut password = Zeroizing::new(cursor.bytes()?);
+            cursor.finish()?;
+            let prepared = vault
+                .prepare_master_password_rotation(&password, KdfProfile::DEFAULT)
+                .map_err(|_| Failure::Unavailable)?;
+            password.zeroize();
             encode_prepared(vault, &prepared)
         }
         4 => {
