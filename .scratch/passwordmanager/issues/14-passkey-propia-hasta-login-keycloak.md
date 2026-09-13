@@ -1,8 +1,8 @@
 # 14 — Passkey propia hasta login Keycloak
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-14
 Blocked by: 10,13
 Spec: ../spec.md
 Requirements: R03,R08,R09,R13,R14
@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-13 — Claimed por Sol tras integración verificada de 10 y 13; review Astra solo al finalizar el DAG.
