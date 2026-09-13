@@ -1,8 +1,8 @@
 # 21 — Backup PMB1/PMF1 y exportación humana
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-21
 Blocked by: 18,06
 Spec: ../spec.md
 Requirements: R04,R05,R18,R19
@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-13 — Reclamado para backup/exports completos tras18 y06 integrados; no copiarSQLite/WAL ni activarautoridadbackup.
