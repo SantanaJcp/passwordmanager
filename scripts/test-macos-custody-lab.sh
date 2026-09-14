@@ -23,8 +23,12 @@ done
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
-./scripts/cargo-local.sh build -p pm-custody -p pm-cli \
-  --features macos-ticket26-diagnostics --locked --offline
+libsodium_out_dir=$(
+  ./scripts/cargo-local.sh build -p pm-custody -p pm-cli \
+    --features macos-ticket26-diagnostics --locked --offline \
+    --message-format=json-render-diagnostics |
+    python3 scripts/extract-libsodium-build-metadata.py
+)
 ./scripts/cargo-local.sh test -p pm-native-channel -p pm-vault -p pm-crypto \
   --features macos-ticket26-diagnostics --locked --offline
 plutil -lint packaging/macos/com.santanajcp.passwordmanager.plist >/dev/null
@@ -53,4 +57,5 @@ done
 python3 crates/pm-custody/tests/macos_lab.py \
   "$root/target/debug/pm-custody" \
   "$root/target/debug/pm" \
-  "$root/packaging/macos/com.santanajcp.passwordmanager.plist"
+  "$root/packaging/macos/com.santanajcp.passwordmanager.plist" \
+  "$libsodium_out_dir/source/libsodium-stable/config.log"

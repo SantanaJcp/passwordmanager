@@ -306,13 +306,9 @@ def parse_sodium_cflags(config_log):
     return b"opt0" if opt0 else b"optimized"
 
 
-def classify_native_sodium(source_binary):
-    repository = source_binary.parents[2]
-    logs = list(repository.glob(
-        "target/debug/build/libsodium-sys-stable-*/out/source/libsodium-stable/config.log"
-    ))
-    assert len(logs) == 1, "native libsodium build metadata is unavailable or ambiguous"
-    classification = parse_sodium_cflags(logs[0].read_bytes())
+def classify_native_sodium(config_log):
+    assert config_log.is_file(), "native libsodium build metadata is unavailable"
+    classification = parse_sodium_cflags(config_log.read_bytes())
     status = b"PM26_DIAGNOSTIC sodium-cflags=" + classification
     diagnostic_lines(status)
     print(status.decode())
@@ -423,8 +419,10 @@ def fake_server_rejected_before_tls(binary, profile, private, impostor_home):
 def main():
     assert sys.platform == "darwin" and os.geteuid() != 0
     assert os.environ.get("PM_MACOS_EPHEMERAL_CI") == "1"
-    binary, cli, source_plist = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:])
-    classify_native_sodium(binary)
+    binary, cli, source_plist, sodium_config = map(
+        lambda value: pathlib.Path(value).resolve(), sys.argv[1:]
+    )
+    classify_native_sodium(sodium_config)
     guarded = [INSTALL, STATE, RUNTIME, PLIST]
     collisions = [str(path) for path in guarded if path.exists()]
     assert not collisions, f"refusing to replace pre-existing host paths: {collisions}"

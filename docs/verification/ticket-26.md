@@ -548,6 +548,23 @@ same complete check passed. `./scripts/clean-offline-build.sh` then completed a
 clean locked/offline rebuild successfully. No macOS runner was dispatched, so
 the ARM location and its native `sodium-cflags` category remain unverified.
 
+Native run `34810076591` on `ad9e6ad` failed on both architectures before the
+fixture mutated the host: the closed metadata guard found other than exactly
+one globbed libsodium `config.log`. The preceding feature-enabled build and
+tests create more than one eligible Cargo build directory, so a target-wide
+glob cannot identify the build linked into the custody artifact. The twelfth
+run therefore provides no CFLAGS or unlock-latency result.
+
+The corrected discriminant binds metadata to the exact custody build rather
+than weakening the guard. That single `cargo build` emits machine-readable
+`build-script-executed` records; a checked parser requires exactly one record
+for the locked `libsodium-sys-stable@1.24.0` package and writes only its
+`out_dir`. Missing, duplicate, malformed, foreign-package or non-directory
+records fail explicitly. The harness receives that exact output directory and
+requires its fixed `source/libsodium-stable/config.log`; it never globs, picks
+the first result or derives a category from another feature build. The existing
+closed CFLAGS parser and `opt0|optimized` output remain unchanged.
+
 ## Remaining acceptance work
 
 - Rerun the repaired checkpoint on both authorized ephemeral macOS
