@@ -96,3 +96,15 @@ rc0 tras preservar tres fallos de formato/lint, y clean offline rc0 en 40 s.
 Esto sólo demuestra reserva/mlock antes de `Read`: el caller conserva
 `stdin.lock()` y su buffer interno puede precargar plaintext. Falta lectura
 nativa sin buffer por plataforma; no se marca G7 ni el ticket como cerrado.
+
+2026-09-14 — Cuarto RED preparado sin ejecución: socketpair propio deja un
+canario sin newline tras dos passwords; `FIONREAD` del extremo lector debe
+mostrarlo aún en kernel al aparecer confirmación. `StdinLock` puede precargarlo
+en su `BufReader`. Método exige fd/handle nativo sin ownership del stdin original
+y sin fallback; Linux no acreditará macOS/Windows. No se escribió GREEN.
+
+2026-09-14 — Usuario autorizó de forma explícita sólo los cuatro cleanups antes
+pendientes: `TemporaryDirectory::drop/remove_dir_all` y los unlink de privada
+tras keygen, `.partial` de download y archivo incompleto de `write_new`. Se
+implementarán test-first después del vertical stdin, preservando error primario
+más cleanup, path owned y un intento; no es autorización global de cleanup.

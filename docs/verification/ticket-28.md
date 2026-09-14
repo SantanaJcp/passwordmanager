@@ -75,7 +75,7 @@ de una aserción. Éxito requiere cero fallos, cero procesos/residuos propios y
 todos los canales de canario completos. La evidencia no es auditoría externa,
 no acredita administradores/kernel ni sustituye 30–34.
 
-## Fallbacks heredados fuera del cambio sin autorización
+## Fallbacks heredados con corrección acotada autorizada
 
 - `pm-process-runner::TemporaryDirectory::drop` descarta el error de
   `remove_dir_all`; puede dejar un directorio de evidencia aunque la observación
@@ -84,9 +84,12 @@ no acredita administradores/kernel ni sustituye 30–34.
   pública, al retirar `.partial` después de fallo de descarga y al retirar un
   archivo nuevo después de fallo de write/fsync.
 
-Esos fallbacks se informaron antes de tocar código. El cleanup de `persist_new`
-se corrige en el cambio separado ya autorizado y se compondrá antes del gate
-integral; este ticket no duplica esa edición.
+Esos cuatro fallbacks se informaron antes de tocar código y el usuario autorizó
+explícitamente su corrección el 2026-09-14. Se abordarán en un vertical separado
+después de stdin: error primario más cleanup, path owned, un solo intento y sin
+ruta sustituta. La autorización es sólo para esos cuatro lugares, no una
+autorización global de cleanup. `persist_new` ya se corrigió en el cambio
+separado compuesto y este ticket no duplica esa edición.
 
 ## Evidencia TDD en curso
 
@@ -227,6 +230,27 @@ fallos previos, todos conservados: formato (`...-check.log`, rc1), documentació
 (`...-check-3.log`, rc101). Tras correcciones acotadas pasó rc0
 (`/tmp/pm28-direct-green-check-4.log`). El build limpio locked/offline pasó rc0
 en 40 s (`/tmp/pm28-direct-green-clean.log`).
+
+## Cuarto vertical preparado: stdin nativo sin prefetch
+
+El RED Linux reemplaza sólo el stdin del hijo por un `socketpair` propio. El
+padre conserva abierto el extremo lector y envía dos líneas de password seguidas
+de un canario sin newline. Al observar el prompt de confirmación consulta
+`FIONREAD` sobre ese mismo receive queue: una lectura nativa de un byte deja al
+menos el canario completo en kernel, mientras `StdinLock` puede vaciar el socket
+hacia su `BufReader` aunque el caller haya pedido un byte. No se lee ni consume
+el canario para probar ausencia. El control normal sigue creando raíces hasta
+recovery, el sujeto se termina por PID exacto y el `finally` cierra ambos
+sockets antes del cleanup estricto.
+
+El GREEN debe duplicar el stdin nativo sin tomar ownership del descriptor
+original y hacer `Read` directamente sobre la región protegida. Linux/macOS usan
+el fd nativo; Windows requiere su handle nativo equivalente, no un no-op ni
+retorno a `StdinLock`. Errores de duplicación/lectura conservan rc5 público y no
+seleccionan una ruta sustituta. Los tests de línea existentes fijan LF, CRLF,
+CR, EOF y límites. Este lab sólo puede producir RED/GREEN Linux: compilación y
+evidencia nativas siguen siendo requisitos separados antes de afirmar las otras
+plataformas.
 
 ## Verticales de fault/crash pendientes de RED
 
