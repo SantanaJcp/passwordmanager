@@ -58,7 +58,6 @@ use pm_vault::{
 use crate::{Failure, take_path};
 
 mod sync_job;
-mod tui;
 
 const KEY_MAGIC: &[u8] = b"PMK1";
 const BOOTSTRAP_MAGIC: &[u8] = b"PMCB1";
@@ -179,7 +178,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-backup-exercise") => human_backup_exercise(&mut arguments),
         Some("human-backup-restore") => human_backup_restore(&mut arguments),
         Some("human-ssh-lab-setup") => human_ssh_lab_setup(&mut arguments),
-        Some("tui") => tui::run(&mut arguments),
+        Some("tui") => crate::tui::run(&mut arguments),
         Some("human-github-lab-setup") => human_github_lab_setup(&mut arguments),
         Some("human-recovery-restore") => human_recovery_restore(&mut arguments),
         Some("human-master-rotate") => human_master_rotate(&mut arguments),

@@ -35,7 +35,7 @@ use rustls::{ClientConnection, StreamOwned};
 use std::os::unix::net::UnixStream;
 use zeroize::{Zeroize, Zeroizing};
 
-use super::{
+use crate::linux::{
     Cursor, HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared, connect,
     decode_prepared_response, finish_arguments, hex, open_1pux_source, push_bytes, read_frame,
     read_import_source, read_key, read_profile, rpc_commit, rpc_download_atomic, rpc_history,

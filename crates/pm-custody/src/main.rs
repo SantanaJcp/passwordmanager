@@ -9,6 +9,8 @@ mod agent_wire;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod tui;
 #[cfg(target_os = "windows")]
 mod windows;
 
