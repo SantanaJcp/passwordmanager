@@ -3,25 +3,31 @@
 use std::{io, ptr, sync::Arc};
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_IO_PENDING, ERROR_NOT_FOUND,
-        ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError,
-        GlobalFree, HANDLE, HGLOBAL, INVALID_HANDLE_VALUE, LocalFree, WAIT_FAILED, WAIT_OBJECT_0,
-        WAIT_TIMEOUT,
+        CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INSUFFICIENT_BUFFER,
+        ERROR_IO_PENDING, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED,
+        ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, GetLastError, GlobalFree, HANDLE, HGLOBAL,
+        INVALID_HANDLE_VALUE, LocalFree, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::{
+        ACL,
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-            SDDL_REVISION_1,
+            EXPLICIT_ACCESS_W, GRANT_ACCESS, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+            SetEntriesInAclW, SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
         },
         Cryptography::{
             CRYPT_INTEGER_BLOB, CRYPTPROTECT_LOCAL_MACHINE, CryptProtectData, CryptUnprotectData,
         },
-        GetTokenInformation, RevertToSelf, SECURITY_ATTRIBUTES, SecurityIdentification,
-        TOKEN_QUERY, TOKEN_USER, TokenImpersonationLevel, TokenUser,
+        DACL_SECURITY_INFORMATION, GetTokenInformation, IsValidSid, LookupAccountNameW,
+        NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID, RevertToSelf, SECURITY_ATTRIBUTES,
+        SID_NAME_USE, SecurityIdentification, TOKEN_QUERY, TOKEN_USER, TokenImpersonationLevel,
+        TokenUser,
     },
     Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
-        PIPE_ACCESS_DUPLEX, ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
+        GetFileInformationByHandle, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
+        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
     },
     System::{
         Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole},
@@ -43,7 +49,8 @@ use windows_sys::Win32::{
             SERVICE_STATUS_PROCESS,
         },
         Threading::{
-            CreateEventW, GetCurrentProcess, GetCurrentThread, INFINITE, OpenThreadToken, SetEvent,
+            CreateEventW, GetCurrentProcess, GetCurrentThread, GetProcessId, INFINITE, OpenProcess,
+            OpenThreadToken, PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION, SetEvent,
             WaitForMultipleObjects, WaitForSingleObject,
         },
     },
@@ -290,6 +297,81 @@ impl WindowsServerPipe {
             expected_client_sid: self.expected_client_sid.clone(),
             client_pid: self.client_pid,
         })
+    }
+
+    /// Duplicates one regular source handle from the authenticated client PID.
+    /// The client must hold its short-lived process transfer lease.
+    ///
+    /// # Errors
+    /// Returns an opaque error for peer/PID changes, missing exact process
+    /// rights, invalid source handles, links/reparse points, or cleanup failure.
+    pub fn duplicate_client_file(
+        &self,
+        source_value: u64,
+        maximum: u64,
+    ) -> Result<std::fs::File, ChannelAuthenticationError> {
+        use std::os::windows::io::FromRawHandle;
+
+        let source =
+            usize::try_from(source_value).map_err(|_| ChannelAuthenticationError)? as HANDLE;
+        if source.is_null() || source == INVALID_HANDLE_VALUE || maximum == 0 {
+            return Err(ChannelAuthenticationError);
+        }
+        self.verify()?;
+        let pid = self.client_pid.ok_or(ChannelAuthenticationError)?;
+        let client = unsafe {
+            OpenProcess(
+                PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        if client.is_null() {
+            return Err(ChannelAuthenticationError);
+        }
+        if unsafe { GetProcessId(client) } != pid || self.verify().is_err() {
+            close_handle(client)?;
+            return Err(ChannelAuthenticationError);
+        }
+        let mut local = ptr::null_mut();
+        let duplicated = unsafe {
+            DuplicateHandle(
+                client,
+                source,
+                GetCurrentProcess(),
+                &raw mut local,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        let peer_valid = self.verify();
+        let client_closed = close_handle(client);
+        if duplicated == 0 || peer_valid.is_err() || client_closed.is_err() {
+            if !local.is_null() && close_handle(local).is_err() {
+                return Err(ChannelAuthenticationError);
+            }
+            return Err(ChannelAuthenticationError);
+        }
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        let queried = unsafe { GetFileInformationByHandle(local, &raw mut information) } != 0;
+        let size =
+            (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
+        let valid = queried
+            && information.dwFileAttributes
+                & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                == 0
+            && information.nNumberOfLinks == 1
+            && ((u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow))
+                != 0
+            && size != 0
+            && size <= maximum;
+        if !valid {
+            close_handle(local)?;
+            return Err(ChannelAuthenticationError);
+        }
+        Ok(unsafe { std::fs::File::from_raw_handle(local) })
     }
 }
 
@@ -616,6 +698,266 @@ pub fn windows_named_pipe_available(
         | windows_sys::Win32::Foundation::ERROR_SEM_TIMEOUT
         | windows_sys::Win32::Foundation::ERROR_PIPE_BUSY => Ok(false),
         _ => Err(ChannelAuthenticationError),
+    }
+}
+
+/// Temporary access grant allowing only the installed custodian service to
+/// duplicate handles out of the current human TUI process.
+pub struct ProcessHandleTransferLease {
+    original_descriptor: PSECURITY_DESCRIPTOR,
+    original_dacl: *mut ACL,
+    installed_dacl: *mut ACL,
+    installed_bytes: Vec<u8>,
+    active: bool,
+}
+
+impl ProcessHandleTransferLease {
+    /// Adds a non-inheritable process ACE for the installed virtual service.
+    ///
+    /// # Errors
+    /// Returns an opaque error if SID resolution, DACL query/install, or
+    /// post-install verification fails.
+    pub fn begin() -> Result<Self, ChannelAuthenticationError> {
+        let sid = installed_service_sid()?;
+        let process = unsafe { GetCurrentProcess() };
+        let (original_descriptor, original_dacl) = query_process_dacl(process)?;
+        let mut entry = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: NO_INHERITANCE,
+            ..EXPLICIT_ACCESS_W::default()
+        };
+        entry.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        entry.Trustee.TrusteeType = TRUSTEE_IS_USER;
+        entry.Trustee.ptstrName = sid.as_ptr().cast_mut().cast();
+        let mut installed_dacl = ptr::null_mut();
+        let created = unsafe {
+            SetEntriesInAclW(1, &raw const entry, original_dacl, &raw mut installed_dacl)
+        };
+        if created != ERROR_SUCCESS || installed_dacl.is_null() {
+            let installed = free_local(installed_dacl.cast());
+            let original = free_local(original_descriptor);
+            if installed.is_err() || original.is_err() {
+                return Err(ChannelAuthenticationError);
+            }
+            return Err(ChannelAuthenticationError);
+        }
+        let installed_bytes = match acl_bytes(installed_dacl) {
+            Ok(value) => value,
+            Err(error) => {
+                let installed = free_local(installed_dacl.cast());
+                let original = free_local(original_descriptor);
+                if installed.is_err() || original.is_err() {
+                    return Err(ChannelAuthenticationError);
+                }
+                return Err(error);
+            }
+        };
+        let applied = unsafe {
+            SetSecurityInfo(
+                process,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                installed_dacl,
+                ptr::null(),
+            )
+        };
+        if applied != ERROR_SUCCESS {
+            let first = free_local(installed_dacl.cast());
+            let second = free_local(original_descriptor);
+            if first.is_err() || second.is_err() {
+                return Err(ChannelAuthenticationError);
+            }
+            return Err(ChannelAuthenticationError);
+        }
+        let mut lease = Self {
+            original_descriptor,
+            original_dacl,
+            installed_dacl,
+            installed_bytes,
+            active: true,
+        };
+        if lease.current_matches(&lease.installed_bytes).is_err() {
+            lease.finish()?;
+            return Err(ChannelAuthenticationError);
+        }
+        Ok(lease)
+    }
+
+    /// Restores the original DACL only if no external actor changed the
+    /// descriptor installed by this lease.
+    ///
+    /// # Errors
+    /// Returns an opaque error for concurrent change, restore, verification,
+    /// or descriptor cleanup failure.
+    pub fn finish(mut self) -> Result<(), ChannelAuthenticationError> {
+        let result = (|| {
+            self.current_matches(&self.installed_bytes)?;
+            if unsafe {
+                SetSecurityInfo(
+                    GetCurrentProcess(),
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    self.original_dacl,
+                    ptr::null(),
+                )
+            } != ERROR_SUCCESS
+            {
+                return Err(ChannelAuthenticationError);
+            }
+            self.current_matches(&acl_bytes(self.original_dacl)?)
+        })();
+        let installed = free_local(self.installed_dacl.cast());
+        let original = free_local(self.original_descriptor);
+        self.active = false;
+        if result.is_err() || installed.is_err() || original.is_err() {
+            Err(ChannelAuthenticationError)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn current_matches(&self, expected: &[u8]) -> Result<(), ChannelAuthenticationError> {
+        let (descriptor, dacl) = query_process_dacl(unsafe { GetCurrentProcess() })?;
+        let matches = acl_bytes(dacl).map(|actual| actual == expected);
+        let released = free_local(descriptor);
+        if matches != Ok(true) || released.is_err() {
+            Err(ChannelAuthenticationError)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for ProcessHandleTransferLease {
+    fn drop(&mut self) {
+        if self.active {
+            std::process::abort();
+        }
+    }
+}
+
+fn query_process_dacl(
+    process: HANDLE,
+) -> Result<(PSECURITY_DESCRIPTOR, *mut ACL), ChannelAuthenticationError> {
+    let mut dacl = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    if unsafe {
+        GetSecurityInfo(
+            process,
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &raw mut dacl,
+            ptr::null_mut(),
+            &raw mut descriptor,
+        )
+    } != ERROR_SUCCESS
+        || descriptor.is_null()
+        || dacl.is_null()
+    {
+        if !descriptor.is_null() {
+            free_local(descriptor)?;
+        }
+        return Err(ChannelAuthenticationError);
+    }
+    Ok((descriptor, dacl))
+}
+
+fn acl_bytes(acl: *const ACL) -> Result<Vec<u8>, ChannelAuthenticationError> {
+    if acl.is_null() {
+        return Err(ChannelAuthenticationError);
+    }
+    let length = usize::from(unsafe { (*acl).AclSize });
+    if length < std::mem::size_of::<ACL>() || length > u16::MAX.into() {
+        return Err(ChannelAuthenticationError);
+    }
+    Ok(unsafe { std::slice::from_raw_parts(acl.cast::<u8>(), length) }.to_vec())
+}
+
+fn installed_service_sid() -> Result<Vec<usize>, ChannelAuthenticationError> {
+    let account = wide(r"NT SERVICE\PasswordManager");
+    let mut sid_bytes = 0_u32;
+    let mut domain_units = 0_u32;
+    let mut use_kind: SID_NAME_USE = 0;
+    let first = unsafe {
+        LookupAccountNameW(
+            ptr::null(),
+            account.as_ptr(),
+            ptr::null_mut(),
+            &raw mut sid_bytes,
+            ptr::null_mut(),
+            &raw mut domain_units,
+            &raw mut use_kind,
+        )
+    };
+    if first != 0
+        || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER
+        || sid_bytes == 0
+        || domain_units == 0
+    {
+        return Err(ChannelAuthenticationError);
+    }
+    let word = std::mem::size_of::<usize>();
+    let sid_words = usize::try_from(sid_bytes)
+        .map_err(|_| ChannelAuthenticationError)?
+        .div_ceil(word);
+    let mut sid = vec![0_usize; sid_words];
+    let mut domain =
+        vec![0_u16; usize::try_from(domain_units).map_err(|_| ChannelAuthenticationError)?];
+    if unsafe {
+        LookupAccountNameW(
+            ptr::null(),
+            account.as_ptr(),
+            sid.as_mut_ptr().cast(),
+            &raw mut sid_bytes,
+            domain.as_mut_ptr(),
+            &raw mut domain_units,
+            &raw mut use_kind,
+        )
+    } == 0
+        || unsafe { IsValidSid(sid.as_mut_ptr().cast()) } == 0
+    {
+        return Err(ChannelAuthenticationError);
+    }
+    let text = sid_string(sid.as_mut_ptr().cast())?;
+    if !text.starts_with("S-1-5-80-") {
+        return Err(ChannelAuthenticationError);
+    }
+    Ok(sid)
+}
+
+fn sid_string(sid: PSID) -> Result<String, ChannelAuthenticationError> {
+    let mut text = ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &raw mut text) } == 0 || text.is_null() {
+        return Err(ChannelAuthenticationError);
+    }
+    let length = (0..256)
+        .take_while(|index| unsafe { *text.add(*index) } != 0)
+        .count();
+    if length == 256 {
+        free_local(text.cast())?;
+        return Err(ChannelAuthenticationError);
+    }
+    let decoded = String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) })
+        .map_err(|_| ChannelAuthenticationError);
+    let released = free_local(text.cast());
+    match (decoded, released) {
+        (Ok(value), Ok(())) => Ok(value),
+        _ => Err(ChannelAuthenticationError),
+    }
+}
+
+fn free_local(value: *mut core::ffi::c_void) -> Result<(), ChannelAuthenticationError> {
+    if value.is_null() || unsafe { LocalFree(value) }.is_null() {
+        Ok(())
+    } else {
+        Err(ChannelAuthenticationError)
     }
 }
 

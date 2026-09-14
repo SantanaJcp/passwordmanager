@@ -1167,21 +1167,30 @@ fn preview_1pux(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Fa
     if read_frame(tls)? != [0] {
         return Err(Failure::Unavailable);
     }
-    send_import_file(tls, &source)?;
-    let (summary, prepared) = decode_import_preview(&read_frame(tls)?)?;
+    let response = transfer_import_file(tls, &source)?;
+    let (summary, prepared) = decode_import_preview(&response)?;
     app.operation = Some(PendingOperation::Import(prepared));
     begin_prompt(app, Mode::ConfirmImport, &summary);
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn send_import_file(tls: &mut HumanTls, source: &File) -> Result<(), Failure> {
-    send_file_descriptor(&tls.sock, source.as_raw_fd())
+fn transfer_import_file(tls: &mut HumanTls, source: &File) -> Result<Vec<u8>, Failure> {
+    send_file_descriptor(&tls.sock, source.as_raw_fd()).and_then(|()| read_frame(tls))
 }
 
 #[cfg(target_os = "windows")]
-fn send_import_file(tls: &mut HumanTls, source: &File) -> Result<(), Failure> {
-    send_file_handle(tls, source)
+fn transfer_import_file(tls: &mut HumanTls, source: &File) -> Result<Vec<u8>, Failure> {
+    let lease =
+        pm_native_channel::ProcessHandleTransferLease::begin().map_err(|_| Failure::Unavailable)?;
+    let operation = send_file_handle(tls, source).and_then(|()| read_frame(tls));
+    match operation {
+        Ok(response) => match lease.finish() {
+            Ok(()) => Ok(response),
+            Err(cleanup) => Err(Failure::Unavailable.after_native_cleanup(Err(cleanup))),
+        },
+        Err(error) => Err(error.after_native_cleanup(lease.finish())),
+    }
 }
 
 fn confirm_import(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {

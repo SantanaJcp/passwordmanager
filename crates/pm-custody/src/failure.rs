@@ -9,6 +9,7 @@ pub(crate) enum PrimaryFailure {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum CleanupFailureKind {
     OwnedPathRemoval,
+    NativeResourceRestoration,
 }
 
 #[derive(Debug)]
@@ -35,6 +36,36 @@ impl Failure {
         let failure = CleanupFailure {
             kind: CleanupFailureKind::OwnedPathRemoval,
             source,
+        };
+        match self {
+            Self::Usage => Self::WithCleanup {
+                primary: PrimaryFailure::Usage,
+                cleanups: vec![failure],
+            },
+            Self::Unavailable => Self::WithCleanup {
+                primary: PrimaryFailure::Unavailable,
+                cleanups: vec![failure],
+            },
+            Self::WithCleanup {
+                primary,
+                mut cleanups,
+            } => {
+                cleanups.push(failure);
+                Self::WithCleanup { primary, cleanups }
+            }
+        }
+    }
+
+    pub(crate) fn after_native_cleanup(
+        self,
+        cleanup: Result<(), pm_native_channel::ChannelAuthenticationError>,
+    ) -> Self {
+        let Err(source) = cleanup else {
+            return self;
+        };
+        let failure = CleanupFailure {
+            kind: CleanupFailureKind::NativeResourceRestoration,
+            source: std::io::Error::other(source),
         };
         match self {
             Self::Usage => Self::WithCleanup {

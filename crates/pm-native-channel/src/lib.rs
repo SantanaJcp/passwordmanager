@@ -12,8 +12,8 @@ mod windows;
 
 #[cfg(target_os = "windows")]
 pub use windows::{
-    ConPty, OwnedClipboard, WindowsClientPipe, WindowsServerPipe, WindowsStopEvent,
-    dpapi_protect_machine, dpapi_unprotect, windows_named_pipe_available,
+    ConPty, OwnedClipboard, ProcessHandleTransferLease, WindowsClientPipe, WindowsServerPipe,
+    WindowsStopEvent, dpapi_protect_machine, dpapi_unprotect, windows_named_pipe_available,
 };
 
 /// One of the two Windows named-pipe endpoints. Roles are fixed by the
@@ -144,6 +144,17 @@ impl AuthenticatedHumanChannel {
                 Err(ChannelAuthenticationError)
             }
         }
+    }
+
+    /// Duplicates the accepted Windows pipe for the TLS transport while this
+    /// channel retains the authenticated identity lease.
+    ///
+    /// # Errors
+    /// Returns an opaque error if the accepted pipe cannot be duplicated.
+    #[cfg(target_os = "windows")]
+    pub fn try_clone_windows_pipe(&self) -> Result<WindowsServerPipe, ChannelAuthenticationError> {
+        self.pipe.verify()?;
+        self.pipe.try_clone()
     }
 }
 

@@ -37,7 +37,8 @@ fn main() -> ExitCode {
             if !failure.cleanups().is_empty() {
                 for cleanup in failure.cleanups() {
                     match cleanup.kind {
-                        CleanupFailureKind::OwnedPathRemoval => {}
+                        CleanupFailureKind::OwnedPathRemoval
+                        | CleanupFailureKind::NativeResourceRestoration => {}
                     }
                     let _ = cleanup.source.kind();
                 }

@@ -686,17 +686,20 @@ fn handle_server_connection(
     service: &VaultService,
     peer_rpk: &[u8],
 ) -> Result<(), Failure> {
-    let tls_pipe = pipe.try_clone().map_err(|_| Failure::Unavailable)?;
-    let human_channel = if role == Role::Human {
+    let (tls_pipe, human_channel) = if role == Role::Human {
         let channel = AuthenticatedHumanChannel::authenticate_windows(pipe)
+            .map_err(|_| Failure::Unavailable)?;
+        let tls_pipe = channel
+            .try_clone_windows_pipe()
             .map_err(|_| Failure::Unavailable)?;
         if let Some(diagnostics) = service.diagnostics.as_ref() {
             diagnostics.record(ServiceDiagnosticPhase::HumanAccepted)?;
         }
-        Some(channel)
+        (tls_pipe, Some(channel))
     } else {
         pipe.accept().map_err(|_| Failure::Unavailable)?;
-        None
+        let tls_pipe = pipe.try_clone().map_err(|_| Failure::Unavailable)?;
+        (tls_pipe, None)
     };
     let connection = ServerConnection::new(Arc::clone(config)).map_err(|_| Failure::Unavailable)?;
     let mut tls = rustls::StreamOwned::new(connection, tls_pipe);
@@ -774,6 +777,18 @@ fn serve_human(
         }
         let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
         match opcode {
+            31 => {
+                write_frame(tls, &[0])?;
+                let token = read_frame(tls)?;
+                let source_value =
+                    u64::from_be_bytes(token.try_into().map_err(|_| Failure::Unavailable)?);
+                let source = tls
+                    .sock
+                    .duplicate_client_file(source_value, 1024_u64.pow(4) + 256 * 1024 * 1024)
+                    .map_err(|_| Failure::Unavailable)?;
+                crate::human_wire::handle_1pux_file(&mut vault, tls, rest, source)?;
+                continue;
+            }
             17 => {
                 crate::human_wire::handle_stream_upload(&mut vault, tls, rest)?;
                 continue;
