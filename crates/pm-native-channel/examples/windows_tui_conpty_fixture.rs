@@ -23,7 +23,7 @@ mod windows_fixture {
     use windows_sys::Win32::{
         Foundation::{
             CloseHandle, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_DATA, GetLastError,
-            HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            HANDLE, SetLastError, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
             Authorization::{
@@ -33,6 +33,8 @@ mod windows_fixture {
         },
         System::{
             Console::{COORD, ClosePseudoConsole, CreatePseudoConsole},
+            DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
+            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
             Pipes::CreatePipe,
             StationsAndDesktops::{
                 CloseDesktop, CloseWindowStation, CreateDesktopW, CreateWindowStationW,
@@ -1380,6 +1382,54 @@ mod windows_fixture {
         write_conpty_input(fixture.input_write, &input)
     }
 
+    fn read_clipboard_utf16() -> io::Result<zeroize::Zeroizing<Vec<u16>>> {
+        if unsafe { OpenClipboard(ptr::null_mut()) } == 0 {
+            return Err(win32("OpenClipboard(fixture reader)"));
+        }
+        let operation = (|| {
+            let memory = unsafe {
+                GetClipboardData(u32::from(windows_sys::Win32::System::Ole::CF_UNICODETEXT))
+            };
+            if memory.is_null() {
+                return Err(win32("GetClipboardData(CF_UNICODETEXT)"));
+            }
+            let bytes = unsafe { GlobalSize(memory) };
+            if bytes < 2 || bytes % 2 != 0 {
+                return Err(io::Error::other(
+                    "clipboard UTF-16 allocation has invalid size",
+                ));
+            }
+            let source = unsafe { GlobalLock(memory) };
+            if source.is_null() {
+                return Err(win32("GlobalLock(clipboard reader)"));
+            }
+            let words = unsafe { std::slice::from_raw_parts(source.cast::<u16>(), bytes / 2) };
+            let end = words
+                .iter()
+                .position(|word| *word == 0)
+                .ok_or_else(|| io::Error::other("clipboard UTF-16 text is unterminated"));
+            let value = end.map(|end| zeroize::Zeroizing::new(words[..end].to_vec()));
+            unsafe { SetLastError(0) };
+            if unsafe { GlobalUnlock(memory) } == 0 && unsafe { GetLastError() } != 0 {
+                return Err(win32("GlobalUnlock(clipboard reader)"));
+            }
+            value
+        })();
+        let cleanup = if unsafe { CloseClipboard() } == 0 {
+            Err(win32("CloseClipboard(fixture reader)"))
+        } else {
+            Ok(())
+        };
+        match (operation, cleanup) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(primary), Ok(())) => Err(primary),
+            (Ok(_), Err(cleanup)) => Err(cleanup),
+            (Err(primary), Err(cleanup)) => Err(io::Error::other(format!(
+                "{primary}; clipboard reader cleanup failed: {cleanup}"
+            ))),
+        }
+    }
+
     fn press(fixture: &Fixture, key: &str) -> io::Result<()> {
         write_keyboard_input(fixture, key.as_bytes())
     }
@@ -1566,6 +1616,41 @@ mod windows_fixture {
             .observer
             .wait_for("Copied explicitly")
             .map_err(io::Error::other)?;
+        let expected_clipboard = zeroize::Zeroizing::new(
+            "synthetic-ticket27-import"
+                .encode_utf16()
+                .collect::<Vec<_>>(),
+        );
+        if read_clipboard_utf16()?.as_slice() != expected_clipboard.as_slice() {
+            return Err(io::Error::other(
+                "TUI clipboard did not contain the exact selected synthetic field",
+            ));
+        }
+        let replacement = pm_native_channel::OwnedClipboard::copy(b"synthetic-ticket27-new-owner")
+            .map_err(|_| io::Error::other("fixture interloper could not own private clipboard"))?;
+        thread::sleep(Duration::from_millis(1_200));
+        fixture
+            .observer
+            .wait_for("Clipboard custody expired")
+            .map_err(io::Error::other)?;
+        let expected_replacement = zeroize::Zeroizing::new(
+            "synthetic-ticket27-new-owner"
+                .encode_utf16()
+                .collect::<Vec<_>>(),
+        );
+        if read_clipboard_utf16()?.as_slice() != expected_replacement.as_slice() {
+            return Err(io::Error::other(
+                "TUI timeout changed a newer private clipboard selection",
+            ));
+        }
+        if !replacement
+            .clear_if_owned()
+            .map_err(|_| io::Error::other("fixture interloper clipboard cleanup failed"))?
+        {
+            return Err(io::Error::other(
+                "fixture interloper lost clipboard ownership before cleanup",
+            ));
+        }
 
         open_menu(fixture, "g", "Generator length")?;
         type_visible_and_submit(fixture, "24", "24")?;

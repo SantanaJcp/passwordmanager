@@ -670,7 +670,7 @@ try {
 
     if ($TuiConPtyRed) {
         $stationSddl = "D:P(A;;GA;;;SY)(A;;GA;;;$humanSid)"
-        $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, '--matrix', $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '15', '--copy-seconds', '30') $humanInput $tuiOut $tuiErr
+        $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, '--matrix', $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
         Assert-True ($p.ExitCode -eq 0) ('normal pm-custody TUI did not complete its ConPTY tracer: ' + (Get-Content $tuiErr -Raw))
         Assert-True ((Get-Content $tuiOut -Raw) -eq "TUI_CONPTY_READY$([Environment]::NewLine)") 'TUI fixture emitted unexpected public output'
         Assert-True (Test-Path -LiteralPath $tuiBackup -PathType Leaf) 'TUI native backup was not published'

@@ -1862,6 +1862,25 @@ lease y descriptor cambiado. Un cambio concurrente visible hace fallar y no se
 sobrescribe. La prueba positiva usa el mismo handle de un 1PUX mayor que el
 frame; ninguna negativa concede derechos sobre un proceso o estación ajenos.
 
+El primer bloque implementado de esa matriz crea CSV y 1PUX dentro de la raíz
+humana, exige preview+confirmación por teclado, recorre organización, favorito,
+historia, selección explícita reveal/copy, generador, suspend/resume, pendientes,
+audit query, backup/export, trash/restore y purga de revisiones. El 1PUX incluye
+un attachment de 2 MiB+7 para cruzar la transferencia por handle y no caber en
+un frame de 1 MiB. El test nativo del lease compara el DACL binario exacto
+antes/después, cuenta un único ACE no heredable del servicio con sólo los dos
+rights confirmados y rechaza un segundo lease concurrente. El clipboard se lee
+en la estación privada, luego un owner sintético publica otra selección y se
+comprueba que el timeout no la borra. Estos casos requieren ejecución Windows;
+la inspección estática no los declara verdes.
+
+Quedan en el siguiente bloque, y por tanto no se declara matriz completa:
+resize con redraw, catálogo/reveal de los siete tipos, aislamiento del lector
+agente fuera de la window station, negativas completas peer/PID/source/reparse/
+links/cambio DACL, restore y ambas rotaciones, attachment download de 16 MiB+,
+pair/sync/reinicio/idle/offline/retire y audit purge. El tracer tampoco acredita
+Windows Terminal visible ni x64/reboot/FDE/firma.
+
 ### Composición sync nativa pendiente
 
 Los opcodes 60, 61, 64 y 65 ya pertenecen al handler humano común: creación del
