@@ -1961,6 +1961,17 @@ def run_shared_pasteboard_control(
             assert_agent_cannot_read_pasteboard(
                 TUI_PASSWORD_RECORD, diagnostic=True, require_denied=False
             )
+        # Close a still-running supporting TUI through the same human keyboard
+        # path as the normal flow.  This keeps the PTY stream complete before
+        # strict cleanup observes it; a child that already exited is classified
+        # from its natural status instead of being signalled by cleanup.
+        observe_child_exit_without_termination(shared)
+        if shared.returncode is None and not shared.reaped:
+            shared.send_key("l")
+            assert shared.wait_exit(timeout=8) == 0, (
+                "shared pasteboard control did not lock and exit normally",
+                shared.returncode,
+            )
     finally:
         try:
             observe_child_exit_without_termination(shared)

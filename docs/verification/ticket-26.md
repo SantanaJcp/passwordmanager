@@ -1345,6 +1345,39 @@ shell syntax checks, the macOS custody checker, and `git diff --check` pass for
 this correction. No Cargo, build, parser runtime, system lab or native run was
 executed for this correction; native behavior remains pending.
 
+### Native run 27 shared-control PTY-close RED and bounded correction
+
+The subsequent native run on `a3db150` failed on both authorized macOS
+architectures in the supporting shared-bootstrap control before the isolated
+agent job. The run's fixed logs are
+`/tmp/pm-macos-run27-arm-full.log` and
+`/tmp/pm-macos-run27-intel-full.log`. The control's direct pasteboard probe
+remained supporting, non-acceptance evidence. Its still-running TUI was then
+closed by `MacPtySession.close()`, which sent the fixture's cleanup `SIGTERM`;
+strict PTY finalization consequently observed an incomplete VT control and
+reported `incomplete-control`. This is a fixture teardown RED, not evidence of
+pasteboard isolation or a product TUI failure, and the raw PTY stream remains
+unmodified.
+
+The bounded correction keeps strict parsing, checked cleanup and the exact
+exit classifier. After the shared probe, the harness first observes whether
+the child has already exited. If it is still alive, it sends the existing
+human `l` key and requires `wait_exit(timeout=8) == 0`, allowing the normal
+TUI path to finish its VT stream before cleanup closes the PTY. An already
+exited child is not signalled and is classified from its natural status.
+Thus the successful path must report `natural-zero returncode=0`; every
+nonzero or unknown status remains a failure. The strict SIGTERM cleanup path
+is retained only for an exceptional failure before normal close and is not a
+successful-control fallback. No product code, deadline, pasteboard assertion,
+or isolation boundary changed.
+
+This candidate has only static Python AST, shell syntax, macOS-checker and
+diff checks on Linux; no local Cargo, parser runtime, system lab or native
+rerun was executed. The next native run must show the categorized
+`natural-zero returncode=0` result on both architectures before the shared
+control can be considered clean; it still cannot count as Ticket 26
+acceptance.
+
 ## Remaining acceptance work
 
 - Compose and verify the complete keyboard TUI through the normal
