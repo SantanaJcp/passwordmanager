@@ -40,6 +40,8 @@ require_literal 'SE_DACL_PROTECTED' "$native_file"
 require_literal 'regular_open_rejects_a_final_reparse_component' "$native_file"
 require_literal 'pm_native_channel::create_private_file' "$sync_lib"
 require_literal 'pm_native_channel::open_regular_file' "$sync_lib"
+require_literal "@('test', '-p', 'pm-sync', '--lib', '--locked', '--offline')" "$lab"
+require_literal 'staged_output_is_flushed_before_atomic_publication' "$sync_lib"
 if grep -Eq 'os::unix::fs::OpenOptionsExt|\.mode\(0o600\)|O_NOFOLLOW' "$sync_lib"; then
     echo 'pm-sync bypasses the native portable file seam' >&2
     exit 1

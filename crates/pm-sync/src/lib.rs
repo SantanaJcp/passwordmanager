@@ -2,14 +2,14 @@
 
 //! Opaque self-hosted synchronization storage and E2EE vault replication.
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use minicbor::{Decoder, Encoder};
-use pm_crypto::{SyncPairing, digest};
+use pm_crypto::{digest, SyncPairing};
 use pm_vault::{
     CausalReducer, ReceivedCiphertextAttachment, ReceivedCiphertextGraph, ReceivedCiphertextStream,
     ReductionError, SignedCausalEvent,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     fmt,
     io::{Read, Write},
@@ -748,9 +748,7 @@ impl SyncReplica {
             if size != total || full.finish() != expected {
                 return Err(SyncError::Integrity);
             }
-            file.sync_all().map_err(|_| SyncError::Unavailable)?;
-            drop(file);
-            std::fs::rename(&temporary, output).map_err(|_| SyncError::Unavailable)
+            publish_staged_file(file, &temporary, output)
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temporary);
@@ -768,6 +766,47 @@ fn map_open_error(error: std::io::Error) -> SyncError {
         return SyncError::InvalidRequest;
     }
     SyncError::Unavailable
+}
+
+fn publish_staged_file(
+    file: std::fs::File,
+    temporary: &Path,
+    output: &Path,
+) -> Result<(), SyncError> {
+    file.sync_all().map_err(|_| SyncError::Unavailable)?;
+    drop(file);
+    std::fs::rename(temporary, output).map_err(|_| SyncError::Unavailable)
+}
+
+#[cfg(test)]
+mod native_file_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn staged_output_is_flushed_before_atomic_publication() {
+        let root = std::env::temp_dir().join(format!(
+            "pm-sync-publish-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let temporary = root.join("object.part");
+        let output = root.join("object");
+        let mut file = pm_native_channel::create_private_file(&temporary, true, true).unwrap();
+        file.write_all(b"synthetic ciphertext only").unwrap();
+        assert!(!output.exists());
+        publish_staged_file(file, &temporary, &output).unwrap();
+        assert!(!temporary.exists());
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"synthetic ciphertext only"
+        );
+        std::fs::remove_file(&output).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+    }
 }
 
 fn encode_object_page(entries: &[BlockRef]) -> Vec<u8> {
