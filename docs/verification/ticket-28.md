@@ -284,8 +284,10 @@ El GREEN Linux enfocado terminó rc0 en los tres seams: `pm-crypto` completo
 cleanup verificado. El primer `scripts/check.sh` posterior llegó sólo a
 `rustfmt --check` y terminó rc1 por el wrapping de un import Windows
 (`/tmp/pm28-native-stdin-green-check.log`); se conserva como fallo de formato,
-no conductual, y se corrigió sin tocar comportamiento. Check y clean finales
-quedan registrados por separado cuando terminen. Esta evidencia sigue siendo
+no conductual, y se corrigió sin tocar comportamiento. El segundo check completo
+terminó rc0 (`/tmp/pm28-native-stdin-green-check-attempt2.log`) y el clean
+offline posterior terminó rc0 en 38.15 s
+(`/tmp/pm28-native-stdin-green-clean.log`). Esta evidencia sigue siendo
 Linux x86_64: los casos Windows enumerados y macOS no se infieren de ella.
 
 La comparación de compatibilidad queda fijada contra el código fuente de

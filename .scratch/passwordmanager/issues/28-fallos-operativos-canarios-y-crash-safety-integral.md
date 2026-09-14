@@ -124,7 +124,8 @@ PASS Linux no los acredita.
 2026-09-14 — GREEN stdin nativo Linux: pm-crypto, pm-cli y fault-safety lab
 terminaron rc0; el lab observó `stdin=native-unbuffered` y cleanup verificado.
 El primer check posterior falló únicamente en formato de un import Windows y
-se conserva; Windows/macOS todavía no están probados.
+se conserva. El segundo check completo terminó rc0 y clean offline rc0 en
+38.15 s. Windows/macOS todavía no están probados.
 
 2026-09-14 — Usuario autorizó de forma explícita sólo los cuatro cleanups antes
 pendientes: `TemporaryDirectory::drop/remove_dir_all` y los unlink de privada
