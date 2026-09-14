@@ -56,8 +56,9 @@ use windows_sys::Win32::{
         },
         Threading::{
             CreateEventW, GetCurrentProcess, GetCurrentThread, GetProcessId, INFINITE, OpenProcess,
-            OpenThreadToken, PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION, SetEvent,
-            WaitForMultipleObjects, WaitForSingleObject,
+            OpenProcessToken, OpenThreadToken, PROCESS_DUP_HANDLE,
+            PROCESS_QUERY_LIMITED_INFORMATION, SetEvent, WaitForMultipleObjects,
+            WaitForSingleObject,
         },
     },
     UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE},
@@ -72,6 +73,58 @@ use windows_sys::Win32::System::Memory::GlobalSize;
 use crate::{ChannelAuthenticationError, WindowsEndpoint, windows_pipe_sddl};
 
 const PIPE_BUFFER: u32 = 1024 * 1024;
+const SYNC_PIPE_PREFIX: &str = r"\\.\pipe\pm-sync-";
+
+fn validate_sync_pipe_name(name: &str) -> Result<(), ChannelAuthenticationError> {
+    let suffix = name
+        .strip_prefix(SYNC_PIPE_PREFIX)
+        .ok_or(ChannelAuthenticationError)?;
+    if suffix.len() != 32
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ChannelAuthenticationError);
+    }
+    Ok(())
+}
+
+fn sync_pipe_sddl(
+    server_sid: &str,
+    client_sids: &[String],
+) -> Result<String, ChannelAuthenticationError> {
+    if !specific_local_sid(server_sid)
+        || client_sids.is_empty()
+        || client_sids
+            .iter()
+            .any(|sid| !specific_local_sid(sid) || sid == server_sid)
+        || client_sids
+            .iter()
+            .enumerate()
+            .any(|(index, sid)| client_sids[..index].contains(sid))
+    {
+        return Err(ChannelAuthenticationError);
+    }
+    let mut value = format!("O:{server_sid}G:{server_sid}D:P(A;;GA;;;SY)(A;;GA;;;{server_sid})");
+    for sid in client_sids {
+        value.push_str(&format!("(A;;GRGW;;;{sid})"));
+    }
+    Ok(value)
+}
+
+fn specific_local_sid(value: &str) -> bool {
+    ["S-1-5-21-", "S-1-5-80-"]
+        .iter()
+        .any(|prefix| value.starts_with(prefix) && valid_sid_suffix(value, prefix))
+}
+
+fn valid_sid_suffix(value: &str, prefix: &str) -> bool {
+    value.len() > prefix.len()
+        && value
+            .split('-')
+            .skip(1)
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
 
 /// Manual-reset event shared by the service control handler and server I/O.
 struct StopEventHandle {
@@ -184,7 +237,7 @@ fn event_is_signalled(event: HANDLE) -> io::Result<bool> {
 pub struct WindowsServerPipe {
     handle: HANDLE,
     stop: WindowsStopEvent,
-    expected_client_sid: String,
+    expected_client_sids: Vec<String>,
     client_pid: Option<u32>,
 }
 
@@ -231,7 +284,70 @@ impl WindowsServerPipe {
         Ok(Self {
             handle,
             stop: stop.clone(),
-            expected_client_sid: client_sid.to_owned(),
+            expected_client_sids: vec![client_sid.to_owned()],
+            client_pid: None,
+        })
+    }
+
+    /// Creates a dedicated sync pipe after validating the current server SID.
+    ///
+    /// # Errors
+    /// Rejects non-canonical names/SIDs and any token, descriptor or handle failure.
+    pub fn create_sync(
+        name: &str,
+        server_sid: &str,
+        client_sids: &[String],
+        stop: &WindowsStopEvent,
+    ) -> Result<Self, ChannelAuthenticationError> {
+        validate_sync_pipe_name(name)?;
+        if current_process_sid()? != server_sid {
+            return Err(ChannelAuthenticationError);
+        }
+        let sddl = sync_pipe_sddl(server_sid, client_sids)?;
+        Self::create_sync_named(name, &sddl, client_sids.to_vec(), stop)
+    }
+
+    fn create_sync_named(
+        name: &str,
+        sddl: &str,
+        client_sids: Vec<String>,
+        stop: &WindowsStopEvent,
+    ) -> Result<Self, ChannelAuthenticationError> {
+        let name = wide(name);
+        let sddl = wide(sddl);
+        let security_length = u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+            .map_err(|_| ChannelAuthenticationError)?;
+        let mut descriptor = ptr::null_mut();
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            return Err(ChannelAuthenticationError);
+        }
+        let security = SECURITY_ATTRIBUTES {
+            nLength: security_length,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let creation = create_pipe_instance(name.as_ptr(), &raw const security);
+        let released = free_local(descriptor);
+        let handle = match (creation, released) {
+            (Ok(handle), Ok(())) => handle,
+            (Err(_), Ok(())) | (Err(_), Err(_)) => return Err(ChannelAuthenticationError),
+            (Ok(handle), Err(_)) => {
+                close_handle(handle)?;
+                return Err(ChannelAuthenticationError);
+            }
+        };
+        Ok(Self {
+            handle,
+            stop: stop.clone(),
+            expected_client_sids: client_sids,
             client_pid: None,
         })
     }
@@ -247,7 +363,7 @@ impl WindowsServerPipe {
             return Err(ChannelAuthenticationError);
         }
         let sid = impersonated_client_sid(self.handle)?;
-        if sid != self.expected_client_sid {
+        if !self.expected_client_sids.contains(&sid) {
             return Err(ChannelAuthenticationError);
         }
         self.client_pid = Some(pid);
@@ -300,7 +416,7 @@ impl WindowsServerPipe {
         Ok(Self {
             handle,
             stop: self.stop.clone(),
-            expected_client_sid: self.expected_client_sid.clone(),
+            expected_client_sids: self.expected_client_sids.clone(),
             client_pid: self.client_pid,
         })
     }
@@ -653,34 +769,82 @@ impl WindowsClientPipe {
         Ok(channel)
     }
 
+    /// Connects to a canonical local sync pipe and pins the observed server PID.
+    /// TLS-RPK authenticates the server above this kernel transport.
+    ///
+    /// # Errors
+    /// Rejects invalid names and any connect/PID/liveness failure.
+    pub fn connect_sync(name: &str) -> Result<Self, ChannelAuthenticationError> {
+        validate_sync_pipe_name(name)?;
+        let name = wide(name);
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                ptr::null(),
+                OPEN_EXISTING,
+                SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(ChannelAuthenticationError);
+        }
+        let mut expected_server_pid = 0;
+        if unsafe { GetNamedPipeServerProcessId(handle, &raw mut expected_server_pid) } == 0
+            || expected_server_pid == 0
+        {
+            close_handle(handle)?;
+            return Err(ChannelAuthenticationError);
+        }
+        if verify_server_pipe(handle, expected_server_pid).is_err() {
+            // The sync constructor has not published an owner yet, so this path
+            // must close the raw handle explicitly rather than relying on Drop.
+            close_handle(handle)?;
+            return Err(ChannelAuthenticationError);
+        }
+        Ok(Self {
+            handle,
+            expected_server_pid,
+        })
+    }
+
     /// Revalidates the server PID and pipe liveness.
     ///
     /// # Errors
     /// Returns an opaque error after disconnect or server replacement.
     pub fn verify(&self) -> Result<(), ChannelAuthenticationError> {
-        let mut pid = 0;
-        if unsafe { GetNamedPipeServerProcessId(self.handle, &raw mut pid) } == 0
-            || pid != self.expected_server_pid
-            || unsafe {
-                PeekNamedPipe(
-                    self.handle,
-                    ptr::null_mut(),
-                    0,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            } == 0
-        {
-            return Err(ChannelAuthenticationError);
-        }
-        Ok(())
+        verify_server_pipe(self.handle, self.expected_server_pid)
     }
 
     #[must_use]
     pub const fn raw_handle(&self) -> HANDLE {
         self.handle
     }
+}
+
+fn verify_server_pipe(
+    handle: HANDLE,
+    expected_server_pid: u32,
+) -> Result<(), ChannelAuthenticationError> {
+    let mut pid = 0;
+    if unsafe { GetNamedPipeServerProcessId(handle, &raw mut pid) } == 0
+        || pid != expected_server_pid
+        || unsafe {
+            PeekNamedPipe(
+                handle,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        } == 0
+    {
+        return Err(ChannelAuthenticationError);
+    }
+    Ok(())
 }
 
 /// Checks whether one exact named-pipe endpoint currently has an available instance.
@@ -1473,6 +1637,19 @@ fn token_sid(token: HANDLE) -> Result<String, ChannelAuthenticationError> {
     Ok(sid)
 }
 
+fn current_process_sid() -> Result<String, ChannelAuthenticationError> {
+    let mut token = ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+        return Err(ChannelAuthenticationError);
+    }
+    let sid = token_sid(token);
+    let closed = close_handle(token);
+    match (sid, closed) {
+        (Ok(sid), Ok(())) => Ok(sid),
+        _ => Err(ChannelAuthenticationError),
+    }
+}
+
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
@@ -1685,6 +1862,24 @@ mod tests {
         assert_ne!(protected.as_slice(), CANARY);
         assert_eq!(dpapi_unprotect(&protected).unwrap().as_slice(), CANARY);
         assert!(dpapi_unprotect(b"not-a-dpapi-blob").is_err());
+    }
+
+    #[test]
+    fn sync_pipe_names_and_identity_lists_are_closed() {
+        let server = "S-1-5-80-10-20-30-40-50";
+        let clients = vec![
+            "S-1-5-80-11-21-31-41-51".to_owned(),
+            "S-1-5-21-1-2-3-1001".to_owned(),
+        ];
+        assert!(
+            validate_sync_pipe_name(r"\\.\pipe\pm-sync-0123456789abcdef0123456789abcdef").is_ok()
+        );
+        assert!(validate_sync_pipe_name(r"\\.\pipe\pm-sync-ABC").is_err());
+        let descriptor = sync_pipe_sddl(server, &clients).unwrap();
+        assert!(descriptor.contains(server));
+        assert!(clients.iter().all(|sid| descriptor.contains(sid)));
+        assert!(sync_pipe_sddl(server, &["S-1-1-0".to_owned()]).is_err());
+        assert!(sync_pipe_sddl(server, &[clients[0].clone(), clients[0].clone()]).is_err());
     }
 
     #[test]

@@ -1783,6 +1783,15 @@ DACL esperada antes de abrir el contenedor. El ejecutable configurado también
 debe superar la verificación de firma fijada del contrato de distribución; una
 ruta existente o un PE cualquiera no bastan.
 
+El adaptador Named Pipe preparado para esa extracción sólo acepta
+`\\.\pipe\pm-sync-<32 hex minúsculas>`. El servidor verifica que su token
+corresponde al SID explícito, instala DACL protegida SYSTEM+servidor+lista
+cerrada de clientes y, al aceptar, fija SID y PID impersonados. El cliente fija
+el PID de servidor observado y lo revalida; la RPK esperada autentica al
+servidor en TLS. No se acepta `Everyone`, `Authenticated Users`, aliases ni dos
+SIDs duplicados. El adaptador todavía no es evidencia de pm-sync Windows hasta
+componer deadline de 30 s, framing y lifecycle del binario en el fixture real.
+
 El método nativo crea servidor y cliente sync efímeros con SIDs distintos, hace
 pair por teclado en ConPTY, inicia el trabajo una sola vez y observa
 queued/pushing/pulling/terminal mediante 66. Debe probar lock e idle durante el
