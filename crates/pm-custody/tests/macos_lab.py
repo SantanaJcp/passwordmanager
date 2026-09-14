@@ -30,7 +30,13 @@ DIAGNOSTIC_LOG = STATE / "ticket26-diagnostic.log"
 DIAGNOSTIC_LINE = re.compile(
     rb"(?:PM26_DIAGNOSTIC phase=[a-z-]+|"
     rb"PM26_DIAGNOSTIC accepted-stream-nonblocking-(?:before|after)=[01]|"
-    rb"PM26_DIAGNOSTIC error=[a-z-]+)$"
+    rb"PM26_DIAGNOSTIC error=[a-z-]+|"
+    rb"PM26_DIAGNOSTIC client-human-unlock-result="
+    rb"(?:timeout|eof|other-io|malformed-frame|status-nonzero) elapsed-ms=[0-9]{1,6}|"
+    rb"PM26_DIAGNOSTIC server-human-unlock-result="
+    rb"(?:ok|vault-error) elapsed-ms=[0-9]{1,6}|"
+    rb"PM26_DIAGNOSTIC launchd-service="
+    rb"(?:same-pid|different-pid|unavailable|unparseable))$"
 )
 PEER_UID_SCRIPT = """
 import ctypes, socket, sys
@@ -274,7 +280,18 @@ def diagnostic_lines(value):
     return lines
 
 
-def human_authorization_setup(binary, profile, private, endpoint, first, second):
+def classify_launchd_service(result, expected_pid):
+    if result.returncode != 0:
+        return b"unavailable"
+    if result.stderr:
+        return b"unparseable"
+    match = re.search(rb"\bpid = ([0-9]+)\b", result.stdout)
+    if match is None:
+        return b"unparseable"
+    return b"same-pid" if int(match.group(1)) == expected_pid else b"different-pid"
+
+
+def human_authorization_setup(binary, profile, private, endpoint, first, second, service_pid):
     command = [
         "env", f"{DIAGNOSTIC_ENV}=1", binary, "human-authorization",
         "--profile", profile, "--private", private, "--socket", endpoint,
@@ -290,6 +307,12 @@ def human_authorization_setup(binary, profile, private, endpoint, first, second)
         result.returncode,
     )
     client = diagnostic_lines(diagnostic_stderr)
+    if result.returncode == 4:
+        launchd = sudo(["launchctl", "print", f"system/{LABEL}"], check=False)
+        classification = classify_launchd_service(launchd, service_pid)
+        status = b"PM26_DIAGNOSTIC launchd-service=" + classification
+        diagnostic_lines(status + b"\n")
+        print(status.decode())
     service = sudo(["tail", "-n", "32", DIAGNOSTIC_LOG], check=False)
     assert service.returncode == 0 and service.stderr == b"", (
         "custodian diagnostic log unavailable", service.returncode,
@@ -534,7 +557,7 @@ def main():
 
         human_authorization_setup(
             INSTALL / "pm-custody", human_profile, human_key, RUNTIME / "human.sock",
-            published_agent_pub.read_bytes(), published_other_pub.read_bytes(),
+            published_agent_pub.read_bytes(), published_other_pub.read_bytes(), pid,
         )
         suspend = run([INSTALL / "pm-custody", "human-authorization", "--profile", human_profile,
                        "--private", human_key, "--socket", RUNTIME / "human.sock", "--action", "suspend"],

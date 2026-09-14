@@ -15,7 +15,7 @@ use std::{
     },
     path::Path,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use aws_lc_rs::{
@@ -182,6 +182,45 @@ enum Ticket26DiagnosticError {
     ServerHumanResponseWrite,
 }
 
+#[derive(Clone, Copy)]
+enum Ticket26ClientUnlockResult {
+    Timeout,
+    Eof,
+    OtherIo,
+    MalformedFrame,
+    StatusNonzero,
+}
+
+impl Ticket26ClientUnlockResult {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Eof => "eof",
+            Self::OtherIo => "other-io",
+            Self::MalformedFrame => "malformed-frame",
+            Self::StatusNonzero => "status-nonzero",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Ticket26ServerUnlockResult {
+    Ok,
+    VaultError,
+}
+
+#[derive(Clone, Copy)]
+struct Ticket26DiagnosticTimer(Option<Instant>);
+
+impl Ticket26ServerUnlockResult {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::VaultError => "vault-error",
+        }
+    }
+}
+
 impl Ticket26DiagnosticError {
     const fn name(self) -> &'static str {
         match self {
@@ -258,6 +297,61 @@ fn ticket26_diagnostic_error(error: Ticket26DiagnosticError) {
 
 #[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
 const fn ticket26_diagnostic_error(_error: Ticket26DiagnosticError) {}
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic_timer() -> Ticket26DiagnosticTimer {
+    Ticket26DiagnosticTimer(
+        (std::env::var_os("PM_MACOS_TICKET26_DIAGNOSTIC").as_deref() == Some(OsStr::new("1")))
+            .then(Instant::now),
+    )
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic_timer() -> Ticket26DiagnosticTimer {
+    Ticket26DiagnosticTimer(None)
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic_client_unlock(
+    result: Ticket26ClientUnlockResult,
+    timer: Ticket26DiagnosticTimer,
+) {
+    if let Some(started) = timer.0 {
+        let elapsed_ms = started.elapsed().as_millis().min(999_999);
+        eprintln!(
+            "PM26_DIAGNOSTIC client-human-unlock-result={} elapsed-ms={elapsed_ms}",
+            result.name()
+        );
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic_client_unlock(
+    _result: Ticket26ClientUnlockResult,
+    _timer: Ticket26DiagnosticTimer,
+) {
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic_server_unlock(
+    result: Ticket26ServerUnlockResult,
+    timer: Ticket26DiagnosticTimer,
+) {
+    if let Some(started) = timer.0 {
+        let elapsed_ms = started.elapsed().as_millis().min(999_999);
+        eprintln!(
+            "PM26_DIAGNOSTIC server-human-unlock-result={} elapsed-ms={elapsed_ms}",
+            result.name()
+        );
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic_server_unlock(
+    _result: Ticket26ServerUnlockResult,
+    _timer: Ticket26DiagnosticTimer,
+) {
+}
 
 impl Role {
     const fn byte(self) -> u8 {
@@ -2913,10 +3007,22 @@ fn rpc_unlock(
     tls: &mut rustls::StreamOwned<ClientConnection, UnixStream>,
     password: &[u8],
 ) -> Result<(), Failure> {
+    let timer = ticket26_diagnostic_timer();
     let mut request = vec![1];
     push_bytes(&mut request, password)?;
     write_frame(tls, &request)?;
-    expect_status(&read_frame(tls)?, 0)
+    let response = read_frame_bounded_classified(tls, MAX_HUMAN_FRAME).map_err(|error| {
+        ticket26_diagnostic_client_unlock(error.client_result(), timer);
+        error.public_failure()
+    })?;
+    expect_status(&response, 0).inspect_err(|_| {
+        let result = if response.len() == 1 {
+            Ticket26ClientUnlockResult::StatusNonzero
+        } else {
+            Ticket26ClientUnlockResult::MalformedFrame
+        };
+        ticket26_diagnostic_client_unlock(result, timer);
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3074,6 +3180,7 @@ fn handle_human_rpc(
     cursor.finish().inspect_err(|_| {
         ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockDecode);
     })?;
+    let unlock_timer = ticket26_diagnostic_timer();
     let mut vault = HumanVault::unlock_with_audit_custody(
         &service.path,
         &password,
@@ -3082,9 +3189,11 @@ fn handle_human_rpc(
         Arc::clone(&service.audit_custody),
     )
     .map_err(|_| {
+        ticket26_diagnostic_server_unlock(Ticket26ServerUnlockResult::VaultError, unlock_timer);
         ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockVault);
         Failure::Unavailable
     })?;
+    ticket26_diagnostic_server_unlock(Ticket26ServerUnlockResult::Ok, unlock_timer);
     ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanUnlocked);
     password.zeroize();
     write_frame(tls, &[0]).inspect_err(|_| {
@@ -5005,23 +5114,63 @@ fn write_frame(output: &mut impl Write, value: &[u8]) -> Result<(), Failure> {
         .map_err(|_| Failure::Unavailable)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrameReadFailure {
+    Timeout,
+    Eof,
+    OtherIo,
+    MalformedFrame,
+}
+
+impl FrameReadFailure {
+    fn from_io(error: &std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => Self::Timeout,
+            std::io::ErrorKind::UnexpectedEof => Self::Eof,
+            _ => Self::OtherIo,
+        }
+    }
+
+    const fn client_result(self) -> Ticket26ClientUnlockResult {
+        match self {
+            Self::Timeout => Ticket26ClientUnlockResult::Timeout,
+            Self::Eof => Ticket26ClientUnlockResult::Eof,
+            Self::OtherIo => Ticket26ClientUnlockResult::OtherIo,
+            Self::MalformedFrame => Ticket26ClientUnlockResult::MalformedFrame,
+        }
+    }
+
+    const fn public_failure(self) -> Failure {
+        let _ = self;
+        Failure::Unavailable
+    }
+}
+
 fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, Failure> {
     read_frame_bounded(input, MAX_HUMAN_FRAME)
 }
 
 fn read_frame_bounded(input: &mut impl Read, maximum: usize) -> Result<Vec<u8>, Failure> {
+    read_frame_bounded_classified(input, maximum).map_err(FrameReadFailure::public_failure)
+}
+
+fn read_frame_bounded_classified(
+    input: &mut impl Read,
+    maximum: usize,
+) -> Result<Vec<u8>, FrameReadFailure> {
     let mut length = [0_u8; 4];
     input
         .read_exact(&mut length)
-        .map_err(|_| Failure::Unavailable)?;
-    let length = usize::try_from(u32::from_be_bytes(length)).map_err(|_| Failure::Unavailable)?;
+        .map_err(|error| FrameReadFailure::from_io(&error))?;
+    let length = usize::try_from(u32::from_be_bytes(length))
+        .map_err(|_| FrameReadFailure::MalformedFrame)?;
     if length == 0 || length > maximum {
-        return Err(Failure::Unavailable);
+        return Err(FrameReadFailure::MalformedFrame);
     }
     let mut value = vec![0_u8; length];
     input
         .read_exact(&mut value)
-        .map_err(|_| Failure::Unavailable)?;
+        .map_err(|error| FrameReadFailure::from_io(&error))?;
     Ok(value)
 }
 
@@ -5886,6 +6035,42 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailingReader(std::io::ErrorKind);
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(self.0))
+        }
+    }
+
+    #[test]
+    fn classified_frame_failures_keep_the_public_unavailable_result() {
+        for (kind, category) in [
+            (std::io::ErrorKind::TimedOut, FrameReadFailure::Timeout),
+            (std::io::ErrorKind::WouldBlock, FrameReadFailure::Timeout),
+            (std::io::ErrorKind::UnexpectedEof, FrameReadFailure::Eof),
+            (std::io::ErrorKind::BrokenPipe, FrameReadFailure::OtherIo),
+        ] {
+            let mut classified = FailingReader(kind);
+            assert_eq!(
+                read_frame_bounded_classified(&mut classified, MAX_HUMAN_FRAME),
+                Err(category)
+            );
+            let mut public = FailingReader(kind);
+            assert!(matches!(read_frame(&mut public), Err(Failure::Unavailable)));
+        }
+
+        let malformed = [0_u8; 4];
+        assert_eq!(
+            read_frame_bounded_classified(&mut malformed.as_slice(), MAX_HUMAN_FRAME),
+            Err(FrameReadFailure::MalformedFrame)
+        );
+        assert!(matches!(
+            read_frame(&mut malformed.as_slice()),
+            Err(Failure::Unavailable)
+        ));
+    }
 
     #[test]
     fn ancillary_widths_and_payload_bounds_are_checked() {

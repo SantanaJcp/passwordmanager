@@ -97,6 +97,10 @@ require_literal 'PM_MACOS_TICKET26_DIAGNOSTIC' "$harness"
 require_literal 'feature = "macos-ticket26-diagnostics"' "$custody_source"
 require_literal 'ticket26_diagnostic_error' "$custody_source"
 require_literal 'PM26_DIAGNOSTIC error=' "$custody_source"
+require_literal 'client-human-unlock-result=' "$custody_source"
+require_literal 'server-human-unlock-result=' "$custody_source"
+require_literal 'PM26_DIAGNOSTIC launchd-service=' "$harness"
+require_literal 'classify_launchd_service(launchd, service_pid)' "$harness"
 require_literal 'libc::F_GETFL' "$custody_source"
 require_literal 'set_nonblocking(false)' "$custody_source"
 require_literal 'accepted-stream-nonblocking-before=' "$custody_source"
@@ -117,7 +121,7 @@ if grep -Fq 'macos-ticket26-diagnostics' "$workflow" ||
     exit 1
 fi
 
-python3 - "$harness" <<'PY'
+PYTHONDONTWRITEBYTECODE=1 python3 - "$harness" <<'PY'
 import importlib.util
 import pathlib
 import sys
@@ -153,6 +157,25 @@ assert module.diagnostic_lines(
 assert module.diagnostic_lines(
     b"PM26_DIAGNOSTIC error=server-human-setup-password-commit\n"
 ) == [b"PM26_DIAGNOSTIC error=server-human-setup-password-commit"]
+assert module.diagnostic_lines(
+    b"PM26_DIAGNOSTIC client-human-unlock-result=timeout elapsed-ms=15001\n"
+) == [b"PM26_DIAGNOSTIC client-human-unlock-result=timeout elapsed-ms=15001"]
+assert module.diagnostic_lines(
+    b"PM26_DIAGNOSTIC server-human-unlock-result=ok elapsed-ms=14999\n"
+) == [b"PM26_DIAGNOSTIC server-human-unlock-result=ok elapsed-ms=14999"]
+assert module.diagnostic_lines(
+    b"PM26_DIAGNOSTIC launchd-service=same-pid\n"
+) == [b"PM26_DIAGNOSTIC launchd-service=same-pid"]
+result = type("Result", (), {
+    "returncode": 0, "stdout": b"state = running\n\tpid = 321\n", "stderr": b""
+})()
+assert module.classify_launchd_service(result, 321) == b"same-pid"
+assert module.classify_launchd_service(result, 654) == b"different-pid"
+result.returncode = 1
+assert module.classify_launchd_service(result, 321) == b"unavailable"
+result.returncode = 0
+result.stdout = b"state = running\n"
+assert module.classify_launchd_service(result, 321) == b"unparseable"
 try:
     module.diagnostic_lines(b"PM26_DIAGNOSTIC phase=client-profile path=/secret\n")
 except AssertionError:

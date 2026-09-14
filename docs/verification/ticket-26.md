@@ -416,6 +416,66 @@ Checkpoint evidence from this worktree:
   and needs the same native lab rerun to identify a phase/category before any
   product or fixture correction.
 
+### Tenth-run unlock-result diagnostic method
+
+The 2026-09-14 Apple-silicon rerun reached
+`server-human-unlock-frame` while the client ended at
+`error=client-human-unlock`. The current frame helper maps a socket timeout,
+EOF, other I/O failure, malformed response and non-success status to the same
+public failure. The fixture also reads the server log immediately after the
+client returns, so the absence of a server terminal phase does not distinguish
+an unlock still executing from a terminated or restarted custodian. Buffered
+fixture output means the workflow timestamps are not operation durations.
+
+Before editing, the next single-variable diagnostic method is fixed as follows:
+
+1. Preserve the exact setup command, public stdout/stderr/exit contract,
+   `IO_TIMEOUT`, Argon2id profile, wire format and server behavior. Add no retry,
+   sleep, new deadline, alternate path, or relaxed assertion.
+2. Refactor the existing frame reader once, without duplicating its framing
+   protocol, so its internal result retains only these fixed categories until
+   the human-unlock observer: `timeout` (`TimedOut` or `WouldBlock`), `eof`,
+   `other-io`, `malformed-frame`, and `status-nonzero`. Its ordinary wrapper
+   must continue mapping every category to the same `Failure::Unavailable`.
+   A focused regression checks that public-equivalent mapping.
+3. Under only `macos-ticket26-diagnostics` plus the exact opt-in
+   `PM_MACOS_TICKET26_DIAGNOSTIC=1`, report the fixed client unlock category and
+   a monotonic, bounded elapsed-millisecond value. Around the server vault
+   unlock, report only `ok` or `vault-error` with the same bounded elapsed
+   grammar. Do not include an error string, status byte, secret, key, path,
+   request, vault data, account, or wall-clock value.
+4. On setup exit 4, before reading the server log or raising the unchanged
+   failure, query the exact launchd label once and compare its parsed PID with
+   the already verified service PID. Emit only one fixed classification:
+   `same-pid`, `different-pid`, `unavailable`, or `unparseable`. Do not dump
+   launchctl output and do not wait for the server.
+5. Keep diagnostics evidence-only. `timeout` plus `same-pid` and no server
+   terminal result isolates a live server still inside unlock at the client
+   deadline; EOF plus a missing/replaced process distinguishes termination;
+   a server `vault-error` distinguishes an explicit unlock rejection. None is
+   acceptance, and the native RED remains until the unchanged observable lab
+   succeeds on both architectures.
+
+The inherited best-effort cleanup remains unchanged and outside this bounded
+checkpoint; it still requires separate authorization before Ticket 26 can be
+accepted.
+
+Checkpoint evidence from the Linux development host:
+
+- TDD RED: the focused `pm-custody` regression failed to compile because
+  `FrameReadFailure` and `read_frame_bounded_classified` did not yet exist.
+- Focused GREEN: the same regression passed both with and without
+  `macos-ticket26-diagnostics`; every classified frame failure retained the
+  ordinary `Failure::Unavailable` result.
+- The Python diagnostic grammar/classifier checks, Python and shell syntax,
+  the focused macOS CI checker, and `git diff --check` passed. The final
+  `./scripts/check.sh` passed in 97 seconds.
+- `./scripts/clean-offline-build.sh` removed 11,183 files / 3.8 GiB and the
+  locked offline rebuild passed in 39 seconds.
+- No native macOS rerun was performed for this checkpoint. The tenth-run ARM
+  failure remains RED, and the new categories are not native evidence until
+  the same unchanged laboratory runs there.
+
 ## Remaining acceptance work
 
 - Rerun the repaired checkpoint on both authorized ephemeral macOS
