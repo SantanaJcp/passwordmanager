@@ -1,0 +1,76 @@
+name: Native environment preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_AUTO_INSTALL: '0'
+
+jobs:
+  unix-environments:
+    name: Preflight ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+            platform: linux
+            machine: x86_64
+            runner_arch: X64
+            rust_host: x86_64-unknown-linux-gnu
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux
+            machine: aarch64
+            runner_arch: ARM64
+            rust_host: aarch64-unknown-linux-gnu
+          - target: macos-intel
+            runner: macos-15-intel
+            platform: macos
+            machine: x86_64
+            runner_arch: X64
+            rust_host: x86_64-apple-darwin
+          - target: macos-apple-silicon
+            runner: macos-15
+            platform: macos
+            machine: arm64
+            runner_arch: ARM64
+            rust_host: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          persist-credentials: false
+      - name: Install exact native Rust toolchain
+        shell: bash
+        run: rustup toolchain install '1.98.1-${{ matrix.rust_host }}' --profile minimal --no-self-update
+      - name: Verify native environment only
+        shell: bash
+        run: >-
+          ./scripts/ci/native-preflight-unix.sh
+          '${{ matrix.platform }}'
+          '${{ matrix.machine }}'
+          '${{ matrix.runner_arch }}'
+          '${{ matrix.rust_host }}'
+
+  windows-arm64-environment:
+    name: Preflight windows-arm64
+    runs-on: windows-11-vs2026-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          persist-credentials: false
+      - name: Install exact native Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install '1.98.1-aarch64-pc-windows-msvc' --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw "Exact Rust toolchain installation failed with exit code $LASTEXITCODE" }
+      - name: Verify native environment only
+        shell: pwsh
+        run: ./scripts/ci/native-preflight-windows.ps1

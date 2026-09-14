@@ -37,3 +37,19 @@ Pendiente de implementación y evidencia.
 2026-09-13 — Claimed tras integrar 05 y 18. Escalado de Luna a Sol conforme execution.md: unlock/lock y exposición de secretos, temporizadores y carrera de clipboard afectan garantías G7, además de conectar la TUI al canal humano real. Revisión formal Astra solo al final.
 
 2026-09-13 — Checkpoint SOLO23: TUI Ratatui/Crossterm real sobre `/dev/tty` y canal humano TLS-RPK; catálogo de siete tipos, mutaciones de organización, búsqueda, generador50, historia, trash/restore/purgas y selección explícita de todos los descriptores mediante opcodes51–53. Lab PTY/Wayland real verde con wrong-password sin mutación, resize, Unicode/control injection, expiraciones y carrera de `wl-copy` preservando selección ajena. `scripts/check.sh` y clean locked/offline verdes; 13 labs verdes y web-auth verde en retry exacto tras un primer timeout registrado en `docs/verification/ticket-23.md`. No resolver ni presentar como candidato integrable: el fallback heredado `primary_human_secret` de opcodes47/48 sigue sin cambio y espera autorización explícita.
+
+2026-09-13 — Autorizada la selección explícita sin sustitución de notas. La
+composición con la base unificada conserva todos los campos de
+`TokenExchange`; 47/48 y `primary_human_secret` se retiraron y el canal real los
+rechaza. Notas, source/custom, auth y attachments permanecen accesibles por
+51–53 con selección exacta. Pendiente gate completo y merger separado.
+
+2026-09-13 — Candidato SOLO23 congelado tras gate completo. La TUI real conserva
+los siete tipos y ocho records compuestos, incluido `TokenExchange`; notas,
+source/custom, auth múltiples y attachments son campos seleccionables por
+51–53. El fallback heredado 47/48 + `primary_human_secret` quedó eliminado bajo
+la autorización registrada y ambos opcodes se rechazan por el canal humano.
+`check.sh`, clean locked/offline y 18/18 labs Linux secuenciales pasaron. La
+evidencia conserva los RED de composición y de orden PTY; el harness espera el
+input visible antes de Enter sin retry ni aumento de deadlines. Pendiente
+únicamente integración por merger separado; no se resuelve aquí.

@@ -76,8 +76,10 @@ pub(crate) fn exchange_code(
         form_component(verifier),
     );
     let response = https_request(
-        profile,
-        "token_endpoint",
+        profile
+            .url("token_endpoint")
+            .map_err(|_| OidcError::Network)?,
+        profile.value("ca_der"),
         "POST",
         "application/x-www-form-urlencoded",
         form.as_bytes(),
@@ -96,7 +98,13 @@ pub(crate) fn exchange_code(
     if !scope.split(' ').any(|value| value == "openid") {
         return Err(OidcError::InvalidResponse);
     }
-    let jwks = https_request(profile, "jwks_uri", "GET", "", &[])?;
+    let jwks = https_request(
+        profile.url("jwks_uri").map_err(|_| OidcError::Network)?,
+        profile.value("ca_der"),
+        "GET",
+        "",
+        &[],
+    )?;
     let jwks = parse_json(&jwks).map_err(|_| OidcError::InvalidResponse)?;
     let id_subject = validate_jwt(&id_token, &jwks, profile, Some(nonce), now)?;
     let access_subject = validate_jwt(&access_token, &jwks, profile, None, now)?;
@@ -133,6 +141,29 @@ fn validate_jwt(
     nonce: Option<&str>,
     now: i64,
 ) -> Result<String, OidcError> {
+    let claims = verified_jwt_claims(token, jwks)?;
+    if string_field(&claims, "iss")? != profile.value("issuer")
+        || !audience_contains(&claims, profile.value("audience"))
+        || int_field(&claims, "exp")? <= now
+        || claims.field("nbf").is_some()
+            && int_field(&claims, "nbf").map_or(true, |value| value > now + 30)
+    {
+        return Err(OidcError::InvalidToken);
+    }
+    if let Some(expected) = nonce
+        && string_field(&claims, "nonce")? != expected
+    {
+        return Err(OidcError::InvalidToken);
+    }
+    if matches!(claims.field("aud"), Some(Json::Array(values)) if values.len() > 1)
+        && string_field(&claims, "azp")? != profile.value("client_id")
+    {
+        return Err(OidcError::InvalidToken);
+    }
+    Ok(string_field(&claims, "sub")?.to_owned())
+}
+
+pub(crate) fn verified_jwt_claims(token: &str, jwks: &Json) -> Result<Json, OidcError> {
     let mut parts = token.split('.');
     let header64 = parts.next().ok_or(OidcError::InvalidToken)?;
     let claims64 = parts.next().ok_or(OidcError::InvalidToken)?;
@@ -157,26 +188,7 @@ fn validate_jwt(
     UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key)
         .verify(signed.as_bytes(), &signature)
         .map_err(|_| OidcError::InvalidToken)?;
-    let claims = parse_segment(claims64)?;
-    if string_field(&claims, "iss")? != profile.value("issuer")
-        || !audience_contains(&claims, profile.value("audience"))
-        || int_field(&claims, "exp")? <= now
-        || claims.field("nbf").is_some()
-            && int_field(&claims, "nbf").map_or(true, |value| value > now + 30)
-    {
-        return Err(OidcError::InvalidToken);
-    }
-    if let Some(expected) = nonce
-        && string_field(&claims, "nonce")? != expected
-    {
-        return Err(OidcError::InvalidToken);
-    }
-    if matches!(claims.field("aud"), Some(Json::Array(values)) if values.len() > 1)
-        && string_field(&claims, "azp")? != profile.value("client_id")
-    {
-        return Err(OidcError::InvalidToken);
-    }
-    Ok(string_field(&claims, "sub")?.to_owned())
+    parse_segment(claims64)
 }
 
 fn parse_segment(value: &str) -> Result<Json, OidcError> {
@@ -294,14 +306,13 @@ pub(crate) fn form_component(value: &str) -> String {
 }
 
 pub(crate) fn https_request(
-    profile: &Profile,
-    endpoint: &str,
+    url: crate::HttpsUrl<'_>,
+    ca_der: &str,
     method: &str,
     content_type: &str,
     body: &[u8],
 ) -> Result<Vec<u8>, OidcError> {
-    let url = profile.url(endpoint).map_err(|_| OidcError::Network)?;
-    let ca = fs::read(profile.value("ca_der")).map_err(|_| OidcError::Network)?;
+    let ca = fs::read(ca_der).map_err(|_| OidcError::Network)?;
     let mut roots = RootCertStore::empty();
     roots
         .add(CertificateDer::from(ca))

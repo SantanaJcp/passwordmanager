@@ -42,10 +42,16 @@ def wait_text(root, text, timeout=8):
     raise AssertionError((text, screen(root)))
 
 
-def send(root, value, enter=False):
+def send(root, value, enter=False, hidden=False):
     if value:
         tmux(root, "send-keys", "-l", value)
     if enter:
+        # For visible prompts, observe the literal keyboard input in the real
+        # pane before sending Enter.  This keeps the lab ordered at the PTY
+        # boundary instead of assuming two tmux client processes imply that
+        # Crossterm has already consumed and rendered the first key batch.
+        if value and not hidden:
+            wait_text(root, f"Input: {value}")
         tmux(root, "send-keys", "Enter")
 
 
@@ -114,8 +120,10 @@ def setup(root, binary, cli):
         "--vault", vault, "--device", DEVICE])
     wait_for_sockets(daemon, [runtime / "agent.sock", runtime / "human.sock"])
     seeded = as_uid(HUMAN, [installed_binary, "human-content-flow", "--profile", profile,
-        "--private", human_key, "--socket", runtime / "human.sock"], input=wire_fields([password]))
-    assert seeded.stdout.startswith(b"PASS content-e2e types=7"), seeded
+        "--private", human_key, "--socket", runtime / "human.sock"],
+        input=wire_fields([password]), check=False)
+    assert seeded.returncode == 0 and seeded.stdout.startswith(b"PASS content-e2e types=7"), (
+        seeded.returncode, seeded.stdout, seeded.stderr)
     return installed_binary, daemon, password, profile, human_key, runtime, vault
 
 
@@ -133,7 +141,7 @@ def launch_tui(root, binary, profile, key, runtime, *, idle=30, reveal=1, copy=2
 
 def start_tui(root, binary, profile, key, runtime, password, *, idle=30, reveal=1, copy=2):
     raw = launch_tui(root, binary, profile, key, runtime, idle=idle, reveal=reveal, copy=copy)
-    send(root, password.decode(), enter=True)
+    send(root, password.decode(), enter=True, hidden=True)
     wait_text(root, "Unlocked: selection never reveals secrets")
     return raw
 
@@ -155,7 +163,7 @@ def main():
         )
         db.close()
         wrong_raw = launch_tui(root, binary, profile, key, runtime)
-        send(root, "synthetic-definitely-wrong", enter=True)
+        send(root, "synthetic-definitely-wrong", enter=True, hidden=True)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and tmux(root, "has-session", check=False).returncode == 0:
             time.sleep(0.05)
@@ -175,7 +183,9 @@ def main():
                             ("ssh", "SSH"), ("token", "Token"), ("note", "ticket05-e2e-search-canary"),
                             ("file", "File")):
             assert f"[{kind}]" in initial and title in initial, initial
-        for forbidden in ("ticket05-e2e-password-canary", "ticket05-e2e-totp-canary", "ticket05-e2e-token-canary"):
+        for forbidden in ("ticket05-e2e-password-canary", "ticket05-e2e-totp-canary",
+                          "ticket05-e2e-token-canary", "ticket11-e2e-subject-token-canary",
+                          "ticket11-e2e-requester-secret-canary"):
             assert forbidden not in initial
 
         # Real PTY resize: compact and larger frames remain interactive.
@@ -191,6 +201,7 @@ def main():
             ("Passkey", "auth[0].private_key"),
             ("SSH", "auth[0].private_key"),
             ("Token", "auth[0].secret"),
+            ("Exchange Relationship", "auth[0].requester_client_secret"),
             ("ticket05-e2e-search-canary", "notes"),
             ("File", "attachment[0].content"),
         )
@@ -213,6 +224,26 @@ def main():
         query(root, "Password")
         choose_field(root, "r", "source[0].value", 12)
         assert "ticket05-e2e-source-canary" in wait_text(root, "Secret revealed temporarily")
+        time.sleep(1.3)
+        wait_text(root, "Reveal expired")
+
+        # Notes remain independently selectable; absence of an auth secret no
+        # longer causes an implicit substitution by a legacy exposure opcode.
+        query(root, "ticket05-e2e-search-canary")
+        choose_field(root, "r", "notes", 5)
+        assert "Exposure: note" in wait_text(root, "Secret revealed temporarily")
+        time.sleep(1.3)
+        wait_text(root, "Reveal expired")
+
+        # The token-exchange relationship added by the unified base exposes
+        # both sensitive members only through the same exact-field ceremony.
+        query(root, "Exchange Relationship")
+        choose_field(root, "r", "auth[0].subject_token", 6)
+        assert "ticket11-e2e-subject-token-canary" in wait_text(root, "Secret revealed temporarily")
+        time.sleep(1.3)
+        wait_text(root, "Reveal expired")
+        choose_field(root, "r", "auth[0].requester_client_secret", 8)
+        assert "ticket11-e2e-requester-secret-canary" in wait_text(root, "Secret revealed temporarily")
         time.sleep(1.3)
         wait_text(root, "Reveal expired")
 
@@ -279,7 +310,8 @@ def main():
         assert after_audit >= before_audit + 2  # unlock + automatic lock
 
         stop(daemon); daemon = None
-        print("PASS tui-content types=7 fields=explicit-complete type-mutations=7 wrong-password=unchanged tls-rpk=1 keyboard=1 pty=1 terminal=linux "
+        print("PASS tui-content types=7 fields=explicit-complete token-exchange-fields=subject+requester notes=explicit legacy-exposure=rejected "
+              "type-mutations=7 wrong-password=unchanged tls-rpk=1 keyboard=1 pty=1 terminal=linux "
               "resize=80x24+42x12+100x30 unicode=1 controls=sanitized osc52=absent "
               "selection-secret=absent reveal-expiry=1 idle-lock=1 clipboard=wl-copy-2.3.0 "
               "clipboard-race=preserved hostile-agent=denied history=1 trash=1 restore=1 purge=1")

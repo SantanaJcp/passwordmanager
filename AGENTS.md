@@ -20,3 +20,7 @@ Contexto único: [CONTEXT.md](CONTEXT.md) es el vocabulario canónico. Para conv
 ### Investigación y planificación
 
 Las notas en [docs/research/](docs/research/) son evidencia o propuestas, no sustituyen decisiones confirmadas. Antes de planificar implementación, cerrar decisiones relevantes y comprobar viabilidad crítica; las pruebas del producto se planifican como criterios de aceptación, no se exigen ejecutadas antes de que exista. Crear tickets, prototipos o código sigue requiriendo autorización. Reutilizar el estado de la sección 15 en vez de agregar listas paralelas o rondas genéricas de investigación. No crear una segunda fuente de instrucciones `CLAUDE.md`.
+
+### Verificación nativa hospedada
+
+Antes de preparar o ejecutar runners hospedados, seguir el [Método CI nativo efímero](docs/verification/native-ci.md). Ese documento delimita preflight de entorno, futura aceptación de producto y evidencia que sigue requiriendo laboratorios humanos o de reboot; un runner disponible no acredita soporte.

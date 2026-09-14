@@ -61,12 +61,27 @@ dependencia:
    seleccionar campos `source`, custom, múltiples auth ni attachments. La
    superficie 51–53 ahora lista únicamente label/tamaño, exige selección
    explícita y solo entonces entrega el valor elegido con audit reveal/copy.
+6. Al componer la base unificada, `AuthRecord::TokenExchange` produjo RED
+   `E0004` tanto en el catálogo de campos como en el fallback heredado
+   `primary_human_secret`. El catálogo ahora enumera subject token, cliente,
+   secreto requester, proveedor, perfil, destinos y expiración. La superficie
+   pública comprueba que 47/48 se rechazan; se retiraron esos opcodes y el
+   helper completo, y reveal/copy existen solo como 51–53 con índice explícito.
+   Las notas siguen siendo un campo elegible y el lab las revela por su índice,
+   no como sustituto de un secreto ausente.
+7. La primera corrida integral de 18 labs dejó la TUI con `Input: keyboard-0`
+   todavía visible y agotó la espera de `Organization committed`: dos clientes
+   `tmux send-keys` consecutivos no acreditaban que Crossterm ya hubiera
+   consumido y renderizado el texto antes de enviar Enter. El harness ahora
+   espera el eco visible exacto del input en el PTY antes de Enter. No reintenta
+   la operación, no aumenta deadlines y no aplica esta observación a la maestra
+   oculta. El lab enfocado y la siguiente corrida integral pasaron.
 
 Comando enfocado actual:
 
 ```text
 ./scripts/test-linux-tui-content-lab.sh
-PASS tui-content types=7 fields=explicit-complete type-mutations=7 wrong-password=unchanged tls-rpk=1 keyboard=1 pty=1 terminal=linux resize=80x24+42x12+100x30 unicode=1 controls=sanitized osc52=absent selection-secret=absent reveal-expiry=1 idle-lock=1 clipboard=wl-copy-2.3.0 clipboard-race=preserved hostile-agent=denied history=1 trash=1 restore=1 purge=1
+PASS tui-content types=7 fields=explicit-complete token-exchange-fields=subject+requester notes=explicit legacy-exposure=rejected type-mutations=7 wrong-password=unchanged tls-rpk=1 keyboard=1 pty=1 terminal=linux resize=80x24+42x12+100x30 unicode=1 controls=sanitized osc52=absent selection-secret=absent reveal-expiry=1 idle-lock=1 clipboard=wl-copy-2.3.0 clipboard-race=preserved hostile-agent=denied history=1 trash=1 restore=1 purge=1
 ```
 
 Checks de candidato requeridos:
@@ -81,13 +96,36 @@ done
 git diff --check
 ```
 
-La ejecución secuencial inicial de laboratorios llegó a web-auth y falló allí:
-Keycloak informó actualización de imagen/configuración y el preflight terminó
-por timeout con OTP de longitud cero. Esto no se atribuye como causa demostrada
-ni se ocultó como verde. Un segundo `test-linux-web-auth-lab.sh` exacto, con los
-mismos artefactos fijados, pasó P1/isolation/adversarial/challenge. Los otros 13
-laboratorios pasaron; passkey/SSH/sync/TUI se ejecutaron con los artefactos
-repo-locales fijados. La integración debe repetir el gate compuesto.
+El historial de ejecución conserva los fallos y no los presenta como una suite
+verde: el checkpoint previo tuvo un timeout de web-auth con OTP vacío, sin causa
+establecida, seguido por un retry exacto verde. Tras componer la base, la primera
+corrida de 18 labs encontró expectativas obsoletas de backup/recovery (la base
+ya contenía ocho records de siete tipos) y de la salida content; cuatro labs
+web/passkey no arrancaron porque el clean había borrado symlinks ignorados a los
+artefactos fijados. Se restauraron exactamente esos symlinks repo-locales. Las
+expectativas de backup/recovery ahora distinguen `types=7 records=8`, con 18
+items/20 partes durables y nueve items restaurados (ocho records más el stream),
+sin reducir tipos ni datos. La siguiente corrida integral observó el RED de
+framing de teclado descrito arriba.
+
+Gate final del candidato, sin skips ni reintentos de operaciones:
+
+```text
+./scripts/check.sh
+PASS (fmt, check, tests y clippy; exit 0)
+
+./scripts/clean-offline-build.sh
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 49.24s
+
+set -euo pipefail
+for lab in $(find scripts -maxdepth 1 -name 'test-linux-*-lab.sh' | sort); do
+  "$lab"
+done
+PASS all-linux-labs count=18
+```
+
+Los 18 laboratorios pasaron secuencialmente, incluidos TUI real, Keycloak
+26.7.3, CFT/MV3/Native Messaging, SSH y sync con artefactos fijados.
 
 ## Límites
 
@@ -100,7 +138,6 @@ repo-locales fijados. La integración debe repetir el gate compuesto.
   y no inventa una copia parcial.
 - La revisión formal Astra y la integración/resolución pertenecen a las
   puertas finales/separate merger, no a este implementador.
-- El checkpoint conserva todavía opcodes heredados 47/48 y su selección
-  `primary_human_secret`; no forman parte del flujo 51–53. Su reemplazo o
-  retirada espera autorización explícita por la regla de no modificar
-  fallbacks existentes.
+- Tras autorización explícita, los opcodes heredados 47/48 y
+  `primary_human_secret` fueron retirados. No queda una ruta implícita o
+  alternativa a la selección exacta 51–53.

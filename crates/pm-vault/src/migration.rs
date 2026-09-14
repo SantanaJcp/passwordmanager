@@ -212,6 +212,10 @@ impl CsvRecordPreview<'_> {
             }
             AuthRecord::Totp { account, .. } => account.as_str(),
             AuthRecord::Token { profile_id, .. } => profile_id.as_str(),
+            AuthRecord::TokenExchange {
+                requester_client_id,
+                ..
+            } => requester_client_id.as_str(),
             AuthRecord::Passkey { user_name, .. } => user_name.as_str(),
         })
     }

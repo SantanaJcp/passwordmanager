@@ -14,8 +14,9 @@ use std::{
 
 use minicbor::{Decoder, Encoder, data::Type};
 use pm_crypto::{
-    ControlPackageInput, CryptoError, DigestState, GrantVectorInput, PasskeyKeyPair,
-    RevisionPackageInput, TrustedRoot, UnlockedRoot, digest, fill_random, random_id,
+    ControlPackageInput, CryptoError, DigestState, GrantVectorInput, KdfProfile, PasskeyKeyPair,
+    PendingRecoveryRotation, RecoveryCode, RevisionPackageInput, RootBundle, TrustedRoot,
+    UnlockedRoot, digest, fill_random, open_human_root, random_id, recover_human_root,
     verify_human_command,
 };
 pub use pm_native_channel::AuthenticatedHumanChannel as HumanChannel;
@@ -38,7 +39,7 @@ use crate::{
     ItemLifecycle, ItemPurgeScope, LogicalRecord, PasskeyAssertion, PasskeyError, PasskeyOperation,
     PasskeyPublicCredential, PasskeyRequest, PasskeyStatus, PasswordRng, PreparedAgentEnrollment,
     PreparedItemPurge, PreparedPasskeyRegistration, RecordKind, SearchHit, SearchQuery, VaultError,
-    content, unlock_root,
+    content, load_and_validate_bundle, unlock_root,
 };
 
 const CHALLENGE_LIFETIME_US: i64 = 60_000_000;
@@ -212,6 +213,49 @@ pub struct PreparedHumanCommand {
     item_id: [u8; 16],
     command: Vec<u8>,
     body: Vec<u8>,
+}
+
+/// Fresh recovery material that cannot be staged until its external copy is
+/// reintroduced. Dropping it leaves the current durable recovery path intact.
+pub struct PendingRecoveryChange {
+    pending: PendingRecoveryRotation,
+    source_bundle_digest: [u8; 32],
+}
+
+#[derive(Clone, Copy)]
+enum BackupOpen<'a> {
+    Password(&'a [u8]),
+    Recovery(&'a RecoveryCode),
+}
+
+impl PendingRecoveryChange {
+    #[must_use]
+    pub const fn recovery_code(&self) -> &RecoveryCode {
+        self.pending.recovery_code()
+    }
+
+    /// Confirms the new external code and stages its encrypted root bundle for
+    /// the ordinary signed human commit transaction.
+    ///
+    /// # Errors
+    /// Rejects a wrong/foreign confirmation or a changed vault state.
+    pub fn confirm(
+        self,
+        vault: &mut HumanVault,
+        reintroduced: &RecoveryCode,
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        let (current, _) = load_and_validate_bundle(&open_connection(&vault.path)?)?;
+        if digest(&current.to_bytes()) != self.source_bundle_digest {
+            return Err(HumanCommitError::StateChanged);
+        }
+        let bundle = self
+            .pending
+            .into_bundle_after_recovery_confirmation(reintroduced)?;
+        if recover_human_root(&bundle, reintroduced)?.trusted_root() != vault.trusted_root {
+            return Err(HumanCommitError::Integrity);
+        }
+        vault.stage_root_rotation("root-recovery-rotate", &bundle)
+    }
 }
 
 impl PreparedHumanCommand {
@@ -482,20 +526,53 @@ impl HumanVault {
         input: &mut dyn Read,
         backup_password: &[u8],
     ) -> Result<crate::PreparedBackupRestore, HumanCommitError> {
+        self.prepare_backup_restore(input, BackupOpen::Password(backup_password))
+    }
+
+    /// Authenticates a portable PMB1 with its external recovery key and stages
+    /// the content under this vault's fresh/current keys. Source device keyring
+    /// and historical signing private keys are neither needed nor activated.
+    ///
+    /// # Errors
+    /// Rejects a wrong recovery code, corruption, incomplete inventory, bounds
+    /// or storage failures without changing visible content or current authority.
+    pub fn prepare_native_recovery(
+        &mut self,
+        input: &mut dyn Read,
+        source_recovery: &RecoveryCode,
+    ) -> Result<crate::PreparedBackupRestore, HumanCommitError> {
+        self.prepare_backup_restore(input, BackupOpen::Recovery(source_recovery))
+    }
+
+    fn prepare_backup_restore(
+        &mut self,
+        input: &mut dyn Read,
+        source: BackupOpen<'_>,
+    ) -> Result<crate::PreparedBackupRestore, HumanCommitError> {
         self.channel.verify()?;
         let transaction_id = random_id()?;
         let challenge = random_challenge()?;
         let mut connection = open_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let expected_state = state_digest(&transaction, self.root.vault_id(), 1)?;
-        let (summary, item_ids, object_digest) = crate::backup::prepare_restore(
-            &transaction,
-            &self.root,
-            self.device,
-            transaction_id,
-            input,
-            backup_password,
-        )?;
+        let (summary, item_ids, object_digest) = match source {
+            BackupOpen::Password(password) => crate::backup::prepare_restore(
+                &transaction,
+                &self.root,
+                self.device,
+                transaction_id,
+                input,
+                password,
+            ),
+            BackupOpen::Recovery(recovery) => crate::backup::prepare_recovery(
+                &transaction,
+                &self.root,
+                self.device,
+                transaction_id,
+                input,
+                recovery,
+            ),
+        }?;
         let manifest = encode_event_manifest(
             "backup-restore",
             *summary.backup_id(),
@@ -543,6 +620,106 @@ impl HumanVault {
             summary,
             item_ids,
         ))
+    }
+
+    /// Stages a new password wrapper while preserving the human root,
+    /// authority, recovery path and vault lineage.
+    ///
+    /// # Errors
+    /// Rejects invalid inputs, a changed/foreign bundle or unavailable storage.
+    pub fn prepare_master_password_rotation(
+        &mut self,
+        new_password: &[u8],
+        profile: KdfProfile,
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        self.channel.verify()?;
+        let (bundle, _) = load_and_validate_bundle(&open_connection(&self.path)?)?;
+        let replacement = self.root.rewrap_password(&bundle, new_password, profile)?;
+        if open_human_root(&replacement, new_password)?.trusted_root() != self.trusted_root {
+            return Err(HumanCommitError::Integrity);
+        }
+        self.stage_root_rotation("root-password-rotate", &replacement)
+    }
+
+    /// Begins replacement of the external recovery key. Nothing durable is
+    /// changed until the returned code is reintroduced, staged, signed and committed.
+    ///
+    /// # Errors
+    /// Rejects a foreign/corrupt root bundle or unavailable randomness.
+    pub fn begin_recovery_rotation(&self) -> Result<PendingRecoveryChange, HumanCommitError> {
+        self.channel.verify()?;
+        let (bundle, _) = load_and_validate_bundle(&open_connection(&self.path)?)?;
+        Ok(PendingRecoveryChange {
+            pending: self.root.rotate_recovery(&bundle)?,
+            source_bundle_digest: digest(&bundle.to_bytes()),
+        })
+    }
+
+    /// Verifies a candidate against the currently durable recovery envelope.
+    ///
+    /// # Errors
+    /// Rejects an old, foreign or malformed recovery code.
+    pub fn verify_current_recovery(&self, recovery: &RecoveryCode) -> Result<(), HumanCommitError> {
+        self.channel.verify()?;
+        let (bundle, trusted) = load_and_validate_bundle(&open_connection(&self.path)?)?;
+        let root = recover_human_root(&bundle, recovery)?;
+        if root.trusted_root() != trusted {
+            return Err(HumanCommitError::Integrity);
+        }
+        Ok(())
+    }
+
+    fn stage_root_rotation(
+        &mut self,
+        kind: &str,
+        bundle: &RootBundle,
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        self.channel.verify()?;
+        if !matches!(kind, "root-password-rotate" | "root-recovery-rotate")
+            || bundle.trusted_root() != &self.trusted_root
+        {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let transaction_id = random_id()?;
+        let challenge = random_challenge()?;
+        let package = bundle.to_bytes();
+        let package_digest = digest(&package);
+        let body = encode_body(&Body {
+            transaction_id,
+            events_manifest_digest: digest(kind.as_bytes()),
+            event_count: 0,
+            object_manifest_digest: Some(package_digest),
+        });
+        let body_hash = digest(&body);
+        let expires_at_us = now_us()?
+            .checked_add(CHALLENGE_LIFETIME_US)
+            .ok_or(HumanCommitError::InvalidCommand)?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let expected_state = state_digest(&transaction, self.root.vault_id(), 1)?;
+        let command = encode_command(&CommandFields {
+            vault: *self.root.vault_id(),
+            challenge,
+            expected_state,
+            operation: "root_rotation",
+            body_hash,
+            expires_at_us,
+        });
+        transaction.execute(
+            "INSERT INTO human_challenges(challenge,transaction_id,command,body_hash,expected_state,expires_at_us,consumed) VALUES(?1,?2,?3,?4,?5,?6,0)",
+            params![challenge.as_slice(),transaction_id.as_slice(),command,body_hash.as_slice(),expected_state.as_slice(),expires_at_us],
+        )?;
+        transaction.execute(
+            "INSERT INTO human_staging(transaction_id,operation,event_kind,item_id,body,package) VALUES(?1,'root_rotation',?2,?3,?4,?5)",
+            params![transaction_id.as_slice(),kind,self.root.vault_id().as_slice(),body,package],
+        )?;
+        transaction.commit()?;
+        Ok(PreparedHumanCommand {
+            transaction_id,
+            item_id: *self.root.vault_id(),
+            command,
+            body,
+        })
     }
 
     /// Prepares a one-use, state-bound confirmation for a full plaintext export.
@@ -1201,6 +1378,22 @@ impl HumanVault {
         }
         validate_staged(&transaction, &staged, &body)?;
         let committed_at_us = now_us()?;
+        if matches!(
+            staged.event_kind.as_str(),
+            "root-password-rotate" | "root-recovery-rotate"
+        ) {
+            return commit_root_rotation(
+                transaction,
+                &self.root,
+                &self.trusted_root,
+                self.device,
+                &self.audit_custody,
+                &staged,
+                &body,
+                actual_body_hash,
+                committed_at_us,
+            );
+        }
         if staged.event_kind == "import-batch" {
             return commit_import_batch(
                 transaction,
@@ -1446,6 +1639,7 @@ impl HumanVault {
             request.display_name().to_owned(),
             true,
             false,
+            crate::passkey::registration_client_data_json(request),
         );
         let record = LogicalRecord::new(
             RecordKind::Passkey,
@@ -3043,6 +3237,10 @@ fn import_account(record: &LogicalRecord) -> &str {
         }
         AuthRecord::Totp { account, .. } => account.as_str(),
         AuthRecord::Token { profile_id, .. } => profile_id.as_str(),
+        AuthRecord::TokenExchange {
+            requester_client_id,
+            ..
+        } => requester_client_id.as_str(),
         AuthRecord::Passkey { user_name, .. } => user_name.as_str(),
     })
 }
@@ -3294,6 +3492,71 @@ fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
          PRAGMA trusted_schema=OFF;",
     )?;
     Ok(connection)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_root_rotation(
+    transaction: Transaction<'_>,
+    root: &UnlockedRoot,
+    trusted_root: &TrustedRoot,
+    device: [u8; 16],
+    audit_custody: &AuditDeviceCustody,
+    staged: &Staged,
+    body: &Body,
+    body_hash: [u8; 32],
+    committed_at_us: i64,
+) -> Result<HumanReceipt, HumanCommitError> {
+    let package = staged
+        .package
+        .as_deref()
+        .ok_or(HumanCommitError::BodyChanged)?;
+    let bundle = RootBundle::from_bytes(package)?;
+    if bundle.trusted_root() != trusted_root {
+        return Err(HumanCommitError::Integrity);
+    }
+    let changed = transaction.execute(
+        "UPDATE encrypted_objects SET value=?1 WHERE kind='human-root-bundle-v1'",
+        [package],
+    )?;
+    if changed != 1 {
+        return Err(HumanCommitError::Integrity);
+    }
+    let head = current_head(&transaction)?;
+    audit::append_event(
+        &transaction,
+        trusted_root,
+        Some(root),
+        device,
+        audit_custody,
+        &AuditEvent::new(
+            AuditActorKind::Human,
+            None,
+            AuditAction::Recovery,
+            AuditOutcome::Succeeded,
+        ),
+        committed_at_us,
+        head.unwrap_or([0; 32]),
+    )?;
+    transaction.execute(
+        "UPDATE human_challenges SET consumed=1 WHERE transaction_id=?1 AND consumed=0",
+        [body.transaction_id.as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM human_staging WHERE transaction_id=?1",
+        [body.transaction_id.as_slice()],
+    )?;
+    let committed_heads = head.into_iter().collect::<Vec<_>>();
+    transaction.execute(
+        "INSERT INTO human_receipts(transaction_id,body_hash,committed_heads,committed_at_us,outcome) VALUES(?1,?2,?3,?4,'committed')",
+        params![body.transaction_id.as_slice(),body_hash.as_slice(),encode_heads(&committed_heads),committed_at_us],
+    )?;
+    transaction.commit()?;
+    Ok(HumanReceipt {
+        transaction_id: body.transaction_id,
+        body_hash,
+        committed_heads,
+        committed_at_us,
+    })
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -4499,6 +4762,34 @@ fn validate_staged(
     staged: &Staged,
     body: &Body,
 ) -> Result<(), HumanCommitError> {
+    if matches!(
+        staged.event_kind.as_str(),
+        "root-password-rotate" | "root-recovery-rotate"
+    ) {
+        let package = staged
+            .package
+            .as_deref()
+            .ok_or(HumanCommitError::BodyChanged)?;
+        let replacement = RootBundle::from_bytes(package)?;
+        let valid_shape = staged.operation == "root_rotation"
+            && staged.item_id == *replacement.trusted_root().vault_id()
+            && staged.revision_id.is_none()
+            && staged.item_kind.is_none()
+            && staged.attachments.is_none()
+            && staged.audit_generation.is_none()
+            && staged.audit_through_seq.is_none()
+            && staged.subject_generation.is_none()
+            && staged.authority_body.is_none()
+            && staged.staged_grant.is_none();
+        if !valid_shape
+            || body.event_count != 0
+            || body.object_manifest_digest != Some(digest(package))
+            || body.events_manifest_digest != digest(staged.event_kind.as_bytes())
+        {
+            return Err(HumanCommitError::BodyChanged);
+        }
+        return Ok(());
+    }
     if staged.event_kind == "import-batch" {
         let batch = load_import_batch(transaction, staged.transaction_id)?;
         let object_digest = import_object_digest(transaction, staged.transaction_id)?;
@@ -4911,6 +5202,10 @@ fn delegated_account(record: &LogicalRecord) -> Option<String> {
         AuthRecord::Totp { account, .. } => account.clone(),
         AuthRecord::Passkey { user_name, .. } => user_name.clone(),
         AuthRecord::Token { profile_id, .. } => profile_id.clone(),
+        AuthRecord::TokenExchange {
+            requester_client_id,
+            ..
+        } => requester_client_id.clone(),
     })
 }
 
@@ -5561,6 +5856,7 @@ fn decode_command(bytes_value: &[u8]) -> Result<CommandFields<'_>, HumanCommitEr
             | "import_commit"
             | "plaintext_export"
             | "backup_restore"
+            | "root_rotation"
     ) {
         return Err(HumanCommitError::InvalidCommand);
     }
@@ -5960,8 +6256,13 @@ fn state_digest(
     epoch: u64,
 ) -> Result<[u8; 32], HumanCommitError> {
     let head = current_head(connection)?;
+    let root_bundle: Vec<u8> = connection.query_row(
+        "SELECT value FROM encrypted_objects WHERE kind='human-root-bundle-v1'",
+        [],
+        |row| row.get(0),
+    )?;
     let mut encoder = Encoder::new(Vec::new());
-    encoder.array(4).unwrap();
+    encoder.array(5).unwrap();
     encoder.str("pm/state-view/v1").unwrap();
     encoder.bytes(vault).unwrap();
     encoder.u64(epoch).unwrap();
@@ -5969,6 +6270,7 @@ fn state_digest(
     if let Some(head) = head {
         encoder.bytes(&head).unwrap();
     }
+    encoder.bytes(&digest(&root_bundle)).unwrap();
     Ok(digest(&encoder.into_writer()))
 }
 
@@ -6106,7 +6408,7 @@ fn decode_heads(value: &[u8]) -> Result<Vec<[u8; 32]>, HumanCommitError> {
         .array()
         .map_err(invalid)?
         .ok_or(HumanCommitError::InvalidCommand)?;
-    if count == 0 || count > 4096 {
+    if count > 4096 {
         return Err(HumanCommitError::InvalidCommand);
     }
     let mut heads =

@@ -110,6 +110,155 @@ fn keycloak_attempt_lease_carries_password_and_matching_totp_only_to_trusted_ada
 }
 
 #[test]
+fn keycloak_exchange_lease_is_context_bound_and_rechecked_before_provider_use() {
+    let directory = TestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let record = exchange_record();
+    let item = commit_create(&mut human, &record);
+    enroll(&mut human, &enrollment(AGENT_A, REQUEST_A, &RPK_A), 1);
+    let resume = human.prepare_delegated_resume().unwrap();
+    commit(&mut human, &resume);
+    let enable = human.prepare_enable(item).unwrap();
+    commit(&mut human, &enable);
+    drop(human);
+
+    let peer = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
+    let attempts =
+        AttemptVault::open(DelegatedVault::open(&path, DEVICE, Arc::clone(&custody)).unwrap())
+            .unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
+    )
+    .unwrap();
+    let request = |nonce| {
+        StartAttempt::new(
+            item,
+            "keycloak-token-exchange",
+            1,
+            "token_exchange",
+            "keycloak-exchange-lab",
+            b"keycloak-exchange-lab".to_vec(),
+            IdempotencyKey::new(now, nonce).unwrap(),
+        )
+        .unwrap()
+    };
+    let created = attempts.start(&peer, &request([0x21; 16])).unwrap();
+    assert_eq!(
+        attempts
+            .start(&peer, &request([0x21; 16]))
+            .unwrap()
+            .attempt_id(),
+        created.attempt_id()
+    );
+    let lease = attempts.claim_next().unwrap().unwrap();
+    assert_eq!(lease.username(), "pm-exchanger");
+    assert_eq!(lease.password(), b"synthetic-requester-secret-canary");
+    assert_eq!(
+        lease.subject_token(),
+        Some(b"synthetic-subject-token-A-canary".as_slice())
+    );
+    let calls = AtomicU64::new(0);
+    attempts
+        .with_authorized_provider_use(&lease, || calls.fetch_add(1, Ordering::Relaxed))
+        .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    attempts
+        .settle(
+            &lease,
+            AttemptOutcome::Succeeded {
+                result: b"closed exchanged result".to_vec(),
+            },
+        )
+        .unwrap();
+
+    attempts.start(&peer, &request([0x22; 16])).unwrap();
+    let revoked_lease = attempts.claim_next().unwrap().unwrap();
+    let (mut human, _peer) = open_human(&path, custody);
+    let disable = human
+        .prepare_agent_revocation(AGENT_A, AuthorizationReason::OwnerRequest)
+        .unwrap();
+    commit(&mut human, &disable);
+    assert!(matches!(
+        attempts.with_authorized_provider_use(&revoked_lease, || {
+            calls.fetch_add(1, Ordering::Relaxed)
+        }),
+        Err(AttemptError::AgentRevoked)
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn github_bearer_lease_accepts_only_the_closed_request_profile_and_keeps_token_custodial() {
+    let directory = TestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let item = commit_create(&mut human, &github_token_record());
+    enroll(&mut human, &enrollment(AGENT_A, REQUEST_A, &RPK_A), 1);
+    let resume = human.prepare_delegated_resume().unwrap();
+    commit(&mut human, &resume);
+    let enable = human.prepare_enable(item).unwrap();
+    commit(&mut human, &enable);
+    drop(human);
+
+    let peer = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
+    let attempts =
+        AttemptVault::open(DelegatedVault::open(&path, DEVICE, custody).unwrap()).unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
+    )
+    .unwrap();
+    let context = b"github-assigned-issues/1\nfilter=assigned\nstate=open\nsort=updated\ndirection=desc\npage=2\nper_page=50\n";
+    let request = StartAttempt::new(
+        item,
+        "github-rest-bearer",
+        1,
+        "bearer",
+        "github-assigned-issues/1",
+        context.to_vec(),
+        IdempotencyKey::new(now, [0x31; 16]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        attempts.start(&peer, &request).unwrap().state(),
+        AttemptState::Created
+    );
+    let lease = attempts.claim_next().unwrap().unwrap();
+    assert_eq!(lease.context(), context);
+    assert_eq!(
+        lease.subject_token(),
+        Some(b"synthetic-github-pat-canary".as_slice())
+    );
+    assert!(lease.username().is_empty());
+    assert!(lease.password().is_empty());
+
+    let injected = StartAttempt::new(
+        item,
+        "github-rest-bearer",
+        1,
+        "bearer",
+        "github-assigned-issues/1",
+        b"github-assigned-issues/1\nurl=https://reflect.invalid/\n".to_vec(),
+        IdempotencyKey::new(now, [0x32; 16]).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        attempts.start(&peer, &injected),
+        Err(AttemptError::CredentialUnavailable)
+    ));
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn durable_attempts_pin_revision_owner_idempotency_and_never_reexecute_indeterminate() {
     let directory = TestDir::new();
@@ -809,6 +958,64 @@ fn ssh_record() -> LogicalRecord {
             username: "pmssh".to_owned(),
             destination_refs: vec![0],
             passphrase: Some(b"synthetic-passphrase".to_vec()),
+        }],
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+fn exchange_record() -> LogicalRecord {
+    use pm_vault::{AuthRecord, Destination, HumanMetadata};
+    LogicalRecord::new(
+        RecordKind::Token,
+        HumanMetadata {
+            title: "Synthetic Keycloak exchange relationship".to_owned(),
+            destinations: vec![Destination {
+                label: "installed profile".to_owned(),
+                value: "keycloak-exchange-lab".to_owned(),
+            }],
+            tags: Vec::new(),
+            favorite: false,
+            notes: String::new(),
+            fields: Vec::new(),
+            source_fields: Vec::new(),
+        },
+        vec![AuthRecord::TokenExchange {
+            subject_token: b"synthetic-subject-token-A-canary".to_vec(),
+            requester_client_id: "pm-exchanger".to_owned(),
+            requester_client_secret: b"synthetic-requester-secret-canary".to_vec(),
+            provider: "keycloak".to_owned(),
+            profile_id: "keycloak-exchange-lab".to_owned(),
+            destination_refs: vec![0],
+            expires_at: None,
+        }],
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+fn github_token_record() -> LogicalRecord {
+    use pm_vault::{AuthRecord, Destination, HumanMetadata};
+    LogicalRecord::new(
+        RecordKind::Token,
+        HumanMetadata {
+            title: "Synthetic GitHub PAT".to_owned(),
+            destinations: vec![Destination {
+                label: "installed profile".to_owned(),
+                value: "github-assigned-issues/1".to_owned(),
+            }],
+            tags: Vec::new(),
+            favorite: false,
+            notes: String::new(),
+            fields: Vec::new(),
+            source_fields: Vec::new(),
+        },
+        vec![AuthRecord::Token {
+            secret: b"synthetic-github-pat-canary".to_vec(),
+            provider: "github".to_owned(),
+            profile_id: "github-assigned-issues/1".to_owned(),
+            destination_refs: vec![0],
+            expires_at: None,
         }],
         Vec::new(),
     )

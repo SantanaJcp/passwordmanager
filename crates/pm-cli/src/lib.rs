@@ -6,7 +6,7 @@ use pm_crypto::{KdfProfile, RecoveryCode};
 use pm_custody::agent_rpc;
 use pm_interface::{
     Engine, ErrorCode, Json, Request, capabilities_result, dispatch, encode_json,
-    parse_mcp_request, public_attempt_result,
+    github_request_context, parse_mcp_request, public_attempt_result,
 };
 use pm_vault::{PendingVault, open_vault};
 use std::{
@@ -186,6 +186,7 @@ fn params_for_cli(values: &[OsString]) -> Result<Json, CliError> {
         return Ok(Json::Object(Vec::new()));
     }
     let mut fields = Vec::new();
+    let mut github_context = Vec::new();
     let mut index = 2;
     while index < values.len() {
         let key = values[index]
@@ -196,7 +197,7 @@ fn params_for_cli(values: &[OsString]) -> Result<Json, CliError> {
             .get(index + 1)
             .and_then(|value| value.to_str())
             .ok_or_else(|| CliError::new("INVALID_ARGUMENT", 2))?;
-        let json = if key == "integration-version" {
+        let json = if matches!(key, "integration-version" | "page" | "per-page") {
             Json::Number(
                 value
                     .parse::<u64>()
@@ -215,6 +216,13 @@ fn params_for_cli(values: &[OsString]) -> Result<Json, CliError> {
             "method",
             "destination",
             "context",
+            "request-profile",
+            "filter",
+            "state",
+            "sort",
+            "direction",
+            "page",
+            "per-page",
             "issued-at",
             "nonce",
         ]
@@ -227,7 +235,12 @@ fn params_for_cli(values: &[OsString]) -> Result<Json, CliError> {
         } else {
             key.replace('-', "_")
         };
-        if normalized == "issued_at" || normalized == "nonce" {
+        if matches!(
+            normalized.as_str(),
+            "request_profile" | "filter" | "state" | "sort" | "direction" | "page" | "per_page"
+        ) {
+            github_context.push((normalized, json));
+        } else if normalized == "issued_at" || normalized == "nonce" {
             // these belong to the nested idempotency object below
             let idempotency = fields
                 .iter_mut()
@@ -244,6 +257,29 @@ fn params_for_cli(values: &[OsString]) -> Result<Json, CliError> {
             fields.push((normalized, json));
         }
         index += 2;
+    }
+    if !github_context.is_empty() {
+        let integration = fields
+            .iter()
+            .find(|(name, _)| name == "integration_id")
+            .and_then(|(_, value)| value.string());
+        if integration != Some("github-rest-bearer")
+            || fields.iter().any(|(name, _)| name == "context")
+        {
+            return Err(CliError::new("INVALID_ARGUMENT", 2));
+        }
+        let profile = github_context
+            .iter()
+            .position(|(name, _)| name == "request_profile")
+            .ok_or_else(|| CliError::new("INVALID_ARGUMENT", 2))?;
+        let (_, profile) = github_context.remove(profile);
+        fields.push((
+            "context".into(),
+            Json::Object(vec![
+                ("request_profile_id".into(), profile),
+                ("query".into(), Json::Object(github_context)),
+            ]),
+        ));
     }
     Ok(Json::Object(fields))
 }
@@ -325,15 +361,20 @@ fn start_request(params: &Json) -> Result<Vec<u8>, ErrorCode> {
             .and_then(Json::string)
             .ok_or(ErrorCode::InvalidArgument)?,
     )?;
-    let context = params
-        .field("context")
-        .and_then(Json::string)
-        .unwrap_or("")
-        .as_bytes();
     let integration = params
         .field("integration_id")
         .and_then(Json::string)
         .ok_or(ErrorCode::InvalidArgument)?;
+    let context = if integration == "github-rest-bearer" {
+        github_request_context(params.field("context").ok_or(ErrorCode::InvalidArgument)?)?
+    } else {
+        params
+            .field("context")
+            .and_then(Json::string)
+            .unwrap_or("")
+            .as_bytes()
+            .to_vec()
+    };
     let version = params
         .field("integration_version")
         .and_then(Json::number)
@@ -356,7 +397,7 @@ fn start_request(params: &Json) -> Result<Vec<u8>, ErrorCode> {
     value.extend_from_slice(&version.to_be_bytes());
     push_wire_bytes(&mut value, method.as_bytes())?;
     push_wire_bytes(&mut value, destination.as_bytes())?;
-    push_wire_bytes(&mut value, context)?;
+    push_wire_bytes(&mut value, &context)?;
     Ok(value)
 }
 
@@ -366,6 +407,7 @@ fn push_wire_bytes(value: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ErrorCode> {
     value.extend_from_slice(bytes);
     Ok(())
 }
+
 fn decode_discovery(raw: &[u8]) -> Result<Json, ErrorCode> {
     if raw.first() != Some(&0) {
         return Err(ErrorCode::Unauthorized);
@@ -405,7 +447,10 @@ fn decode_discovery(raw: &[u8]) -> Result<Json, ErrorCode> {
                 "account".into(),
                 Json::String(String::from_utf8_lossy(account).into()),
             ),
-            ("integrations".into(), credential_integrations(destination)),
+            (
+                "integrations".into(),
+                credential_integrations(kind, destination),
+            ),
         ]));
     }
     Ok(Json::Object(vec![
@@ -413,13 +458,20 @@ fn decode_discovery(raw: &[u8]) -> Result<Json, ErrorCode> {
         ("next_cursor".into(), Json::Null),
     ]))
 }
-fn credential_integrations(destination: &[u8]) -> Json {
+fn credential_integrations(kind: &[u8], destination: &[u8]) -> Json {
     let mut integrations = vec![Json::String("controlled.external".into())];
     if destination == b"ssh-lab" {
         integrations.push(Json::String("ssh-server".into()));
         integrations.push(Json::String("linux-system-ssh".into()));
     } else if destination == b"keycloak-lab" {
         integrations.push(Json::String("keycloak-browser-oidc".into()));
+    } else if destination == b"keycloak-exchange-lab" {
+        integrations.push(Json::String("keycloak-token-exchange".into()));
+    } else if destination == b"github-assigned-issues/1" {
+        integrations.push(Json::String("github-rest-bearer".into()));
+    }
+    if kind == b"passkey" {
+        integrations.push(Json::String("keycloak-webauthn".into()));
     }
     Json::Array(integrations)
 }
@@ -785,4 +837,62 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{params_for_cli, start_request};
+    use std::ffi::OsString;
+
+    #[test]
+    fn github_cli_builds_the_closed_typed_query_context() {
+        let values = [
+            "auth",
+            "start",
+            "--credential-id",
+            "11111111111111111111111111111111",
+            "--integration-id",
+            "github-rest-bearer",
+            "--integration-version",
+            "1",
+            "--method",
+            "bearer",
+            "--destination",
+            "github-assigned-issues/1",
+            "--request-profile",
+            "github-assigned-issues/1",
+            "--filter",
+            "assigned",
+            "--state",
+            "open",
+            "--sort",
+            "updated",
+            "--direction",
+            "desc",
+            "--page",
+            "2",
+            "--per-page",
+            "50",
+            "--issued-at",
+            "42",
+            "--nonce",
+            "22222222222222222222222222222222",
+        ]
+        .map(OsString::from);
+        let params = params_for_cli(&values).unwrap();
+        let request = start_request(&params).unwrap();
+        let profile = b"github-assigned-issues/1\nfilter=";
+        let pagination = b"per_page=50\n";
+        assert!(
+            request
+                .windows(profile.len())
+                .any(|window| window == profile)
+        );
+        assert!(
+            request
+                .windows(pagination.len())
+                .any(|window| window == pagination)
+        );
+        assert!(!request.windows(4).any(|window| window == b"url="));
+    }
 }

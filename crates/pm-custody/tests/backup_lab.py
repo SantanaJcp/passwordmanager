@@ -95,7 +95,7 @@ def main():
         daemon = start(binary, bootstrap, runtime, vault)
         observed = human(binary, "human-backup-exercise", human_key, human_profile,
             runtime/"human.sock", password, ("--output-dir", output))
-        assert observed.startswith(b"PASS backup-exercise types=7 "), observed
+        assert observed.startswith(b"PASS backup-exercise types=7 records=8 "), observed
         assert b"inventory=exact" in observed and b"confirmation=strong+one-use" in observed
         native, plaintext = output/"ticket21-backup.pmb1", output/"ticket21-export.jsonl"
         assert native.read_bytes()[:4] == b"PMB1"
@@ -110,7 +110,7 @@ def main():
         assert b"ticket21-stream-note-canary" in decoded
         assert b"ticket21-stream-note-canary" not in plaintext.read_bytes()
         durable = counts(vault)
-        assert durable[0] == 16 and durable[1] == 18
+        assert durable[0] == 18 and durable[1] == 20, durable
         assert durable[8:11] == (0, 0, 0)
         assert durable[11] > 0 and durable[12] == 0
 

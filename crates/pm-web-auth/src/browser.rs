@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::{
+    fmt::Write as _,
     fs::{self, File},
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddrV4, TcpListener},
@@ -47,6 +48,15 @@ pub(crate) enum BrowserOutcome {
     IntegrityFailure,
 }
 
+pub(crate) struct PasskeySession {
+    browser: Browser,
+    session: String,
+    callback: Option<Callback>,
+    state: String,
+    nonce: String,
+    verifier: String,
+}
+
 pub(crate) fn authenticate(
     profile: &Profile,
     credentials: &Credentials,
@@ -90,6 +100,187 @@ pub(crate) fn authenticate(
         eprintln!("WEB_AUTH_FAIL stage=flow");
     }
     result
+}
+
+/// Starts the fixed Keycloak `WebAuthn` browser flow. The browser remains owned
+/// by the trusted adapter while custody pauses the outer attempt for the real
+/// human ceremony.
+pub(crate) fn authenticate_passkey(
+    profile: &Profile,
+    username: &str,
+    item: [u8; 16],
+) -> Result<(BrowserOutcome, Option<PasskeySession>), ()> {
+    if !profile.is_passkey() || verify_browser(profile).is_err() {
+        return Err(());
+    }
+    let state = random_token()?;
+    let nonce = random_token()?;
+    let verifier = random_token()?;
+    let challenge = URL_SAFE_NO_PAD.encode(digest::digest(&digest::SHA256, verifier.as_bytes()));
+    let authorize = format!(
+        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&nonce={}&code_challenge={}&code_challenge_method=S256",
+        profile.value("authorization_endpoint"),
+        oidc::form_component(profile.value("client_id")),
+        oidc::form_component(profile.value("redirect_uri")),
+        oidc::form_component(profile.value("scopes")),
+        oidc::form_component(&state),
+        oidc::form_component(&nonce),
+        oidc::form_component(&challenge),
+    );
+    let callback = Callback::start(profile, &state)?;
+    let mut browser = Browser::launch_passkey(profile, item)?;
+    let session = attach(&mut browser, &authorize)?;
+    passkey_username(&mut browser, &session, profile, username)?;
+    let mut value = PasskeySession {
+        browser,
+        session,
+        callback: Some(callback),
+        state,
+        nonce,
+        verifier,
+    };
+    match value.poll(profile)? {
+        BrowserOutcome::Waiting => Ok((BrowserOutcome::Waiting, Some(value))),
+        outcome => Ok((outcome, None)),
+    }
+}
+
+impl PasskeySession {
+    pub(crate) fn poll(&mut self, profile: &Profile) -> Result<BrowserOutcome, ()> {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let issuer = profile.url("issuer").map_err(|_| ())?;
+        let issuer_origin = format!("https://{}:{}", issuer.host(), issuer.port());
+        let callback = profile.url("redirect_uri").map_err(|_| ())?;
+        let callback_origin = format!("https://{}:{}", callback.host(), callback.port());
+        let script = r"(()=>JSON.stringify({origin:location.origin,top:window.top===window.self,ready:document.readyState,waiting:document.documentElement.dataset.pmPasskeyState||'',error:(document.querySelector('#input-error,#error')?.textContent||'').trim(),webauth:document.querySelector('form#webauth')?.action||''}))()";
+        while Instant::now() < deadline {
+            let raw = self.browser.evaluate(&self.session, script)?;
+            let view = parse_json(raw.as_bytes()).map_err(|_| ())?;
+            if !bool_field(&view, "top")? {
+                return Ok(BrowserOutcome::IntegrityFailure);
+            }
+            let origin = field(&view, "origin")?;
+            if origin == callback_origin {
+                let callback = self.callback.take().ok_or(())?;
+                let (code, observed_state) = callback.receive()?;
+                if observed_state != self.state || code.is_empty() {
+                    return Ok(BrowserOutcome::IntegrityFailure);
+                }
+                let now = i64::try_from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|_| ())?
+                        .as_secs(),
+                )
+                .map_err(|_| ())?;
+                return match oidc::exchange_code(profile, &code, &self.verifier, &self.nonce, now) {
+                    Ok(result) => Ok(BrowserOutcome::Succeeded(result.encode())),
+                    Err(oidc::OidcError::Network) => Err(()),
+                    Err(_) => Ok(BrowserOutcome::IntegrityFailure),
+                };
+            }
+            if origin != issuer_origin {
+                return Ok(BrowserOutcome::IntegrityFailure);
+            }
+            if !field(&view, "error")?.is_empty() {
+                return Ok(BrowserOutcome::Rejected);
+            }
+            let form = field(&view, "webauth")?;
+            if !form.is_empty() {
+                validate_form(form, &issuer_origin)?;
+            }
+            if field(&view, "waiting")? == "waiting" {
+                return Ok(BrowserOutcome::Waiting);
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Ok(BrowserOutcome::Waiting)
+    }
+}
+
+fn attach(browser: &mut Browser, authorize: &str) -> Result<String, ()> {
+    let target = browser.command(
+        "Target.createTarget",
+        vec![("url", Json::String(authorize.into()))],
+        None,
+    )?;
+    let target = target
+        .field("result")
+        .and_then(|value| value.field("targetId"))
+        .and_then(Json::string)
+        .ok_or(())?;
+    let attached = browser.command(
+        "Target.attachToTarget",
+        vec![
+            ("targetId", Json::String(target.into())),
+            ("flatten", Json::Bool(true)),
+        ],
+        None,
+    )?;
+    let session = attached
+        .field("result")
+        .and_then(|value| value.field("sessionId"))
+        .and_then(Json::string)
+        .ok_or(())?
+        .to_owned();
+    browser.command("Page.enable", Vec::new(), Some(&session))?;
+    browser.command("Runtime.enable", Vec::new(), Some(&session))?;
+    browser.command(
+        "Browser.setDownloadBehavior",
+        vec![("behavior", Json::String("deny".into()))],
+        None,
+    )?;
+    Ok(session)
+}
+
+fn passkey_username(
+    browser: &mut Browser,
+    session: &str,
+    profile: &Profile,
+    username: &str,
+) -> Result<(), ()> {
+    let issuer = profile.url("issuer").map_err(|_| ())?;
+    let issuer_origin = format!("https://{}:{}", issuer.host(), issuer.port());
+    let deadline = Instant::now() + FLOW_TIMEOUT;
+    let inspect = r"(()=>JSON.stringify({origin:location.origin,href:location.href,top:window.top===window.self,form:document.querySelector('form#kc-form-login')?.action||'',username:document.querySelector('input#username')?.type||'',password:!!document.querySelector('input#password'),button:!!document.querySelector('input#kc-login,button#kc-login')}))()";
+    while Instant::now() < deadline {
+        let raw = browser.evaluate(session, inspect)?;
+        let view = parse_json(raw.as_bytes()).map_err(|_| ())?;
+        if field(&view, "origin")? == "null" && field(&view, "href")? == "about:blank" {
+            std::thread::sleep(Duration::from_millis(25));
+            continue;
+        }
+        if !bool_field(&view, "top")? || field(&view, "origin")? != issuer_origin {
+            return Err(());
+        }
+        if !field(&view, "form")?.is_empty() {
+            validate_form(field(&view, "form")?, &issuer_origin)?;
+            if field(&view, "username")? != "text"
+                || bool_field(&view, "password")?
+                || !bool_field(&view, "button")?
+            {
+                return Err(());
+            }
+            let username = Zeroizing::new(js_string(username));
+            let script = Zeroizing::new(format!(
+                "(()=>{{const u=document.querySelector('input#username');const f=document.querySelector('form#kc-form-login');if(!u||!f)throw new Error('shape');u.value={};u.dispatchEvent(new Event('input',{{bubbles:true}}));f.requestSubmit(document.querySelector('input#kc-login,button#kc-login'));return 'ok';}})()",
+                username.as_str()
+            ));
+            browser.evaluate(session, &script)?;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let click = r"(()=>{const f=document.querySelector('form#webauth');const b=document.querySelector('#authenticateWebAuthnButton');const loaded=performance.getEntriesByType('resource').some(e=>new URL(e.name).pathname.endsWith('/js/webauthnAuthenticate.js'));if(!f||!b||document.readyState!=='complete'||!loaded||globalThis.__PM_PASSKEY_ADAPTER_INSTALLED__!==true)return 'wait';if(window.top!==window.self)throw new Error('frame');b.click();return 'clicked';})()";
+    let deadline = Instant::now() + FLOW_TIMEOUT;
+    while Instant::now() < deadline {
+        let result = browser.evaluate(session, click)?;
+        if result == "clicked" {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(())
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -424,6 +615,69 @@ fn nibble(value: u8) -> Result<u8, ()> {
     }
 }
 
+const EXTENSION_FILES: [&str; 5] = [
+    "config.js",
+    "content.js",
+    "main.js",
+    "manifest.json",
+    "service.js",
+];
+
+fn prepare_extension(profile: &Profile, attempt: &Path, item: [u8; 16]) -> Result<PathBuf, ()> {
+    let source = Path::new(profile.value("extension_path"));
+    let metadata = fs::symlink_metadata(source).map_err(|_| ())?;
+    if !metadata.is_dir() || metadata.permissions().mode() & 0o022 != 0 {
+        return Err(());
+    }
+    let mut context = digest::Context::new(&digest::SHA256);
+    let mut values = Vec::new();
+    for name in EXTENSION_FILES {
+        let path = source.join(name);
+        let metadata = fs::symlink_metadata(&path).map_err(|_| ())?;
+        if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o022 != 0 {
+            return Err(());
+        }
+        let bytes = fs::read(path).map_err(|_| ())?;
+        context.update(name.as_bytes());
+        context.update(&[0]);
+        context.update(&bytes);
+        context.update(&[0]);
+        values.push((name, bytes));
+    }
+    if context.finish().as_ref() != decode_hex(profile.value("extension_sha256"))? {
+        return Err(());
+    }
+    let destination = attempt.join("passkey-extension");
+    fs::create_dir(&destination).map_err(|_| ())?;
+    fs::set_permissions(&destination, fs::Permissions::from_mode(0o700)).map_err(|_| ())?;
+    let issuer = profile.url("issuer").map_err(|_| ())?;
+    let origin = format!("https://{}:{}", issuer.host(), issuer.port());
+    let item = item.iter().fold(String::new(), |mut output, value| {
+        write!(output, "{value:02x}").expect("writing to a String cannot fail");
+        output
+    });
+    for (name, mut bytes) in values {
+        if name == "config.js" {
+            let text = String::from_utf8(bytes).map_err(|_| ())?;
+            bytes = text
+                .replace("https://passkey.test:8443", &origin)
+                .replace(
+                    "rpId: \"passkey.test\"",
+                    &format!("rpId: \"{}\"", issuer.host()),
+                )
+                .replace("itemId: \"\"", &format!("itemId: \"{item}\""))
+                .into_bytes();
+        } else if name == "manifest.json" {
+            let text = String::from_utf8(bytes).map_err(|_| ())?;
+            bytes = text
+                .replace("https://passkey.test:8443/*", &format!("{origin}/*"))
+                .into_bytes();
+        }
+        fs::write(destination.join(name), bytes).map_err(|_| ())?;
+    }
+    Ok(destination)
+}
+
 struct Browser {
     child: Child,
     input: File,
@@ -434,6 +688,43 @@ struct Browser {
 
 impl Browser {
     fn launch(profile: &Profile) -> Result<Self, ()> {
+        Self::launch_inner(profile, None)
+    }
+
+    fn launch_passkey(profile: &Profile, item: [u8; 16]) -> Result<Self, ()> {
+        let mut browser = Self::launch_inner(profile, Some(item))?;
+        browser.wait_for_passkey_extension()?;
+        Ok(browser)
+    }
+
+    fn wait_for_passkey_extension(&mut self) -> Result<(), ()> {
+        let deadline = Instant::now() + FLOW_TIMEOUT;
+        while Instant::now() < deadline {
+            let targets = self.command("Target.getTargets", Vec::new(), None)?;
+            let Some(Json::Array(targets)) = targets
+                .field("result")
+                .and_then(|value| value.field("targetInfos"))
+            else {
+                return Err(());
+            };
+            let ready = targets.iter().any(|target| {
+                matches!(
+                    target.field("type").and_then(Json::string),
+                    Some("service_worker" | "background_page")
+                ) && target
+                    .field("url")
+                    .and_then(Json::string)
+                    .is_some_and(|url| url.starts_with("chrome-extension://"))
+            });
+            if ready {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err(())
+    }
+
+    fn launch_inner(profile: &Profile, item: Option<[u8; 16]>) -> Result<Self, ()> {
         let home = Path::new(profile.value("browser_home"));
         let metadata = fs::symlink_metadata(home).map_err(|_| ())?;
         if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
@@ -444,6 +735,16 @@ impl Browser {
         fs::set_permissions(&profile_path, fs::Permissions::from_mode(0o700)).map_err(|_| ())?;
         let (to_child_read, to_child_write) = pipe()?;
         let (from_child_read, from_child_write) = pipe()?;
+        let extension = item
+            .map(|item| prepare_extension(profile, &profile_path, item))
+            .transpose()?;
+        let issuer = profile.url("issuer").map_err(|_| ())?;
+        let callback = profile.url("redirect_uri").map_err(|_| ())?;
+        let resolver = format!(
+            "MAP {} 127.0.0.1, MAP {} 127.0.0.1, EXCLUDE localhost",
+            issuer.host(),
+            callback.host()
+        );
         let mut command = Command::new(profile.value("browser_path"));
         command
             .args([
@@ -454,14 +755,24 @@ impl Browser {
                 "--disable-background-networking",
                 "--disable-component-update",
                 "--disable-sync",
-                "--disable-extensions",
                 "--disable-logging",
                 "--disable-breakpad",
                 "--disable-crash-reporter",
                 "--disable-dev-shm-usage",
-                "--host-resolver-rules=MAP auth.test 127.0.0.1, MAP callback.test 127.0.0.1, EXCLUDE localhost",
-                "about:blank",
             ])
+            .arg(format!("--host-resolver-rules={resolver}"));
+        if let Some(extension) = &extension {
+            command
+                .arg(format!(
+                    "--disable-extensions-except={}",
+                    extension.display()
+                ))
+                .arg(format!("--load-extension={}", extension.display()));
+        } else {
+            command.arg("--disable-extensions");
+        }
+        command
+            .arg("about:blank")
             .arg(format!("--user-data-dir={}", profile_path.display()))
             .env_clear()
             .env("HOME", home)
@@ -627,7 +938,7 @@ struct Callback {
 
 impl Callback {
     fn start(profile: &Profile, state: &str) -> Result<Self, ()> {
-        let url = profile.url("redirect_uri").map_err(|_| ())?.clone();
+        let url = profile.url("redirect_uri").map_err(|_| ())?;
         let cert = fs::read(profile.value("callback_cert")).map_err(|_| ())?;
         let key = Zeroizing::new(fs::read(profile.value("callback_key")).map_err(|_| ())?);
         let provider = rustls::crypto::aws_lc_rs::default_provider();

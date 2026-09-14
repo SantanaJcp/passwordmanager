@@ -15,7 +15,7 @@ use std::{
 };
 
 use pm_vault::{
-    AgentPeer, AttemptError, AttemptVault, DelegatedVault, IdempotencyKey, StartAttempt,
+    AgentPeer, AttemptError, AttemptVault, DelegatedVault, IdempotencyKey, RecordKind, StartAttempt,
 };
 
 pub const PROTOCOL: u64 = 1;
@@ -426,6 +426,38 @@ pub fn capabilities_result() -> Result<Json, ErrorCode> {
                         Json::Object(vec![("kind".into(), Json::String("oidc_tokens".into()))]),
                     ),
                 ]),
+                Json::Object(vec![
+                    ("id".into(), Json::String("keycloak-token-exchange".into())),
+                    ("version".into(), Json::Number("1".into())),
+                    (
+                        "methods".into(),
+                        Json::Array(vec![Json::String("token_exchange".into())]),
+                    ),
+                    ("availability".into(), Json::String("verified".into())),
+                    ("input_schema".into(), schema_start()),
+                    (
+                        "result_schema".into(),
+                        Json::Object(vec![(
+                            "kind".into(),
+                            Json::String("exchanged_access_token".into()),
+                        )]),
+                    ),
+                ]),
+                Json::Object(vec![
+                    ("id".into(), Json::String("keycloak-webauthn".into())),
+                    ("version".into(), Json::Number("1".into())),
+                    (
+                        "methods".into(),
+                        Json::Array(vec![Json::String("webauthn".into())]),
+                    ),
+                    ("availability".into(), Json::String("verified".into())),
+                    ("input_schema".into(), schema_start()),
+                    (
+                        "result_schema".into(),
+                        Json::Object(vec![("kind".into(), Json::String("oidc_tokens".into()))]),
+                    ),
+                ]),
+                github_capability(),
                 integration_capability(
                     "ssh-server",
                     &["publickey"],
@@ -469,6 +501,33 @@ fn integration_capability(id: &str, methods: &[&str], availability: &str, result
         (
             "result_schema".into(),
             Json::Object(vec![("kind".into(), Json::String(result.into()))]),
+        ),
+    ])
+}
+
+fn github_capability() -> Json {
+    Json::Object(vec![
+        ("id".into(), Json::String("github-rest-bearer".into())),
+        ("version".into(), Json::Number("1".into())),
+        (
+            "methods".into(),
+            Json::Array(vec![Json::String("bearer".into())]),
+        ),
+        (
+            "availability".into(),
+            Json::String("verified-adversarial-double".into()),
+        ),
+        (
+            "request_profiles".into(),
+            Json::Array(vec![Json::String("github-assigned-issues/1".into())]),
+        ),
+        ("input_schema".into(), schema_start()),
+        (
+            "result_schema".into(),
+            Json::Object(vec![(
+                "kind".into(),
+                Json::String("authenticated_http_response".into()),
+            )]),
         ),
     ])
 }
@@ -538,7 +597,7 @@ impl VaultEngine {
                     ),
                     (
                         "integrations".into(),
-                        discovery_integrations(credential.destination()),
+                        discovery_integrations(credential.kind(), credential.destination()),
                     ),
                 ])
             })
@@ -571,10 +630,14 @@ impl VaultEngine {
             optional_string(params, "destination")?.ok_or(ErrorCode::InvalidArgument)?;
         let version =
             optional_uint(params, "integration_version")?.ok_or(ErrorCode::InvalidArgument)?;
-        let context = optional_string(params, "context")?
-            .unwrap_or("")
-            .as_bytes()
-            .to_vec();
+        let context = if integration == "github-rest-bearer" {
+            github_request_context(params.field("context").ok_or(ErrorCode::InvalidArgument)?)?
+        } else {
+            optional_string(params, "context")?
+                .unwrap_or("")
+                .as_bytes()
+                .to_vec()
+        };
         let key = params
             .field("idempotency_key")
             .ok_or(ErrorCode::InvalidArgument)?;
@@ -624,13 +687,20 @@ impl VaultEngine {
     }
 }
 
-fn discovery_integrations(destination: Option<&str>) -> Json {
+fn discovery_integrations(kind: RecordKind, destination: Option<&str>) -> Json {
     let mut values = vec![Json::String("controlled.external".into())];
     if destination == Some("keycloak-lab") {
         values.push(Json::String("keycloak-browser-oidc".into()));
     } else if destination == Some("ssh-lab") {
         values.push(Json::String("ssh-server".into()));
         values.push(Json::String("linux-system-ssh".into()));
+    } else if destination == Some("keycloak-exchange-lab") {
+        values.push(Json::String("keycloak-token-exchange".into()));
+    } else if destination == Some("github-assigned-issues/1") {
+        values.push(Json::String("github-rest-bearer".into()));
+    }
+    if kind == RecordKind::Passkey {
+        values.push(Json::String("keycloak-webauthn".into()));
     }
     Json::Array(values)
 }
@@ -684,8 +754,14 @@ pub fn public_attempt_result(
         return Ok(Json::Null);
     };
     match integration_id {
-        "keycloak-browser-oidc" => {
+        "keycloak-browser-oidc" | "keycloak-webauthn" => {
             validate_oidc_result(parse_json(result).map_err(|_| ErrorCode::Internal)?)
+        }
+        "keycloak-token-exchange" => {
+            validate_exchange_result(parse_json(result).map_err(|_| ErrorCode::Internal)?)
+        }
+        "github-rest-bearer" => {
+            validate_github_result(parse_json(result).map_err(|_| ErrorCode::Internal)?)
         }
         "ssh-server" | "linux-system-ssh" => {
             validate_ssh_result(parse_json(result).map_err(|_| ErrorCode::Internal)?)
@@ -730,6 +806,38 @@ fn validate_oidc_result(value: Json) -> Result<Json, ErrorCode> {
     Ok(value)
 }
 
+fn validate_exchange_result(value: Json) -> Result<Json, ErrorCode> {
+    const REQUIRED: [&str; 8] = [
+        "kind",
+        "issuer",
+        "audience",
+        "token_type",
+        "access_token",
+        "issued_token_type",
+        "expires_at",
+        "scope",
+    ];
+    let Json::Object(fields) = &value else {
+        return Err(ErrorCode::Internal);
+    };
+    if fields.len() != REQUIRED.len()
+        || fields
+            .iter()
+            .any(|(key, item)| !REQUIRED.contains(&key.as_str()) || item.string().is_none())
+        || value.field("kind").and_then(Json::string) != Some("exchanged_access_token")
+        || value.field("token_type").and_then(Json::string) != Some("Bearer")
+        || value
+            .field("access_token")
+            .and_then(Json::string)
+            .is_none_or(str::is_empty)
+        || value.field("issued_token_type").and_then(Json::string)
+            != Some("urn:ietf:params:oauth:token-type:access_token")
+    {
+        return Err(ErrorCode::Internal);
+    }
+    Ok(value)
+}
+
 fn validate_ssh_result(value: Json) -> Result<Json, ErrorCode> {
     const REQUIRED: [&str; 4] = ["kind", "consumer_ref", "host_key_sha256", "username"];
     let Json::Object(fields) = &value else {
@@ -766,6 +874,144 @@ fn validate_ssh_result(value: Json) -> Result<Json, ErrorCode> {
         return Err(ErrorCode::Internal);
     }
     Ok(value)
+}
+
+fn validate_github_result(value: Json) -> Result<Json, ErrorCode> {
+    const REQUIRED: [&str; 7] = [
+        "kind",
+        "provider",
+        "request_profile_id",
+        "status",
+        "items",
+        "page",
+        "next_page",
+    ];
+    let Json::Object(fields) = &value else {
+        return Err(ErrorCode::Internal);
+    };
+    if fields.len() != REQUIRED.len()
+        || fields
+            .iter()
+            .any(|(key, _)| !REQUIRED.contains(&key.as_str()))
+        || value.field("kind").and_then(Json::string) != Some("authenticated_http_response")
+        || value.field("provider").and_then(Json::string) != Some("github")
+        || value.field("request_profile_id").and_then(Json::string)
+            != Some("github-assigned-issues/1")
+        || exact_uint(value.field("status"), 200, 200).is_err()
+        || exact_uint(value.field("page"), 1, u64::MAX).is_err()
+    {
+        return Err(ErrorCode::Internal);
+    }
+    match value.field("next_page") {
+        Some(Json::Null) => {}
+        value if exact_uint(value, 1, u64::MAX).is_ok() => {}
+        _ => return Err(ErrorCode::Internal),
+    }
+    let Some(Json::Array(items)) = value.field("items") else {
+        return Err(ErrorCode::Internal);
+    };
+    if items.len() > 100 || items.iter().any(|item| !valid_github_issue(item)) {
+        return Err(ErrorCode::Internal);
+    }
+    Ok(value)
+}
+
+fn valid_github_issue(value: &Json) -> bool {
+    const REQUIRED: [&str; 5] = ["id", "number", "title", "state", "html_url"];
+    let Json::Object(fields) = value else {
+        return false;
+    };
+    let id = value.field("id").and_then(Json::string).unwrap_or("");
+    let title = value.field("title").and_then(Json::string).unwrap_or("");
+    let state = value.field("state").and_then(Json::string).unwrap_or("");
+    let url = value.field("html_url").and_then(Json::string).unwrap_or("");
+    fields.len() == REQUIRED.len()
+        && fields
+            .iter()
+            .all(|(key, _)| REQUIRED.contains(&key.as_str()))
+        && !id.is_empty()
+        && id.bytes().all(|byte| byte.is_ascii_digit())
+        && id.parse::<u64>().is_ok()
+        && exact_uint(value.field("number"), 1, u64::MAX).is_ok()
+        && title.len() <= 1024
+        && matches!(state, "open" | "closed")
+        && url.starts_with("https://github.com/")
+        && url.len() <= 8 * 1024
+        && !url.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn exact_uint(value: Option<&Json>, minimum: u64, maximum: u64) -> Result<u64, ErrorCode> {
+    let value = value
+        .and_then(Json::number)
+        .ok_or(ErrorCode::InvalidArgument)?
+        .parse::<u64>()
+        .map_err(|_| ErrorCode::InvalidArgument)?;
+    if !(minimum..=maximum).contains(&value) {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    Ok(value)
+}
+
+/// Converts the public GitHub context object into the one canonical internal
+/// request profile. URLs, methods and headers are deliberately not representable.
+///
+/// # Errors
+/// Rejects unknown fields, unsupported enums and out-of-range pagination.
+pub fn github_request_context(context: &Json) -> Result<Vec<u8>, ErrorCode> {
+    reject_unknown(context, &["request_profile_id", "query"])?;
+    if context.field("request_profile_id").and_then(Json::string)
+        != Some("github-assigned-issues/1")
+    {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    let query = context.field("query").ok_or(ErrorCode::InvalidArgument)?;
+    reject_unknown(
+        query,
+        &["filter", "state", "sort", "direction", "page", "per_page"],
+    )?;
+    let filter = closed_enum(
+        query,
+        "filter",
+        "assigned",
+        &[
+            "assigned",
+            "created",
+            "mentioned",
+            "subscribed",
+            "repos",
+            "all",
+        ],
+    )?;
+    let state = closed_enum(query, "state", "open", &["open", "closed", "all"])?;
+    let sort = closed_enum(
+        query,
+        "sort",
+        "created",
+        &["created", "updated", "comments"],
+    )?;
+    let direction = closed_enum(query, "direction", "desc", &["asc", "desc"])?;
+    let page = optional_uint(query, "page")?.unwrap_or(1);
+    let per_page = optional_uint(query, "per_page")?.unwrap_or(30);
+    if page == 0 || !(1..=100).contains(&per_page) {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    Ok(format!(
+        "github-assigned-issues/1\nfilter={filter}\nstate={state}\nsort={sort}\ndirection={direction}\npage={page}\nper_page={per_page}\n"
+    )
+    .into_bytes())
+}
+
+fn closed_enum<'a>(
+    value: &'a Json,
+    key: &str,
+    default: &'a str,
+    allowed: &[&str],
+) -> Result<&'a str, ErrorCode> {
+    let value = optional_string(value, key)?.unwrap_or(default);
+    allowed
+        .contains(&value)
+        .then_some(value)
+        .ok_or(ErrorCode::InvalidArgument)
 }
 
 fn optional_string<'a>(params: &'a Json, name: &str) -> Result<Option<&'a str>, ErrorCode> {
@@ -1149,6 +1395,13 @@ mod tests {
             output.field("access_token").and_then(Json::string),
             Some("new-access")
         );
+        assert_eq!(
+            public_attempt_result("keycloak-webauthn", Some(valid))
+                .unwrap()
+                .field("subject")
+                .and_then(Json::string),
+            Some("synthetic")
+        );
         let reflected = br#"{"kind":"oidc_tokens","issuer":"x","subject":"x","client_id":"x","audience":"x","token_type":"Bearer","access_token":"x","id_token":"x","expires_at":"42","scope":"openid","password":"original"}"#;
         assert_eq!(
             public_attempt_result("keycloak-browser-oidc", Some(reflected)),
@@ -1161,6 +1414,18 @@ mod tests {
         assert_eq!(
             public_attempt_result("controlled.external", Some(b"private provider bytes")).unwrap(),
             Json::Null
+        );
+
+        let exchanged = br#"{"kind":"exchanged_access_token","issuer":"https://auth.invalid/realms/pm","audience":"pm-target","token_type":"Bearer","access_token":"new-B","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","expires_at":"42","scope":"openid target.read"}"#;
+        let output = public_attempt_result("keycloak-token-exchange", Some(exchanged)).unwrap();
+        assert_eq!(
+            output.field("access_token").and_then(Json::string),
+            Some("new-B")
+        );
+        let reflected = br#"{"kind":"exchanged_access_token","issuer":"x","audience":"x","token_type":"Bearer","access_token":"new-B","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","expires_at":"42","scope":"x","subject_token":"secret-A"}"#;
+        assert_eq!(
+            public_attempt_result("keycloak-token-exchange", Some(reflected)),
+            Err(ErrorCode::Internal)
         );
     }
     #[test]
@@ -1180,6 +1445,60 @@ mod tests {
         );
         assert_eq!(
             public_attempt_result("ssh-server", Some(b"{}")),
+            Err(ErrorCode::Internal)
+        );
+    }
+
+    #[test]
+    fn github_request_and_result_are_closed_typed_schemas() {
+        let context = Json::Object(vec![
+            (
+                "request_profile_id".into(),
+                Json::String("github-assigned-issues/1".into()),
+            ),
+            (
+                "query".into(),
+                Json::Object(vec![
+                    ("filter".into(), Json::String("assigned".into())),
+                    ("state".into(), Json::String("open".into())),
+                    ("sort".into(), Json::String("updated".into())),
+                    ("direction".into(), Json::String("desc".into())),
+                    ("page".into(), Json::Number("2".into())),
+                    ("per_page".into(), Json::Number("50".into())),
+                ]),
+            ),
+        ]);
+        assert_eq!(
+            github_request_context(&context).unwrap(),
+            b"github-assigned-issues/1\nfilter=assigned\nstate=open\nsort=updated\ndirection=desc\npage=2\nper_page=50\n"
+        );
+        let injected = Json::Object(vec![
+            (
+                "request_profile_id".into(),
+                Json::String("github-assigned-issues/1".into()),
+            ),
+            (
+                "query".into(),
+                Json::Object(vec![(
+                    "url".into(),
+                    Json::String("https://reflect.invalid/".into()),
+                )]),
+            ),
+        ]);
+        assert_eq!(
+            github_request_context(&injected),
+            Err(ErrorCode::InvalidArgument)
+        );
+
+        let good = br#"{"kind":"authenticated_http_response","provider":"github","request_profile_id":"github-assigned-issues/1","status":200,"items":[{"id":"9007199254740993","number":7,"title":"Synthetic issue","state":"open","html_url":"https://github.com/acme/repo/issues/7"}],"page":2,"next_page":3}"#;
+        let output = public_attempt_result("github-rest-bearer", Some(good)).unwrap();
+        assert_eq!(
+            output.field("request_profile_id").and_then(Json::string),
+            Some("github-assigned-issues/1")
+        );
+        let extended = br#"{"kind":"authenticated_http_response","provider":"github","request_profile_id":"github-assigned-issues/1","status":200,"items":[],"page":1,"next_page":null,"authorization":"Bearer synthetic-secret"}"#;
+        assert_eq!(
+            public_attempt_result("github-rest-bearer", Some(extended)),
             Err(ErrorCode::Internal)
         );
     }

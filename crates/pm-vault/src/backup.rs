@@ -244,8 +244,44 @@ pub(crate) fn prepare_restore(
     input: &mut dyn Read,
     password: &[u8],
 ) -> Result<PreparedRestore, HumanCommitError> {
+    prepare_restore_from(
+        tx,
+        root,
+        device,
+        transaction_id,
+        input,
+        OpenPath::Password(password),
+    )
+}
+
+pub(crate) fn prepare_recovery(
+    tx: &Transaction<'_>,
+    root: &UnlockedRoot,
+    device: [u8; 16],
+    transaction_id: [u8; 16],
+    input: &mut dyn Read,
+    recovery: &RecoveryCode,
+) -> Result<PreparedRestore, HumanCommitError> {
+    prepare_restore_from(
+        tx,
+        root,
+        device,
+        transaction_id,
+        input,
+        OpenPath::Recovery(recovery),
+    )
+}
+
+fn prepare_restore_from(
+    tx: &Transaction<'_>,
+    root: &UnlockedRoot,
+    device: [u8; 16],
+    transaction_id: [u8; 16],
+    input: &mut dyn Read,
+    source: OpenPath<'_>,
+) -> Result<PreparedRestore, HumanCommitError> {
     let mut collector = RestoreCollector::new(tx, root, device, transaction_id);
-    let summary = parse_backup(input, OpenPath::Password(password), Some(&mut collector))?;
+    let summary = parse_backup(input, source, Some(&mut collector))?;
     let item_ids = collector.item_ids();
     let object_digest: [u8; 32] = tx
         .query_row(
@@ -2278,14 +2314,16 @@ fn derived_id(domain: &[u8], parts: &[&[u8]]) -> [u8; 16] {
     state.finish()[..16].try_into().unwrap()
 }
 fn current_frontier(tx: &Transaction<'_>) -> Result<[u8; 32], HumanCommitError> {
-    Ok(tx
+    let frontier = tx
         .query_row(
             "SELECT event_digest FROM authority_events ORDER BY rowid DESC LIMIT 1",
             [],
             |r| r.get::<_, Vec<u8>>(0),
         )
-        .optional()?
-        .map_or([0; 32], |v| fixed(&v).unwrap_or([0; 32])))
+        .optional()?;
+    frontier.map_or(Ok([0; 32]), |value| {
+        value.try_into().map_err(|_| HumanCommitError::Integrity)
+    })
 }
 fn authority_checkpoint(tx: &Transaction<'_>) -> Result<[u8; 32], HumanCommitError> {
     let mut state = DigestState::new()?;
