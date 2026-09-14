@@ -1256,7 +1256,9 @@ def assert_pty_helper_drain_regression():
             time.sleep(0.05)
         assert path.exists(), "owned helper descendant did not start"
 
-    session = start_fixture_pty(b"\x1b[1;1Hsynthetic PTY heartbeat ", repeat=True)
+    # Keep the repeated drain writer ASCII-only: teardown must not interrupt a
+    # multi-byte UTF-8 or VT control sequence and create a false cleanup RED.
+    session = start_fixture_pty(b"synthetic PTY heartbeat ", repeat=True)
     try:
         result = session.run_while_draining(
             helper_script(
@@ -1294,7 +1296,7 @@ def assert_pty_helper_drain_regression():
     os.close(marker_fd)
     marker = pathlib.Path(marker_name)
     marker.unlink()
-    session = start_fixture_pty(b"\x1b[1;1Hsynthetic timeout stream ", repeat=True)
+    session = start_fixture_pty(b"synthetic timeout stream ", repeat=True)
     try:
         try:
             session.run_while_draining(

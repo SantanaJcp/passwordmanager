@@ -1452,9 +1452,11 @@ approved for the short Linux-only verification window. It does not start a
 Password Manager binary, Cargo, a system lab, or a native runner:
 
 1. Allocate a real PTY with `pty.fork()` and run a synthetic child that emits
-   cursor-addressed heartbeat bytes while a helper command writes fixed,
+   complete ASCII heartbeat bytes while a helper command writes fixed,
    non-secret stdout/stderr. Assert that the helper returns zero with both
-   streams intact and that the PTY bytes were consumed.
+   streams intact and that the PTY bytes were consumed; keeping this writer
+   ASCII-only prevents owned teardown from cutting a VT/UTF-8 sequence and
+   creating an unrelated cleanup error.
 2. Run a helper that emits a synthetic canary and exits zero. Pass its captured
    streams through the existing `classify_pasteboard_output` contract without
    printing them; assert exact canary detection remains categorical.
