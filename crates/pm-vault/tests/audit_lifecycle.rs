@@ -190,16 +190,18 @@ fn device_custody_writes_signed_encrypted_audit_without_human_root() {
 
     let (human, _peer) = open_human(&path, custody);
     let query = human.query_audit(DEVICE, 1, 1, 16).unwrap();
-    assert_eq!(query.records().len(), 2);
+    assert_eq!(query.records().len(), 4);
     assert_eq!(query.records()[0].actor_kind(), AuditActorKind::Human);
-    assert_eq!(query.records()[0].action(), AuditAction::ItemChange);
-    assert_eq!(query.records()[0].item_id(), Some(&item));
-    assert_eq!(query.records()[1].actor_kind(), AuditActorKind::Agent);
-    assert_eq!(query.records()[1].actor_id(), Some(&AGENT));
-    assert_eq!(query.records()[1].action(), AuditAction::AuthUse);
-    assert_eq!(query.records()[1].outcome(), AuditOutcome::Indeterminate);
+    assert_eq!(query.records()[0].action(), AuditAction::HumanUnlock);
+    assert_eq!(query.records()[1].action(), AuditAction::ItemChange);
     assert_eq!(query.records()[1].item_id(), Some(&item));
-    assert_eq!(query.records()[1].attempt_id(), Some(&ATTEMPT));
+    assert_eq!(query.records()[2].actor_kind(), AuditActorKind::Agent);
+    assert_eq!(query.records()[2].actor_id(), Some(&AGENT));
+    assert_eq!(query.records()[2].action(), AuditAction::AuthUse);
+    assert_eq!(query.records()[2].outcome(), AuditOutcome::Indeterminate);
+    assert_eq!(query.records()[2].item_id(), Some(&item));
+    assert_eq!(query.records()[2].attempt_id(), Some(&ATTEMPT));
+    assert_eq!(query.records()[3].action(), AuditAction::HumanUnlock);
 
     for entry in fs::read_dir(&directory.0).unwrap() {
         let bytes = fs::read(entry.unwrap().path()).unwrap();
@@ -333,7 +335,7 @@ fn segment_rollover_occurs_before_the_257th_record() {
     drop(autonomous);
     let (human, _peer) = open_human(&path, custody);
     let query = human.query_audit(DEVICE, 1, 1, 4096).unwrap();
-    assert_eq!(query.records().len(), 257);
+    assert_eq!(query.records().len(), 259);
     assert_eq!(query.segment_count(), 2);
     assert_eq!(query.closed_segment_count(), 1);
 }

@@ -803,9 +803,36 @@ impl HumanVault {
         audit_custody: Arc<AuditDeviceCustody>,
     ) -> Result<Self, HumanCommitError> {
         channel.verify()?;
-        let connection = open_connection(path)?;
+        let mut connection = open_connection(path)?;
         let root = unlock_root(&connection, password)?;
         let trusted_root = root.trusted_root();
+        channel.verify()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let has_device_audit_package: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM audit_keys WHERE device_id=?1)",
+            [device.as_slice()],
+            |row| row.get(0),
+        )?;
+        if has_device_audit_package {
+            audit::load_matching_package(&transaction, &trusted_root, device, &audit_custody)?;
+        }
+        let frontier = audit::current_frontier(&transaction)?;
+        audit::append_event(
+            &transaction,
+            &trusted_root,
+            Some(&root),
+            device,
+            &audit_custody,
+            &AuditEvent::new(
+                AuditActorKind::Human,
+                None,
+                AuditAction::HumanUnlock,
+                AuditOutcome::Succeeded,
+            ),
+            now_us()?,
+            frontier,
+        )?;
+        transaction.commit()?;
         Ok(Self {
             path: path.to_owned(),
             device,

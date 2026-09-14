@@ -1041,23 +1041,34 @@ misma `AuditDeviceCustody` estable debe comprobar:
    revierte también paquete, estado y segmento. No se permite una sesión
    desbloqueada sin su evento ni una fila KAUD parcial;
 5. después de crear la generación inicial, intentar unlock con otra custodia
-   falla sin crear generación 2 ni cambiar los registros existentes.
+   no puede rotar silenciosamente como efecto secundario del unlock. Este punto
+   entra en tensión con el contrato público heredado descrito abajo y todavía
+   no tiene cambio de API autorizado.
 
-El arreglo mínimo pertenece a `HumanVault::unlock_with_audit_custody`, que es
+El prototipo mínimo pertenece a `HumanVault::unlock_with_audit_custody`, que es
 el seam compartido por Linux, macOS y Windows. Después de abrir KH y revalidar
 el canal humano, inicia una transacción SQLite `IMMEDIATE`, obtiene la frontera
 de autoridad y llama una sola vez a `append_event` con el root humano,
-`HumanUnlock/Succeeded` y la custodia estable entregada por el servicio.
-La transacción distingue ausencia real de una custodia incompatible: si no hay
-ningún `audit_keys` para el dispositivo permite que `ensure_package` cree la
-generación inicial; si existe cualquier fila, exige que
-`load_matching_package` valide la custodia actual antes de append. Una pérdida
-o cambio de custodia falla cerrado y nunca se convierte implícitamente en una
-generación nueva. La misma transacción confirma paquete, evento, estado,
-segmento y manifiesto antes de construir la sesión. Cualquier error revierte y
-mantiene el fallo cerrado. La contraseña incorrecta no llega a esa transacción
-y no produce un evento; tampoco se genera una custodia nueva, se reintenta el
-commit ni se usa otra clave.
+`HumanUnlock/Succeeded` y la custodia estable entregada por el servicio. Para
+el servicio instalado, la transacción debe distinguir ausencia inicial real de
+una custodia incompatible: sólo sin `audit_keys` del dispositivo puede crear la
+generación inicial; un paquete existente que no abre con la custodia del
+servicio no puede convertirse silenciosamente en generación nueva. La misma
+transacción confirma paquete, evento, estado, segmento y manifiesto antes de
+construir la sesión. Cualquier error revierte y mantiene el fallo cerrado. La
+contraseña incorrecta no llega a esa transacción y no produce un evento.
+
+Sin embargo, el contrato público existente también expone
+`HumanVault::unlock`, que genera una `AuditDeviceCustody` nueva en cada llamada,
+y la regresión `replacing_device_custody_opens_a_linked_audit_generation`
+espera hoy que una nueva custodia abra una generación enlazada. Exigir
+coincidencia en todo unlock impide reabrir mediante esa API y elimina aquella
+rotación implícita: es una reducción/prerrequisito nuevo, no una mera corrección
+de fixture. No se autoriza resolverlo con estado global, cache, una ruta sin
+auditoría ni una custodia sustituta. La propuesta pendiente es hacer explícita
+la custodia estable en la API pública y diseñar, si se conserva, una ceremonia
+separada y explícita de cambio de custodia; eso requiere autorización por su
+impacto de compatibilidad.
 
 Primero se añade el test de estas observaciones a la superficie pública de
 `pm-vault`; queda preparado para observar su RED contra el comportamiento
@@ -1070,6 +1081,26 @@ siendo obligatorios. En este checkpoint de método/test estático no se ejecuta
 Cargo ni se presenta un GREEN de producto. Los casos nuevos usan una raíz de
 fixture propia cuya eliminación se comprueba; no reutilizan ni cambian el
 `TestDir::drop` heredado que suprime errores de cleanup.
+
+Con la ventana Linux exclusiva concedida, ambos casos nuevos observaron RED
+contra el comportamiento previo. El caso vacío llegó a `query_audit` y recibió
+`Storage(QueryReturnedNoRows)` porque no existía paquete; el trigger del primer
+registro dejó que unlock devolviera una sesión, incumpliendo el fallo cerrado.
+Ambos procesos terminaron 101 y sus salidas se conservaron en
+`/tmp/pm27-audit-first-unlock-red-{empty,rollback}.log`.
+
+La primera implementación del plan hizo GREEN esos dos casos. Una corrida
+transitoria de `audit_lifecycle` quedó 8/8 sólo después de convertir la
+expectativa heredada de rotación implícita en una negativa; ese cambio no
+estaba autorizado y se revirtió, por lo que no constituye un GREEN aceptable.
+Al ampliar a todo `pm-vault` apareció además un RED distinto y verificable: los
+helpers antiguos llaman
+`HumanVault::unlock`, que genera una custodia nueva en cada llamada. Una segunda
+apertura del mismo dispositivo ya no puede coincidir con el paquete estable y
+`backup_lifecycle` falla con `AuditKeyUnavailable`. El producto Linux/Windows
+usa `unlock_with_audit_custody` con custodia estable; no se añadirá un cache,
+una rotación implícita ni una ruta sin auditoría para hacer verde ese helper.
+La decisión de API/custodia permanece pendiente y el gate completo no es GREEN.
 
 ## Déficit contractual de parada SCM (plan, no implementación)
 
