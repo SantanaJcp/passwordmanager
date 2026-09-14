@@ -1,3 +1,11 @@
 [env]
 # Cargo resolves this relative path from the workspace root.
 SODIUM_DIST_DIR = { value = "third_party/libsodium", relative = true, force = true }
+
+# The authenticated Windows libsodium build uses the static MSVC CRT (/MT).
+# Keep Rust's CRT choice target-specific so Unix builds retain their defaults.
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

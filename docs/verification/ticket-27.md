@@ -245,6 +245,35 @@ simula parsing PowerShell. Solo una corrida Windows nativa puede demostrar que
 SCM acepta la cuenta virtual y que el resto del laboratorio continúa; el ticket
 permanece sin aceptar.
 
+## Corrección acotada del CRT y método TDD (escrito antes de implementar)
+
+La misma corrida `34802741744` terminó el build Rust con el warning del linker
+`LNK4098: defaultlib 'LIBCMT' conflicts with use of other libs`. El proyecto
+libsodium fuente ya había demostrado `ReleaseLIB|ARM64` con runtime C estático
+`/MT`, por lo que el warning es un conflicto de runtimes y no debe ocultarse
+con `/NODEFAULTLIB`. El seam de esta corrección es la selección del runtime C
+del compilador Rust para los targets Windows MSVC; el checker exige una entrada
+target-specific para ARM64 y x64 con `-C target-feature=+crt-static`, y rechaza
+flags globales, `-crt-static` y cualquier supresión del linker. La regresión dio
+RED antes de implementar porque `.cargo/config.toml` no contenía esas entradas.
+
+La implementación mínima añade únicamente esas dos entradas target-specific.
+Así Rust y los C compilados con `/MT` usan el runtime estático sin cambiar
+libsodium, otro target, linker flags globales ni la advertencia en sí. La base
+documental de Rust explica que `crt-static` selecciona el runtime C y que los
+build scripts pueden observarlo mediante `CARGO_CFG_TARGET_FEATURE` en
+[Linkage — Static and dynamic C runtimes](https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes).
+
+La validación nativa posterior debe comprobar que ambos ejecutables se enlazan
+sin `LNK4098` y revisar sus dependencias PE con `dumpbin /dependents` para que
+no aparezca el runtime MSVC dinámico (`ucrtbase`, `vcruntime`/`msvcp` o
+`api-ms-win-crt-*`); la salida no debe contener secretos ni convertirse en un
+criterio de éxito por ausencia de logs. El host Linux no tiene target Windows,
+MSVC ni `dumpbin`, así que no se simula esta comprobación: aquí solo se pueden
+ejecutar el checker, `git diff --check`, `./scripts/check.sh` y los labs Linux
+establecidos. Una corrida Windows nativa debe confirmar el binario real y el
+resto del laboratorio; el ticket permanece sin aceptar.
+
 ## Pendiente que bloquea aceptación
 
 Falta compilar y ejecutar el producto y el script en Windows 11 ARM64. El

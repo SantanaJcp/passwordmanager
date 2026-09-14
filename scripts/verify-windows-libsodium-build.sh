@@ -8,8 +8,9 @@ prepare="$root/scripts/prepare-windows-libsodium.ps1"
 lab="$root/scripts/test-windows-custody-lab.ps1"
 verifier="$root/crates/pm-build-input-verifier/src/main.rs"
 attributes="$root/.gitattributes"
+cargo_config="$root/.cargo/config.toml"
 
-for file in "$workflow" "$prepare" "$lab" "$verifier" "$attributes"; do
+for file in "$workflow" "$prepare" "$lab" "$verifier" "$attributes" "$cargo_config"; do
     test -f "$file" || {
         echo "required Windows source-build file is absent: $file" >&2
         exit 1
@@ -42,6 +43,30 @@ require_literal 'SODIUM_LIB_DIR' "$lab"
 require_literal 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3' "$verifier"
 require_literal 'third_party/libsodium/LATEST.tar.gz -text' "$attributes"
 require_literal 'third_party/libsodium/LATEST.tar.gz.minisig -text' "$attributes"
+
+require_windows_static_crt() {
+    target=$1
+    block=$(awk -v target="$target" '
+        $0 == "[target." target "]" { found = 1; next }
+        found && /^\[/ { exit }
+        found { print }
+    ' "$cargo_config")
+    printf '%s\n' "$block" | grep -Fqx 'rustflags = ["-C", "target-feature=+crt-static"]' || {
+        echo "Windows target $target must enable the static MSVC CRT explicitly" >&2
+        exit 1
+    }
+}
+
+require_windows_static_crt 'aarch64-pc-windows-msvc'
+require_windows_static_crt 'x86_64-pc-windows-msvc'
+if grep -Eq 'NODEFAULTLIB|target-feature=-crt-static' "$cargo_config" ||
+   ! awk '
+       /^\[/ { target = ($0 ~ /^\[target\./); next }
+       /^rustflags[[:space:]]*=/ && !target { exit 1 }
+   ' "$cargo_config"; then
+    echo 'Windows CRT alignment contains a suppression, dynamic override, or global rustflags' >&2
+    exit 1
+fi
 
 service_create_line=$(grep -F "Invoke-Checked 'sc.exe' @('create', \$serviceName" "$lab" || true)
 test -n "$service_create_line" || {
