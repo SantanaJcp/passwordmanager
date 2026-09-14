@@ -4,7 +4,6 @@
 """Destructive-only-inside-ephemeral-CI native macOS custody laboratory."""
 
 import ctypes
-import codecs
 import errno
 import fcntl
 import os
@@ -23,6 +22,7 @@ import subprocess
 import sys
 import termios
 import time
+import unicodedata
 import pty
 
 LABEL = "com.santanajcp.passwordmanager"
@@ -38,9 +38,6 @@ TUI_PASSWORD_RECORD = b"ticket05-e2e-password-canary"
 TUI_EXTERNAL_REPLACEMENT = b"ticket26-tui-external-replacement"
 DIAGNOSTIC_ENV = "PM_MACOS_TICKET26_DIAGNOSTIC"
 DIAGNOSTIC_LOG = STATE / "ticket26-diagnostic.log"
-ANSI_SEQUENCE = re.compile(
-    rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))"
-)
 DIAGNOSTIC_LINE = re.compile(
     rb"(?:PM26_DIAGNOSTIC phase=[a-z-]+|"
     rb"PM26_DIAGNOSTIC accepted-stream-nonblocking-(?:before|after)=[01]|"
@@ -94,6 +91,400 @@ def wire_fields(values):
     return bytes(result)
 
 
+class UnsupportedVtSequence(AssertionError):
+    """A terminal capability outside the observer's deliberately small contract."""
+
+    def __init__(self, category):
+        self.category = category
+        super().__init__(f"unsupported VT sequence category={category}")
+
+
+class VtScreen:
+    """Decode the pinned TUI's cursor-addressed bytes into visible screen cells."""
+
+    def __init__(self, columns, rows):
+        assert columns > 0 and rows > 0
+        self.columns = columns
+        self.rows = rows
+        self._cells = self._blank_cells()
+        self._primary = None
+        self._last_application = None
+        self._cursor_row = 0
+        self._cursor_column = 0
+        self._wrap_pending = False
+        self._last_base = None
+        self._saved_cursor = (0, 0, False)
+        self._state = "ground"
+        self._csi = bytearray()
+        self._utf8 = bytearray()
+        self._utf8_expected = 0
+        self.revision = 0
+
+    def _blank_cells(self):
+        return [[" " for _ in range(self.columns)] for _ in range(self.rows)]
+
+    @staticmethod
+    def _cell_width(character):
+        category = unicodedata.category(character)
+        if category in {"Mn", "Mc", "Me"} or character == "\u200d":
+            return 0
+        if category.startswith("C"):
+            raise UnsupportedVtSequence("unicode-control")
+        return 2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+
+    @staticmethod
+    def _render_cells(cells):
+        return "\n".join(
+            "".join(" " if cell is None else cell for cell in row)
+            for row in cells
+        )
+
+    def text(self):
+        return self._render_cells(self._cells)
+
+    def application_text(self):
+        if self._primary is None:
+            return self._last_application or self._render_cells(self._cells)
+        return self._render_cells(self._cells)
+
+    def _changed(self):
+        self.revision += 1
+
+    def _reset_cursor_state(self):
+        self._wrap_pending = False
+        self._last_base = None
+
+    def _linefeed(self):
+        self._reset_cursor_state()
+        if self._cursor_row == self.rows - 1:
+            self._cells.pop(0)
+            self._cells.append([" " for _ in range(self.columns)])
+            self._changed()
+        else:
+            self._cursor_row += 1
+
+    def _reverse_index(self):
+        self._reset_cursor_state()
+        if self._cursor_row == 0:
+            self._cells.insert(0, [" " for _ in range(self.columns)])
+            self._cells.pop()
+            self._changed()
+        else:
+            self._cursor_row -= 1
+
+    def _put(self, character):
+        width = self._cell_width(character)
+        if width == 0:
+            if self._last_base is None:
+                raise UnsupportedVtSequence("orphan-combining")
+            row, column = self._last_base
+            self._cells[row][column] += character
+            self._changed()
+            return
+        if width > self.columns:
+            raise UnsupportedVtSequence("wide-cell")
+        if self._wrap_pending:
+            self._cursor_column = 0
+            self._linefeed()
+        if self._cursor_column + width > self.columns:
+            self._cursor_column = 0
+            self._linefeed()
+        row, column = self._cursor_row, self._cursor_column
+        self._cells[row][column] = character
+        if width == 2:
+            self._cells[row][column + 1] = None
+        self._last_base = (row, column)
+        if column + width == self.columns:
+            self._cursor_column = self.columns - 1
+            self._wrap_pending = True
+        else:
+            self._cursor_column = column + width
+            self._wrap_pending = False
+        self._changed()
+
+    def _move_cursor(self, row, column):
+        self._cursor_row = max(0, min(self.rows - 1, row))
+        self._cursor_column = max(0, min(self.columns - 1, column))
+        self._reset_cursor_state()
+
+    @staticmethod
+    def _params(raw):
+        private = raw.startswith(b"?")
+        body = raw[1:] if private else raw
+        if not re.fullmatch(rb"[0-9;]*", body):
+            raise UnsupportedVtSequence("csi-parameters")
+        if not body:
+            return private, []
+        values = []
+        for value in body.split(b";"):
+            if not value:
+                values.append(None)
+                continue
+            try:
+                values.append(int(value))
+            except ValueError as error:
+                raise UnsupportedVtSequence("csi-parameters") from error
+        return private, values
+
+    @staticmethod
+    def _one(values, default, maximum=1):
+        if len(values) > maximum:
+            raise UnsupportedVtSequence("csi-arity")
+        value = values[0] if values else None
+        return default if value is None else value
+
+    def _erase_line(self, mode):
+        if mode not in (0, 1, 2):
+            raise UnsupportedVtSequence("erase-line-mode")
+        start = 0 if mode == 1 else self._cursor_column
+        end = self._cursor_column if mode == 1 else self.columns - 1
+        if mode == 2:
+            start, end = 0, self.columns - 1
+        changed = False
+        for column in range(start, end + 1):
+            if self._cells[self._cursor_row][column] != " ":
+                self._cells[self._cursor_row][column] = " "
+                changed = True
+        self._reset_cursor_state()
+        if changed:
+            self._changed()
+
+    def _erase_display(self, mode):
+        if mode not in (0, 1, 2, 3):
+            raise UnsupportedVtSequence("erase-display-mode")
+        changed = False
+        if mode == 0:
+            ranges = [(self._cursor_row, self.rows - 1)]
+            first_start = self._cursor_column
+        elif mode == 1:
+            ranges = [(0, self._cursor_row)]
+            first_start = 0
+        else:
+            ranges = [(0, self.rows - 1)]
+            first_start = 0
+        for row_start, row_end in ranges:
+            for row in range(row_start, row_end + 1):
+                start = first_start if row == self._cursor_row and mode in (0, 1) else 0
+                for column in range(start, self.columns):
+                    if self._cells[row][column] != " ":
+                        self._cells[row][column] = " "
+                        changed = True
+        self._reset_cursor_state()
+        if changed:
+            self._changed()
+
+    def _set_private_mode(self, value, enabled):
+        if value == 25:
+            return
+        if value != 1049:
+            raise UnsupportedVtSequence("private-mode")
+        if enabled:
+            if self._primary is not None:
+                raise UnsupportedVtSequence("nested-alternate-screen")
+            self._primary = (
+                self._cells, self._cursor_row, self._cursor_column,
+                self._wrap_pending, self._last_base, self._saved_cursor,
+            )
+            self._cells = self._blank_cells()
+            self._cursor_row = 0
+            self._cursor_column = 0
+            self._reset_cursor_state()
+            self._last_application = None
+            return
+        if self._primary is None:
+            raise UnsupportedVtSequence("alternate-screen-exit")
+        self._last_application = self._render_cells(self._cells)
+        (
+            self._cells, self._cursor_row, self._cursor_column,
+            self._wrap_pending, self._last_base, self._saved_cursor,
+        ) = self._primary
+        self._primary = None
+        self._reset_cursor_state()
+
+    def _dispatch_csi(self, raw, final):
+        parameter_end = 0
+        while parameter_end < len(raw) and 0x30 <= raw[parameter_end] <= 0x3F:
+            parameter_end += 1
+        parameters = raw[:parameter_end]
+        intermediates = raw[parameter_end:]
+        if intermediates or any(not 0x20 <= value <= 0x2F for value in intermediates):
+            raise UnsupportedVtSequence("csi-intermediate")
+        private, values = self._params(parameters)
+        if private:
+            if final not in ("h", "l") or len(values) != 1 or values[0] is None:
+                raise UnsupportedVtSequence("private-mode")
+            self._set_private_mode(values[0], final == "h")
+            return
+        if final == "n":
+            raise UnsupportedVtSequence("terminal-query")
+        if final in ("H", "f"):
+            if len(values) > 2:
+                raise UnsupportedVtSequence("csi-arity")
+            row = 1 if not values or values[0] is None else values[0]
+            column = 1 if len(values) < 2 or values[1] is None else values[1]
+            self._move_cursor(row - 1, column - 1)
+            return
+        if final == "m":
+            return
+        if final == "J":
+            self._erase_display(self._one(values, 0))
+            return
+        if final == "K":
+            self._erase_line(self._one(values, 0))
+            return
+        if final in ("A", "B", "C", "D"):
+            amount = self._one(values, 1)
+            if amount < 0:
+                raise UnsupportedVtSequence("csi-range")
+            delta_row = amount if final == "B" else -amount if final == "A" else 0
+            delta_column = amount if final == "C" else -amount if final == "D" else 0
+            self._move_cursor(
+                self._cursor_row + delta_row,
+                self._cursor_column + delta_column,
+            )
+            return
+        if final == "G":
+            self._move_cursor(self._cursor_row, self._one(values, 1) - 1)
+            return
+        if final == "d":
+            self._move_cursor(self._one(values, 1) - 1, self._cursor_column)
+            return
+        if final == "s":
+            if values:
+                raise UnsupportedVtSequence("csi-arity")
+            self._saved_cursor = (
+                self._cursor_row, self._cursor_column, self._wrap_pending,
+            )
+            return
+        if final == "u":
+            if values:
+                raise UnsupportedVtSequence("csi-arity")
+            self._cursor_row, self._cursor_column, self._wrap_pending = self._saved_cursor
+            self._last_base = None
+            return
+        raise UnsupportedVtSequence("csi-command")
+
+    def _feed_byte(self, value):
+        if self._utf8:
+            if not 0x80 <= value <= 0xBF:
+                raise UnsupportedVtSequence("invalid-utf8")
+            self._utf8.append(value)
+            if len(self._utf8) == self._utf8_expected:
+                try:
+                    character = bytes(self._utf8).decode("utf-8", "strict")
+                except UnicodeDecodeError as error:
+                    raise UnsupportedVtSequence("invalid-utf8") from error
+                self._utf8.clear()
+                self._utf8_expected = 0
+                self._put(character)
+            return
+        if self._state == "escape":
+            if value == ord("["):
+                self._state = "csi"
+                self._csi.clear()
+                return
+            if value == ord("]"):
+                raise UnsupportedVtSequence("osc")
+            if value == ord("7"):
+                self._saved_cursor = (
+                    self._cursor_row, self._cursor_column, self._wrap_pending,
+                )
+                self._state = "ground"
+                return
+            if value == ord("8"):
+                self._cursor_row, self._cursor_column, self._wrap_pending = self._saved_cursor
+                self._last_base = None
+                self._state = "ground"
+                return
+            if value == ord("D"):
+                self._linefeed()
+                self._state = "ground"
+                return
+            if value == ord("E"):
+                self._cursor_column = 0
+                self._linefeed()
+                self._state = "ground"
+                return
+            if value == ord("M"):
+                self._reverse_index()
+                self._state = "ground"
+                return
+            raise UnsupportedVtSequence("escape")
+        if self._state == "csi":
+            if 0x30 <= value <= 0x3F or 0x20 <= value <= 0x2F:
+                self._csi.append(value)
+                return
+            if 0x40 <= value <= 0x7E:
+                raw = bytes(self._csi)
+                self._csi.clear()
+                self._state = "ground"
+                self._dispatch_csi(raw, chr(value))
+                return
+            raise UnsupportedVtSequence("csi")
+        if value == 0x1B:
+            self._state = "escape"
+            return
+        if value in (0x00, 0x07, 0x7F):
+            return
+        if value == 0x08:
+            self._cursor_column = max(0, self._cursor_column - 1)
+            self._reset_cursor_state()
+            return
+        if value == 0x09:
+            self._cursor_column = min(self.columns - 1, ((self._cursor_column // 8) + 1) * 8)
+            self._reset_cursor_state()
+            return
+        if value in (0x0A, 0x0B, 0x0C):
+            self._linefeed()
+            return
+        if value == 0x0D:
+            self._cursor_column = 0
+            self._reset_cursor_state()
+            return
+        if value < 0x20:
+            raise UnsupportedVtSequence("control")
+        if value < 0x80:
+            self._put(chr(value))
+            return
+        if 0xC2 <= value <= 0xDF:
+            self._utf8.extend((value,))
+            self._utf8_expected = 2
+            return
+        if 0xE0 <= value <= 0xEF:
+            self._utf8.extend((value,))
+            self._utf8_expected = 3
+            return
+        if 0xF0 <= value <= 0xF4:
+            self._utf8.extend((value,))
+            self._utf8_expected = 4
+            return
+        raise UnsupportedVtSequence("invalid-utf8")
+
+    def feed(self, value, *, final=False):
+        for byte in value:
+            self._feed_byte(byte)
+        if final:
+            if self._utf8:
+                raise UnsupportedVtSequence("incomplete-utf8")
+            if self._state != "ground":
+                raise UnsupportedVtSequence("incomplete-control")
+
+    def resize(self, columns, rows):
+        assert columns > 0 and rows > 0
+        cells = [
+            row[:columns] + [" "] * max(0, columns - len(row))
+            for row in self._cells[:rows]
+        ]
+        cells.extend([[" " for _ in range(columns)] for _ in range(rows - len(cells))])
+        self.columns = columns
+        self.rows = rows
+        self._cells = cells
+        self._cursor_row = min(self._cursor_row, rows - 1)
+        self._cursor_column = min(self._cursor_column, columns - 1)
+        self._reset_cursor_state()
+        self._changed()
+
+
 class MacPtySession:
     """Drive the real macOS TUI through a controlling pseudo-terminal."""
 
@@ -101,11 +492,11 @@ class MacPtySession:
         self.pid = pid
         self.master = master
         self.output = bytearray()
+        self.screen = VtScreen(80, 24)
         self._decode_at = 0
-        self._ansi_pending = b""
-        self._decoder = codecs.getincrementaldecoder("utf-8")("strict")
-        self._decoded_chunks = []
-        self._decoder_finalized = False
+        self._screen_revision = self.screen.revision
+        self._screen_events = []
+        self._screen_finalized = False
         self.returncode = None
         self.reaped = False
         self.eof = False
@@ -139,37 +530,24 @@ class MacPtySession:
     def resize(self, columns, rows):
         dimensions = struct.pack("HHHH", rows, columns, 0, 0)
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, dimensions)
-
-    @staticmethod
-    def _strip_ansi_incremental(value, final):
-        visible = bytearray()
-        offset = 0
-        while offset < len(value):
-            if value[offset] != 0x1b:
-                visible.append(value[offset])
-                offset += 1
-                continue
-            match = ANSI_SEQUENCE.match(value, offset)
-            if match is not None:
-                offset = match.end()
-                continue
-            if not final:
-                return bytes(visible), value[offset:]
-            visible.append(value[offset])
-            offset += 1
-        return bytes(visible), b""
+        self.screen.resize(columns, rows)
+        self._record_screen_event()
 
     def _consume_output(self, *, final=False):
-        if self._decoder_finalized:
+        if self._screen_finalized:
             return
-        value = self._ansi_pending + bytes(self.output[self._decode_at:])
+        value = bytes(self.output[self._decode_at:])
         self._decode_at = len(self.output)
-        visible, self._ansi_pending = self._strip_ansi_incremental(value, final)
-        rendered = self._decoder.decode(visible, final=final)
-        if rendered:
-            self._decoded_chunks.append((len(self.output), rendered))
+        self.screen.feed(value, final=final)
+        self._record_screen_event()
         if final:
-            self._decoder_finalized = True
+            self._screen_finalized = True
+
+    def _record_screen_event(self):
+        if self.screen.revision == self._screen_revision:
+            return
+        self._screen_events.append((len(self.output), self.screen.application_text()))
+        self._screen_revision = self.screen.revision
 
     def _read_once(self, timeout):
         if self.eof:
@@ -198,8 +576,8 @@ class MacPtySession:
             pass
 
     def text(self, since=0):
-        return "".join(
-            rendered for raw_end, rendered in self._decoded_chunks if raw_end > since
+        return "\n".join(
+            rendered for raw_end, rendered in self._screen_events if raw_end > since
         )
 
     def wait_text(self, expected, *, timeout=8, since=0):
@@ -210,7 +588,7 @@ class MacPtySession:
                 return rendered
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise AssertionError((expected, self.text(since)[-4096:]))
+                raise AssertionError("TUI PTY screen observation timed out")
             self._read_once(min(0.1, remaining))
 
     def write(self, value):
@@ -280,6 +658,55 @@ class MacPtySession:
                 errors.append(error)
         if errors:
             raise AssertionError("TUI PTY cleanup failed") from errors[0]
+
+
+def assert_screen_observer_regression():
+    """The PTY observer must preserve cells addressed by cursor-positioned output."""
+    captured = (
+        b"\x1b[2J\x1b[4;1HItems\x1b[4;7H(selection is metadata only)"
+        b"\x1b[6;1HPassword\x1b[6;10Hrequired\x1b[8;1Hcafe\xcc\x81"
+    )
+    screen = VtScreen(40, 10)
+    for offset in range(len(captured)):
+        screen.feed(captured[offset:offset + 1])
+    screen.feed(b"", final=True)
+    rendered = screen.text()
+    assert "Items (selection is metadata only)" in rendered, (
+        "cursor-positioned screen regression: item title lost its separating cell"
+    )
+    assert "Password required" in rendered, (
+        "cursor-positioned screen regression: prompt lost its separating cell"
+    )
+    assert "cafe\u0301" in rendered, (
+        "cursor-positioned screen regression: combining mark was not retained"
+    )
+    screen.resize(12, 4)
+    screen.feed(b"\x1b[1;1Hwide\xe7\x95\x8c")
+    resized = screen.text().splitlines()
+    assert len(resized) == 4 and resized[0].startswith("wide界"), (
+        "cursor-positioned screen regression: resize changed visible rows"
+    )
+    screen.feed(b"\x1b[?1049h\x1b[1;1Halternate")
+    alternate = screen.text()
+    screen.feed(b"\x1b[?1049l")
+    assert "alternate" not in screen.text() and "alternate" in screen.application_text(), (
+        "cursor-positioned screen regression: alternate-screen snapshot was lost"
+    )
+    assert alternate.startswith("alternate"), (
+        "cursor-positioned screen regression: alternate screen was not rendered"
+    )
+    try:
+        screen.feed(b"\x1b[6n")
+    except UnsupportedVtSequence as error:
+        assert error.category == "terminal-query"
+    else:
+        raise AssertionError("cursor-positioned screen regression: terminal query was accepted")
+    try:
+        screen.feed(b"\xc3", final=True)
+    except UnsupportedVtSequence as error:
+        assert error.category == "incomplete-utf8"
+    else:
+        raise AssertionError("cursor-positioned screen regression: incomplete UTF-8 was accepted")
 
 
 def read_appkit_pasteboard():
@@ -808,7 +1235,9 @@ def select_tui_password_for_copy(session):
     start = session.mark()
     session.send_text("j" * 14)
     page = session.wait_text("auth[0].password", since=start)
-    assert any("›" in line and "auth[0].password" in line for line in page.splitlines()), page
+    assert any("›" in line and "auth[0].password" in line for line in page.splitlines()), (
+        "selected password field was not rendered"
+    )
     copy_start = session.mark()
     session.send_key("enter")
     return copy_start
@@ -831,7 +1260,9 @@ def run_tui_core_lab(
             b"ticket11-e2e-subject-token-canary",
             b"ticket11-e2e-requester-secret-canary",
         ):
-            assert forbidden not in bytes(first.output), forbidden
+            assert forbidden not in bytes(first.output), (
+                "TUI PTY output contained a protected synthetic value"
+            )
 
         for columns, rows, expected in (
             (42, 12, "Password Manager"),
@@ -877,7 +1308,9 @@ def run_tui_core_lab(
             "TUI PTY idle exit must not require a terminal-emulator cursor response"
         )
         idle_text = second.text(idle_start)
-        assert "Locked after 5 minutes without human input" in idle_text, idle_text[-4096:]
+        assert "Locked after 5 minutes without human input" in idle_text, (
+            "TUI PTY idle lock status was not rendered"
+        )
     finally:
         second.close()
     assert PASSWORD not in bytes(second.output)
@@ -956,6 +1389,7 @@ def main():
     assert DIAGNOSTIC_ENV not in os.environ, (
         "ticket 26 diagnostic activation must be injected only into owned fixture processes"
     )
+    assert_screen_observer_regression()
     diagnostic, paths = parse_lab_arguments(sys.argv[1:])
     binary, cli, source_plist, sodium_config = paths
     classify_native_sodium(sodium_config, diagnostic)

@@ -997,6 +997,42 @@ also repeat `scripts/check.sh`, the clean locked/offline build and the complete
 ordered Linux laboratory set after composition. None of those local gates,
 the prior nine native tests, or run 18 substitutes for this native PTY run.
 
+### Native run 22 observer RED and bounded correction
+
+The Apple-silicon job for checkpoint `6c6bec` reached the normal TUI and
+rendered its first screen, but the laboratory timed out while looking for
+`Password required`. Its captured diagnostic representation contained
+`Passwordrequired` and `Items(selectionismetadataonly)`. This is not evidence
+that the product omitted spaces: the existing `MacPtySession` removed every
+cursor-positioning CSI and concatenated the text bytes, so spaces represented
+by untouched screen cells were lost. The result is a harness-observer RED,
+not a product behavioral RED or acceptance result; the Intel outcome must be
+reported separately.
+
+The bounded test-only correction is a small VT screen observer in
+`crates/pm-custody/tests/macos_lab.py`. It consumes the real `forkpty` bytes
+incrementally and maintains the requested cursor, grid, wrap state and
+application alternate-screen snapshot. Its accepted grammar is intentionally
+closed around the pinned Crossterm output: cursor addressing/movement,
+erase, SGR, the two private screen/cursor modes, basic C0 cursor controls,
+strict UTF-8, and Unicode combining/wide-cell accounting. Any other escape
+or control sequence fails with a fixed category; in particular `CSI 6n` is a
+terminal-query failure and is never answered or ignored. Rows retain their
+spaces and Unicode; no whitespace normalization, terminal-response
+emulation, retry, deadline change, product change or optional terminal
+dependency is introduced.
+
+The parser regression feeds a cursor-positioned no-secret capture pattern one
+byte at a time, including split UTF-8 and combining bytes, and verifies the
+separated `Password required`/`Items (selection is metadata only)` rows,
+resize, alternate-screen exit snapshot, and rejection of incomplete UTF-8 and
+`CSI 6n`. The native TUI waits use the same observer over the actual captured
+PTY stream; raw bytes remain available only for the existing secret, OSC52 and
+DSR checks. Error messages do not include screen rows or raw bytes. The
+parser-only GREEN and the next normal two-architecture native result remain
+pending; this observer is not complete Ticket 23--25 acceptance, which still
+requires the separately documented full matrix.
+
 ## Remaining acceptance work
 
 - Compose and verify the complete keyboard TUI through the normal
