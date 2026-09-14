@@ -213,11 +213,10 @@ fn validate_diagnostic_file(file: &File) -> Result<(), Failure> {
     // SAFETY: `file` owns a valid handle for the duration of this call and
     // `information` is writable storage of the documented type.
     let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut information) };
-    let file_index = (u64::from(information.nFileIndexHigh) << 32)
-        | u64::from(information.nFileIndexLow);
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
     if ok == 0
-        || information.dwFileAttributes
-            & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+        || information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
             != 0
         || file_index == 0
     {
@@ -438,9 +437,8 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
             let vault_id = vault_id.clone();
             std::thread::spawn(move || serve_role(Role::Agent, &vault_id, &bootstrap, &service))
         };
-        let human = std::thread::spawn(move || {
-            serve_role(Role::Human, &vault_id, &bootstrap, &service)
-        });
+        let human =
+            std::thread::spawn(move || serve_role(Role::Human, &vault_id, &bootstrap, &service));
         agent.join().map_err(|_| Failure::Unavailable)??;
         human.join().map_err(|_| Failure::Unavailable)??;
         Err(Failure::Unavailable)
@@ -519,11 +517,6 @@ fn handle_server_connection(
     if tls.conn.alpn_protocol() != Some(role.alpn()) {
         return Err(Failure::Unavailable);
     }
-    if role == Role::Human
-        && let Some(diagnostics) = service.diagnostics.as_ref()
-    {
-        diagnostics.record(ServiceDiagnosticPhase::HumanMagicAlpn)?;
-    }
     match role {
         Role::Agent if magic == *AGENT_MAGIC => crate::agent_wire::serve_agent(
             &mut tls,
@@ -534,11 +527,16 @@ fn handle_server_connection(
             },
             peer_rpk,
         ),
-        Role::Human if magic == *HUMAN_MAGIC => serve_human(
-            &mut tls,
-            service,
-            human_channel.ok_or(Failure::Unavailable)?,
-        ),
+        Role::Human if magic == *HUMAN_MAGIC => {
+            if let Some(diagnostics) = service.diagnostics.as_ref() {
+                diagnostics.record(ServiceDiagnosticPhase::HumanMagicAlpn)?;
+            }
+            serve_human(
+                &mut tls,
+                service,
+                human_channel.ok_or(Failure::Unavailable)?,
+            )
+        }
         _ => Err(Failure::Unavailable),
     }
 }
@@ -1155,9 +1153,9 @@ fn take_optional_path(
 ) -> Result<Option<PathBuf>, Failure> {
     match arguments.next() {
         None => Ok(None),
-        Some(actual) if actual == flag => Ok(Some(PathBuf::from(
-            arguments.next().ok_or(Failure::Usage)?,
-        ))),
+        Some(actual) if actual == flag => {
+            Ok(Some(PathBuf::from(arguments.next().ok_or(Failure::Usage)?)))
+        }
         Some(_) => Err(Failure::Usage),
     }
 }

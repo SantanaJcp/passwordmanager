@@ -998,6 +998,14 @@ resultado como verde. No se ejecutaron Cargo, PowerShell, build ni
 laboratorio. La clasificación humana permanece sin observar hasta la próxima
 corrida diagnóstica Windows.
 
+Antes del dispatch se aplicaron las tres diferencias mínimas de formato
+heredadas en el mismo archivo ya afectado; `rustfmt --check` quedó verde sin
+refactor semántico. También se corrigió la ubicación de
+`human-magic-alpn`: ahora se registra únicamente dentro del branch que ya
+comprobó simultáneamente rol humano, ALPN y el MAGIC humano exacto, por lo que
+el marcador no puede afirmar un MAGIC inválido. El checker y
+`git diff --check` permanecieron verdes; no se ejecutó Cargo ni Windows.
+
 ## Déficit contractual de parada SCM (plan, no implementación)
 
 La misma corrida mostró `NOT_STOPPABLE` y el cleanup no pudo ejecutar
