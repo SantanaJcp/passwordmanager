@@ -876,6 +876,9 @@ fn handle_sync_request(
     opcode: u8,
     request: &[u8],
 ) -> Option<Result<Vec<u8>, Failure>> {
+    if !matches!(opcode, 63 | 66) {
+        return None;
+    }
     Some((|| match opcode {
         63 => {
             let mut cursor = Cursor::new(request);
@@ -920,7 +923,7 @@ fn handle_sync_request(
             response.extend_from_slice(&status.pulled.to_be_bytes());
             Ok(response)
         }
-        _ => return None,
+        _ => unreachable!("closed sync opcode set checked above"),
     })())
 }
 
