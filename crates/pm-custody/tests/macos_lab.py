@@ -1270,7 +1270,8 @@ def assert_screen_observer_regression():
     split_expiry.reads = 0
     expiry_frames = iter((
         b"\x1b[2J\x1b[1;1HStatus: Secret revealed temporarily"
-        b"\x1b[2;1HExposure: ticket05-e2e-password-canary",
+        b"\x1b[2;1HExposure: ticket05-e2e-password-canary"
+        b"\x1b[3;1Hkind: note",
         b"\x1b[1;1H\x1b[2KStatus: Reveal expired",
         b"\x1b[2;1H\x1b[2KExposure: <hidden>",
     ))
@@ -1287,7 +1288,7 @@ def assert_screen_observer_regression():
 
     split_expiry._read_once = read_expiry_frame
     assert wait_stable_reveal_expiry(
-        split_expiry, forbidden="ticket05-e2e-password-canary", timeout=1,
+        split_expiry, forbidden="note", timeout=1,
     ).find("Reveal expired") >= 0
     assert split_expiry.reads == 3, (
         "cursor-positioned screen regression: intermediate expiry frame was accepted"
@@ -2490,11 +2491,15 @@ def wait_stable_reveal_expiry(session, *, forbidden=None, timeout=8, since=0):
     deadline = time.monotonic() + timeout
     while True:
         rendered = session._current_text_after(since)
+        exposure_lines = () if rendered is None else tuple(
+            line.strip() for line in rendered.splitlines()
+            if line.strip().startswith("Exposure:")
+        )
         if (
             rendered is not None
-            and "Reveal expired" in rendered
-            and "Exposure: <hidden>" in rendered
-            and (forbidden is None or forbidden not in rendered)
+            and any("Reveal expired" in line for line in rendered.splitlines())
+            and "Exposure: <hidden>" in exposure_lines
+            and (forbidden is None or all(forbidden not in line for line in exposure_lines))
         ):
             return rendered
         remaining = deadline - time.monotonic()
