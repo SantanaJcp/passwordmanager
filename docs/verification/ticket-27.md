@@ -215,6 +215,36 @@ sintaxis PowerShell real, MSBuild/`ReleaseLIB|ARM64`, Dumpbin y el comportamient
 de cleanup continúan pendientes de la ejecución Windows nativa, sin inferirse
 del chequeo Linux.
 
+## Corrección acotada de SCM y método TDD (escrito antes de implementar)
+
+La octava ejecución nativa del producto,
+[run 34802741744](https://github.com/SantanaJcp/passwordmanager/actions/runs/34802741744),
+compiló `pm-vault`, `pm-custody` y `pm` en ARM64, pasó los cuatro tests del
+canal y el test de producto disponible, y después falló al crear el servicio
+antes de crear fixtures. `sc.exe` recibió el token `password=` con un valor
+vacío junto con la cuenta virtual `NT SERVICE\PasswordManager`, y SCM devolvió
+1057. La documentación de
+[CreateServiceA](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-createservicea)
+exige `lpPassword = NULL` para cuentas virtuales; una cadena vacía no satisface
+ese contrato.
+
+El seam público de esta corrección es el argv de la única invocación
+`sc.exe create` del laboratorio. Antes de tocarla se añadió al checker
+`verify-windows-libsodium-build.sh` una regresión que conserva el nombre de la
+cuenta virtual y rechaza cualquier `password=` en esa invocación. La regresión
+dio RED contra el candidato congelado porque aún contenía `'password=', ''`.
+La implementación mínima elimina solo ese token: la omisión es la forma en que
+`sc.exe` entrega `NULL` a `lpPassword`; no cambia la cuenta virtual, el tipo o
+inicio del servicio, las guardias de colisión, el registro de propiedad ni el
+cleanup. No se introduce cuenta `LocalSystem`, fallback, retry o timeout.
+
+La comprobación local posterior debe repetir el checker, `git diff --check`,
+`./scripts/check.sh` y el laboratorio Linux de custodia que ya cubre recursos,
+ownership, colisiones y cleanup. El host Linux no tiene `pwsh`, por lo que no se
+simula parsing PowerShell. Solo una corrida Windows nativa puede demostrar que
+SCM acepta la cuenta virtual y que el resto del laboratorio continúa; el ticket
+permanece sin aceptar.
+
 ## Pendiente que bloquea aceptación
 
 Falta compilar y ejecutar el producto y el script en Windows 11 ARM64. El

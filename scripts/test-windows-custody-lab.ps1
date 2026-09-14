@@ -127,7 +127,9 @@ try {
 
     $agentSid = Get-Sid "$env:COMPUTERNAME\$agentName"
     $humanSid = Get-Sid "$env:COMPUTERNAME\$humanName"
-    Invoke-Checked 'sc.exe' @('create', $serviceName, 'type=', 'own', 'start=', 'demand', 'obj=', "NT SERVICE\$serviceName", 'password=', '', 'binPath=', 'cmd /c exit 0')
+    # Omit password= for a virtual account: SCM maps the absent argument to
+    # the required NULL lpPassword value, rather than an empty string.
+    Invoke-Checked 'sc.exe' @('create', $serviceName, 'type=', 'own', 'start=', 'demand', 'obj=', "NT SERVICE\$serviceName", 'binPath=', 'cmd /c exit 0')
     $serviceOwned = $true
     Invoke-Checked 'sc.exe' @('sidtype', $serviceName, 'unrestricted')
     $serviceSid = Get-Sid "NT SERVICE\$serviceName"

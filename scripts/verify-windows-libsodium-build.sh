@@ -43,6 +43,19 @@ require_literal 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3' "$ver
 require_literal 'third_party/libsodium/LATEST.tar.gz -text' "$attributes"
 require_literal 'third_party/libsodium/LATEST.tar.gz.minisig -text' "$attributes"
 
+service_create_line=$(grep -F "Invoke-Checked 'sc.exe' @('create', \$serviceName" "$lab" || true)
+test -n "$service_create_line" || {
+    echo 'Windows custody lab service creation contract is absent' >&2
+    exit 1
+}
+case "$service_create_line" in
+    *"'password='"*)
+        echo 'virtual Windows service must omit password= so SCM receives a NULL password' >&2
+        exit 1
+        ;;
+esac
+require_literal 'NT SERVICE\$serviceName' "$lab"
+
 for input in third_party/libsodium/LATEST.tar.gz third_party/libsodium/LATEST.tar.gz.minisig; do
     attribute=$(git -C "$root" check-attr text -- "$input")
     case "$attribute" in
