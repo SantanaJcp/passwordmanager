@@ -508,7 +508,7 @@ fn open_human(path: &Path, custody: Arc<AuditDeviceCustody>) -> (HumanVault, Uni
     let (server, peer) = UnixStream::pair().unwrap();
     let channel = HumanChannel::authenticate(server, unsafe { libc::geteuid() }).unwrap();
     (
-        HumanVault::unlock_with_audit_custody(path, MASTER, DEVICE, channel, custody).unwrap(),
+        HumanVault::unlock(path, MASTER, DEVICE, channel, custody).unwrap(),
         peer,
     )
 }

@@ -2802,7 +2802,7 @@ fn handle_human_rpc(
     cursor.expect(&[1])?;
     let mut password = Zeroizing::new(cursor.bytes()?);
     cursor.finish()?;
-    let mut vault = HumanVault::unlock_with_audit_custody(
+    let mut vault = HumanVault::unlock(
         &service.path,
         &password,
         service.device,
