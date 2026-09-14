@@ -141,3 +141,46 @@ Los 18 laboratorios pasaron secuencialmente, incluidos TUI real, Keycloak
 - Tras autorización explícita, los opcodes heredados 47/48 y
   `primary_human_secret` fueron retirados. No queda una ruta implícita o
   alternativa a la selección exacta 51–53.
+
+
+## Integración verificada por merger
+
+El merger separado integró el candidato `f1c375e` sobre la rama unificada
+actual, que ya contenía el método de observación asíncrona autorizado, mediante
+el merge no destructivo `c74aba0`. No hubo conflictos textuales. La inspección
+semántica comprobó que `primary_human_secret` ya no existe y que 47/48 solo se
+construyen en la negativa que exige su rechazo; la única exposición disponible
+usa catálogo 51 y selección exacta 52/53. `human_fields` enumera metadata,
+destinos, tags, notas, custom/source, todas las variantes de auth —incluido
+`TokenExchange`— y descriptores de attachments. La prueba TUI recorrió los
+siete tipos y ocho records compuestos mediante motor, TLS-RPK, teclado y PTY
+reales.
+
+```text
+./scripts/check.sh
+# exit 0
+
+./scripts/clean-offline-build.sh
+# locked/offline; 42.12 s de compilación, 43.067 s total; exit 0
+
+set -o pipefail
+# loop ordenado con contador y acumulación explícita de fallos
+for lab in $(find scripts -maxdepth 1 -name 'test-linux-*-lab.sh' | sort); do
+  ...
+done
+# count=18 failures=0; exit 0
+
+git diff --check
+# exit 0
+```
+
+La corrida integral no necesitó reintentos. El laboratorio TUI confirmó
+`fields=explicit-complete`, `legacy-exposure=rejected`, `types=7`, selección sin
+secreto, expiraciones, clipboard race preservada, agente hostil denegado,
+resize/Unicode/control sanitizado, historia, trash, restore y purgas.
+
+Esto resuelve 23 solo para Linux x86_64. No convierte los flujos exclusivamente
+CLI de 24/25 en TUI. En particular, un attachment mayor que el frame humano
+conserva su seam streaming de descarga/exportación, pero esta pantalla no
+pretende copiarlo parcialmente ni acredita todavía esa UX. Tampoco acredita
+los otros cinco targets, empaquetado ni la revisión formal Astra.

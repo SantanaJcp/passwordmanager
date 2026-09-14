@@ -131,4 +131,12 @@ Merger Sol distinto integró el candidato Luna `2f92f69` como `d1d8b1f` y corrig
 
 La primera barrida tuvo un fallo de `passkey-login` al iniciar el intento de cuenta (`CUSTODY_UNAVAILABLE`), no una lectura de estado intermedio. El loop de esa primera barrida no propagó el fallo; su exit 0 **no se acepta como suite verde**. Una repetición enfocada pasó y una nueva barrida completa con acumulación explícita de errores terminó `count=17 failures=0`. Esta última es la evidencia de integración, sin ocultar la falla intermitente anterior ni atribuirle una causa todavía no demostrada. No se repitió autenticación dentro de una misma aserción ni se aumentaron deadlines.
 
-23 entregó candidato `f1c375e` con 18 labs de autor; está pendiente de integración separada y no habilita todavía 24/25. La evidencia nativa reciente está en [native-ci.md](../../docs/verification/native-ci.md); la revisión formal permanece al final de los 35 tickets.
+23 quedó integrado sin conflictos textuales como `c74aba0` y resuelto tras
+verificación independiente del merger: check, clean locked/offline y 18/18 labs
+Linux con propagación explícita de fallos. La selección de campo 51–53 es la
+única exposición; 47/48 se rechazan y `primary_human_secret` no existe. Esto
+habilita recalcular la frontera de 24/25, pero no los implementa ni convierte
+sus flujos CLI en TUI; tampoco cierra la UX streaming pendiente para attachments
+mayores que el frame humano. La evidencia nativa reciente está en
+[native-ci.md](../../docs/verification/native-ci.md); la revisión formal
+permanece al final de los 35 tickets.
