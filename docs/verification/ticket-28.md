@@ -177,6 +177,25 @@ como fallo de bookkeeping, no como RED conductual. La corrección sincronizó s�
 esa entrada. Además, `LockedKey` reutiliza un allocator privado desde su array de
 stack y lo limpia en éxito o error, sin introducir una copia `Vec` desbloqueada.
 
+## Tercer vertical preparado: entrada directa protegida
+
+El checkpoint anterior reserva memoria protegida sólo después de completar
+`read_until`, así que no satisface todavía la entrada directa de G7. El próximo
+RED inicia `pm vault create` con `RLIMIT_MEMLOCK=0`, mantiene abierto su stdin y
+no envía ningún byte. Tras el primer prompt, el proceso debe fallar cerrado como
+`RESOURCE_UNAVAILABLE` dentro del plazo ya acotado del fixture. La variante
+actual permanece esperando entrada: ese timeout demuestra que intenta leer
+antes de reservar/bloquear el destino, no un fallo de credencial o dependencia.
+
+El GREEN preasignará el destino nativo protegido antes de la primera lectura y
+leerá en su capacidad mediante `Read`, sin un `BufRead` propio intermedio. Debe
+conservar exactamente: aceptación de LF, retirada de un único CR antes de LF,
+aceptación de EOF tras al menos un byte, rechazo de EOF vacío y rechazo sobre el
+límite. Las regresiones enfocadas comparan sólo booleanos y errores públicos,
+sin imprimir el material sintético. Este vertical no amplía la garantía a los
+buffers internos de stdio/OS ni a librerías de terceros permitidos por G7 §2.1,
+y tampoco reescribe Argon, TLS, russh o browser.
+
 ## Verticales de fault/crash pendientes de RED
 
 El seam de almacenamiento será un lab público separado, no una colección de

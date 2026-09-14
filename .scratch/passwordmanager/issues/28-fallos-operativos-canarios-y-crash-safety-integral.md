@@ -79,3 +79,8 @@ positivo, rechazo memlock antes de confirmación y cleanup verificado. Un intent
 previo rc101 no compiló por `Cargo.lock` desincronizado y no cuenta como RED; se
 conserva en `/tmp/pm28-green2-pm-crypto.log`. Sigue sin probar lectura directa
 en memoria bloqueada ni los demás buffers/canales, por lo que 28 queda abierto.
+
+2026-09-14 — Tercer RED preparado sin ejecución: con stdin abierto y cero bytes
+enviados, memlock=0 debe fallar tras el primer prompt; esperar entrada demuestra
+que el destino no fue protegido antes de leer. Casos enfocados fijan LF, CRLF,
+EOF vacío/no vacío y límite sin registrar el canario. No se escribió GREEN.

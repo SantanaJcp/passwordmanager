@@ -846,8 +846,37 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{params_for_cli, start_request};
-    use std::ffi::OsString;
+    use super::{params_for_cli, read_protected_line, start_request};
+    use std::{ffi::OsString, io::Cursor};
+
+    #[test]
+    fn protected_line_preserves_public_line_parsing() {
+        let lf = read_protected_line(&mut Cursor::new(b"ticket28-lf\n"), 32).unwrap();
+        assert!(lf.as_ref() == b"ticket28-lf");
+
+        let crlf = read_protected_line(&mut Cursor::new(b"ticket28-crlf\r\n"), 32).unwrap();
+        assert!(crlf.as_ref() == b"ticket28-crlf");
+
+        let eof_after_bytes =
+            read_protected_line(&mut Cursor::new(b"ticket28-eof"), 32).unwrap();
+        assert!(eof_after_bytes.as_ref() == b"ticket28-eof");
+
+        let lone_cr = read_protected_line(&mut Cursor::new(b"ticket28-cr\r"), 32).unwrap();
+        assert!(lone_cr.as_ref() == b"ticket28-cr\r");
+
+        let exact_limit = read_protected_line(&mut Cursor::new(b"1234\n"), 4).unwrap();
+        assert!(exact_limit.as_ref() == b"1234");
+
+        let Err(empty) = read_protected_line(&mut Cursor::new(b""), 32) else {
+            panic!("empty input was accepted");
+        };
+        assert!(empty == "unexpected end of input");
+
+        let Err(over_limit) = read_protected_line(&mut Cursor::new(b"12345\n"), 4) else {
+            panic!("over-limit input was accepted");
+        };
+        assert!(over_limit == "input exceeds 4 bytes");
+    }
 
     #[test]
     fn github_cli_builds_the_closed_typed_query_context() {

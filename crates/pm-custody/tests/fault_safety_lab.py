@@ -157,7 +157,16 @@ def main():
         assert PASSWORD not in stdout + stderr
 
         denied = start_create(cli, root / "denied.sqlite3", memlock=0)
-        stdout, stderr = denied.communicate(input=PASSWORD + b"\n", timeout=20)
+        processes.append(denied)
+        wait_line(denied, b"Master password (read from stdin):\n")
+        try:
+            denied.wait(timeout=3)
+        except subprocess.TimeoutExpired as error:
+            raise AssertionError(
+                "client read stdin before reserving its protected input destination"
+            ) from error
+        stdout, stderr = denied.communicate(timeout=3)
+        processes.remove(denied)
         assert denied.returncode == 5, (denied.returncode, stdout, stderr)
         assert b"resource unavailable" in stderr.lower(), stderr
         assert b"Confirm master password" not in stdout
