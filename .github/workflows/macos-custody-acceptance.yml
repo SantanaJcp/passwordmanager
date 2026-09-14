@@ -2,6 +2,12 @@ name: macOS custody acceptance
 
 on:
   workflow_dispatch:
+    inputs:
+      pasteboard_diagnostic:
+        description: "Run the test-only categorical pasteboard observation"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -54,4 +60,11 @@ jobs:
         run: ./scripts/fetch-dependencies.sh
       - name: Run native macOS custody product laboratory offline
         shell: bash
-        run: PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh
+        env:
+          PM26_PASTEBOARD_DIAGNOSTIC: ${{ inputs.pasteboard_diagnostic }}
+        run: |
+          args=()
+          if [[ "$PM26_PASTEBOARD_DIAGNOSTIC" == true ]]; then
+            args+=(--pasteboard-diagnostic)
+          fi
+          PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh "${args[@]}"

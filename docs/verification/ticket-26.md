@@ -56,8 +56,8 @@ terminal, clipboard and strict owned-cleanup gates described below. The pinned
 libsodium build metadata remains a build-input gate and must classify the exact
 build as optimized; it is not a product diagnostic channel.
 
-The previous bounded diagnostic path remains available only through the exact
-explicit opt-in:
+The previous product-phase diagnostic path remains available only through the
+exact explicit opt-in:
 
 ```text
 PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh --diagnostic
@@ -68,6 +68,20 @@ diagnostic environment into the synthetic client and launchd fixture, and
 validates the protected diagnostic log. Unknown or additional arguments fail;
 normal-mode failure never selects diagnostic mode. Native acceptance requires
 the default normal command, while diagnostic runs remain supporting evidence.
+
+The pasteboard-only observation path is a separate explicit opt-in. It builds
+and installs the ordinary binary and ordinary LaunchDaemon plist; it does not
+enable `macos-ticket26-diagnostics`, set `PM_MACOS_TICKET26_DIAGNOSTIC` or
+create the service diagnostic log:
+
+```text
+PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh --pasteboard-diagnostic
+```
+
+The manual workflow exposes this as the boolean `pasteboard_diagnostic` input.
+When true it passes only `--pasteboard-diagnostic` to the harness. The mode is
+limited to the categorical human/agent pasteboard observation below; it is
+supporting evidence and cannot turn a normal product failure into a pass.
 
 Prerequisites are a fresh macOS 13-or-newer Intel or Apple-silicon CI runner,
 the repository-pinned Rust 1.98.1 toolchain, Xcode command-line tools,
@@ -730,14 +744,16 @@ The laboratory now defaults to the normal mode defined above. The shell passes
 no feature or harness-mode argument in that path; the harness installs the
 unchanged production plist, rejects ambient diagnostic activation, runs agent
 and human operations without the diagnostic environment, and requires the
-protected diagnostic log to remain absent. `--diagnostic` is the sole explicit
-alternative and retains the prior bounded diagnostic assertions. Both modes
-still bind and reject ambiguous libsodium build metadata, and require the exact
-build to be optimized.
+protected diagnostic log to remain absent. `--diagnostic` is the explicit
+alternative that enables product-phase diagnostics; `--pasteboard-diagnostic`
+is the separate harness-only categorical observation mode. All modes still
+bind and reject ambiguous libsodium build metadata, and require the exact build
+to be optimized.
 
-The static checker covers both closed argument forms, rejects unknown and
-incomplete modes, distinguishes normal versus diagnostic output, rejects
-unoptimized metadata, and pins normal plist/log behavior. Shell syntax, Python
+The static checker covers all three closed argument forms, rejects unknown and
+incomplete modes, distinguishes normal, product-diagnostic and
+pasteboard-diagnostic output, rejects unoptimized metadata, and pins normal
+plist/log behavior. Shell syntax, Python
 AST parsing, the static macOS checker and `git diff --check` passed. No Cargo,
 build, native laboratory or product behavior was executed for this checkpoint;
 the default command must run on both native architectures before it is evidence.
@@ -1129,10 +1145,12 @@ The possibility that the UID-switched child retains the caller's bootstrap is
 a source-supported fixture hypothesis, not a native finding; no product or
 fixture session change is authorized by this record.
 
-The bounded diagnostic-only correction records the missing distinction under
-the existing `macos-ticket26-diagnostics` feature and exact
-`PM_MACOS_TICKET26_DIAGNOSTIC=1` opt-in. It emits only fixed categories, never
-the canary, captured bytes, numeric UIDs, paths or OS error text:
+The bounded pasteboard-only correction records the missing distinction under
+the separate `--pasteboard-diagnostic` harness/workflow opt-in. It uses the
+ordinary binary and ordinary LaunchDaemon plist, without the
+`macos-ticket26-diagnostics` feature or `PM_MACOS_TICKET26_DIAGNOSTIC=1`.
+It emits only fixed categories, never the canary, captured bytes, numeric UIDs,
+paths or OS error text:
 
 - `pasteboard-human-canary-read=yes|no` records the exact human positive
   control before the negative probe;
@@ -1148,19 +1166,32 @@ the canary, captured bytes, numeric UIDs, paths or OS error text:
   expected synthetic identity without printing its UID; and
 - `pasteboard-human-domain`, `pasteboard-agent-domain` and
   `pasteboard-domain-relation` classify `launchctl manageruid` as
-  `system|human|other|unavailable|unparseable` and compare the two contexts as
-  `same|different|indeterminate`. The command's bootstrap-namespace meaning
-  follows the documented [`launchctl manageruid`](https://github.com/apple-oss-distributions/launchd/blob/main/man/launchctl.1)
-  interface; its numeric output is never printed.
+  `system|human|other|unavailable|unparseable`. The two raw manager UIDs are
+  parsed and compared internally before their categories are emitted, so two
+  `other` categories are not treated as equal merely because their labels
+  match. The relation is only `same|different|indeterminate`. The command's
+  bootstrap-namespace meaning follows the documented
+  [`launchctl manageruid`](https://github.com/apple-oss-distributions/launchd/blob/main/man/launchctl.1)
+  interface; neither numeric output is printed.
 
 The negative assertion now rejects exact-canary exposure or an indeterminate
 timeout, but does not reject a completed zero exit solely because it is zero:
 the human exact-canary control and the categorical identity/domain evidence
 must be considered together. This is an evidence correction, not a claim that
 the run proved isolation or a relaxation of the native G1 requirement. A
-future native run must capture these fixed categories before any decision to
-redesign the agent fixture; normal mode remains unchanged and emits no
-diagnostic output.
+future native pasteboard-diagnostic run must capture these fixed categories
+before any decision to redesign the agent fixture; normal mode remains
+uses the ordinary binary/plist and emits no diagnostic output.
+
+The isolation scenario now uses the product's maximum/default 30-second copy
+lease, and reads the exact human canary immediately before and immediately
+after the agent probe. The added identity/domain commands and the existing
+agent `osascript` call must complete within that unchanged lease; a failed
+post-probe human control is not reinterpreted as agent denial. The separate
+expiry scenario remains explicit: a fresh TUI uses the existing 5-second copy
+lease, replaces the canary from another application, and requires the normal
+expiry/ownership result. This preserves both the long-lease isolation
+observation and the short-lease expiry race without changing product limits.
 
 The checkpoint has only had a Python AST parse and static diff inspection on
 the Linux host; no local Cargo, macOS runtime, system lab or native acceptance

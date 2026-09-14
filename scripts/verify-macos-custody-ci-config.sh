@@ -51,6 +51,10 @@ require_exact_count() {
 }
 
 require_literal '  workflow_dispatch:' "$workflow"
+require_literal '      pasteboard_diagnostic:' "$workflow"
+require_literal '        type: boolean' "$workflow"
+require_literal '          PM26_PASTEBOARD_DIAGNOSTIC: ${{ inputs.pasteboard_diagnostic }}' "$workflow"
+require_literal '            args+=(--pasteboard-diagnostic)' "$workflow"
 require_literal '  contents: read' "$workflow"
 require_literal "  RUSTUP_AUTO_INSTALL: '0'" "$workflow"
 require_literal '    RUSTUP_HOME: ${{ github.workspace }}/.toolchain/rustup' "$workflow"
@@ -97,6 +101,7 @@ require_literal 'build_command=(' "$lab"
 require_literal 'test_command=(' "$lab"
 require_literal '-p pm-native-channel -p pm-vault -p pm-crypto -p pm-custody --locked --offline' "$lab"
 require_literal 'harness_command=(python3' "$lab"
+require_literal '--pasteboard-diagnostic' "$lab"
 require_literal 'scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")' "$harness"
 require_literal 'require_owner_mode(scratch.parent, (0, 0o1777))' "$harness"
 require_literal 'stat.S_IMODE(full_mode)' "$harness"
@@ -108,8 +113,8 @@ require_literal 'pid, master = pty.fork()' "$harness"
 require_literal 'termios.TIOCSWINSZ' "$harness"
 require_literal 'self.wait_text(f"Input: {value}", since=start)' "$harness"
 require_literal 'wait_exit(timeout=8)' "$harness"
-require_literal 'self._decoder = codecs.getincrementaldecoder("utf-8")("strict")' "$harness"
-require_literal 'self._strip_ansi_incremental(value, final)' "$harness"
+require_literal 'self._utf8 = bytearray()' "$harness"
+require_literal 'bytes(self._utf8).decode("utf-8", "strict")' "$harness"
 require_literal 'if error.errno == errno.EIO:' "$harness"
 require_literal 'if self.returncode is None and not self.reaped:' "$harness"
 require_literal 'raise AssertionError("TUI PTY child returned an unknown wait status")' "$harness"
@@ -117,6 +122,19 @@ require_literal 'copy_start = session.mark()' "$harness"
 require_literal 'return copy_start' "$harness"
 require_literal 'human-content-flow' "$harness"
 require_literal 'assert_agent_cannot_read_pasteboard' "$harness"
+require_literal 'assert_human_pasteboard_canary' "$harness"
+require_literal 'pasteboard-agent-canary-stdout' "$harness"
+require_literal 'pasteboard-agent-canary-stderr' "$harness"
+require_literal 'pasteboard-agent-success-read' "$harness"
+require_literal 'pasteboard-human-identity' "$harness"
+require_literal 'pasteboard-agent-identity' "$harness"
+require_literal 'pasteboard-human-domain' "$harness"
+require_literal 'pasteboard-agent-domain' "$harness"
+require_literal 'pasteboard-domain-relation' "$harness"
+require_literal 'launchctl", "manageruid' "$harness"
+require_literal 'classify_launchd_domain' "$harness"
+require_literal 'copy=30' "$harness"
+require_literal 'copy=5' "$harness"
 require_literal 'osascript' "$harness"
 require_literal 'run_tui_core_lab(' "$harness"
 require_literal 'tui_core_verified = True' "$harness"
@@ -165,6 +183,7 @@ require_literal 'attempt(f"rmdir-{name}", ["rmdir", path])' "$harness"
 require_literal '"env", f"{DIAGNOSTIC_ENV}=1"' "$harness"
 require_literal 'plist_to_install = source_plist' "$harness"
 require_literal 'diagnostic=diagnostic' "$harness"
+require_literal 'pasteboard_diagnostic=pasteboard_diagnostic' "$harness"
 require_literal 'classify_native_sodium(sodium_config, diagnostic)' "$harness"
 require_literal 'assert DIAGNOSTIC_ENV not in os.environ' "$harness"
 require_literal '"normal mode created a diagnostic log"' "$harness"
@@ -208,6 +227,16 @@ configure_ticket26_build_commands normal /synthetic-ticket26
 printf '%s\n' "${build_command[@]}" "${test_command[@]}" >/dev/null
 configure_ticket26_harness_command normal /synthetic-ticket26 /synthetic-config.log
 [[ "${harness_command[*]}" != *--diagnostic* ]]
+[[ "${harness_command[*]}" != *--pasteboard-diagnostic* ]]
+printf '%s\n' "${harness_command[@]}" >/dev/null
+
+configure_ticket26_build_commands pasteboard /synthetic-ticket26
+[[ "${build_command[*]}" != *macos-ticket26-diagnostics* ]]
+[[ "${test_command[*]}" != *macos-ticket26-diagnostics* ]]
+printf '%s\n' "${build_command[@]}" "${test_command[@]}" >/dev/null
+configure_ticket26_harness_command pasteboard /synthetic-ticket26 /synthetic-config.log
+count_argument --pasteboard-diagnostic "${harness_command[@]}"
+[[ "${harness_command[*]}" != *--diagnostic* ]]
 printf '%s\n' "${harness_command[@]}" >/dev/null
 
 configure_ticket26_build_commands diagnostic /synthetic-ticket26
@@ -232,15 +261,20 @@ spec = importlib.util.spec_from_file_location("pm_macos_lab", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-normal, paths = module.parse_lab_arguments(["custody", "cli", "plist", "config"])
-assert normal is False and len(paths) == 4
-diagnostic, paths = module.parse_lab_arguments(
+normal, pasteboard, paths = module.parse_lab_arguments(["custody", "cli", "plist", "config"])
+assert normal is False and pasteboard is False and len(paths) == 4
+diagnostic, pasteboard, paths = module.parse_lab_arguments(
     ["--diagnostic", "custody", "cli", "plist", "config"]
 )
-assert diagnostic is True and len(paths) == 4
+assert diagnostic is True and pasteboard is False and len(paths) == 4
+diagnostic, pasteboard, paths = module.parse_lab_arguments(
+    ["--pasteboard-diagnostic", "custody", "cli", "plist", "config"]
+)
+assert diagnostic is False and pasteboard is True and len(paths) == 4
 for rejected in (
     ["--unknown", "cli", "plist", "config"],
     ["--diagnostic", "--unknown", "cli", "plist", "config"],
+    ["--diagnostic", "--pasteboard-diagnostic", "cli", "plist", "config"],
     ["custody", "cli", "plist"],
 ):
     try:
@@ -313,6 +347,35 @@ assert module.diagnostic_lines(
 assert module.diagnostic_lines(
     b"PM26_DIAGNOSTIC sodium-cflags=opt0\n"
 ) == [b"PM26_DIAGNOSTIC sodium-cflags=opt0"]
+for line in (
+    b"PM26_DIAGNOSTIC pasteboard-human-canary-read=yes\n",
+    b"PM26_DIAGNOSTIC pasteboard-agent-result=zero\n",
+    b"PM26_DIAGNOSTIC pasteboard-agent-canary-stdout=absent\n",
+    b"PM26_DIAGNOSTIC pasteboard-agent-canary-stderr=absent\n",
+    b"PM26_DIAGNOSTIC pasteboard-agent-success-read=no\n",
+    b"PM26_DIAGNOSTIC pasteboard-human-identity=expected\n",
+    b"PM26_DIAGNOSTIC pasteboard-agent-identity=expected\n",
+    b"PM26_DIAGNOSTIC pasteboard-human-domain=human\n",
+    b"PM26_DIAGNOSTIC pasteboard-agent-domain=other\n",
+    b"PM26_DIAGNOSTIC pasteboard-domain-relation=different\n",
+):
+    assert module.diagnostic_lines(line) == [line.rstrip(b"\n")]
+assert module.classify_launchd_domain(
+    module.subprocess.CompletedProcess(["launchctl"], 0, b"700\n", b""), 501
+) == (b"other", 700)
+assert module.classify_domain_relation((b"other", 700), (b"other", 700)) == b"same"
+assert module.classify_domain_relation((b"other", 700), (b"other", 701)) == b"different"
+assert module.classify_domain_relation((b"unavailable", None), (b"other", 700)) == b"indeterminate"
+assert module.classify_pasteboard_output(
+    b"synthetic-canary", b"", b"", 0
+) == (b"zero", False, False, b"no")
+assert module.classify_pasteboard_output(
+    b"synthetic-canary", b"synthetic-canary", b"", 0
+) == (b"zero", True, False, b"yes")
+assert module.classify_pasteboard_output(
+    b"synthetic-canary", b"", b"", None
+) == (b"timeout", False, False, b"indeterminate")
+module.assert_pasteboard_diagnostic_regression()
 assert module.parse_sodium_cflags(b"CFLAGS='-O0 -g'\n") == b"opt0"
 assert module.parse_sodium_cflags(b"CFLAGS='-O2 -g'\n") == b"optimized"
 for rejected in (b"", b"CFLAGS='-Og'\n", b"CFLAGS='-O0 -O2'\n"):

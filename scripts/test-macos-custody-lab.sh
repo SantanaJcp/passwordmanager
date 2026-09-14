@@ -26,6 +26,8 @@ configure_ticket26_harness_command() {
   harness_command=(python3 "$root/crates/pm-custody/tests/macos_lab.py")
   if [[ "$mode" == diagnostic ]]; then
     harness_command+=(--diagnostic)
+  elif [[ "$mode" == pasteboard ]]; then
+    harness_command+=(--pasteboard-diagnostic)
   fi
   harness_command+=(
     "$root/target/debug/pm-custody"
@@ -40,14 +42,17 @@ main() {
   case "$#" in
     0) ;;
     1)
-      if [[ "$1" != --diagnostic ]]; then
-        echo "ticket 26 laboratory accepts only the optional --diagnostic mode" >&2
+      if [[ "$1" == --diagnostic ]]; then
+        mode=diagnostic
+      elif [[ "$1" == --pasteboard-diagnostic ]]; then
+        mode=pasteboard
+      else
+        echo "ticket 26 laboratory accepts only --diagnostic or --pasteboard-diagnostic" >&2
         exit 1
       fi
-      mode=diagnostic
       ;;
     *)
-      echo "ticket 26 laboratory accepts at most one --diagnostic argument" >&2
+      echo "ticket 26 laboratory accepts at most one diagnostic-mode argument" >&2
       exit 1
       ;;
   esac

@@ -888,26 +888,31 @@ def classify_identity(result, expected_uid):
 
 def classify_launchd_domain(result, human_uid):
     if result.returncode != 0:
-        return b"unavailable"
+        return b"unavailable", None
     if result.stderr:
-        return b"unparseable"
+        return b"unparseable", None
     manager_uid = result.stdout.strip()
-    if manager_uid == b"0":
-        return b"system"
-    if manager_uid == str(human_uid).encode():
-        return b"human"
     try:
-        int(manager_uid, 10)
+        parsed_uid = int(manager_uid, 10)
     except ValueError:
-        return b"unparseable"
-    return b"other"
+        return b"unparseable", None
+    if parsed_uid == 0:
+        category = b"system"
+    elif parsed_uid == human_uid:
+        category = b"human"
+    else:
+        category = b"other"
+    return category, parsed_uid
 
 
 def classify_domain_relation(human_domain, agent_domain):
-    if human_domain in {b"unavailable", b"unparseable"} \
-            or agent_domain in {b"unavailable", b"unparseable"}:
+    human_category, human_uid = human_domain
+    agent_category, agent_uid = agent_domain
+    if human_category in {b"unavailable", b"unparseable"} \
+            or agent_category in {b"unavailable", b"unparseable"} \
+            or human_uid is None or agent_uid is None:
         return b"indeterminate"
-    return b"same" if human_domain == agent_domain else b"different"
+    return b"same" if human_uid == agent_uid else b"different"
 
 
 def classify_pasteboard_output(secret, stdout, stderr, returncode):
@@ -996,8 +1001,8 @@ def assert_agent_cannot_read_pasteboard(secret, *, diagnostic=False):
             (b"pasteboard-agent-success-read", success_read),
             (b"pasteboard-human-identity", human_identity),
             (b"pasteboard-agent-identity", agent_identity),
-            (b"pasteboard-human-domain", human_domain),
-            (b"pasteboard-agent-domain", agent_domain),
+            (b"pasteboard-human-domain", human_domain[0]),
+            (b"pasteboard-agent-domain", agent_domain[0]),
             (b"pasteboard-domain-relation", classify_domain_relation(human_domain, agent_domain)),
         ):
             emit_diagnostic(b"PM26_DIAGNOSTIC " + name + b"=" + value)
@@ -1515,11 +1520,11 @@ def select_tui_password_for_copy(session):
 
 def run_tui_core_lab(
     binary, profile, private, endpoint, agent_profile, agent_private, agent_endpoint,
-    *, diagnostic=False,
+    *, diagnostic=False, pasteboard_diagnostic=False,
 ):
     seed_tui_content(binary, profile, private, endpoint)
     first = start_macos_tui(
-        binary, profile, private, endpoint, idle=30, reveal=1, copy=5,
+        binary, profile, private, endpoint, idle=30, reveal=1, copy=30,
     )
     try:
         initial = first.text()
@@ -1551,12 +1556,30 @@ def run_tui_core_lab(
         tui_search(first, "Password")
         copied_start = select_tui_password_for_copy(first)
         first.wait_text("Copied explicitly", since=copied_start)
-        assert_human_pasteboard_canary(TUI_PASSWORD_RECORD, diagnostic=diagnostic)
-        assert_agent_cannot_read_pasteboard(TUI_PASSWORD_RECORD, diagnostic=diagnostic)
-        write_appkit_pasteboard(TUI_EXTERNAL_REPLACEMENT)
-        expiry_start = first.mark()
-        first.wait_text("Clipboard custody expired", since=expiry_start)
-        assert read_appkit_pasteboard() == TUI_EXTERNAL_REPLACEMENT
+        pasteboard_observation = diagnostic or pasteboard_diagnostic
+        assert_human_pasteboard_canary(
+            TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation
+        )
+        probe_error = None
+        try:
+            assert_agent_cannot_read_pasteboard(
+                TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation
+            )
+        except BaseException as error:
+            probe_error = error
+        after_error = None
+        try:
+            assert_human_pasteboard_canary(
+                TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation
+            )
+        except BaseException as error:
+            after_error = error
+        if probe_error is not None:
+            if after_error is not None:
+                raise probe_error from after_error
+            raise probe_error
+        if after_error is not None:
+            raise after_error
 
         first.send_key("l")
         assert first.wait_exit(timeout=8) == 0
@@ -1587,6 +1610,26 @@ def run_tui_core_lab(
     assert PASSWORD not in bytes(second.output)
     assert TUI_PASSWORD_RECORD not in bytes(second.output)
     assert b"\x1b]52;" not in bytes(second.output)
+    require_agent_discovery(binary, agent_profile, agent_private, agent_endpoint)
+
+    expiry = start_macos_tui(
+        binary, profile, private, endpoint, idle=30, reveal=1, copy=5,
+    )
+    try:
+        copied_start = select_tui_password_for_copy(expiry)
+        expiry.wait_text("Copied explicitly", since=copied_start)
+        assert_human_pasteboard_canary(TUI_PASSWORD_RECORD)
+        write_appkit_pasteboard(TUI_EXTERNAL_REPLACEMENT)
+        expiry_start = expiry.mark()
+        expiry.wait_text("Clipboard custody expired", since=expiry_start)
+        assert read_appkit_pasteboard() == TUI_EXTERNAL_REPLACEMENT
+        expiry.send_key("l")
+        assert expiry.wait_exit(timeout=8) == 0
+    finally:
+        expiry.close()
+    assert PASSWORD not in bytes(expiry.output)
+    assert TUI_PASSWORD_RECORD not in bytes(expiry.output)
+    assert b"\x1b]52;" not in bytes(expiry.output)
     require_agent_discovery(binary, agent_profile, agent_private, agent_endpoint)
 
 
@@ -1646,12 +1689,15 @@ def fake_server_rejected_before_tls(binary, profile, private, impostor_home):
 def parse_lab_arguments(values):
     arguments = list(values)
     diagnostic = bool(arguments and arguments[0] == "--diagnostic")
-    if diagnostic:
+    pasteboard_diagnostic = bool(arguments and arguments[0] == "--pasteboard-diagnostic")
+    if diagnostic or pasteboard_diagnostic:
         arguments.pop(0)
     assert len(arguments) == 4 and not any(
         value.startswith("--") for value in arguments
-    ), "usage: macos_lab.py [--diagnostic] CUSTODY CLI PLIST SODIUM_CONFIG"
-    return diagnostic, tuple(pathlib.Path(value).resolve() for value in arguments)
+    ), "usage: macos_lab.py [--diagnostic|--pasteboard-diagnostic] CUSTODY CLI PLIST SODIUM_CONFIG"
+    return diagnostic, pasteboard_diagnostic, tuple(
+        pathlib.Path(value).resolve() for value in arguments
+    )
 
 
 def main():
@@ -1661,7 +1707,7 @@ def main():
         "ticket 26 diagnostic activation must be injected only into owned fixture processes"
     )
     assert_screen_observer_regression()
-    diagnostic, paths = parse_lab_arguments(sys.argv[1:])
+    diagnostic, pasteboard_diagnostic, paths = parse_lab_arguments(sys.argv[1:])
     binary, cli, source_plist, sodium_config = paths
     classify_native_sodium(sodium_config, diagnostic)
     guarded = [INSTALL, STATE, RUNTIME, PLIST]
@@ -1861,6 +1907,7 @@ def main():
             INSTALL / "pm-custody", human_profile, human_key, RUNTIME / "human.sock",
             agent_profile, agent_key, RUNTIME / "agent.sock",
             diagnostic=diagnostic,
+            pasteboard_diagnostic=pasteboard_diagnostic,
         )
         tui_core_verified = True
         suspend = run([INSTALL / "pm-custody", "human-authorization", "--profile", human_profile,
