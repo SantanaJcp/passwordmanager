@@ -117,8 +117,10 @@ single-architecture Mach-O exactly matching `uname -m`. Its Python harness then:
 5. proves an agent UID cannot use the human endpoint, establishes authorization,
    suspends it, kills/restarts the real launchd job, and requires delegated
    discovery to remain denied;
-6. runs the native clipboard ownership race, real `/dev/tty`/`isatty`, and
-   zero-core-limit probe from the logged-in user session;
+6. runs the native clipboard ownership race, the exact pasteboard negative
+   probe from a separate ephemeral system-domain launchd job running as the
+   no-login agent account, real `/dev/tty`/`isatty`, and zero-core-limit probe
+   from the logged-in user session;
 7. boots the job out and removes only the collision-checked paths/accounts it
    created, even on failure.
 
@@ -1197,6 +1199,82 @@ The checkpoint has only had a Python AST parse and static diff inspection on
 the Linux host; no local Cargo, macOS runtime, system lab or native acceptance
 is claimed. The Mac24 result remains a RED with canary exposure status
 `indeterminate` (ARM `rc=0`, Intel timeout), not evidence of extraction.
+
+### Native run 25: shared-bootstrap control negative and isolated-job correction
+
+Run [`34858597883`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34858597883)
+on `73e9175` was dispatched with the separate pasteboard observation option.
+Both `macos-15-intel` and `macos-15` passed environment validation, the locked
+build/tests and architecture checks, then failed in the pasteboard laboratory.
+The fixed observations on each target were:
+
+```text
+human-canary-before=yes
+agent-result=zero canary-stdout=present canary-stderr=absent success-read=yes
+human-identity=expected agent-identity=expected
+human-domain=human agent-domain=human domain-relation=same
+human-canary-after=yes
+```
+
+The exact synthetic human canary was therefore present in the agent probe's
+captured stdout. The matching `human` launchd-domain categories were obtained
+from the raw manager UID comparison, not from the account names. This is a
+reproducible **control negative** for the unsafe fixture shape: a direct
+`sudo -u _pmagent26 osascript` child inherits the logged-in harness bootstrap
+and cannot be counted as an isolated agent. It is not a product failure or an
+isolation PASS, and the control must remain labelled unsupported even if a
+future runner happens not to expose the canary. The later
+`incomplete-control`/PTY-cleanup error is separate cleanup evidence and does
+not weaken the canary observation.
+
+The bounded fixture correction is based on the selected isolation profile,
+not on changing the product or lowering the negative assertion. Apple's
+[daemon/agent guidance](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
+requires `UserName`/`GroupName` to be supplied by launchd for a root-managed
+job and distinguishes the system daemon bootstrap from per-user agents. Apple's
+[root/login-session model](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPMultipleUsers/Concepts/SystemContexts.html)
+also treats bootstrap/session boundaries as a real IPC security boundary.
+The fixture therefore does the following, in order:
+
+1. Retains the shared-bootstrap control only as explicitly labelled supporting
+   evidence. It never contributes to the isolation assertion or a PASS line.
+2. Creates a fresh root-owned, `0644` temporary plist and root-owned,
+   non-writable helper under the collision-guarded fixture root. It bootstraps
+   the helper in the **system** launchd domain with `UserName` and `GroupName`
+   set to `_pmagent26`, `LimitLoadToSessionType=System`, `RunAtLoad=true` and
+   `LaunchOnlyOnce=true`. The synthetic account keeps `UserShell=/usr/bin/false`
+   and `NFSHomeDirectory=/var/empty`; it has no login session. Its result,
+   stdout and stderr files are pre-created inside its own `0700` directory and
+   are tracked as owned resources.
+3. The helper records only fixed categories for its effective UID,
+   `launchctl manageruid`, `launchctl managername`, and the parsed relation to
+   the human harness manager. The manager UID category must be `system` and
+   the combined manager-domain relation must be `different`; a merely
+   different account label is insufficient. It then executes the **same** public
+   `/usr/bin/osascript -e 'the clipboard as text'` probe as the agent. The
+   harness requires the launched process UID and manager domain to be
+   different from the human context before interpreting the probe. Missing or
+   malformed manager metadata is indeterminate, never a fallback.
+4. The exact human canary is read immediately before and immediately after
+   this isolated-job probe. A completed result without the canary is a denial;
+   exact-canary stdout/stderr exposure fails; timeout, missing result, unknown
+   exit state or failed post-control remains a failure/indeterminate result.
+   No extra retry, lease extension, clipboard implementation or product
+   diagnostic feature is used. The existing 5-second expiry case remains a
+   separate scenario.
+5. Cleanup first boots out the owned system-domain job, verifies no owned PID
+   or label remains, then removes only the helper/plist/result files and
+   directories recorded by the fixture. It propagates every bootout, close and
+   removal error. PTY EOF finalization remains strict: an incomplete VT
+   control is recorded as a cleanup error, but cleanup continues and the
+   original behavioral error is preserved as the primary failure; the parser
+   is not made permissive.
+
+This is a test-only fixture correction and a method checkpoint. A future native
+run must show the isolated job's UID/domain relation as `different`, both human
+pre/post controls as `yes`, and no exact canary in either captured stream on
+both architectures before any isolation evidence is considered. The shared
+bootstrap control remains a documented negative, not acceptance evidence.
 
 ## Remaining acceptance work
 

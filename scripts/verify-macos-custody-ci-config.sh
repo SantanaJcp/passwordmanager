@@ -106,6 +106,9 @@ require_literal 'scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket
 require_literal 'require_owner_mode(scratch.parent, (0, 0o1777))' "$harness"
 require_literal 'stat.S_IMODE(full_mode)' "$harness"
 require_literal 'scratch.mkdir(mode=0o711)' "$harness"
+require_literal 'require_no_login_account(name)' "$harness"
+require_literal 'UserShell", "/usr/bin/false"' "$harness"
+require_literal 'NFSHomeDirectory", "/var/empty"' "$harness"
 require_literal 'synthetic keygen failed' "$harness"
 require_literal 'cross_uid_peer_diagnostic(agent_uid, scratch)' "$harness"
 require_literal 'assert launchd_peer_uid(AGENT, RUNTIME / "agent.sock") == custodian_uid' "$harness"
@@ -122,7 +125,15 @@ require_literal 'copy_start = session.mark()' "$harness"
 require_literal 'return copy_start' "$harness"
 require_literal 'human-content-flow' "$harness"
 require_literal 'assert_agent_cannot_read_pasteboard' "$harness"
+require_literal 'AGENT_PASTEBOARD_LAUNCHER' "$harness"
+require_literal 'assert_launchd_agent_cannot_read_pasteboard' "$harness"
+require_literal 'parse_agent_pasteboard_result' "$harness"
+require_literal 'LimitLoadToSessionType' "$harness"
+require_literal 'LaunchOnlyOnce' "$harness"
+require_literal 'launchctl", "bootstrap", "system"' "$harness"
+require_literal 'owned_launchd_labels' "$harness"
 require_literal 'assert_human_pasteboard_canary' "$harness"
+require_literal 'close_session_preserving_primary' "$harness"
 require_literal 'pasteboard-agent-canary-stdout' "$harness"
 require_literal 'pasteboard-agent-canary-stderr' "$harness"
 require_literal 'pasteboard-agent-success-read' "$harness"
@@ -131,6 +142,12 @@ require_literal 'pasteboard-agent-identity' "$harness"
 require_literal 'pasteboard-human-domain' "$harness"
 require_literal 'pasteboard-agent-domain' "$harness"
 require_literal 'pasteboard-domain-relation' "$harness"
+require_literal 'pasteboard-human-canary-before' "$harness"
+require_literal 'pasteboard-human-canary-after' "$harness"
+require_literal 'pasteboard-shared-control=unsupported' "$harness"
+require_literal 'pasteboard-isolated-manager-domain' "$harness"
+require_literal 'probe-canary-stdout' "$harness"
+require_literal 'probe-canary-stderr' "$harness"
 require_literal 'launchctl", "manageruid' "$harness"
 require_literal 'classify_launchd_domain' "$harness"
 require_literal 'copy=30' "$harness"
@@ -349,6 +366,8 @@ assert module.diagnostic_lines(
 ) == [b"PM26_DIAGNOSTIC sodium-cflags=opt0"]
 for line in (
     b"PM26_DIAGNOSTIC pasteboard-human-canary-read=yes\n",
+    b"PM26_DIAGNOSTIC pasteboard-human-canary-before=yes\n",
+    b"PM26_DIAGNOSTIC pasteboard-human-canary-after=yes\n",
     b"PM26_DIAGNOSTIC pasteboard-agent-result=zero\n",
     b"PM26_DIAGNOSTIC pasteboard-agent-canary-stdout=absent\n",
     b"PM26_DIAGNOSTIC pasteboard-agent-canary-stderr=absent\n",
@@ -358,6 +377,15 @@ for line in (
     b"PM26_DIAGNOSTIC pasteboard-human-domain=human\n",
     b"PM26_DIAGNOSTIC pasteboard-agent-domain=other\n",
     b"PM26_DIAGNOSTIC pasteboard-domain-relation=different\n",
+    b"PM26_DIAGNOSTIC pasteboard-shared-control=unsupported\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-agent-result=nonzero\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-agent-canary-stdout=absent\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-agent-canary-stderr=absent\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-agent-success-read=no\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-agent-uid=expected\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-manager-uid=system\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-manager-name=different\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-manager-domain=different\n",
 ):
     assert module.diagnostic_lines(line) == [line.rstrip(b"\n")]
 assert module.classify_launchd_domain(
@@ -375,6 +403,23 @@ assert module.classify_pasteboard_output(
 assert module.classify_pasteboard_output(
     b"synthetic-canary", b"", b"", None
 ) == (b"timeout", False, False, b"indeterminate")
+assert module.parse_agent_pasteboard_result(
+    b"\n".join((
+        b"PM26_PASTEBOARD agent-uid=expected",
+        b"PM26_PASTEBOARD manager-uid=system",
+        b"PM26_PASTEBOARD manager-name=different",
+        b"PM26_PASTEBOARD manager-domain=different",
+        b"PM26_PASTEBOARD probe-result=nonzero",
+        b"PM26_PASTEBOARD probe-canary-stdout=absent",
+        b"PM26_PASTEBOARD probe-canary-stderr=absent",
+        b"PM26_PASTEBOARD probe-success-read=no",
+    )) + b"\n"
+) == {
+    b"agent-uid": b"expected", b"manager-uid": b"system",
+    b"manager-name": b"different", b"manager-domain": b"different",
+    b"probe-result": b"nonzero", b"probe-canary-stdout": b"absent",
+    b"probe-canary-stderr": b"absent", b"probe-success-read": b"no",
+}
 module.assert_pasteboard_diagnostic_regression()
 assert module.parse_sodium_cflags(b"CFLAGS='-O0 -g'\n") == b"opt0"
 assert module.parse_sodium_cflags(b"CFLAGS='-O2 -g'\n") == b"optimized"

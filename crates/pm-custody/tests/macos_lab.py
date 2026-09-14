@@ -50,6 +50,8 @@ DIAGNOSTIC_LINE = re.compile(
     rb"(?:same-pid|different-pid|unavailable|unparseable)|"
     rb"PM26_DIAGNOSTIC pasteboard-human-canary-read="
     rb"(?:yes|no|indeterminate)|"
+    rb"PM26_DIAGNOSTIC pasteboard-human-canary-(?:before|after)="
+    rb"(?:yes|no|indeterminate)|"
     rb"PM26_DIAGNOSTIC pasteboard-agent-result="
     rb"(?:zero|nonzero|timeout)|"
     rb"PM26_DIAGNOSTIC pasteboard-agent-canary-stdout="
@@ -67,6 +69,23 @@ DIAGNOSTIC_LINE = re.compile(
     rb"PM26_DIAGNOSTIC pasteboard-agent-domain="
     rb"(?:system|human|other|unavailable|unparseable)|"
     rb"PM26_DIAGNOSTIC pasteboard-domain-relation="
+    rb"(?:same|different|indeterminate)|"
+    rb"PM26_DIAGNOSTIC pasteboard-shared-control=unsupported|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-agent-result="
+    rb"(?:zero|nonzero|timeout)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-agent-canary-stdout="
+    rb"(?:present|absent)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-agent-canary-stderr="
+    rb"(?:present|absent)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-agent-success-read="
+    rb"(?:yes|no|indeterminate)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-agent-uid="
+    rb"(?:expected|unexpected|unavailable|unparseable)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-manager-uid="
+    rb"(?:same|different|unavailable|unparseable)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-manager-name="
+    rb"(?:same|different|unavailable|unparseable)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-manager-domain="
     rb"(?:same|different|indeterminate)|"
     rb"PM26_DIAGNOSTIC unlock-phase="
     rb"(?:channel-verified|sqlite-opened|durability-configured|bundle-loaded|"
@@ -88,6 +107,119 @@ print(uid.value, flush=True)
 if len(sys.argv) == 3:
     assert stream.recv(1) == b'x'
 """
+
+AGENT_PASTEBOARD_LAUNCHER = r'''#!/usr/bin/python3
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+
+def command_output(command):
+    try:
+        result = subprocess.run(
+            command, check=False, capture_output=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or result.stderr:
+        return None
+    return result.stdout.strip()
+
+
+def fixed_uid(value):
+    if value is None or not re.fullmatch(rb"[0-9]+", value):
+        return None
+    return int(value, 10)
+
+
+def fixed_name(value):
+    if value is None or not re.fullmatch(rb"[A-Za-z0-9_.-]+", value):
+        return None
+    return value
+
+
+def relation(actual, expected):
+    if actual is None or expected is None:
+        return "unavailable"
+    return "same" if actual == expected else "different"
+
+
+result_path = pathlib.Path(sys.argv[1])
+expected_agent_uid = int(sys.argv[2], 10)
+human_manager_uid = int(sys.argv[3], 10)
+human_manager_name = sys.argv[4].encode("ascii")
+canary = sys.argv[5].encode("ascii")
+
+agent_uid = os.getuid()
+manager_uid = fixed_uid(command_output(["/bin/launchctl", "manageruid"]))
+manager_name = fixed_name(command_output(["/bin/launchctl", "managername"]))
+uid_category = "expected" if agent_uid == expected_agent_uid else "unexpected"
+if manager_uid is None:
+    manager_uid_category = "unavailable"
+elif manager_uid == 0:
+    manager_uid_category = "system"
+elif manager_uid == human_manager_uid:
+    manager_uid_category = "human"
+else:
+    manager_uid_category = "other"
+manager_name_category = relation(manager_name, human_manager_name)
+if manager_uid is None or manager_name_category == "unavailable":
+    manager_domain_category = "indeterminate"
+elif manager_uid == human_manager_uid and manager_name_category == "same":
+    manager_domain_category = "same"
+else:
+    manager_domain_category = "different"
+
+try:
+    probe = subprocess.run(
+        ["/usr/bin/osascript", "-e", "the clipboard as text"],
+        check=False, capture_output=True, timeout=30,
+    )
+except subprocess.TimeoutExpired as error:
+    probe_status = "timeout"
+    probe_stdout = error.stdout or b""
+    probe_stderr = error.stderr or b""
+else:
+    probe_status = "zero" if probe.returncode == 0 else "nonzero"
+    probe_stdout = probe.stdout
+    probe_stderr = probe.stderr
+
+stdout_canary = canary in probe_stdout
+stderr_canary = canary in probe_stderr
+probe_success = (
+    "yes" if stdout_canary or stderr_canary
+    else "indeterminate" if probe_status == "timeout" else "no"
+)
+result_path.write_text(
+    "\n".join((
+        "PM26_PASTEBOARD agent-uid=" + uid_category,
+        "PM26_PASTEBOARD manager-uid=" + manager_uid_category,
+        "PM26_PASTEBOARD manager-name=" + manager_name_category,
+        "PM26_PASTEBOARD manager-domain=" + manager_domain_category,
+        "PM26_PASTEBOARD probe-result=" + probe_status,
+        "PM26_PASTEBOARD probe-canary-stdout="
+        + ("present" if stdout_canary else "absent"),
+        "PM26_PASTEBOARD probe-canary-stderr="
+        + ("present" if stderr_canary else "absent"),
+        "PM26_PASTEBOARD probe-success-read=" + probe_success,
+    )) + "\n",
+    encoding="ascii",
+)
+'''
+
+AGENT_PASTEBOARD_RESULT_LINE = re.compile(
+    rb"PM26_PASTEBOARD "
+    rb"(?:agent-uid=(?:expected|unexpected|unavailable|unparseable)|"
+    rb"manager-uid=(?:system|human|other|unavailable|unparseable)|"
+    rb"manager-name=(?:same|different|unavailable|unparseable)|"
+    rb"manager-domain=(?:same|different|indeterminate)|"
+    rb"probe-result=(?:zero|nonzero|timeout)|"
+    rb"probe-canary-stdout=(?:present|absent)|"
+    rb"probe-canary-stderr=(?:present|absent)|"
+    rb"probe-success-read=(?:yes|no|indeterminate))$"
+)
 
 
 def run(command, *, check=True, input=None, timeout=30):
@@ -543,7 +675,7 @@ class MacPtySession:
         try:
             session.resize(80, 24)
         except BaseException:
-            session.close()
+            close_session_preserving_primary(session)
             raise
         return session
 
@@ -736,6 +868,20 @@ class MacPtySession:
                 errors.append(error)
         if errors:
             raise AssertionError("TUI PTY cleanup failed") from errors[0]
+
+
+def close_session_preserving_primary(session):
+    """Run strict PTY cleanup without replacing an already-raised error."""
+    primary = sys.exc_info()[1]
+    try:
+        session.close()
+    except BaseException as cleanup_error:
+        if primary is None:
+            raise
+        prior_cause = primary.__cause__
+        if prior_cause is not None:
+            cleanup_error.__context__ = prior_cause
+        primary.__cause__ = cleanup_error
 
 
 def assert_screen_observer_regression():
@@ -949,7 +1095,7 @@ def assert_pasteboard_diagnostic_regression():
     assert (status, stdout, stderr, success) == (b"timeout", False, False, b"indeterminate")
 
 
-def assert_human_pasteboard_canary(secret, *, diagnostic=False):
+def assert_human_pasteboard_canary(secret, *, diagnostic=False, phase=None):
     value = read_appkit_pasteboard()
     canary_read = value == secret
     if diagnostic:
@@ -957,10 +1103,16 @@ def assert_human_pasteboard_canary(secret, *, diagnostic=False):
             b"PM26_DIAGNOSTIC pasteboard-human-canary-read="
             + (b"yes" if canary_read else b"no")
         )
+        if phase is not None:
+            assert phase in ("before", "after")
+            emit_diagnostic(
+                b"PM26_DIAGNOSTIC pasteboard-human-canary-" + phase.encode("ascii")
+                + b"=" + (b"yes" if canary_read else b"no")
+            )
     assert canary_read, "human AppKit pasteboard control did not read the exact canary"
 
 
-def assert_agent_cannot_read_pasteboard(secret, *, diagnostic=False):
+def assert_agent_cannot_read_pasteboard(secret, *, diagnostic=False, require_denied=True):
     if diagnostic:
         human_uid = os.getuid()
         agent_uid = pwd.getpwnam(AGENT).pw_uid
@@ -1006,10 +1158,150 @@ def assert_agent_cannot_read_pasteboard(secret, *, diagnostic=False):
             (b"pasteboard-domain-relation", classify_domain_relation(human_domain, agent_domain)),
         ):
             emit_diagnostic(b"PM26_DIAGNOSTIC " + name + b"=" + value)
-    assert not canary_stdout and not canary_stderr, (
-        "agent pasteboard probe exposed the exact human canary", result_status,
+    if require_denied:
+        assert not canary_stdout and not canary_stderr, (
+            "agent pasteboard probe exposed the exact human canary", result_status,
+        )
+        assert result is not None, "agent pasteboard probe result was indeterminate"
+    return result_status, canary_stdout, canary_stderr, success_read
+
+
+def parse_agent_pasteboard_result(value):
+    lines = value.splitlines()
+    assert len(lines) == 8 and all(
+        AGENT_PASTEBOARD_RESULT_LINE.fullmatch(line) for line in lines
+    ), "isolated pasteboard launch result was missing or malformed"
+    fields = {}
+    for line in lines:
+        name, category = line.removeprefix(b"PM26_PASTEBOARD ").split(b"=", 1)
+        assert name not in fields, "isolated pasteboard launch result was duplicated"
+        fields[name] = category
+    assert set(fields) == {
+        b"agent-uid", b"manager-uid", b"manager-name", b"manager-domain",
+        b"probe-result", b"probe-canary-stdout", b"probe-canary-stderr",
+        b"probe-success-read",
+    }, "isolated pasteboard launch result had an unexpected schema"
+    return fields
+
+
+def launchd_manager_context():
+    uid_result = run(["launchctl", "manageruid"], check=False)
+    name_result = run(["launchctl", "managername"], check=False)
+    assert uid_result.returncode == 0 and uid_result.stderr == b"", (
+        "human launchd manager UID was unavailable"
     )
-    assert result is not None, "agent pasteboard probe result was indeterminate"
+    assert name_result.returncode == 0 and name_result.stderr == b"", (
+        "human launchd manager name was unavailable"
+    )
+    uid = uid_result.stdout.strip()
+    name = name_result.stdout.strip()
+    assert re.fullmatch(rb"[0-9]+", uid) and re.fullmatch(rb"[A-Za-z0-9_.-]+", name), (
+        "human launchd manager metadata was malformed"
+    )
+    return int(uid, 10), name.decode("ascii")
+
+
+def wait_for_agent_launch(label, result_path):
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        result_exists = sudo(["test", "-s", result_path], check=False).returncode == 0
+        details = sudo(["launchctl", "print", f"system/{label}"], check=False)
+        if details.returncode != 0:
+            raise AssertionError("isolated pasteboard launch job disappeared")
+        running = re.search(rb"\bpid = [0-9]+\b", details.stdout) is not None
+        if result_exists and not running:
+            return
+        time.sleep(0.1)
+    raise AssertionError("isolated pasteboard launch job did not finish")
+
+
+def assert_launchd_agent_cannot_read_pasteboard(
+    secret, scratch, agent_directory, agent_uid, owned_paths, owned_launchd_labels,
+    *, diagnostic=False,
+):
+    """Run the exact pasteboard probe from an owned system-domain launchd job."""
+    human_manager_uid, human_manager_name = launchd_manager_context()
+    assert agent_uid != os.getuid(), "isolated pasteboard job reused the human UID"
+    label = f"{LABEL}.pasteboard-agent"
+    plist_path = scratch / "pasteboard-agent.plist"
+    launcher_path = scratch / "pasteboard-agent-launcher.py"
+    result_path = agent_directory / "pasteboard-result"
+    stdout_path = agent_directory / "pasteboard-stdout"
+    stderr_path = agent_directory / "pasteboard-stderr"
+    assert sudo(["launchctl", "print", f"system/{label}"], check=False).returncode != 0, (
+        "isolated pasteboard launch label already exists"
+    )
+
+    owned_paths.append(("pasteboard-launcher", launcher_path))
+    with open(launcher_path, "w", encoding="ascii", newline="\n") as launcher:
+        launcher.write(AGENT_PASTEBOARD_LAUNCHER)
+    sudo(["chown", "root:wheel", launcher_path])
+    sudo(["chmod", "0555", launcher_path])
+
+    for name, path in (("pasteboard-result", result_path),
+                       ("pasteboard-stdout", stdout_path),
+                       ("pasteboard-stderr", stderr_path)):
+        owned_paths.append((name, path))
+        sudo(["touch", path], user=AGENT)
+        sudo(["chmod", "0600", path], user=AGENT)
+        require_owner_mode(path, (agent_uid, 0o600))
+
+    launchd_config = {
+        "Label": label,
+        "ProgramArguments": [
+            sys.executable, str(launcher_path), str(result_path), str(agent_uid),
+            str(human_manager_uid), human_manager_name, secret.decode("ascii"),
+        ],
+        "UserName": AGENT,
+        "GroupName": AGENT,
+        "LimitLoadToSessionType": "System",
+        "RunAtLoad": True,
+        "LaunchOnlyOnce": True,
+        "ProcessType": "Background",
+        "WorkingDirectory": "/var/empty",
+        "Umask": 63,
+        "StandardOutPath": str(stdout_path),
+        "StandardErrorPath": str(stderr_path),
+    }
+    owned_paths.append(("pasteboard-plist", plist_path))
+    with open(plist_path, "wb") as plist_file:
+        plistlib.dump(launchd_config, plist_file)
+    sudo(["chown", "root:wheel", plist_path])
+    sudo(["chmod", "0644", plist_path])
+    sudo(["plutil", "-lint", plist_path])
+    require_owner_mode(launcher_path, (0, 0o555))
+    require_owner_mode(plist_path, (0, 0o644))
+    owned_launchd_labels.append(label)
+    sudo(["launchctl", "bootstrap", "system", plist_path])
+    wait_for_agent_launch(label, result_path)
+
+    result = sudo(["cat", result_path])
+    fields = parse_agent_pasteboard_result(result.stdout)
+    for path in (stdout_path, stderr_path):
+        output = sudo(["cat", path])
+        assert output.returncode == 0 and output.stdout == b"" and output.stderr == b"", (
+            "isolated pasteboard launch emitted unclassified output"
+        )
+    if diagnostic:
+        for name in (
+            b"agent-uid", b"manager-uid", b"manager-name", b"manager-domain",
+            b"probe-result", b"probe-canary-stdout", b"probe-canary-stderr",
+            b"probe-success-read",
+        ):
+            emit_diagnostic(b"PM26_DIAGNOSTIC pasteboard-isolated-"
+                            + name + b"=" + fields[name])
+    assert fields[b"agent-uid"] == b"expected", "isolated pasteboard job UID was not the agent"
+    assert fields[b"manager-uid"] == b"system" \
+        and fields[b"manager-domain"] == b"different", (
+            "isolated pasteboard job was not in a distinct system domain"
+        )
+    assert fields[b"probe-canary-stdout"] == b"absent" \
+        and fields[b"probe-canary-stderr"] == b"absent", (
+            "isolated pasteboard probe exposed the exact human canary"
+        )
+    assert fields[b"probe-success-read"] == b"no", (
+        "isolated pasteboard probe result was indeterminate or exposed the canary"
+    )
 
 
 def create_account(name, uid, owned_records):
@@ -1027,6 +1319,18 @@ def create_account(name, uid, owned_records):
         ("IsHidden", "1"), ("Password", "*"),
     ]:
         sudo(["dscl", ".", "-create", user, attribute, value])
+
+
+def require_no_login_account(name):
+    for attribute, expected in (
+        ("UserShell", "/usr/bin/false"),
+        ("NFSHomeDirectory", "/var/empty"),
+    ):
+        result = sudo(["dscl", ".", "-read", f"/Users/{name}", attribute], check=False)
+        assert result.returncode == 0 and result.stderr == b"" \
+            and result.stdout == f"{attribute}: {expected}\n".encode("ascii"), (
+                "synthetic launchd account is not a no-login account"
+            )
 
 
 class OwnedCleanupError(AssertionError):
@@ -1081,7 +1385,7 @@ def require_safe_existing_parent(path):
 
 def cleanup_owned_resources(
     bootstrapped, owned_paths, owned_empty_directories, owned_records, invoke=sudo,
-    path_exists=os.path.lexists,
+    path_exists=os.path.lexists, owned_launchd_labels=(),
 ):
     errors = []
 
@@ -1096,8 +1400,12 @@ def cleanup_owned_resources(
             errors.append(AssertionError(f"owned cleanup raised: action={action}"))
             errors[-1].__cause__ = error
 
+    launchd_labels = list(owned_launchd_labels)
     if bootstrapped:
-        attempt("launchd-bootout", ["launchctl", "bootout", f"system/{LABEL}"])
+        launchd_labels.insert(0, LABEL)
+    for label in launchd_labels:
+        action = "launchd-bootout" if label == LABEL else f"launchd-bootout-{label}"
+        attempt(action, ["launchctl", "bootout", f"system/{label}"])
     for name, path in reversed(owned_paths):
         attempt(f"remove-{name}", ["rm", "-rf", path])
     for name, path in reversed(owned_empty_directories):
@@ -1106,13 +1414,15 @@ def cleanup_owned_resources(
         kind = "user" if record.startswith("/Users/") else "group"
         attempt(f"delete-{kind}", ["dscl", ".", "-delete", record])
 
-    if bootstrapped:
+    if launchd_labels:
         try:
             result = invoke(["launchctl", "list"], check=False)
             if result.returncode != 0:
                 raise AssertionError("launchd cleanup inventory query failed")
-            if LABEL in parse_launchctl_labels(result.stdout):
-                errors.append(AssertionError("owned cleanup left launchd job"))
+            labels = parse_launchctl_labels(result.stdout)
+            for label in launchd_labels:
+                if label in labels:
+                    errors.append(AssertionError("owned cleanup left launchd job"))
         except BaseException as error:
             wrapped = AssertionError("owned cleanup absence check raised: launchd")
             wrapped.__cause__ = error
@@ -1158,14 +1468,18 @@ def cleanup_owned_resources(
 
 def finish_owned_resources(
     lab_error, bootstrapped, owned_paths, owned_empty_directories,
-    owned_records, invoke=sudo,
+    owned_records, invoke=sudo, owned_launchd_labels=(),
 ):
     cleanup_errors = cleanup_owned_resources(
-        bootstrapped, owned_paths, owned_empty_directories, owned_records, invoke
+        bootstrapped, owned_paths, owned_empty_directories, owned_records, invoke,
+        owned_launchd_labels=owned_launchd_labels,
     )
     if lab_error is not None:
         if cleanup_errors:
-            raise lab_error from OwnedCleanupError(cleanup_errors)
+            aggregate = OwnedCleanupError(cleanup_errors)
+            if lab_error.__cause__ is not None:
+                aggregate.__context__ = lab_error.__cause__
+            raise lab_error from aggregate
         raise lab_error
     if cleanup_errors:
         raise OwnedCleanupError(cleanup_errors)
@@ -1493,7 +1807,7 @@ def start_macos_tui(binary, profile, private, endpoint, *, idle, reveal, copy):
         session.wait_text("Unlocked: selection never reveals secrets")
         return session
     except BaseException:
-        session.close()
+        close_session_preserving_primary(session)
         raise
 
 
@@ -1520,7 +1834,8 @@ def select_tui_password_for_copy(session):
 
 def run_tui_core_lab(
     binary, profile, private, endpoint, agent_profile, agent_private, agent_endpoint,
-    *, diagnostic=False, pasteboard_diagnostic=False,
+    *, diagnostic=False, pasteboard_diagnostic=False, scratch, agent_directory,
+    agent_uid, owned_paths, owned_launchd_labels,
 ):
     seed_tui_content(binary, profile, private, endpoint)
     first = start_macos_tui(
@@ -1557,20 +1872,26 @@ def run_tui_core_lab(
         copied_start = select_tui_password_for_copy(first)
         first.wait_text("Copied explicitly", since=copied_start)
         pasteboard_observation = diagnostic or pasteboard_diagnostic
+        if pasteboard_observation:
+            emit_diagnostic(b"PM26_DIAGNOSTIC pasteboard-shared-control=unsupported")
+            assert_agent_cannot_read_pasteboard(
+                TUI_PASSWORD_RECORD, diagnostic=True, require_denied=False
+            )
         assert_human_pasteboard_canary(
-            TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation
+            TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation, phase="before"
         )
         probe_error = None
         try:
-            assert_agent_cannot_read_pasteboard(
-                TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation
+            assert_launchd_agent_cannot_read_pasteboard(
+                TUI_PASSWORD_RECORD, scratch, agent_directory, agent_uid,
+                owned_paths, owned_launchd_labels, diagnostic=pasteboard_observation,
             )
         except BaseException as error:
             probe_error = error
         after_error = None
         try:
             assert_human_pasteboard_canary(
-                TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation
+                TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation, phase="after"
             )
         except BaseException as error:
             after_error = error
@@ -1587,7 +1908,7 @@ def run_tui_core_lab(
             "TUI PTY exit must not require a terminal-emulator cursor response"
         )
     finally:
-        first.close()
+        close_session_preserving_primary(first)
     assert TUI_PASSWORD_RECORD not in bytes(first.output)
     assert b"\x1b]52;" not in bytes(first.output)
     require_agent_discovery(binary, agent_profile, agent_private, agent_endpoint)
@@ -1606,7 +1927,7 @@ def run_tui_core_lab(
             "TUI PTY idle lock status was not rendered"
         )
     finally:
-        second.close()
+        close_session_preserving_primary(second)
     assert PASSWORD not in bytes(second.output)
     assert TUI_PASSWORD_RECORD not in bytes(second.output)
     assert b"\x1b]52;" not in bytes(second.output)
@@ -1626,7 +1947,7 @@ def run_tui_core_lab(
         expiry.send_key("l")
         assert expiry.wait_exit(timeout=8) == 0
     finally:
-        expiry.close()
+        close_session_preserving_primary(expiry)
     assert PASSWORD not in bytes(expiry.output)
     assert TUI_PASSWORD_RECORD not in bytes(expiry.output)
     assert b"\x1b]52;" not in bytes(expiry.output)
@@ -1722,6 +2043,7 @@ def main():
     owned_records = []
     owned_paths = []
     owned_empty_directories = []
+    owned_launchd_labels = []
     bootstrapped = False
     lab_error = None
     tui_core_verified = False
@@ -1736,6 +2058,7 @@ def main():
         custodian_uid, agent_uid, other_uid = unused_ids(3)
         for name, uid in [(CUSTODIAN, custodian_uid), (AGENT, agent_uid), (OTHER, other_uid)]:
             create_account(name, uid, owned_records)
+            require_no_login_account(name)
         for name in (CUSTODIAN, AGENT, OTHER):
             require_traversal(name, scratch.parent)
             require_traversal(name, scratch)
@@ -1908,6 +2231,8 @@ def main():
             agent_profile, agent_key, RUNTIME / "agent.sock",
             diagnostic=diagnostic,
             pasteboard_diagnostic=pasteboard_diagnostic,
+            scratch=scratch, agent_directory=agent, agent_uid=agent_uid,
+            owned_paths=owned_paths, owned_launchd_labels=owned_launchd_labels,
         )
         tui_core_verified = True
         suspend = run([INSTALL / "pm-custody", "human-authorization", "--profile", human_profile,
@@ -1934,7 +2259,8 @@ def main():
 
     finish_owned_resources(
         lab_error,
-        bootstrapped, owned_paths, owned_empty_directories, owned_records
+        bootstrapped, owned_paths, owned_empty_directories, owned_records,
+        owned_launchd_labels=owned_launchd_labels,
     )
     print("PASS macos-launchdaemon account=_passwordmanager peer=getpeereid bilateral=tls-rpk")
     print("PASS macos-acl bootstrap=0400 binary+plist=root-owned wrong-uid=rejected")
