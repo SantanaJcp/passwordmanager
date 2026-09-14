@@ -1187,11 +1187,13 @@ límite `AuditKeyUnavailable` ya aislado en una bóveda inicialmente vacía.
 No se ejecutaron las aserciones posteriores al `human-lock`: sustitución
 cross-role, invariancia del PID tras tráfico, segundo STOP/restart, probes tras
 ese segundo restart ni el crash/restart deliberado. El diagnóstico append-only
-contiene tres generaciones `args-ok`, frente al conteo inicial+restart de dos
-que se esperaba en ese punto; este run no alcanzó la aserción posterior que habría
-comparado el PID en uso con el PID devuelto por el restart, de modo que no se
-atribuye la generación adicional ni se afirma estabilidad del mismo proceso
-durante ambos probes.
+contiene exactamente las dos generaciones esperadas, inicial y restart. Las
+tres apariciones de `phase=args-ok` en el log de consola no son tres procesos:
+la lectura de las 13:23:01 imprimió la primera generación, y la lectura de las
+13:23:19 volvió a imprimir esa historia completa seguida de la segunda. El run
+no alcanzó la aserción posterior que habría comparado explícitamente el PID en
+uso con el PID devuelto por el restart; se conserva esa comprobación posterior
+como no ejecutada, sin inventar un restart adicional.
 
 El `finally` sí se ejecutó: el log muestra `DeleteService SUCCESS`, seguido por
 la reparación ACL completa hasta cada hoja; `Remove-LocalUser` y cada
