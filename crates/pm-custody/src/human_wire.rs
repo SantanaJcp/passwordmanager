@@ -4,13 +4,19 @@
 
 use pm_crypto::KdfProfile;
 use pm_vault::{
-    AuditAction, AuthRecord, GeneratorConfig, HumanCommitError, HumanVault, ItemLifecycle,
-    LogicalRecord, LogicalValue, PasswordRecord, PreparedHumanCommand, PrivateKeyFormat,
-    RecordKind, SearchQuery, SourceEncoding,
+    AgentEnrollment, AuditAction, AuthRecord, AuthorizationReason, CsvDelimiter, CsvEncoding,
+    CsvField, CsvImportDecision, CsvImportProfile, CsvMapping, CsvRowStatus, Destination,
+    GeneratorConfig, HumanCommitError, HumanMetadata, HumanVault, ItemLifecycle, LogicalRecord,
+    LogicalValue, PasswordRecord, PreparedHumanCommand, PrivateKeyFormat, RecordKind, SearchQuery,
+    SourceEncoding, TotpAlgorithm,
 };
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::Failure;
+
+const SPKI_BYTES: usize = 44;
+const LAB_AGENT_A: [u8; 16] = [0xa1; 16];
+const LAB_AGENT_B: [u8; 16] = [0xb2; 16];
 
 /// Handles the shared catalog and exposure operations, or returns `None` for an opcode
 /// owned by another shared human-wire slice.
@@ -20,7 +26,7 @@ pub(crate) fn handle_request_slice(
     opcode: u8,
     request: &[u8],
 ) -> Option<Result<Vec<u8>, Failure>> {
-    if !matches!(opcode, 2..=13 | 15 | 16 | 25..=30 | 43 | 46 | 49..=53) {
+    if !matches!(opcode, 2..=13 | 15..=16 | 19..=30 | 33 | 40..=41 | 43 | 45..=46 | 49..=53) {
         return None;
     }
     let rest = request;
@@ -83,6 +89,234 @@ pub(crate) fn handle_request_slice(
                 .prepare_audit_purge(device, generation, through_seq)
                 .map_err(|_| Failure::Unavailable)?;
             encode_prepared(vault, purge.prepared())
+        }
+        19 => {
+            if rest.len() != SPKI_BYTES * 2 {
+                return Err(Failure::Unavailable);
+            }
+            authorization_setup(vault, &rest[..SPKI_BYTES], &rest[SPKI_BYTES..])?;
+            Ok(vec![0])
+        }
+        20 => {
+            if !rest.is_empty() {
+                return Err(Failure::Unavailable);
+            }
+            authorization_suspend(vault)?;
+            Ok(vec![0])
+        }
+        21 => {
+            if !rest.is_empty() {
+                return Err(Failure::Unavailable);
+            }
+            authorization_resume_revoke(vault)?;
+            Ok(vec![0])
+        }
+        22 => {
+            if rest.len() != SPKI_BYTES {
+                return Err(Failure::Unavailable);
+            }
+            authorization_reenroll(vault, rest)?;
+            Ok(vec![0])
+        }
+        23 => {
+            let mut cursor = Cursor::new(rest);
+            let format = *cursor.fixed(1)?.first().ok_or(Failure::Unavailable)?;
+            let replace_candidates = match cursor.fixed(1)? {
+                [0] => false,
+                [1] => true,
+                _ => return Err(Failure::Unavailable),
+            };
+            let source = Zeroizing::new(cursor.bytes()?);
+            cursor.finish()?;
+            let profile = match format {
+                0 => CsvImportProfile::chrome(),
+                1 => CsvImportProfile::apple(
+                    CsvMapping::new(
+                        CsvDelimiter::Comma,
+                        CsvEncoding::Utf8,
+                        true,
+                        RecordKind::Password,
+                        vec![
+                            (0, CsvField::Title),
+                            (1, CsvField::Destination),
+                            (2, CsvField::Username),
+                            (3, CsvField::Password),
+                            (4, CsvField::Notes),
+                            (5, CsvField::OtpAuth),
+                        ],
+                    )
+                    .map_err(|_| Failure::Unavailable)?,
+                ),
+                2 => CsvImportProfile::mappable(
+                    CsvMapping::new(
+                        CsvDelimiter::Semicolon,
+                        CsvEncoding::Utf8,
+                        true,
+                        RecordKind::Password,
+                        vec![
+                            (0, CsvField::Title),
+                            (2, CsvField::Destination),
+                            (1, CsvField::Username),
+                            (3, CsvField::Password),
+                        ],
+                    )
+                    .map_err(|_| Failure::Unavailable)?,
+                ),
+                _ => return Err(Failure::Unavailable),
+            };
+            let preview = vault
+                .preview_csv(&source, &profile)
+                .map_err(|_| Failure::Unavailable)?;
+            let mut decisions = Vec::with_capacity(preview.total());
+            let mut offset = 0;
+            while offset < preview.total() {
+                let page = preview
+                    .page(offset, 100)
+                    .map_err(|_| Failure::Unavailable)?;
+                for row in page {
+                    decisions.push(match row.status() {
+                        CsvRowStatus::New => CsvImportDecision::ImportNew,
+                        CsvRowStatus::ExactDuplicate => CsvImportDecision::SkipExact,
+                        CsvRowStatus::CandidateDuplicate if replace_candidates => {
+                            CsvImportDecision::Replace(
+                                *row.duplicate_item().ok_or(Failure::Unavailable)?,
+                            )
+                        }
+                        CsvRowStatus::CandidateDuplicate => CsvImportDecision::KeepBoth,
+                    });
+                }
+                offset += page.len();
+            }
+            let prepared = vault
+                .prepare_csv_import(preview, decisions)
+                .map_err(|_| Failure::Unavailable)?;
+            let signature = vault
+                .sign(prepared.prepared())
+                .map_err(|_| Failure::Unavailable)?;
+            let report = prepared.report();
+            let mut response = vec![0];
+            for value in [
+                report.total(),
+                report.new_items(),
+                report.replaced(),
+                report.skipped_exact(),
+                report.excluded(),
+                report.preserved_fields(),
+                report.event_pages(),
+            ] {
+                response.extend_from_slice(
+                    &u64::try_from(value)
+                        .map_err(|_| Failure::Unavailable)?
+                        .to_be_bytes(),
+                );
+            }
+            response.extend_from_slice(
+                &u32::try_from(prepared.item_ids().len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            for item in prepared.item_ids() {
+                response.extend_from_slice(item);
+            }
+            response.extend_from_slice(prepared.prepared().transaction_id());
+            response.extend_from_slice(prepared.prepared().item_id());
+            push_bytes(&mut response, prepared.prepared().command())?;
+            push_bytes(&mut response, prepared.prepared().body())?;
+            response.extend_from_slice(&signature);
+            Ok(response)
+        }
+        24 => {
+            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_enable(item)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
+        }
+        33 => {
+            if rest != [0] {
+                return Err(Failure::Unavailable);
+            }
+            let prepared = vault
+                .prepare_plaintext_export()
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
+        }
+        40 => {
+            if !rest.is_empty() {
+                return Err(Failure::Unavailable);
+            }
+            authorization_add_keycloak(vault)?;
+            Ok(vec![0])
+        }
+        41 => {
+            let mut cursor = Cursor::new(rest);
+            let subject_token = Zeroizing::new(cursor.bytes()?);
+            let requester_secret = Zeroizing::new(cursor.bytes()?);
+            cursor.finish()?;
+            authorization_add_keycloak_exchange(vault, &subject_token, &requester_secret)?;
+            Ok(vec![0])
+        }
+        45 => {
+            let mut cursor = Cursor::new(rest);
+            let ssh_private = Zeroizing::new(cursor.bytes()?);
+            let ssh_public = cursor.bytes()?;
+            let account_password = Zeroizing::new(cursor.bytes()?);
+            cursor.finish()?;
+            let ssh = LogicalRecord::new(
+                RecordKind::Ssh,
+                HumanMetadata {
+                    title: "Synthetic SSH key".into(),
+                    destinations: vec![Destination {
+                        label: "SSH lab".into(),
+                        value: "ssh-lab".into(),
+                    }],
+                    tags: vec!["synthetic".into()],
+                    favorite: false,
+                    notes: String::new(),
+                    fields: Vec::new(),
+                    source_fields: Vec::new(),
+                },
+                vec![AuthRecord::Ssh {
+                    private_format: PrivateKeyFormat::OpenSsh,
+                    private_key: ssh_private.to_vec(),
+                    public_key: ssh_public,
+                    username: "pmssh".into(),
+                    destination_refs: vec![0],
+                    passphrase: None,
+                }],
+                Vec::new(),
+            )
+            .map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_create_record(&ssh)
+                .map_err(|_| Failure::Unavailable)?;
+            let key_item = *prepared.item_id();
+            commit_authority(vault, &prepared)?;
+            let enable = vault
+                .prepare_enable(key_item)
+                .map_err(|_| Failure::Unavailable)?;
+            commit_authority(vault, &enable)?;
+            let password = PasswordRecord::new(
+                "Synthetic Linux system account",
+                "pmssh",
+                &account_password,
+                "ssh-lab",
+                "",
+            )
+            .map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_create(&password)
+                .map_err(|_| Failure::Unavailable)?;
+            let password_item = *prepared.item_id();
+            commit_authority(vault, &prepared)?;
+            let enable = vault
+                .prepare_enable(password_item)
+                .map_err(|_| Failure::Unavailable)?;
+            commit_authority(vault, &enable)?;
+            let mut response = vec![0];
+            response.extend_from_slice(&key_item);
+            response.extend_from_slice(&password_item);
+            Ok(response)
         }
         25 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
@@ -875,4 +1109,226 @@ pub(super) fn write_frame(output: &mut impl Write, value: &[u8]) -> Result<(), F
 
 pub(super) fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, Failure> {
     read_frame_bounded(input, MAX_HUMAN_FRAME)
+}
+
+pub(crate) fn commit_authority(
+    vault: &mut HumanVault,
+    prepared: &PreparedHumanCommand,
+) -> Result<(), Failure> {
+    let signature = vault.sign(prepared).map_err(|_| Failure::Unavailable)?;
+    let receipt = vault
+        .commit(prepared.command(), &signature, prepared.body())
+        .map_err(|_| Failure::Unavailable)?;
+    if vault
+        .receipt(*prepared.transaction_id())
+        .map_err(|_| Failure::Unavailable)?
+        != receipt
+        || vault
+            .commit(prepared.command(), &signature, prepared.body())
+            .map_err(|_| Failure::Unavailable)?
+            != receipt
+    {
+        return Err(Failure::Unavailable);
+    }
+    Ok(())
+}
+
+fn authorization_setup(vault: &mut HumanVault, first: &[u8], second: &[u8]) -> Result<(), Failure> {
+    if first.len() != SPKI_BYTES || second.len() != SPKI_BYTES || first == second {
+        return Err(Failure::Unavailable);
+    }
+    let record = PasswordRecord::new(
+        "Synthetic TLS shared account",
+        "ticket07-user",
+        b"ticket07-secret-canary",
+        "https://ticket07.invalid/login",
+        "",
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let prepared = vault
+        .prepare_create(&record)
+        .map_err(|_| Failure::Unavailable)?;
+    let item = *prepared.item_id();
+    commit_authority(vault, &prepared)?;
+    let note = LogicalRecord::new(
+        RecordKind::Note,
+        HumanMetadata {
+            title: "Synthetic excluded note".to_owned(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: "not authorized".to_owned(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let prepared = vault
+        .prepare_create_record(&note)
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)?;
+    for (subject, request, rpk, label) in [
+        (LAB_AGENT_A, [0x31; 16], first, "Synthetic agent A"),
+        (LAB_AGENT_B, [0x32; 16], second, "Synthetic agent B"),
+    ] {
+        let enrollment = AgentEnrollment::new(subject, request, rpk, label, "ticket07-userns")
+            .map_err(|_| Failure::Unavailable)?;
+        let prepared = vault
+            .prepare_agent_enrollment(&enrollment)
+            .map_err(|_| Failure::Unavailable)?;
+        commit_authority(vault, prepared.prepared())?;
+    }
+    let prepared = vault
+        .prepare_delegated_resume()
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)?;
+    let prepared = vault
+        .prepare_enable(item)
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)
+}
+
+fn authorization_suspend(vault: &mut HumanVault) -> Result<(), Failure> {
+    let prepared = vault
+        .prepare_delegated_suspend(AuthorizationReason::OwnerRequest)
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)
+}
+
+fn authorization_resume_revoke(vault: &mut HumanVault) -> Result<(), Failure> {
+    let prepared = vault
+        .prepare_delegated_resume()
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)?;
+    let prepared = vault
+        .prepare_agent_revocation(LAB_AGENT_A, AuthorizationReason::OwnerRequest)
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)
+}
+
+fn authorization_reenroll(vault: &mut HumanVault, rpk: &[u8]) -> Result<(), Failure> {
+    let enrollment = AgentEnrollment::new(
+        LAB_AGENT_A,
+        [0x33; 16],
+        rpk,
+        "Synthetic agent A replacement",
+        "ticket07-userns",
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    let prepared = vault
+        .prepare_agent_enrollment(&enrollment)
+        .map_err(|_| Failure::Unavailable)?;
+    if prepared.generation() != 2 {
+        return Err(Failure::Unavailable);
+    }
+    commit_authority(vault, prepared.prepared())
+}
+
+fn authorization_add_keycloak(vault: &mut HumanVault) -> Result<(), Failure> {
+    let alice = LogicalRecord::new(
+        RecordKind::Password,
+        HumanMetadata {
+            title: "Synthetic Keycloak P1 account".to_owned(),
+            destinations: vec![Destination {
+                label: "installed profile".to_owned(),
+                value: "keycloak-lab".to_owned(),
+            }],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![
+            AuthRecord::Password {
+                username: "alice".to_owned(),
+                password: b"ticket10-password-canary".to_vec(),
+                destination_refs: vec![0],
+            },
+            AuthRecord::Totp {
+                secret: b"12345678901234567890".to_vec(),
+                algorithm: TotpAlgorithm::Sha1,
+                digits: 6,
+                period: 30,
+                t0: 0,
+                issuer: "pm".to_owned(),
+                account: "alice".to_owned(),
+                destination_refs: vec![0],
+            },
+        ],
+        vec![],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    create_and_enable(vault, &alice)?;
+    let charlie = LogicalRecord::new(
+        RecordKind::Password,
+        HumanMetadata {
+            title: "Synthetic Keycloak challenge account".to_owned(),
+            destinations: vec![Destination {
+                label: "installed profile".to_owned(),
+                value: "keycloak-lab".to_owned(),
+            }],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![AuthRecord::Password {
+            username: "charlie".to_owned(),
+            password: b"ticket10-challenge-password".to_vec(),
+            destination_refs: vec![0],
+        }],
+        vec![],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    create_and_enable(vault, &charlie)
+}
+
+fn authorization_add_keycloak_exchange(
+    vault: &mut HumanVault,
+    subject_token: &[u8],
+    requester_secret: &[u8],
+) -> Result<(), Failure> {
+    let record = LogicalRecord::new(
+        RecordKind::Token,
+        HumanMetadata {
+            title: "Synthetic Keycloak P2 relationship".to_owned(),
+            destinations: vec![Destination {
+                label: "installed profile".to_owned(),
+                value: "keycloak-exchange-lab".to_owned(),
+            }],
+            tags: vec![],
+            favorite: false,
+            notes: String::new(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![AuthRecord::TokenExchange {
+            subject_token: subject_token.to_vec(),
+            requester_client_id: "pm-exchanger".to_owned(),
+            requester_client_secret: requester_secret.to_vec(),
+            provider: "keycloak".to_owned(),
+            profile_id: "keycloak-exchange-lab".to_owned(),
+            destination_refs: vec![0],
+            expires_at: None,
+        }],
+        vec![],
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    create_and_enable(vault, &record)
+}
+
+fn create_and_enable(vault: &mut HumanVault, record: &LogicalRecord) -> Result<(), Failure> {
+    let prepared = vault
+        .prepare_create_record(record)
+        .map_err(|_| Failure::Unavailable)?;
+    let item = *prepared.item_id();
+    commit_authority(vault, &prepared)?;
+    let prepared = vault
+        .prepare_enable(item)
+        .map_err(|_| Failure::Unavailable)?;
+    commit_authority(vault, &prepared)
 }
