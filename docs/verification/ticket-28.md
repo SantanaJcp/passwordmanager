@@ -525,9 +525,12 @@ otros tickets u otros worktrees.
 
 Antes de la ejecución se verificaron `git diff --check` y
 `scripts/verify-native-ci-config.sh`. En la única ventana Linux x86_64, con
-toolchain local 1.98.1, modo `--locked --offline`, sin red, cachés, retries,
-skips ni labs paralelos, pasaron los focused `pm-crypto`, `pm-cli` y
-`pm-custody` con todos sus targets. También pasaron los tres nuevos labs reales:
+toolchain local 1.98.1, builds `--locked --offline`, sin retries, requisitos omitidos
+ni labs paralelos, pasaron los focused `pm-crypto`, `pm-cli` y
+`pm-custody` con todos sus targets. Los servicios locales de los labs sí utilizan red;
+`offline` describe la resolución de dependencias Cargo, no ausencia de
+transporte. Los entrypoints de subprocesos marcados `ignored` se ejecutan
+explícitamente desde sus tests padres. También pasaron los tres nuevos labs reales:
 `custody-protected-input`, `fault-safety` y `storage-fault`.
 
 La comprobación compuesta pasó:

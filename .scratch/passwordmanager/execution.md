@@ -372,3 +372,37 @@ el ticket 28 ni constituye revisión formal o certificación de seguridad.
 Se mantienen **25/35 tickets integrados** y el PR en borrador. Los worktrees
 26–28 quedan preservados sin procesos de verificación activos en este corte.
 La revisión Astra global se ejecutará después de integrar todos los tickets.
+
+### Continuación integral: checkpoint G7 y ports en ejecución
+
+2026-09-14 — El usuario pidió continuar hasta terminar todos los tickets.
+Merger distinto integró `96dd37a` por merge normal `3ca41ee` y documentó
+la evidencia en `3fbd7eb`: raíces y entrada CLI en memoria protegida,
+`NativeStdin` común sin prefetch, primer password de custodia protegido y
+ENOSPC real con rollback/restart. Check, build limpio offline, focalizados y
+**25/25 labs Linux x86_64** pasaron. Evidencia y límites en
+[ticket-28](../../docs/verification/ticket-28.md). No se atribuye protección al
+inventario plaintext restante ni a macOS/Windows; 28 sigue `claimed`.
+
+El RED header-only de custodia era insuficiente: `stdin.lock()` precargaba el
+canario antes de reservar su destino. La regresión socketpair/FIONREAD lo
+reprodujo y la lectura nativa compartida lo corrigió. ENOSPC ya pasaba sobre
+el producto previo; se registra como cobertura existente, no RED fabricado.
+
+El [run macOS 27](https://github.com/SantanaJcp/passwordmanager/actions/runs/34869338454)
+en `a3db150` confirmó nuevamente la exposición del control compartido en ambos
+CPU; falló después por secuencia VT incompleta al terminar ese control con
+SIGTERM. No llegó al probe aislado. Se prepara cierre normal de la sesión de
+control sin tolerar errores del parser ni salidas no cero.
+
+Windows progresa hacia una TUI y handler únicos. Los runs
+[26](https://github.com/SantanaJcp/passwordmanager/actions/runs/34868629220) y
+[27](https://github.com/SantanaJcp/passwordmanager/actions/runs/34869286841)
+fallaron en compilación de la extracción compartida, no son RED de producto
+ni aceptación nativa. Las correcciones y el adapter 1PUX por HANDLE están en
+worktree y requieren check local/nativo; aún falta sync Windows completo.
+
+Se mantienen **25/35 tickets integrados**. Los gates externos de firma real,
+Windows 11 x64/reboot/FDE y validación humana no se simulan; se solicitó al
+usuario disponibilidad de certificados y responsables de firma sin pedir
+claves privadas. La revisión global continúa reservada para el final.
