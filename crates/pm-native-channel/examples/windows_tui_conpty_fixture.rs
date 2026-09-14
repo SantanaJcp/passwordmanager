@@ -490,6 +490,31 @@ mod windows_fixture {
                 .map_err(|_| "ConPTY screen observer lock poisoned".to_owned())
         }
 
+        fn diagnostic(&self) -> Result<String, String> {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "ConPTY screen observer lock poisoned".to_owned())?;
+            let parser = match state.parse {
+                ParseState::Ground => "ground",
+                ParseState::Escape => "escape",
+                ParseState::Csi => "csi",
+                ParseState::Osc => "osc",
+                ParseState::OscEscape => "osc-escape",
+            };
+            let nonblank = state.cells.iter().filter(|cell| **cell != ' ').count();
+            Ok(format!(
+                "observer parser={parser} row={} column={} nonblank={nonblank} title-updates={} markers=manager:{},rpk:{},password:{},unavailable:{}",
+                state.row,
+                state.column,
+                state.window_title_updates,
+                state.contains("Password Manager"),
+                state.contains("human TLS-RPK"),
+                state.contains("Password required"),
+                state.contains("CUSTODY_UNAVAILABLE"),
+            ))
+        }
+
         fn rejects(&self, forbidden: &[u8]) -> Result<(), String> {
             let forbidden = std::str::from_utf8(forbidden)
                 .map_err(|_| "synthetic forbidden value is not UTF-8".to_owned())?;
@@ -1118,10 +1143,11 @@ mod windows_fixture {
     }
 
     fn exercise_keyboard_screen(fixture: &Fixture, password: &[u8]) -> io::Result<()> {
-        fixture
-            .observer
-            .wait_for("Password required")
-            .map_err(io::Error::other)?;
+        if let Err(primary) = fixture.observer.wait_for("Password required") {
+            let observer = fixture.observer.diagnostic().map_err(io::Error::other)?;
+            let child = child_diagnostic(fixture.process)?;
+            return Err(io::Error::other(format!("{primary}; {child}; {observer}")));
+        }
         let (first, rest) = password
             .split_first()
             .ok_or_else(|| io::Error::other("synthetic TUI password is empty"))?;
@@ -1147,6 +1173,19 @@ mod windows_fixture {
             .map_err(io::Error::other)?;
         write_keyboard_input(fixture, b"q")?;
         require_tui_exit(fixture.process)
+    }
+
+    fn child_diagnostic(process: HANDLE) -> io::Result<String> {
+        const STILL_ACTIVE: u32 = 259;
+        let mut exit_code = 0;
+        if process.is_null() || unsafe { GetExitCodeProcess(process, &raw mut exit_code) } == 0 {
+            return Err(win32("GetExitCodeProcess during TUI diagnosis"));
+        }
+        if exit_code == STILL_ACTIVE {
+            Ok("child=running".to_owned())
+        } else {
+            Ok(format!("child=exited:{exit_code}"))
+        }
     }
 
     fn require_tui_exit(process: HANDLE) -> io::Result<()> {

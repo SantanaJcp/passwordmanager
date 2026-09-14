@@ -1736,6 +1736,23 @@ rechaza terminación truncada, tamaño excesivo, comandos desconocidos y OSC 52
 con una categoría fija sin payload. Las regresiones cubren ambos terminadores,
 chunking/UTF-8, ausencia del título en pantalla y rechazo cerrado de OSC 52.
 
+La corrida Windows ARM64
+[`34875128476`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34875128476)
+sobre `3523b2c9b489165adac90f77bcf747e0becf6b3c` pasó 10/10 pruebas nativas,
+1/1 pipe, 9/9 observer y 1/1 sync. El observer ya no falló, pero el producto
+terminó antes de dibujar y el fixture agotó 15 s esperando `Password required`.
+La causa estática concreta es un desacuerdo de argumentos: el fixture pasaba
+el identificador nativo `--vault-id`, mientras el parser TUI común exigía
+`--socket`, y además omitía las tres duraciones que el parser exige. La
+corrección mantiene `--socket` en Unix, acepta exclusivamente `--vault-id` en
+Windows y hace que el fixture pase `--idle-seconds 300`, `--reveal-seconds 15`
+y `--copy-seconds 30`; no cambia máximos ni introduce valores implícitos.
+
+Una regresión del parser construye exactamente la forma Windows del harness y
+rechaza `--socket` allí; la forma Unix conserva `--socket`. En futuros fallos
+previos a pantalla, el fixture puede informar estado real del child y categorías
+cerradas del observer, nunca bytes/celdas, contraseña, título ni metadatos.
+
 ### Método de transferencia 1PUX por handle en Windows
 
 La transferencia Windows no reabre un path ni concede derechos sobre el

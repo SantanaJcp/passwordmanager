@@ -493,9 +493,40 @@ type HumanTls = StreamOwned<ClientConnection, UnixStream>;
 type HumanTls = StreamOwned<ClientConnection, pm_native_channel::WindowsClientPipe>;
 
 pub(super) fn run(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let parsed = parse_arguments(arguments)?;
+    let profile = read_profile(&parsed.profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_tui_key(&parsed.private_path)?;
+    run_terminal(
+        &profile,
+        &key,
+        &parsed.endpoint,
+        parsed.idle,
+        parsed.reveal,
+        parsed.copy,
+    )
+}
+
+struct TuiArguments {
+    profile_path: PathBuf,
+    private_path: PathBuf,
+    endpoint: PathBuf,
+    idle: u64,
+    reveal: u64,
+    copy: u64,
+}
+
+fn parse_arguments(
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<TuiArguments, Failure> {
     let profile_path = take_path(arguments, "--profile")?;
     let private_path = take_path(arguments, "--private")?;
-    let socket_path = take_path(arguments, "--socket")?;
+    #[cfg(unix)]
+    let endpoint = take_path(arguments, "--socket")?;
+    #[cfg(windows)]
+    let endpoint = take_path(arguments, "--vault-id")?;
     let idle = take_seconds(arguments, "--idle-seconds", DEFAULT_IDLE)?;
     let reveal = take_seconds(arguments, "--reveal-seconds", DEFAULT_REVEAL)?;
     let copy = take_seconds(arguments, "--copy-seconds", DEFAULT_COPY)?;
@@ -503,12 +534,14 @@ pub(super) fn run(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), 
     if idle > DEFAULT_IDLE || reveal > DEFAULT_REVEAL || copy > DEFAULT_COPY {
         return Err(Failure::Usage);
     }
-    let profile = read_profile(&profile_path)?;
-    if profile.role != Role::Human {
-        return Err(Failure::Unavailable);
-    }
-    let key = read_tui_key(&private_path)?;
-    run_terminal(&profile, &key, &socket_path, idle, reveal, copy)
+    Ok(TuiArguments {
+        profile_path,
+        private_path,
+        endpoint,
+        idle,
+        reveal,
+        copy,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -2517,6 +2550,71 @@ const fn kind_label(kind: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn arguments(values: &[&str]) -> impl Iterator<Item = OsString> + '_ {
+        values.iter().map(OsString::from)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_tui_arguments_match_the_native_harness() {
+        let mut values = arguments(&[
+            "--profile",
+            r"C:\fixture\human.profile",
+            "--private",
+            r"C:\fixture\human.key",
+            "--vault-id",
+            "0123456789abcdef0123456789abcdef",
+            "--idle-seconds",
+            "300",
+            "--reveal-seconds",
+            "15",
+            "--copy-seconds",
+            "30",
+        ]);
+        let parsed = parse_arguments(&mut values).unwrap();
+        assert_eq!(
+            parsed.endpoint,
+            Path::new("0123456789abcdef0123456789abcdef")
+        );
+
+        let mut wrong_endpoint = arguments(&[
+            "--profile",
+            r"C:\fixture\human.profile",
+            "--private",
+            r"C:\fixture\human.key",
+            "--socket",
+            r"\\.\pipe\PasswordManager-test-human",
+            "--idle-seconds",
+            "300",
+            "--reveal-seconds",
+            "15",
+            "--copy-seconds",
+            "30",
+        ]);
+        assert!(parse_arguments(&mut wrong_endpoint).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_tui_arguments_keep_the_socket_contract() {
+        let mut values = arguments(&[
+            "--profile",
+            "/tmp/human.profile",
+            "--private",
+            "/tmp/human.key",
+            "--socket",
+            "/tmp/human.sock",
+            "--idle-seconds",
+            "300",
+            "--reveal-seconds",
+            "15",
+            "--copy-seconds",
+            "30",
+        ]);
+        let parsed = parse_arguments(&mut values).unwrap();
+        assert_eq!(parsed.endpoint, Path::new("/tmp/human.sock"));
+    }
 
     #[test]
     fn terminal_text_never_preserves_control_sequences() {
