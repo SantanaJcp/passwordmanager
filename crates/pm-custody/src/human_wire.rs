@@ -16,10 +16,11 @@ use crate::Failure;
 /// owned by another shared human-wire slice.
 pub(crate) fn handle_request_slice(
     vault: &mut HumanVault,
+    device: [u8; 16],
     opcode: u8,
     request: &[u8],
 ) -> Option<Result<Vec<u8>, Failure>> {
-    if !matches!(opcode, 2..=13 | 25..=30 | 43 | 46 | 49..=53) {
+    if !matches!(opcode, 2..=13 | 15 | 16 | 25..=30 | 43 | 46 | 49..=53) {
         return None;
     }
     let rest = request;
@@ -45,6 +46,43 @@ pub(crate) fn handle_request_slice(
             }
             .map_err(|_| Failure::Unavailable)?;
             encode_prepared(vault, &prepared)
+        }
+        15 => {
+            let mut cursor = Cursor::new(rest);
+            let generation = cursor.u64()?;
+            let from_seq = cursor.u64()?;
+            let limit = usize::try_from(cursor.u32()?).map_err(|_| Failure::Unavailable)?;
+            cursor.finish()?;
+            let query = vault
+                .query_audit(device, generation, from_seq, limit)
+                .map_err(|_| Failure::Unavailable)?;
+            let mut response = vec![0];
+            response.extend_from_slice(
+                &u64::try_from(query.records().len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            response.extend_from_slice(
+                &u64::try_from(query.discontinuities().len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            response.extend_from_slice(
+                &u64::try_from(query.segment_count())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            Ok(response)
+        }
+        16 => {
+            let mut cursor = Cursor::new(rest);
+            let generation = cursor.u64()?;
+            let through_seq = cursor.u64()?;
+            cursor.finish()?;
+            let purge = vault
+                .prepare_audit_purge(device, generation, through_seq)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, purge.prepared())
         }
         25 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
@@ -447,6 +485,20 @@ impl<'a> Cursor<'a> {
         ))
         .map_err(|_| Failure::Unavailable)?;
         Ok(self.fixed(length)?.to_vec())
+    }
+    fn u32(&mut self) -> Result<u32, Failure> {
+        Ok(u32::from_be_bytes(
+            self.fixed(4)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?,
+        ))
+    }
+    fn u64(&mut self) -> Result<u64, Failure> {
+        Ok(u64::from_be_bytes(
+            self.fixed(8)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?,
+        ))
     }
     fn finish(self) -> Result<(), Failure> {
         if self.offset == self.bytes.len() {

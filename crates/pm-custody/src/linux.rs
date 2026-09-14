@@ -3761,37 +3761,12 @@ fn handle_human_request(
     request: &[u8],
 ) -> Result<Vec<u8>, Failure> {
     let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
-    if let Some(response) = crate::human_wire::handle_request_slice(vault, opcode, rest) {
+    if let Some(response) =
+        crate::human_wire::handle_request_slice(vault, service.device, opcode, rest)
+    {
         return response;
     }
     match opcode {
-        15 => {
-            let mut cursor = Cursor::new(rest);
-            let generation = cursor.u64()?;
-            let from_seq = cursor.u64()?;
-            let limit = usize::try_from(cursor.u32()?).map_err(|_| Failure::Unavailable)?;
-            cursor.finish()?;
-            let query = vault
-                .query_audit(service.device, generation, from_seq, limit)
-                .map_err(|_| Failure::Unavailable)?;
-            let mut response = vec![0];
-            response.extend_from_slice(
-                &u64::try_from(query.records().len())
-                    .map_err(|_| Failure::Unavailable)?
-                    .to_be_bytes(),
-            );
-            response.extend_from_slice(
-                &u64::try_from(query.discontinuities().len())
-                    .map_err(|_| Failure::Unavailable)?
-                    .to_be_bytes(),
-            );
-            response.extend_from_slice(
-                &u64::try_from(query.segment_count())
-                    .map_err(|_| Failure::Unavailable)?
-                    .to_be_bytes(),
-            );
-            Ok(response)
-        }
         60 => {
             let pin: [u8; 44] = rest.try_into().map_err(|_| Failure::Unavailable)?;
             let protected = Zeroizing::new(
@@ -3875,16 +3850,6 @@ fn handle_human_request(
             response.extend_from_slice(&status.pushed.to_be_bytes());
             response.extend_from_slice(&status.pulled.to_be_bytes());
             Ok(response)
-        }
-        16 => {
-            let mut cursor = Cursor::new(rest);
-            let generation = cursor.u64()?;
-            let through_seq = cursor.u64()?;
-            cursor.finish()?;
-            let purge = vault
-                .prepare_audit_purge(service.device, generation, through_seq)
-                .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, purge.prepared())
         }
         19 => {
             if rest.len() != SPKI_BYTES * 2 {
