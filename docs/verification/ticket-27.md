@@ -1762,9 +1762,10 @@ producto. El modelo corregido implementa delayed wrap: la última columna deja
 wrap pendiente y el siguiente glyph avanza de fila; CR, LF,
 movimiento/posicionamiento y erase cancelan el estado, y LF/wrap en la fila 24
 desplaza una línea. La regresión cubre ancho exacto+glyph siguiente, CR y erase
-en margen y scroll inferior. Unicode fuera del repertorio de una celda
-ejercitado por el fixture falla explícitamente; no cuenta silenciosamente un
-wide/combining como una celda.
+en margen y scroll inferior. Unicode se clasifica con la misma dependencia
+`unicode-width` fijada que usa el stack TUI: sólo `width == 1` entra en la
+cuadrícula. Las regresiones incluyen acento y box drawing reales; wide/combining
+fallan explícitamente y nunca se cuentan silenciosamente como una celda.
 
 ### Método de transferencia 1PUX por handle en Windows
 

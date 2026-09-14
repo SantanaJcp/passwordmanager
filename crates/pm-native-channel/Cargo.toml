@@ -35,3 +35,6 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 zeroize.workspace = true
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+unicode-width = "=0.2.2"

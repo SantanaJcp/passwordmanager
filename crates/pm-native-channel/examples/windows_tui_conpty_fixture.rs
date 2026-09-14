@@ -19,6 +19,7 @@ mod windows_fixture {
         thread,
         time::{Duration, Instant},
     };
+    use unicode_width::UnicodeWidthChar;
     use windows_sys::Win32::{
         Foundation::{
             CloseHandle, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_DATA, GetLastError,
@@ -278,9 +279,7 @@ mod windows_fixture {
         }
 
         fn put(&mut self, character: char) {
-            if character.is_control()
-                || (!character.is_ascii() && !matches!(character, '—' | '›' | '★' | '•' | '�'))
-            {
+            if character.is_control() || character.width() != Some(1) {
                 self.fail("unsupported Unicode cell width in ConPTY output");
                 return;
             }
@@ -1329,6 +1328,19 @@ mod windows_fixture {
             observer
                 .wait_for("Password required (input hidden)")
                 .unwrap();
+            observer.feed("\x1b[6;1Hcafé ┌─┐│└┘".as_bytes()).unwrap();
+            observer.wait_for("café ┌─┐│└┘").unwrap();
+        }
+
+        #[test]
+        fn observer_rejects_non_single_cell_unicode() {
+            let observer = TerminalObserver::new();
+            let error = observer.feed("界".as_bytes()).unwrap_err();
+            assert_eq!(error, "unsupported Unicode cell width in ConPTY output");
+
+            let observer = TerminalObserver::new();
+            let error = observer.feed("\u{301}".as_bytes()).unwrap_err();
+            assert_eq!(error, "unsupported Unicode cell width in ConPTY output");
         }
 
         #[test]
