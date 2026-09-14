@@ -62,6 +62,8 @@ mod windows_fixture {
         Ground,
         Escape,
         Csi,
+        Osc,
+        OscEscape,
     }
 
     struct ScreenState {
@@ -72,8 +74,11 @@ mod windows_fixture {
         saved_column: usize,
         win32_input: bool,
         focus_reporting: bool,
+        window_title_updates: u64,
         parse: ParseState,
         csi: Vec<u8>,
+        osc_command: Vec<u8>,
+        osc_title: Vec<u8>,
         utf8: Vec<u8>,
         error: Option<String>,
         closed: bool,
@@ -83,6 +88,8 @@ mod windows_fixture {
         fn drop(&mut self) {
             self.cells.fill('\0');
             self.csi.fill(0);
+            self.osc_command.fill(0);
+            self.osc_title.fill(0);
             self.utf8.fill(0);
         }
     }
@@ -97,8 +104,11 @@ mod windows_fixture {
                 saved_column: 0,
                 win32_input: false,
                 focus_reporting: false,
+                window_title_updates: 0,
                 parse: ParseState::Ground,
                 csi: Vec::new(),
+                osc_command: Vec::new(),
+                osc_title: Vec::new(),
                 utf8: Vec::new(),
                 error: None,
                 closed: false,
@@ -132,6 +142,11 @@ mod windows_fixture {
                             self.csi.clear();
                             self.parse = ParseState::Csi;
                         }
+                        b']' => {
+                            self.osc_command.clear();
+                            self.osc_title.clear();
+                            self.parse = ParseState::Osc;
+                        }
                         b'7' => {
                             self.saved_row = self.row;
                             self.saved_column = self.column;
@@ -158,8 +173,70 @@ mod windows_fixture {
                             self.fail("invalid or overlong ConPTY CSI sequence");
                         }
                     }
+                    ParseState::Osc => self.feed_osc(*byte),
+                    ParseState::OscEscape => {
+                        if *byte == b'\\' {
+                            self.finish_osc();
+                        } else {
+                            self.fail("unsupported ConPTY OSC terminator");
+                        }
+                    }
                 }
             }
+        }
+
+        fn feed_osc(&mut self, byte: u8) {
+            if byte == 0x07 {
+                self.finish_osc();
+                return;
+            }
+            if byte == 0x1b {
+                self.parse = ParseState::OscEscape;
+                return;
+            }
+            if self.osc_command.last() != Some(&b';') {
+                if byte == b';' {
+                    if !matches!(self.osc_command.as_slice(), b"0" | b"2") {
+                        self.fail("unsupported ConPTY OSC command");
+                        return;
+                    }
+                } else if !byte.is_ascii_digit() || self.osc_command.len() >= 2 {
+                    self.fail("invalid ConPTY OSC command");
+                    return;
+                }
+                self.osc_command.push(byte);
+                return;
+            }
+            if byte < 0x20 || self.osc_title.len() >= 1016 {
+                self.fail("invalid or overlong ConPTY window title");
+                return;
+            }
+            self.osc_title.push(byte);
+        }
+
+        fn finish_osc(&mut self) {
+            if !matches!(self.osc_command.as_slice(), b"0;" | b"2;") {
+                self.fail("incomplete ConPTY OSC window title");
+                return;
+            }
+            let Ok(title) = std::str::from_utf8(&self.osc_title) else {
+                self.fail("invalid UTF-8 in ConPTY window title");
+                return;
+            };
+            if title.chars().count() >= 255 || title.chars().any(char::is_control) {
+                self.fail("invalid or overlong ConPTY window title");
+                return;
+            }
+            let Some(updates) = self.window_title_updates.checked_add(1) else {
+                self.fail("too many ConPTY window title updates");
+                return;
+            };
+            self.window_title_updates = updates;
+            self.osc_command.fill(0);
+            self.osc_command.clear();
+            self.osc_title.fill(0);
+            self.osc_title.clear();
+            self.parse = ParseState::Ground;
         }
 
         fn feed_ground(&mut self, byte: u8) {
@@ -1172,8 +1249,35 @@ mod windows_fixture {
         #[test]
         fn observer_rejects_unsupported_sequences_instead_of_stripping_them() {
             let observer = TerminalObserver::new();
-            let error = observer.feed(b"visible\x1b]0;concealed\x07").unwrap_err();
-            assert!(error.contains("unsupported ConPTY escape"));
+            let error = observer
+                .feed(b"visible\x1b]52;clipboard-payload\x07")
+                .unwrap_err();
+            assert_eq!(error, "unsupported ConPTY OSC command");
+            assert!(!error.contains("clipboard-payload"));
+        }
+
+        #[test]
+        fn observer_tracks_window_titles_without_rendering_them() {
+            let observer = TerminalObserver::new();
+            observer.feed(b"visible\x1b]0;synthetic ").unwrap();
+            observer.feed(b"\xe2\x80\x94 title\x1b").unwrap();
+            observer.feed(b"\\still-visible\x1b]2;second\x07").unwrap();
+            observer.wait_for("visiblestill-visible").unwrap();
+            let state = observer.state.lock().unwrap();
+            assert_eq!(state.window_title_updates, 2);
+            assert!(!state.contains("synthetic"));
+            assert!(!state.contains("second"));
+        }
+
+        #[test]
+        fn observer_rejects_invalid_window_titles() {
+            let observer = TerminalObserver::new();
+            let error = observer.feed(b"\x1b]0;bad\x01title\x07").unwrap_err();
+            assert_eq!(error, "invalid or overlong ConPTY window title");
+
+            let observer = TerminalObserver::new();
+            let error = observer.feed(b"\x1b]2;bad\xff\x07").unwrap_err();
+            assert_eq!(error, "invalid UTF-8 in ConPTY window title");
         }
 
         #[test]

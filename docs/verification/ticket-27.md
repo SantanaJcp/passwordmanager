@@ -1718,6 +1718,24 @@ abierto sólo con `GENERIC_READ`; la corrección solicita explícitamente
 `BACKUP_SEMANTICS`, `OPEN_REPARSE_POINT`, validación de tipo/identidad y el
 resultado real de `FlushFileBuffers`.
 
+La corrida Windows ARM64
+[`34874104798`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34874104798)
+sobre `6002bf5690768adaf27808422f6ff46e97fe688c` pasó 9/9 pruebas del canal
+nativo, incluida la corrección de flush, 1/1 pipe, 7/7 observer y 1/1 sync.
+El tracer TUI no llegó a observar `Password required`: su cleanup informó
+`unsupported ESC 0x5d`, es decir, el inicio de una OSC. Este resultado no
+demuestra que el producto haya omitido la pantalla; el observer dejó de
+interpretar la salida antes de poder reconstruirla.
+
+El discriminante siguiente acepta sólo las secuencias Window Title documentadas
+`OSC 0 ; título` y `OSC 2 ; título`, terminadas por BEL o ST (`ESC \\`). El
+título debe ser UTF-8 válido, sin controles y menor de 255 caracteres; se
+registra únicamente el número de actualizaciones, nunca el contenido ni se
+incorpora a las celdas observadas. El parser conserva estado entre chunks y
+rechaza terminación truncada, tamaño excesivo, comandos desconocidos y OSC 52
+con una categoría fija sin payload. Las regresiones cubren ambos terminadores,
+chunking/UTF-8, ausencia del título en pantalla y rechazo cerrado de OSC 52.
+
 ### Método de transferencia 1PUX por handle en Windows
 
 La transferencia Windows no reabre un path ni concede derechos sobre el
