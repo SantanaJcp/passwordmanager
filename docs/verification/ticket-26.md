@@ -1324,12 +1324,13 @@ cleanup policy; the shared control remains unsupported evidence and never
 contributes to acceptance. Its cleanup records a fixed exit category and
 return code: `natural-zero`, `natural-nonzero`, `owned-termination`, or
 `unknown`. A naturally observed nonzero child status remains a failure; a
-signal-derived code is not accepted merely because it is `143`, and is treated
-as owned termination only when this fixture actually sent its cleanup signal.
-If the control session exits or cleanup fails, the categorized control result
-or cleanup failure remains visible. The next native run must confirm whether
-this removes the Intel ambiguity; it is not claimed as a verified product or
-fixture cause here.
+signal-derived code is not accepted merely because it is `143`: only the exact
+`128 + SIGTERM` code is `owned-termination`, and only when this fixture sent
+that cleanup signal. Any other nonzero code remains `natural-nonzero`, even if
+a signal was sent; `unknown` is not accepted. If the control session exits or
+cleanup fails, the categorized control result or cleanup failure remains
+visible. The next native run must confirm whether this removes the Intel
+ambiguity; it is not claimed as a verified product or fixture cause here.
 
 The next native run must first show the fresh-session title searches and
 complete the existing first/isolated/expiry TUI flows before interpreting the

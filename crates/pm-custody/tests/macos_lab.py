@@ -944,10 +944,10 @@ def classify_shared_control_exit(returncode, owned_termination_sent):
     if returncode is None:
         return b"unknown", b"unknown"
     status = str(returncode).encode("ascii")
-    if owned_termination_sent:
-        return b"owned-termination", status
     if returncode == 0:
         return b"natural-zero", status
+    if owned_termination_sent and returncode == 128 + signal.SIGTERM:
+        return b"owned-termination", status
     return b"natural-nonzero", status
 
 
@@ -1163,6 +1163,9 @@ def assert_pasteboard_diagnostic_regression():
     assert classify_shared_control_exit(0, False) == (b"natural-zero", b"0")
     assert classify_shared_control_exit(4, False) == (b"natural-nonzero", b"4")
     assert classify_shared_control_exit(143, False) == (b"natural-nonzero", b"143")
+    assert classify_shared_control_exit(4, True) == (b"natural-nonzero", b"4")
+    assert classify_shared_control_exit(1, True) == (b"natural-nonzero", b"1")
+    assert classify_shared_control_exit(0, True) == (b"natural-zero", b"0")
     assert classify_shared_control_exit(143, True) == (b"owned-termination", b"143")
     assert classify_shared_control_exit(None, False) == (b"unknown", b"unknown")
 
@@ -1978,9 +1981,10 @@ def run_shared_pasteboard_control(
     )
     assert TUI_PASSWORD_RECORD not in bytes(shared.output)
     assert b"\x1b]52;" not in bytes(shared.output)
-    if category == b"natural-nonzero":
+    if category not in (b"natural-zero", b"owned-termination"):
         raise AssertionError(
-            "shared pasteboard control exited naturally with nonzero status",
+            "shared pasteboard control exit was not accepted",
+            category,
             returncode,
         )
 
