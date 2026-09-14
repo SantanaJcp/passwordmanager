@@ -103,6 +103,18 @@ mostrarlo aún en kernel al aparecer confirmación. `StdinLock` puede precargarl
 en su `BufReader`. Método exige fd/handle nativo sin ownership del stdin original
 y sin fallback; Linux no acreditará macOS/Windows. No se escribió GREEN.
 
+2026-09-14 — RED nativo real `/tmp/pm28-red-native-stdin-prefetch.log`, rc1:
+build correcto y `FIONREAD=0` frente a >=304, demostrando prefetch del canario
+por `StdinLock`. Cleanup sin procesos/sockets/raíces. GREEN estático usa
+`read(2)` Unix y `ReadFile` Windows sobre handles prestados, sólo hacia el buffer
+bloqueado y sin fallback; pendiente compilar/ejecutar y evidencia nativa.
+
+Corrección estática previa a cualquier gate: Windows console no puede usar
+`ReadFile` sin perder la semántica UTF-8 de std. El seam ahora clasifica consola
+con `GetConsoleMode`, usa `ReadConsoleW`→UTF-8 con buffers locked, y reserva
+`ReadFile` para pipe/file. Handle nulo conserva EOF público rc5; no éxito. Sigue
+pendiente evidencia Windows real.
+
 2026-09-14 — Usuario autorizó de forma explícita sólo los cuatro cleanups antes
 pendientes: `TemporaryDirectory::drop/remove_dir_all` y los unlink de privada
 tras keygen, `.partial` de download y archivo incompleto de `write_new`. Se

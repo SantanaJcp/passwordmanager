@@ -43,5 +43,6 @@ rustls = { version = "=0.23.44", default-features = false, features = ["aws_lc_r
 russh = { version = "=0.63.3", default-features = false, features = ["aws-lc-rs"] }
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm"] }
 tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO"] }
 zeroize = "=1.9.0"
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }

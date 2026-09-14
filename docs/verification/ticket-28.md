@@ -252,6 +252,30 @@ CR, EOF y límites. Este lab sólo puede producir RED/GREEN Linux: compilación 
 evidencia nativas siguen siendo requisitos separados antes de afirmar las otras
 plataformas.
 
+La ejecución única `/tmp/pm28-red-native-stdin-prefetch.log` terminó rc1: build
+correcto y `FIONREAD=0`, frente a los 304 bytes mínimos esperados. Así observó
+que `StdinLock` había retirado el canario completo del kernel hacia memoria del
+proceso; no fue error de compilación, credencial o timeout. Cleanup dejó cero
+procesos, sockets y raíces propias.
+
+El GREEN estático introduce `NativeStdin` sin ownership del stdin original. En
+Unix valida y lee directamente `STDIN_FILENO` con `read(2)`. En Windows clasifica
+el handle prestado con `GetConsoleMode`: pipe/file usa `ReadFile`; consola usa
+`ReadConsoleW` y `WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS)`, con UTF-16,
+surrogate pendiente y UTF-8 pendiente dentro de `ProtectedBytes`. Esto preserva
+la semántica UTF-8 que [documenta `std::io::stdin`](https://doc.rust-lang.org/stable/std/io/fn.stdin.html)
+sin cambiar el modo/codepage del host. Ambas rutas escriben sólo en regiones ya
+bloqueadas y propagan cada error; no existe rama `StdinLock`, allocator
+alternativo ni degradación de consola a `ReadFile`.
+
+El handle Windows nulo conserva el resultado público previo: representa EOF y
+`read_protected_line` lo convierte en `unexpected end of input`, rc5, sin crear
+vault ni tratarlo como éxito. Hay regresión Windows enfocada y la prueba nativa
+debe confirmar el proceso completo. La API de líneas inyectable sigue usando
+`Read` para sus demás regresiones. Aún no se ha compilado ni ejecutado este
+GREEN, y un PASS Linux no acreditará terminales macOS/Windows ni sus builds
+nativos.
+
 ## Verticales de fault/crash pendientes de RED
 
 El seam de almacenamiento será un lab público separado, no una colección de

@@ -16,6 +16,267 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+struct NativeStdin {
+    descriptor: std::os::fd::RawFd,
+}
+
+#[cfg(unix)]
+impl NativeStdin {
+    fn open() -> io::Result<Self> {
+        let descriptor = libc::STDIN_FILENO;
+        // SAFETY: F_GETFD only inspects the process-owned descriptor number.
+        if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { descriptor })
+    }
+}
+
+#[cfg(unix)]
+impl Read for NativeStdin {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        // SAFETY: `buffer` is writable for its length and this type borrows,
+        // but never closes or transfers ownership of, the stdin descriptor.
+        let bytes =
+            unsafe { libc::read(self.descriptor, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if bytes < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            usize::try_from(bytes).map_err(|_| io::Error::other("invalid native stdin length"))
+        }
+    }
+}
+
+#[cfg(windows)]
+struct NativeStdin {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    kind: NativeStdinKind,
+}
+
+#[cfg(windows)]
+enum NativeStdinKind {
+    Missing,
+    Raw,
+    Console {
+        wide: ProtectedBytes,
+        wide_prefix: usize,
+        pending: ProtectedBytes,
+        pending_start: usize,
+        pending_len: usize,
+    },
+}
+
+#[cfg(windows)]
+impl NativeStdin {
+    fn open() -> io::Result<Self> {
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::Console::{GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE},
+        };
+
+        // SAFETY: GetStdHandle returns a borrowed process standard handle.
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        if handle.is_null() {
+            return Ok(Self {
+                handle,
+                kind: NativeStdinKind::Missing,
+            });
+        }
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut mode = 0_u32;
+        // SAFETY: `mode` is writable and a successful call classifies the
+        // borrowed standard handle as a Windows console rather than pipe/file.
+        let console = unsafe { GetConsoleMode(handle, &raw mut mode) } != 0;
+        let kind = if console {
+            NativeStdinKind::Console {
+                wide: ProtectedBytes::zeroed(4).map_err(io::Error::other)?,
+                wide_prefix: 0,
+                pending: ProtectedBytes::zeroed(8).map_err(io::Error::other)?,
+                pending_start: 0,
+                pending_len: 0,
+            }
+        } else {
+            NativeStdinKind::Raw
+        };
+        Ok(Self { handle, kind })
+    }
+}
+
+#[cfg(windows)]
+impl Read for NativeStdin {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match &mut self.kind {
+            NativeStdinKind::Missing => Ok(0),
+            NativeStdinKind::Raw => read_windows_raw(self.handle, buffer),
+            NativeStdinKind::Console {
+                wide,
+                wide_prefix,
+                pending,
+                pending_start,
+                pending_len,
+            } => read_windows_console(
+                self.handle,
+                wide,
+                wide_prefix,
+                pending,
+                pending_start,
+                pending_len,
+                buffer,
+            ),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn read_windows_raw(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    buffer: &mut [u8],
+) -> io::Result<usize> {
+    use windows_sys::Win32::Storage::FileSystem::ReadFile;
+
+    let requested = u32::try_from(buffer.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "native stdin read is too large",
+        )
+    })?;
+    let mut bytes = 0_u32;
+    // SAFETY: `handle` is borrowed and valid, `buffer` is writable for the
+    // requested length, and the synchronous call does not use OVERLAPPED.
+    let result = unsafe {
+        ReadFile(
+            handle,
+            buffer.as_mut_ptr(),
+            requested,
+            &raw mut bytes,
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        usize::try_from(bytes).map_err(|_| io::Error::other("invalid native stdin length"))
+    }
+}
+
+#[cfg(windows)]
+fn read_windows_console(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    wide: &mut ProtectedBytes,
+    wide_prefix: &mut usize,
+    pending: &mut ProtectedBytes,
+    pending_start: &mut usize,
+    pending_len: &mut usize,
+    buffer: &mut [u8],
+) -> io::Result<usize> {
+    use windows_sys::Win32::{
+        Foundation::{ERROR_OPERATION_ABORTED, GetLastError, SetLastError},
+        Globalization::{CP_UTF8, WC_ERR_INVALID_CHARS, WideCharToMultiByte},
+        System::Console::{CONSOLE_READCONSOLE_CONTROL, ReadConsoleW},
+    };
+
+    if buffer.is_empty() {
+        return Ok(0);
+    }
+    loop {
+        if *pending_start < *pending_len {
+            let available = *pending_len - *pending_start;
+            let copied = available.min(buffer.len());
+            for (destination, source) in buffer[..copied]
+                .iter_mut()
+                .zip(&mut pending[*pending_start..*pending_start + copied])
+            {
+                *destination = *source;
+                *source = 0;
+            }
+            *pending_start += copied;
+            return Ok(copied);
+        }
+
+        *pending_start = 0;
+        *pending_len = 0;
+        let mut control = CONSOLE_READCONSOLE_CONTROL {
+            nLength: u32::try_from(std::mem::size_of::<CONSOLE_READCONSOLE_CONTROL>())
+                .map_err(|_| io::Error::other("invalid console control size"))?,
+            nInitialChars: 0,
+            dwCtrlWakeupMask: 1 << 0x1a,
+            dwControlKeyState: 0,
+        };
+        let mut units = 0_u32;
+        // SAFETY: the locked `wide` allocation is aligned and writable at
+        // `wide_prefix` for one UTF-16 unit; the borrowed handle and control
+        // remain valid for the synchronous call.
+        unsafe { SetLastError(0) };
+        let result = unsafe {
+            ReadConsoleW(
+                handle,
+                wide.as_mut_ptr().add(*wide_prefix * 2).cast(),
+                1,
+                &raw mut units,
+                &raw mut control,
+            )
+        };
+        if result == 0 {
+            wide.fill(0);
+            return Err(io::Error::last_os_error());
+        }
+        if units == 0 {
+            if unsafe { GetLastError() } == ERROR_OPERATION_ABORTED {
+                continue;
+            }
+            return Ok(0);
+        }
+        let units =
+            usize::try_from(units).map_err(|_| io::Error::other("invalid console input length"))?;
+        if units != 1 {
+            wide.fill(0);
+            *wide_prefix = 0;
+            return Err(io::Error::other("invalid console input length"));
+        }
+        // SAFETY: ReadConsoleW initialized the one unit at `wide_prefix`.
+        let unit = unsafe { *wide.as_ptr().cast::<u16>().add(*wide_prefix) };
+        if *wide_prefix == 0 && unit == 0x1a {
+            wide.fill(0);
+            return Ok(0);
+        }
+        if *wide_prefix == 0 && (0xd800..=0xdbff).contains(&unit) {
+            *wide_prefix = 1;
+            continue;
+        }
+        let unit_count = *wide_prefix + 1;
+        let unit_count_i32 = i32::try_from(unit_count)
+            .map_err(|_| io::Error::other("invalid console input length"))?;
+        // SAFETY: input names initialized locked UTF-16 units; output names an
+        // eight-byte locked buffer, enough for two UTF-16 units as UTF-8.
+        let converted = unsafe {
+            WideCharToMultiByte(
+                CP_UTF8,
+                WC_ERR_INVALID_CHARS,
+                wide.as_ptr().cast(),
+                unit_count_i32,
+                pending.as_mut_ptr(),
+                8,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            )
+        };
+        wide.fill(0);
+        *wide_prefix = 0;
+        if converted == 0 {
+            pending.fill(0);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Windows console input contains invalid UTF-16",
+            ));
+        }
+        *pending_len = usize::try_from(converted)
+            .map_err(|_| io::Error::other("invalid console UTF-8 length"))?;
+    }
+}
+
 #[derive(Debug)]
 pub struct CliError {
     message: String,
@@ -770,9 +1031,8 @@ fn error_response(request: &Request, code: ErrorCode) -> Json {
 }
 
 fn create(path: &Path) -> Result<(), String> {
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
     prompt("Master password (read from stdin):")?;
+    let mut input = NativeStdin::open().map_err(|error| error.to_string())?;
     let password = read_protected_line(&mut input, 1024)?;
     prompt("Confirm master password:")?;
     let confirmation = read_protected_line(&mut input, 1024)?;
@@ -799,9 +1059,8 @@ fn create(path: &Path) -> Result<(), String> {
     Ok(())
 }
 fn open(path: &Path) -> Result<(), String> {
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
     prompt("Master password (read from stdin):")?;
+    let mut input = NativeStdin::open().map_err(|error| error.to_string())?;
     let password = read_protected_line(&mut input, 1024)?;
     let opened = open_vault(path, password.as_ref()).map_err(|e| e.to_string())?;
     println!("Vault opened: {}", hex(opened.trusted_root().vault_id()));
@@ -862,6 +1121,21 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::{params_for_cli, read_protected_line, start_request};
     use std::{ffi::OsString, io::Cursor};
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_windows_stdin_preserves_the_public_eof_failure() {
+        use super::{NativeStdin, NativeStdinKind};
+
+        let mut input = NativeStdin {
+            handle: std::ptr::null_mut(),
+            kind: NativeStdinKind::Missing,
+        };
+        let Err(error) = read_protected_line(&mut input, 32) else {
+            panic!("missing stdin was accepted");
+        };
+        assert!(matches!(error.as_str(), "unexpected end of input"));
+    }
 
     #[test]
     fn protected_line_preserves_public_line_parsing() {
