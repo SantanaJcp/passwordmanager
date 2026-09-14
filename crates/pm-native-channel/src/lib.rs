@@ -210,6 +210,35 @@ pub fn unix_peer_uid(stream: &UnixStream) -> Result<u32, ChannelAuthenticationEr
     }
 }
 
+/// Applies the required per-stream SIGPIPE policy for supported Unix targets.
+///
+/// # Errors
+/// Returns an opaque error if Darwin refuses `SO_NOSIGPIPE` on the exact stream.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn configure_unix_stream(stream: &UnixStream) -> Result<(), ChannelAuthenticationError> {
+    #[cfg(target_os = "macos")]
+    {
+        let enabled: libc::c_int = 1;
+        let length = libc::socklen_t::try_from(std::mem::size_of_val(&enabled))
+            .map_err(|_| ChannelAuthenticationError)?;
+        if unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&raw const enabled).cast(),
+                length,
+            )
+        } != 0
+        {
+            return Err(ChannelAuthenticationError);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    let _ = stream;
+    Ok(())
+}
+
 #[cfg(all(target_os = "linux", not(target_os = "windows")))]
 fn peer_is_connected(stream: &UnixStream) -> bool {
     let mut byte = 0_u8;

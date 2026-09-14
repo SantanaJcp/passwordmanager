@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-#![cfg(any(target_os = "linux", target_os = "windows"))]
+#![cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use pm_crypto::digest;
@@ -26,7 +26,7 @@ use rustls::{
     sign::CertifiedKey,
     version,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::{
     fs::{FileTypeExt, MetadataExt, PermissionsExt},
     net::{UnixListener, UnixStream},
@@ -84,7 +84,7 @@ fn run() -> Result<(), ()> {
                     client_sids.push(a.next().ok_or(())?.into_string().map_err(|_| ())?);
                 }
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 serve(&db, &socket, &key, namespace, clients)
             }
@@ -120,7 +120,7 @@ fn take(a: &mut impl Iterator<Item = std::ffi::OsString>, flag: &str) -> Result<
     a.next().map(PathBuf::from).ok_or(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn serve(
     db: &Path,
     socket: &Path,
@@ -149,6 +149,7 @@ fn serve(
     fs::set_permissions(socket, fs::Permissions::from_mode(0o666)).map_err(|_| ())?;
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
         let store_path = db.to_owned();
         let config = Arc::clone(&config);
         std::thread::spawn(move || {
@@ -310,7 +311,7 @@ fn run_with_deadline(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn serve_one_unix(stream: UnixStream, db: &Path, config: Arc<ServerConfig>) -> Result<(), ()> {
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -570,9 +571,10 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Result<Vec<u8>, ()> {
     let stream = UnixStream::connect(socket).map_err(|_| ())?;
+    pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
     let conn = ClientConnection::new(
         Arc::new(config),
         ServerName::try_from("passwordmanager.invalid").map_err(|_| ())?,
@@ -768,7 +770,7 @@ fn raw(
     verify_tls13_signature_with_raw_key(m, &SubjectPublicKeyInfoDer::from(c.as_ref()), d, a)
 }
 fn read_key(path: &Path) -> Result<Key, ()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let b = {
         let metadata = fs::symlink_metadata(path).map_err(|_| ())?;
         if !metadata.file_type().is_file()
@@ -805,7 +807,7 @@ fn read_key(path: &Path) -> Result<Key, ()> {
     })
 }
 fn read_public(path: &Path) -> Result<Vec<u8>, ()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let metadata = fs::symlink_metadata(path).map_err(|_| ())?;
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {

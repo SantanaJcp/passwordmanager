@@ -1867,6 +1867,14 @@ resolverla y ejecutar la matriz nativa, el binario Windows no es aceptación.
 También quedan por acreditar DACL exacta de key/store, reemplazo atómico de
 status existente, firma del programa y publicación/backup reales.
 
+El mismo binario no debe volver a quedar Linux-only al componer macOS. La rama
+Unix se habilita exactamente en Linux y macOS; inmediatamente después de cada
+connect/accept llama al seam nativo `configure_unix_stream`. En macOS éste fija
+`SO_NOSIGPIPE=1` sobre el descriptor exacto y propaga cualquier fallo; Linux no
+requiere esa opción. La regresión nativa de Ticket 26 debe volver a cruzar TLS,
+request y cierre adversario para demostrar que no hay SIGPIPE ni ruta IPC
+sustitutiva. Otros Unix continúan fuera del binario explícitamente.
+
 Verificación local del checkpoint de composición: el primer `cargo check`
 (`/tmp/pm27-sync-check1.log`) conservó dos RED de compilación, un `PathBuf`
 pasado sin préstamo al exchange común y una lifetime ambigua en el helper de
