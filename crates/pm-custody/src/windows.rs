@@ -773,6 +773,37 @@ fn serve_human(
             break;
         }
         let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
+        match opcode {
+            17 => {
+                crate::human_wire::handle_stream_upload(&mut vault, tls, rest)?;
+                continue;
+            }
+            18 | 62 => {
+                crate::human_wire::handle_stream_download(&vault, tls, rest)?;
+                continue;
+            }
+            32 if rest.is_empty() => {
+                crate::human_wire::handle_native_backup_download(&mut vault, tls)?;
+                continue;
+            }
+            33 if rest.first() == Some(&1) => {
+                crate::human_wire::handle_plaintext_backup_download(&mut vault, tls, &rest[1..])?;
+                continue;
+            }
+            34 => {
+                crate::human_wire::handle_native_backup_restore(&mut vault, tls, rest)?;
+                continue;
+            }
+            42 => {
+                crate::human_wire::handle_native_recovery(&mut vault, tls, rest)?;
+                continue;
+            }
+            44 => {
+                crate::human_wire::handle_recovery_rotation(&mut vault, tls, rest)?;
+                continue;
+            }
+            _ => {}
+        }
         let response = crate::human_wire::handle_request_slice(
             &mut vault,
             &service.path,

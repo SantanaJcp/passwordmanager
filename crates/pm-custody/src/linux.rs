@@ -43,11 +43,11 @@ use rustls::{
 use signature::Signer as _;
 use zeroize::{Zeroize, Zeroizing};
 
-use pm_crypto::{KdfProfile, RecoveryCode};
+use pm_crypto::KdfProfile;
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
 use pm_vault::{
-    AgentEnrollment, Attachment, AttachmentReader, AttemptOutcome, AttemptVault, AuditAction,
-    AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome, AuthRecord, AuthorizationReason,
+    AgentEnrollment, Attachment, AttemptOutcome, AttemptVault, AuditAction, AuditActorKind,
+    AuditDeviceCustody, AuditEvent, AuditOutcome, AuthRecord, AuthorizationReason,
     AutonomousAuditVault, CsvDelimiter, CsvEncoding, CsvField, CsvImportDecision, CsvImportProfile,
     CsvMapping, CsvRowStatus, CustomField, DelegatedVault, Destination, GeneratorConfig,
     HumanCommitError, HumanMetadata, HumanVault, HumanVerification, LogicalRecord, LogicalValue,
@@ -55,7 +55,11 @@ use pm_vault::{
     PrivateKeyFormat, RecordKind, SearchQuery, SourceEncoding, SourceField, TotpAlgorithm,
 };
 
-use crate::human_wire::{commit_authority, encode_prepared};
+use crate::human_wire::{
+    commit_authority, encode_prepared, handle_native_backup_download, handle_native_backup_restore,
+    handle_native_recovery, handle_plaintext_backup_download, handle_recovery_rotation,
+    handle_stream_download, handle_stream_upload,
+};
 use crate::{Failure, take_path};
 
 mod sync_job;
@@ -3239,216 +3243,6 @@ impl<'a> SshCursor<'a> {
     }
     const fn finished(&self) -> bool {
         self.at == self.bytes.len()
-    }
-}
-
-fn handle_stream_upload(
-    tls_vault: &mut HumanVault,
-    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
-    request: &[u8],
-) -> Result<(), Failure> {
-    let mut cursor = Cursor::new(request);
-    let bytes = cursor.bytes()?;
-    cursor.finish()?;
-    let record = LogicalRecord::from_descriptor_bytes(&bytes).map_err(|_| Failure::Unavailable)?;
-    if record.attachments().len() != 1 {
-        return Err(Failure::Unavailable);
-    }
-    let id = *record.attachments()[0].id();
-    let mut reader = FrameReader {
-        tls,
-        buffer: Vec::new(),
-        position: 0,
-        ended: false,
-    };
-    let mut sources = [AttachmentReader::new(id, &mut reader)];
-    let prepared = tls_vault
-        .prepare_create_record_streaming(&record, &mut sources)
-        .map_err(|_| Failure::Unavailable)?;
-    let response = encode_prepared(tls_vault, &prepared)?;
-    write_frame(reader.tls, &response)
-}
-fn handle_stream_download(
-    vault: &HumanVault,
-    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
-    request: &[u8],
-) -> Result<(), Failure> {
-    if request.len() != 32 {
-        return Err(Failure::Unavailable);
-    }
-    let item = request[..16].try_into().map_err(|_| Failure::Unavailable)?;
-    let attachment = request[16..].try_into().map_err(|_| Failure::Unavailable)?;
-    write_frame(tls, &[0])?;
-    let mut writer = FrameWriter { tls };
-    vault
-        .read_attachment_to(item, attachment, &mut writer)
-        .map_err(|_| Failure::Unavailable)?;
-    write_frame(writer.tls, &[0])
-}
-
-fn handle_native_backup_download(
-    vault: &mut HumanVault,
-    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
-) -> Result<(), Failure> {
-    write_frame(tls, &[0])?;
-    let mut writer = FrameWriter { tls };
-    vault
-        .write_native_backup(&mut writer)
-        .map_err(|_| Failure::Unavailable)?;
-    write_frame(writer.tls, &[0])
-}
-
-fn handle_plaintext_backup_download(
-    vault: &mut HumanVault,
-    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
-    request: &[u8],
-) -> Result<(), Failure> {
-    let mut cursor = Cursor::new(request);
-    let command = cursor.bytes()?;
-    let signature = cursor
-        .fixed(64)?
-        .try_into()
-        .map_err(|_| Failure::Unavailable)?;
-    let body = cursor.bytes()?;
-    cursor.finish()?;
-    write_frame(tls, &[0])?;
-    let mut writer = FrameWriter { tls };
-    vault
-        .write_plaintext_export(&command, &signature, &body, &mut writer)
-        .map_err(|_| Failure::Unavailable)?;
-    write_frame(writer.tls, &[0])
-}
-
-fn handle_native_backup_restore(
-    vault: &mut HumanVault,
-    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
-    request: &[u8],
-) -> Result<(), Failure> {
-    let mut cursor = Cursor::new(request);
-    let mut password = Zeroizing::new(cursor.bytes()?);
-    cursor.finish()?;
-    if password.len() > 1024 {
-        return Err(Failure::Unavailable);
-    }
-    let mut reader = FrameReader {
-        tls,
-        buffer: Vec::new(),
-        position: 0,
-        ended: false,
-    };
-    let prepared = vault
-        .prepare_native_restore(&mut reader, &password)
-        .map_err(|_| Failure::Unavailable)?;
-    password.zeroize();
-    let response = encode_prepared(vault, prepared.prepared())?;
-    write_frame(reader.tls, &response)
-}
-
-fn handle_native_recovery(
-    vault: &mut HumanVault,
-    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
-    request: &[u8],
-) -> Result<(), Failure> {
-    let mut cursor = Cursor::new(request);
-    let mut encoded = Zeroizing::new(cursor.bytes()?);
-    cursor.finish()?;
-    let text = std::str::from_utf8(&encoded).map_err(|_| Failure::Unavailable)?;
-    let recovery: RecoveryCode = text.parse().map_err(|_| Failure::Unavailable)?;
-    let mut reader = FrameReader {
-        tls,
-        buffer: Vec::new(),
-        position: 0,
-        ended: false,
-    };
-    let prepared = vault
-        .prepare_native_recovery(&mut reader, &recovery)
-        .map_err(|_| Failure::Unavailable)?;
-    encoded.zeroize();
-    let response = encode_prepared(vault, prepared.prepared())?;
-    write_frame(reader.tls, &response)
-}
-
-fn handle_recovery_rotation(
-    vault: &mut HumanVault,
-    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
-    request: &[u8],
-) -> Result<(), Failure> {
-    if !request.is_empty() {
-        return Err(Failure::Unavailable);
-    }
-    let pending = vault
-        .begin_recovery_rotation()
-        .map_err(|_| Failure::Unavailable)?;
-    let mut code = Zeroizing::new(pending.recovery_code().to_string());
-    let mut response = vec![0];
-    push_bytes(&mut response, code.as_bytes())?;
-    write_frame(tls, &response)?;
-    let mut confirmation = Zeroizing::new(read_frame_bounded(tls, 1024)?);
-    if confirmation.is_empty() {
-        write_frame(tls, &[2])?;
-        code.zeroize();
-        return Ok(());
-    }
-    let parsed: RecoveryCode = std::str::from_utf8(&confirmation)
-        .map_err(|_| Failure::Unavailable)?
-        .parse()
-        .map_err(|_| Failure::Unavailable)?;
-    let prepared = pending
-        .confirm(vault, &parsed)
-        .map_err(|_| Failure::Unavailable)?;
-    confirmation.zeroize();
-    code.zeroize();
-    let response = encode_prepared(vault, &prepared)?;
-    write_frame(tls, &response)
-}
-struct FrameReader<'a> {
-    tls: &'a mut rustls::StreamOwned<ServerConnection, UnixStream>,
-    buffer: Vec<u8>,
-    position: usize,
-    ended: bool,
-}
-impl Read for FrameReader<'_> {
-    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
-        if self.position == self.buffer.len() {
-            if self.ended {
-                return Ok(0);
-            }
-            self.buffer.zeroize();
-            self.buffer = read_frame_bounded(self.tls, STREAM_CHUNK_BYTES).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "stream frame unavailable",
-                )
-            })?;
-            self.position = 0;
-            if self.buffer == [0] {
-                self.ended = true;
-                return Ok(0);
-            }
-        }
-        let count = output.len().min(self.buffer.len() - self.position);
-        output[..count].copy_from_slice(&self.buffer[self.position..self.position + count]);
-        self.position += count;
-        Ok(count)
-    }
-}
-impl Drop for FrameReader<'_> {
-    fn drop(&mut self) {
-        self.buffer.zeroize();
-    }
-}
-struct FrameWriter<'a> {
-    tls: &'a mut rustls::StreamOwned<ServerConnection, UnixStream>,
-}
-impl Write for FrameWriter<'_> {
-    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
-        write_frame(self.tls, input).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stream frame failed")
-        })?;
-        Ok(input.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.tls.flush()
     }
 }
 
