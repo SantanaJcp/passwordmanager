@@ -940,6 +940,17 @@ wrong-UID/negative assertions remain in the same harness. No Linux run or
 local macOS result is substituted for the required normal Intel+Apple-silicon
 run. Until that run succeeds, this is an implementation checkpoint only.
 
+Native run 20
+[`34847582724`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34847582724)
+on `a6c3` failed on both authorized macOS architectures during compilation,
+before the laboratory or any TUI behavior ran. Five cfg-gated AppKit test
+assertions used `Result::expect`, which attempted to format the deliberately
+opaque product `Failure` and produced `E0277` in both the library and binary
+test targets. This is a test-compilation failure, not a behavioral RED or
+acceptance result. Checkpoint `a247340` replaces those assertions with static
+panic closures, preserving the non-`Debug` product error and the test's
+failure behavior; native redispatch remains pending.
+
 Before native dispatch, static verification must establish that the new
 harness parses, its command/fixture inventory is closed, its PTY driver waits
 for visible input before Enter, and the workflow still invokes only the normal
