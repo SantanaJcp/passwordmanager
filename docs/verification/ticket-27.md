@@ -224,10 +224,51 @@ original permanece. Esto discrimina si el sequence cambia al cerrar, si la
 apertura con HWND nulo deja owner inválido, o si otro escritor cambia el
 clipboard después. No mueve la decisión de ownership fuera del lock, no añade
 sleeps/retries/deadlines y no imprime el secreto sintético. La documentación de
-Microsoft establece que `OpenClipboard(NULL)` seguido por `EmptyClipboard`
+Microsoft establece en [OpenClipboard](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-openclipboard)
+y [clipboard ownership](https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-operations)
+que `OpenClipboard(NULL)` seguido por `EmptyClipboard`
 deja owner nulo y puede hacer fallar `SetClipboardData`, mientras el sequence se
 incrementa al vaciar o cambiar contenido; por eso ninguna corrección se atribuye
 hasta observar estos puntos en Windows 11 ARM64.
+
+La quinta ejecución,
+[run 34798532966](https://github.com/SantanaJcp/passwordmanager/actions/runs/34798532966),
+confirmó el discriminante: primera lease `after_empty=1`, `after_set=2`,
+`after_close=5`; segunda `6/7/10`; `current=10`; owner y open HWND fueron
+nulos en todos los puntos y ambos `CloseClipboard` tuvieron éxito. Se conservan
+el RED original y este RED diagnóstico. La corrección que deberá comprobar el
+mismo test crea un HWND message-only propio por lease y lo pasa a
+`OpenClipboard`, publica con `EmptyClipboard` + `SetClipboardData`, cierra y
+vuelve a adquirir una sola vez el lock. Ya bajo ese lock verifica atómicamente
+que `GetClipboardOwner` aún sea ese HWND y captura el sequence final estabilizado;
+si perdió ownership, falla y jamás vacía contenido ajeno. `clear_if_owned`
+adquiere el lock una vez y solo vacía cuando owner HWND y sequence coinciden.
+El HWND se destruye al consumir o descartar la lease. No hay lectura post-close
+ciega, retry, sleep, sustitución ni limpieza por sequence solamente. El test
+existente conserva la carrera de dos owners y se añade una pérdida de ownership
+entre publicar y capturar mediante un hook solo de test que publica el segundo
+owner en esa frontera; la lectura real de `CF_UNICODETEXT` se comprobará bajo el
+lock si la API nativa disponible permite hacerlo sin duplicar el motor.
+
+La implementación candidata usa la clase de sistema `STATIC` como
+[HWND message-only](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features)
+por lease. Los dos tests de clipboard mantienen la carrera original,
+leen de vuelta el `CF_UNICODETEXT` real y prueban pérdida de owner exactamente
+entre publicación y captura; no contienen un backend alternativo. En Linux solo
+se pudo compilar esta ruta con el chequeo sintáctico cfg ya documentado:
+
+```text
+RUSTFLAGS='--cfg target_os="windows" -Aexplicit_builtin_cfgs_in_flags' \
+  ./scripts/cargo-local.sh clippy -p pm-native-channel --all-targets \
+  --locked --offline -- -D warnings
+# exit 0
+
+./scripts/check.sh
+# exit 0
+```
+
+Ambos tests nuevos siguen pendientes de ejecución real Windows ARM64; este
+resultado local no convierte el ticket en aceptado.
 
 ## Regresión Linux del checkpoint
 

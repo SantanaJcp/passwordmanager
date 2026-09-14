@@ -24,8 +24,8 @@ use windows_sys::Win32::{
     System::{
         Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole},
         DataExchange::{
-            CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
-            SetClipboardData,
+            CloseClipboard, EmptyClipboard, GetClipboardOwner, GetClipboardSequenceNumber,
+            OpenClipboard, SetClipboardData,
         },
         Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
         Ole::CF_UNICODETEXT,
@@ -41,11 +41,14 @@ use windows_sys::Win32::{
         },
         Threading::{GetCurrentProcess, GetCurrentThread, OpenThreadToken},
     },
+    UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE},
 };
 use zeroize::Zeroizing;
 
 #[cfg(test)]
-use windows_sys::Win32::System::DataExchange::{GetClipboardOwner, GetOpenClipboardWindow};
+use windows_sys::Win32::System::DataExchange::GetClipboardData;
+#[cfg(test)]
+use windows_sys::Win32::System::Memory::GlobalSize;
 
 use crate::{ChannelAuthenticationError, WindowsEndpoint, windows_pipe_sddl};
 
@@ -372,43 +375,59 @@ fn crypt(value: &[u8], protect: bool) -> Result<Zeroizing<Vec<u8>>, ChannelAuthe
     Ok(Zeroizing::new(bytes))
 }
 
+struct ClipboardWindow(windows_sys::Win32::Foundation::HWND);
+
+impl ClipboardWindow {
+    fn create() -> Result<Self, ChannelAuthenticationError> {
+        let class = wide("STATIC");
+        let title = wide("");
+        let handle = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                title.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null(),
+            )
+        };
+        if handle.is_null() {
+            Err(ChannelAuthenticationError)
+        } else {
+            Ok(Self(handle))
+        }
+    }
+
+    fn destroy(&mut self) -> Result<(), ChannelAuthenticationError> {
+        if self.0.is_null() {
+            return Ok(());
+        }
+        if unsafe { DestroyWindow(self.0) } == 0 {
+            return Err(ChannelAuthenticationError);
+        }
+        self.0 = ptr::null_mut();
+        Ok(())
+    }
+}
+
+impl Drop for ClipboardWindow {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { DestroyWindow(self.0) };
+            self.0 = ptr::null_mut();
+        }
+    }
+}
+
 pub struct OwnedClipboard {
     sequence: u32,
-    #[cfg(test)]
-    diagnostic: ClipboardDiagnostic,
-}
-
-#[cfg(test)]
-struct ClipboardDiagnostic {
-    after_empty: u32,
-    owner_after_empty: usize,
-    after_set: u32,
-    owner_after_set: usize,
-    open_before_close: usize,
-    close_succeeded: bool,
-    close_error: u32,
-    after_close: u32,
-    owner_after_close: usize,
-    open_after_close: usize,
-}
-
-#[cfg(test)]
-impl ClipboardDiagnostic {
-    fn emit(&self, label: &str) {
-        eprintln!(
-            "[PM27-CLIPBOARD-DIAG] lease={label} after_empty={} owner_after_empty={} after_set={} owner_after_set={} open_before_close={} close_succeeded={} close_error={} after_close={} owner_after_close={} open_after_close={}",
-            self.after_empty,
-            self.owner_after_empty,
-            self.after_set,
-            self.owner_after_set,
-            self.open_before_close,
-            self.close_succeeded,
-            self.close_error,
-            self.after_close,
-            self.owner_after_close,
-            self.open_after_close,
-        );
-    }
+    owner: ClipboardWindow,
 }
 
 impl OwnedClipboard {
@@ -417,6 +436,13 @@ impl OwnedClipboard {
     /// # Errors
     /// Returns an opaque error for invalid UTF-8 or unavailable clipboard APIs.
     pub fn copy(value: &[u8]) -> Result<Self, ChannelAuthenticationError> {
+        Self::copy_then(value, || {})
+    }
+
+    fn copy_then(
+        value: &[u8],
+        after_publish: impl FnOnce(),
+    ) -> Result<Self, ChannelAuthenticationError> {
         let value = std::str::from_utf8(value).map_err(|_| ChannelAuthenticationError)?;
         if value.contains('\0') {
             return Err(ChannelAuthenticationError);
@@ -425,17 +451,11 @@ impl OwnedClipboard {
         if utf16.len() <= 1 {
             return Err(ChannelAuthenticationError);
         }
-        if unsafe { OpenClipboard(ptr::null_mut()) } == 0 {
-            return Err(ChannelAuthenticationError);
-        }
-        let result = (|| {
+        let owner = ClipboardWindow::create()?;
+        with_open_clipboard(owner.0, || {
             if unsafe { EmptyClipboard() } == 0 {
                 return Err(ChannelAuthenticationError);
             }
-            #[cfg(test)]
-            let after_empty = unsafe { GetClipboardSequenceNumber() };
-            #[cfg(test)]
-            let owner_after_empty = unsafe { GetClipboardOwner() } as usize;
             let bytes = utf16
                 .len()
                 .checked_mul(2)
@@ -457,64 +477,88 @@ impl OwnedClipboard {
                 unsafe { GlobalFree(memory) };
                 return Err(ChannelAuthenticationError);
             }
+            if unsafe { GetClipboardOwner() } != owner.0 {
+                return Err(ChannelAuthenticationError);
+            }
+            Ok(())
+        })?;
+        after_publish();
+        let sequence = with_open_clipboard(owner.0, || {
             let sequence = unsafe { GetClipboardSequenceNumber() };
-            (sequence != 0)
-                .then_some(Self {
-                    sequence,
-                    #[cfg(test)]
-                    diagnostic: ClipboardDiagnostic {
-                        after_empty,
-                        owner_after_empty,
-                        after_set: sequence,
-                        owner_after_set: unsafe { GetClipboardOwner() } as usize,
-                        open_before_close: unsafe { GetOpenClipboardWindow() } as usize,
-                        close_succeeded: false,
-                        close_error: 0,
-                        after_close: 0,
-                        owner_after_close: 0,
-                        open_after_close: 0,
-                    },
-                })
-                .ok_or(ChannelAuthenticationError)
-        })();
-        let close_succeeded = unsafe { CloseClipboard() } != 0;
-        let close_error = if close_succeeded {
-            0
-        } else {
-            unsafe { GetLastError() }
-        };
-        #[cfg(not(test))]
-        let _ = (close_succeeded, close_error);
-        #[cfg(test)]
-        let result = result.map(|mut clipboard| {
-            clipboard.diagnostic.close_succeeded = close_succeeded;
-            clipboard.diagnostic.close_error = close_error;
-            clipboard.diagnostic.after_close = unsafe { GetClipboardSequenceNumber() };
-            clipboard.diagnostic.owner_after_close = unsafe { GetClipboardOwner() } as usize;
-            clipboard.diagnostic.open_after_close = unsafe { GetOpenClipboardWindow() } as usize;
-            clipboard
-        });
-        result
+            if unsafe { GetClipboardOwner() } != owner.0 || sequence == 0 {
+                return Err(ChannelAuthenticationError);
+            }
+            Ok(sequence)
+        })?;
+        Ok(Self { sequence, owner })
     }
 
-    /// Clears only if the clipboard sequence still belongs to this lease.
+    /// Clears only if the clipboard owner and sequence still belong to this lease.
     ///
     /// # Errors
     /// Returns an opaque error if ownership cannot be inspected or cleared.
-    pub fn clear_if_owned(self) -> Result<bool, ChannelAuthenticationError> {
-        if unsafe { OpenClipboard(ptr::null_mut()) } == 0 {
-            return Err(ChannelAuthenticationError);
-        }
-        let result = if unsafe { GetClipboardSequenceNumber() } != self.sequence {
-            Ok(false)
-        } else if unsafe { EmptyClipboard() } != 0 {
-            Ok(true)
-        } else {
-            Err(ChannelAuthenticationError)
-        };
-        unsafe { CloseClipboard() };
-        result
+    pub fn clear_if_owned(mut self) -> Result<bool, ChannelAuthenticationError> {
+        let cleared = with_open_clipboard(self.owner.0, || {
+            if unsafe { GetClipboardOwner() } != self.owner.0
+                || unsafe { GetClipboardSequenceNumber() } != self.sequence
+            {
+                Ok(false)
+            } else if unsafe { EmptyClipboard() } != 0 {
+                Ok(true)
+            } else {
+                Err(ChannelAuthenticationError)
+            }
+        })?;
+        self.owner.destroy()?;
+        Ok(cleared)
     }
+
+    #[cfg(test)]
+    fn read_owned_text(&self) -> Result<String, ChannelAuthenticationError> {
+        with_open_clipboard(self.owner.0, || {
+            if unsafe { GetClipboardOwner() } != self.owner.0
+                || unsafe { GetClipboardSequenceNumber() } != self.sequence
+            {
+                return Err(ChannelAuthenticationError);
+            }
+            let memory = unsafe { GetClipboardData(u32::from(CF_UNICODETEXT)) };
+            if memory.is_null() {
+                return Err(ChannelAuthenticationError);
+            }
+            let bytes = unsafe { GlobalSize(memory) };
+            if bytes < 2 || bytes % 2 != 0 {
+                return Err(ChannelAuthenticationError);
+            }
+            let data = unsafe { GlobalLock(memory) };
+            if data.is_null() {
+                return Err(ChannelAuthenticationError);
+            }
+            let units = unsafe { std::slice::from_raw_parts(data.cast::<u16>(), bytes / 2) };
+            let text = units
+                .iter()
+                .position(|unit| *unit == 0)
+                .ok_or(ChannelAuthenticationError)
+                .and_then(|length| {
+                    String::from_utf16(&units[..length]).map_err(|_| ChannelAuthenticationError)
+                });
+            unsafe { GlobalUnlock(memory) };
+            text
+        })
+    }
+}
+
+fn with_open_clipboard<T>(
+    owner: windows_sys::Win32::Foundation::HWND,
+    operation: impl FnOnce() -> Result<T, ChannelAuthenticationError>,
+) -> Result<T, ChannelAuthenticationError> {
+    if unsafe { OpenClipboard(owner) } == 0 {
+        return Err(ChannelAuthenticationError);
+    }
+    let result = operation();
+    if unsafe { CloseClipboard() } == 0 {
+        return Err(ChannelAuthenticationError);
+    }
+    result
 }
 
 pub struct ConPty(HPCON);
@@ -758,16 +802,21 @@ mod tests {
     fn clipboard_sequence_never_clears_a_newer_owner() {
         let first = OwnedClipboard::copy(CANARY).unwrap();
         let second = OwnedClipboard::copy(b"ticket27-new-owner").unwrap();
-        first.diagnostic.emit("first");
-        second.diagnostic.emit("second");
-        eprintln!(
-            "[PM27-CLIPBOARD-DIAG] current_sequence={} current_owner={} current_open={}",
-            unsafe { GetClipboardSequenceNumber() },
-            unsafe { GetClipboardOwner() } as usize,
-            unsafe { GetOpenClipboardWindow() } as usize,
-        );
         assert!(!first.clear_if_owned().unwrap());
+        assert_eq!(second.read_owned_text().unwrap(), "ticket27-new-owner");
         assert!(second.clear_if_owned().unwrap());
+    }
+
+    #[test]
+    fn clipboard_copy_fails_if_ownership_changes_before_sequence_capture() {
+        let replacement = std::cell::RefCell::new(None);
+        let lost = OwnedClipboard::copy_then(CANARY, || {
+            replacement.replace(Some(OwnedClipboard::copy(b"ticket27-new-owner").unwrap()));
+        });
+        assert!(lost.is_err());
+        let replacement = replacement.into_inner().unwrap();
+        assert_eq!(replacement.read_owned_text().unwrap(), "ticket27-new-owner");
+        assert!(replacement.clear_if_owned().unwrap());
     }
 
     #[test]
