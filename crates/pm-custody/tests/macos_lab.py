@@ -77,6 +77,9 @@ DIAGNOSTIC_LINE = re.compile(
     rb"PM26_DIAGNOSTIC pasteboard-domain-relation="
     rb"(?:same|different|indeterminate)|"
     rb"PM26_DIAGNOSTIC pasteboard-shared-control=unsupported|"
+    rb"PM26_DIAGNOSTIC pasteboard-shared-control-exit="
+    rb"(?:natural-zero|natural-nonzero|owned-termination|unknown) "
+    rb"returncode=(?:[0-9]{1,3}|unknown)|"
     rb"PM26_DIAGNOSTIC pasteboard-isolated-agent-uid="
     rb"(?:expected|unexpected|unavailable|unparseable)|"
     rb"PM26_DIAGNOSTIC pasteboard-isolated-manager-uid="
@@ -688,6 +691,7 @@ class MacPtySession:
         self._screen_finalized = False
         self.returncode = None
         self.reaped = False
+        self.owned_termination_sent = False
         self.eof = False
 
     @classmethod
@@ -891,6 +895,8 @@ class MacPtySession:
                 os.kill(self.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+            else:
+                self.owned_termination_sent = True
             try:
                 self.wait_exit(timeout=5)
             except BaseException as error:
@@ -916,6 +922,33 @@ def close_session_preserving_primary(session):
         if prior_cause is not None:
             cleanup_error.__context__ = prior_cause
         primary.__cause__ = cleanup_error
+
+
+def observe_child_exit_without_termination(session):
+    """Reap an already-finished PTY child before owned cleanup can signal it."""
+    if session.returncode is not None or session.reaped:
+        return
+    try:
+        child, status = os.waitpid(session.pid, os.WNOHANG)
+    except ChildProcessError as error:
+        raise AssertionError("TUI PTY child exit state was unavailable") from error
+    if child != session.pid:
+        return
+    session.reaped = True
+    session.returncode = session._exit_code(status)
+    session.drain()
+
+
+def classify_shared_control_exit(returncode, owned_termination_sent):
+    """Classify a supporting control exit without exposing PTY bytes."""
+    if returncode is None:
+        return b"unknown", b"unknown"
+    status = str(returncode).encode("ascii")
+    if owned_termination_sent:
+        return b"owned-termination", status
+    if returncode == 0:
+        return b"natural-zero", status
+    return b"natural-nonzero", status
 
 
 def assert_screen_observer_regression():
@@ -1127,6 +1160,11 @@ def assert_pasteboard_diagnostic_regression():
         canary, b"", b"", None
     )
     assert (status, stdout, stderr, success) == (b"timeout", False, False, b"indeterminate")
+    assert classify_shared_control_exit(0, False) == (b"natural-zero", b"0")
+    assert classify_shared_control_exit(4, False) == (b"natural-nonzero", b"4")
+    assert classify_shared_control_exit(143, False) == (b"natural-nonzero", b"143")
+    assert classify_shared_control_exit(143, True) == (b"owned-termination", b"143")
+    assert classify_shared_control_exit(None, False) == (b"unknown", b"unknown")
 
 
 def assert_human_pasteboard_canary(secret, *, diagnostic=False, phase=None):
@@ -1921,9 +1959,30 @@ def run_shared_pasteboard_control(
                 TUI_PASSWORD_RECORD, diagnostic=True, require_denied=False
             )
     finally:
-        close_session_preserving_primary(shared)
+        try:
+            observe_child_exit_without_termination(shared)
+        finally:
+            try:
+                close_session_preserving_primary(shared)
+            finally:
+                if pasteboard_observation:
+                    category, returncode = classify_shared_control_exit(
+                        shared.returncode, shared.owned_termination_sent,
+                    )
+                    emit_diagnostic(
+                        b"PM26_DIAGNOSTIC pasteboard-shared-control-exit="
+                        + category + b" returncode=" + returncode
+                    )
+    category, returncode = classify_shared_control_exit(
+        shared.returncode, shared.owned_termination_sent,
+    )
     assert TUI_PASSWORD_RECORD not in bytes(shared.output)
     assert b"\x1b]52;" not in bytes(shared.output)
+    if category == b"natural-nonzero":
+        raise AssertionError(
+            "shared pasteboard control exited naturally with nonzero status",
+            returncode,
+        )
 
 
 def run_tui_core_lab(
