@@ -137,8 +137,19 @@ def parse_directory_records(output):
     return set(records)
 
 
+def require_safe_existing_parent(path):
+    result = sudo(["stat", "-f", "%u %p", path])
+    try:
+        owner, encoded_mode = result.stdout.decode().strip().split()
+        full_mode = int(encoded_mode, 8)
+        assert int(owner) == 0 and stat.S_ISDIR(full_mode)
+        assert stat.S_IMODE(full_mode) & 0o022 == 0
+    except (AssertionError, UnicodeDecodeError, ValueError) as error:
+        raise AssertionError("fixed install parent is not a safe root directory") from error
+
+
 def cleanup_owned_resources(
-    bootstrapped, owned_paths, owned_records, invoke=sudo,
+    bootstrapped, owned_paths, owned_empty_directories, owned_records, invoke=sudo,
     path_exists=os.path.lexists,
 ):
     errors = []
@@ -158,6 +169,8 @@ def cleanup_owned_resources(
         attempt("launchd-bootout", ["launchctl", "bootout", f"system/{LABEL}"])
     for name, path in reversed(owned_paths):
         attempt(f"remove-{name}", ["rm", "-rf", path])
+    for name, path in reversed(owned_empty_directories):
+        attempt(f"rmdir-{name}", ["rmdir", path])
     for record in reversed(owned_records):
         kind = "user" if record.startswith("/Users/") else "group"
         attempt(f"delete-{kind}", ["dscl", ".", "-delete", record])
@@ -179,6 +192,14 @@ def cleanup_owned_resources(
                 errors.append(AssertionError(f"owned cleanup left path: name={name}"))
         except BaseException as error:
             wrapped = AssertionError("owned cleanup absence check raised: path")
+            wrapped.__cause__ = error
+            errors.append(wrapped)
+    for name, path in owned_empty_directories:
+        try:
+            if path_exists(path):
+                errors.append(AssertionError(f"owned cleanup left directory: name={name}"))
+        except BaseException as error:
+            wrapped = AssertionError("owned cleanup absence check raised: directory")
             wrapped.__cause__ = error
             errors.append(wrapped)
     for kind, root in (("user", "/Users"), ("group", "/Groups")):
@@ -204,9 +225,12 @@ def cleanup_owned_resources(
     return errors
 
 
-def finish_owned_resources(lab_error, bootstrapped, owned_paths, owned_records, invoke=sudo):
+def finish_owned_resources(
+    lab_error, bootstrapped, owned_paths, owned_empty_directories,
+    owned_records, invoke=sudo,
+):
     cleanup_errors = cleanup_owned_resources(
-        bootstrapped, owned_paths, owned_records, invoke
+        bootstrapped, owned_paths, owned_empty_directories, owned_records, invoke
     )
     if lab_error is not None:
         if cleanup_errors:
@@ -554,6 +578,7 @@ def main():
 
     owned_records = []
     owned_paths = []
+    owned_empty_directories = []
     bootstrapped = False
     lab_error = None
     scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")
@@ -573,6 +598,14 @@ def main():
         observed_agent_uid = sudo(["id", "-u"], user=AGENT).stdout.decode().strip()
         assert observed_agent_uid == str(agent_uid), observed_agent_uid
         cross_uid_peer_diagnostic(agent_uid, scratch)
+
+        install_parent = INSTALL.parent
+        if os.path.lexists(install_parent):
+            require_safe_existing_parent(install_parent)
+        else:
+            sudo(["install", "-d", "-o", "root", "-g", "wheel", "-m", "0755", install_parent])
+            owned_empty_directories.append(("install-parent", install_parent))
+            require_owner_mode(install_parent, (0, 0o755))
 
         for name, path in [("install", INSTALL), ("state", STATE), ("runtime", RUNTIME)]:
             sudo(["mkdir", path])
@@ -741,7 +774,7 @@ def main():
 
     finish_owned_resources(
         lab_error,
-        bootstrapped, owned_paths, owned_records
+        bootstrapped, owned_paths, owned_empty_directories, owned_records
     )
     print("PASS macos-launchdaemon account=_passwordmanager peer=getpeereid bilateral=tls-rpk")
     print("PASS macos-acl bootstrap=0400 binary+plist=root-owned wrong-uid=rejected")

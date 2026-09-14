@@ -137,6 +137,9 @@ require_literal 'require_readable_regular(AGENT, agent_key' "$harness"
 require_literal 'os.chmod(sys.argv[1], 0o666)' "$harness"
 require_literal 'human_authorization_setup' "$harness"
 require_literal 'path_exists=os.path.lexists' "$harness"
+require_literal 'require_safe_existing_parent(install_parent)' "$harness"
+require_literal 'owned_empty_directories.append(("install-parent", install_parent))' "$harness"
+require_literal 'attempt(f"rmdir-{name}", ["rmdir", path])' "$harness"
 require_literal '"env", f"{DIAGNOSTIC_ENV}=1"' "$harness"
 if grep -Fq 'RUNNER_TEMP' "$harness"; then
     echo 'macOS custody laboratory still depends on the private runner temp root' >&2
@@ -214,6 +217,7 @@ for rejected in (b"", b"CFLAGS='-Og'\n", b"CFLAGS='-O0 -O2'\n"):
         raise AssertionError("ambiguous native libsodium metadata was accepted")
 
 owned_paths = [("state", pathlib.Path("/synthetic-ticket26-owned-state"))]
+owned_empty_directories = [("install-parent", pathlib.Path("/synthetic-ticket26-parent"))]
 owned_records = ["/Groups/_synthetic26", "/Users/_synthetic26"]
 success_calls = []
 def successful_cleanup(command, *, check):
@@ -227,9 +231,12 @@ def successful_cleanup(command, *, check):
         stdout = b""
     return type("Result", (), {"returncode": 0, "stdout": stdout})()
 assert module.cleanup_owned_resources(
-    True, owned_paths, owned_records, successful_cleanup, lambda _path: False
+    True, owned_paths, owned_empty_directories, owned_records,
+    successful_cleanup, lambda _path: False
 ) == []
-assert len(success_calls) == 7
+assert len(success_calls) == 8
+assert success_calls.index(("rm", "-rf", "/synthetic-ticket26-owned-state")) < \
+       success_calls.index(("rmdir", "/synthetic-ticket26-parent"))
 
 failure_calls = []
 def failing_cleanup(command, *, check):
@@ -237,12 +244,14 @@ def failing_cleanup(command, *, check):
     failure_calls.append(tuple(map(str, command)))
     return type("Result", (), {"returncode": 9, "stdout": b""})()
 cleanup_errors = module.cleanup_owned_resources(
-    True, owned_paths, owned_records, failing_cleanup, lambda _path: False
+    True, owned_paths, owned_empty_directories, owned_records,
+    failing_cleanup, lambda _path: False
 )
-assert len(failure_calls) == 7 and len(cleanup_errors) == 7
+assert len(failure_calls) == 8 and len(cleanup_errors) == 8
 aggregate = module.OwnedCleanupError(cleanup_errors)
-assert len(aggregate.errors) == 7
+assert len(aggregate.errors) == 8
 assert "launchd-bootout" in str(aggregate) and "delete-user" in str(aggregate)
+assert "rmdir-install-parent" in str(aggregate)
 
 interrupt = KeyboardInterrupt()
 interrupt_calls = []
@@ -251,7 +260,7 @@ def interruption_cleanup(command, *, check):
     return type("Result", (), {"returncode": 0, "stdout": b""})()
 try:
     module.finish_owned_resources(
-        interrupt, False, owned_paths, [], interruption_cleanup
+        interrupt, False, owned_paths, [], [], interruption_cleanup
     )
 except KeyboardInterrupt as caught:
     assert caught is interrupt
@@ -260,7 +269,7 @@ else:
 assert len(interrupt_calls) == 1
 try:
     module.finish_owned_resources(
-        interrupt, False, owned_paths, [], failing_cleanup
+        interrupt, False, owned_paths, [], [], failing_cleanup
     )
 except KeyboardInterrupt as caught:
     assert caught is interrupt

@@ -675,6 +675,25 @@ cleanup re-raised the identical `KeyboardInterrupt` object after attempting the
 owned removal. Python AST parsing, the static macOS checker and
 `git diff --check` passed. No Cargo, Rust build or native laboratory was run.
 
+Native cleanup run `34836722393` on `81ffa4c` failed on both architectures
+before custody startup: the new exact `mkdir` of
+`/usr/local/libexec/passwordmanager` exited nonzero, whereas the prior
+`mkdir -p` had also provisioned its missing parent when necessary. The captured
+record does not include the command's stderr, so parent absence is a bounded
+explanation to test, not a claimed observed cause.
+
+The fixture correction explicitly handles only the fixed
+`/usr/local/libexec` parent. If it exists, the harness requires a real
+root-owned directory without group/world write and records but does not alter
+its mode or ownership. If absent, it creates that exact parent as root-owned
+`0755`, verifies it, and records separate ownership immediately. Cleanup first
+removes the owned child install root, then uses only `rmdir` on a parent created
+by this run; nonempty or failed parent removal is aggregated and never replaced
+by recursive deletion. Final absence is required only for the created parent.
+Fake-command checks must cover existing-parent preservation, created-parent
+ordering, nonempty `rmdir` failure and continued cleanup attempts. This remains
+fixture-only and needs the same native two-architecture run.
+
 ## Remaining acceptance work
 
 - Resolve and verify the inherited cleanup behavior only after its separate
