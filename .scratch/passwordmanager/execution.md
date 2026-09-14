@@ -318,12 +318,15 @@ El candidato Windows aislado `50dd1bf` pasó el
 crash deliberado y consultas de ausencia final de recursos propios. Esto no
 acredita la TUI completa ni resuelve 27. Su launcher ConPTY sigue en preparación.
 
-macOS `f1a1a51` alcanzó copia TUI en el
-[run 34855277724](https://github.com/SantanaJcp/passwordmanager/actions/runs/34855277724),
-pero el probe de clipboard agente falló: ARM devolvió rc0 sin registrar si
-contenía el canario; Intel agotó el plazo. No hay evidencia suficiente para
-afirmar extracción ni aislamiento. La siguiente prueba debe distinguir ambos
-con flags seguros y controles humanos vigentes, sin imprimir el contenido.
+macOS `f1a1a51` alcanzó copia TUI, pero su log no distinguía rc0 de
+extracción. El diagnóstico posterior sobre binario normal `73e9175`,
+[run 34858597883](https://github.com/SantanaJcp/passwordmanager/actions/runs/34858597883),
+**confirmó exposición del canario en ambos CPU**: el agente devolvió el valor
+exacto y el humano conservaba la copia antes/después. Las identidades eran las
+esperadas, pero ambos procesos compartían el dominio launchd humano. El
+laboratorio no satisface G1 por cambiar sólo UID mediante sudo; el siguiente
+fixture debe probar un dominio agente separado real y conservar este resultado
+como evidencia del perfil inseguro. No se afirma aislamiento ni cierre de 26.
 
 Se mantienen **25/35 tickets integrados**. Los cuatro cleanups recién
 autorizados siguen en 28; este checkpoint no los declara implementados ni
