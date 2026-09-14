@@ -55,6 +55,7 @@ use pm_vault::{
     PrivateKeyFormat, RecordKind, SearchQuery, SourceEncoding, SourceField, TotpAlgorithm,
 };
 
+use crate::human_wire::encode_prepared;
 use crate::{Failure, take_path};
 
 mod sync_job;
@@ -3760,203 +3761,10 @@ fn handle_human_request(
     request: &[u8],
 ) -> Result<Vec<u8>, Failure> {
     let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
-    if let Some(response) = crate::human_wire::handle_catalog(vault, opcode, rest) {
+    if let Some(response) = crate::human_wire::handle_request_slice(vault, opcode, rest) {
         return response;
     }
     match opcode {
-        2 | 3 => {
-            let mut cursor = Cursor::new(rest);
-            let item = if opcode == 3 {
-                Some(
-                    cursor
-                        .fixed(16)?
-                        .try_into()
-                        .map_err(|_| Failure::Unavailable)?,
-                )
-            } else {
-                None
-            };
-            let record = decode_wire_record(&mut cursor)?;
-            cursor.finish()?;
-            let prepared = if let Some(item) = item {
-                vault.prepare_edit(item, &record)
-            } else {
-                vault.prepare_create(&record)
-            }
-            .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
-        }
-        43 => {
-            let mut cursor = Cursor::new(rest);
-            let mut password = Zeroizing::new(cursor.bytes()?);
-            cursor.finish()?;
-            let prepared = vault
-                .prepare_master_password_rotation(&password, KdfProfile::DEFAULT)
-                .map_err(|_| Failure::Unavailable)?;
-            password.zeroize();
-            encode_prepared(vault, &prepared)
-        }
-        4 => {
-            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
-            let prepared = vault
-                .prepare_delete(item)
-                .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
-        }
-        5 | 8 => {
-            let mut cursor = Cursor::new(rest);
-            let command = cursor.bytes()?;
-            let signature = cursor
-                .fixed(64)?
-                .try_into()
-                .map_err(|_| Failure::Unavailable)?;
-            let body = cursor.bytes()?;
-            cursor.finish()?;
-            match vault.commit(&command, &signature, &body) {
-                Ok(receipt) => {
-                    let mut response = vec![0];
-                    response.extend_from_slice(&receipt.to_bytes());
-                    Ok(response)
-                }
-                Err(HumanCommitError::BodyChanged) => Ok(vec![2]),
-                Err(_) => Ok(vec![1]),
-            }
-        }
-        6 => {
-            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
-            match vault.read_password(item) {
-                Ok(record) => {
-                    let mut response = vec![0];
-                    for field in [
-                        record.title().as_bytes(),
-                        record.username().as_bytes(),
-                        record.password(),
-                        record.destination().as_bytes(),
-                        record.notes().as_bytes(),
-                    ] {
-                        push_bytes(&mut response, field)?;
-                    }
-                    Ok(response)
-                }
-                Err(HumanCommitError::ItemNotFound) => Ok(vec![3]),
-                Err(_) => Ok(vec![1]),
-            }
-        }
-        7 => {
-            let transaction_id = rest.try_into().map_err(|_| Failure::Unavailable)?;
-            match vault.receipt(transaction_id) {
-                Ok(receipt) => {
-                    let mut response = vec![0];
-                    response.extend_from_slice(&receipt.to_bytes());
-                    Ok(response)
-                }
-                Err(_) => Ok(vec![3]),
-            }
-        }
-        9 => {
-            let mut cursor = Cursor::new(rest);
-            let bytes = cursor.bytes()?;
-            cursor.finish()?;
-            let record = LogicalRecord::from_bytes(&bytes).map_err(|_| Failure::Unavailable)?;
-            let prepared = vault
-                .prepare_create_record(&record)
-                .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
-        }
-        10 => {
-            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
-            match vault.read_record(item) {
-                Ok(record) => {
-                    let mut response = vec![0];
-                    response.extend_from_slice(&record.to_bytes());
-                    Ok(response)
-                }
-                Err(HumanCommitError::ItemNotFound) => Ok(vec![3]),
-                Err(_) => Ok(vec![1]),
-            }
-        }
-        11 => {
-            let mut cursor = Cursor::new(rest);
-            let item = cursor
-                .fixed(16)?
-                .try_into()
-                .map_err(|_| Failure::Unavailable)?;
-            let favorite = match cursor.fixed(1)? {
-                [0] => false,
-                [1] => true,
-                _ => return Err(Failure::Unavailable),
-            };
-            let count = usize::from(u16::from_be_bytes(
-                cursor
-                    .fixed(2)?
-                    .try_into()
-                    .map_err(|_| Failure::Unavailable)?,
-            ));
-            let mut tags = Vec::with_capacity(count);
-            for _ in 0..count {
-                tags.push(String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?);
-            }
-            cursor.finish()?;
-            let prepared = vault
-                .prepare_organize(item, tags, favorite)
-                .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
-        }
-        12 => {
-            let mut cursor = Cursor::new(rest);
-            let text = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
-            let tag = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
-            let favorite = match cursor.fixed(1)? {
-                [0] => None,
-                [1] => Some(false),
-                [2] => Some(true),
-                _ => return Err(Failure::Unavailable),
-            };
-            cursor.finish()?;
-            let hits = vault
-                .search(&SearchQuery {
-                    text: (!text.is_empty()).then_some(text),
-                    tag: (!tag.is_empty()).then_some(tag),
-                    favorite,
-                })
-                .map_err(|_| Failure::Unavailable)?;
-            let mut response = vec![0];
-            response.extend_from_slice(
-                &u16::try_from(hits.len())
-                    .map_err(|_| Failure::Unavailable)?
-                    .to_be_bytes(),
-            );
-            for hit in hits {
-                response.extend_from_slice(hit.item_id());
-            }
-            Ok(response)
-        }
-        13 => {
-            let mut cursor = Cursor::new(rest);
-            let length = usize::from(u16::from_be_bytes(
-                cursor
-                    .fixed(2)?
-                    .try_into()
-                    .map_err(|_| Failure::Unavailable)?,
-            ));
-            let flags = *cursor.fixed(1)?.first().ok_or(Failure::Unavailable)?;
-            cursor.finish()?;
-            if flags & !0b1111 != 0 {
-                return Err(Failure::Unavailable);
-            }
-            let generated = vault
-                .generate_password(&GeneratorConfig {
-                    length,
-                    lowercase: flags & 1 != 0,
-                    uppercase: flags & 2 != 0,
-                    digits: flags & 4 != 0,
-                    symbols: flags & 8 != 0,
-                })
-                .map_err(|_| Failure::Unavailable)?;
-            let mut response = vec![0];
-            response.extend_from_slice(generated.expose());
-            Ok(response)
-        }
         15 => {
             let mut cursor = Cursor::new(rest);
             let generation = cursor.u64()?;
@@ -4694,38 +4502,6 @@ fn encode_purge_prepared(
     let prepared = encode_prepared(vault, purge.prepared())?;
     response.extend_from_slice(&prepared[1..]);
     Ok(response)
-}
-
-fn encode_prepared(
-    vault: &HumanVault,
-    prepared: &PreparedHumanCommand,
-) -> Result<Vec<u8>, Failure> {
-    let signature = vault.sign(prepared).map_err(|_| Failure::Unavailable)?;
-    let mut response = vec![0];
-    response.extend_from_slice(prepared.transaction_id());
-    response.extend_from_slice(prepared.item_id());
-    push_bytes(&mut response, prepared.command())?;
-    push_bytes(&mut response, prepared.body())?;
-    response.extend_from_slice(&signature);
-    Ok(response)
-}
-
-fn decode_wire_record(cursor: &mut Cursor<'_>) -> Result<PasswordRecord, Failure> {
-    let title = cursor.bytes()?;
-    let username = cursor.bytes()?;
-    let mut password = Zeroizing::new(cursor.bytes()?);
-    let destination = cursor.bytes()?;
-    let notes = cursor.bytes()?;
-    let record = PasswordRecord::new(
-        std::str::from_utf8(&title).map_err(|_| Failure::Unavailable)?,
-        std::str::from_utf8(&username).map_err(|_| Failure::Unavailable)?,
-        &password,
-        std::str::from_utf8(&destination).map_err(|_| Failure::Unavailable)?,
-        std::str::from_utf8(&notes).map_err(|_| Failure::Unavailable)?,
-    )
-    .map_err(|_| Failure::Unavailable)?;
-    password.zeroize();
-    Ok(record)
 }
 
 pub(super) fn write_frame(output: &mut impl Write, value: &[u8]) -> Result<(), Failure> {

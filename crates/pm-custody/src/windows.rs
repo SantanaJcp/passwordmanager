@@ -773,7 +773,7 @@ fn serve_human(
             break;
         }
         let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
-        let response = crate::human_wire::handle_catalog(&mut vault, opcode, rest)
+        let response = crate::human_wire::handle_request_slice(&mut vault, opcode, rest)
             .ok_or(Failure::Unavailable)??;
         write_frame(tls, &response)?;
     }
