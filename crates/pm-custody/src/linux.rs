@@ -60,6 +60,10 @@ use crate::{Failure, take_path};
 
 mod sync_job;
 
+fn passkey_provider(service: &VaultService) -> Result<PasskeyProvider, Failure> {
+    crate::human_wire::passkey_provider(&service.path, service.device, &service.audit_custody)
+}
+
 const KEY_MAGIC: &[u8] = b"PMK1";
 const BOOTSTRAP_MAGIC: &[u8] = b"PMCB1";
 const PROFILE_MAGIC: &[u8] = b"PMP1";
@@ -2916,17 +2920,6 @@ fn read_human_unlock_frame(
     Ok(unlock)
 }
 
-fn passkey_provider(service: &VaultService) -> Result<PasskeyProvider, Failure> {
-    let delegated = DelegatedVault::open(
-        &service.path,
-        service.device,
-        Arc::clone(&service.audit_custody),
-    )
-    .map_err(|_| Failure::Unavailable)?;
-    let attempts = AttemptVault::open(delegated).map_err(|_| Failure::Unavailable)?;
-    PasskeyProvider::open(attempts).map_err(|_| Failure::Unavailable)
-}
-
 fn run_provider_once(service: &VaultService) -> Result<(), Failure> {
     let provider = service.provider.as_ref().ok_or(Failure::Unavailable)?;
     let attempts = AttemptVault::open(
@@ -3539,9 +3532,14 @@ fn handle_human_request(
     request: &[u8],
 ) -> Result<Vec<u8>, Failure> {
     let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
-    if let Some(response) =
-        crate::human_wire::handle_request_slice(vault, service.device, opcode, rest)
-    {
+    if let Some(response) = crate::human_wire::handle_request_slice(
+        vault,
+        &service.path,
+        service.device,
+        &service.audit_custody,
+        opcode,
+        rest,
+    ) {
         return response;
     }
     match opcode {
@@ -3627,169 +3625,6 @@ fn handle_human_request(
             let mut response = vec![0, status.phase.byte()];
             response.extend_from_slice(&status.pushed.to_be_bytes());
             response.extend_from_slice(&status.pulled.to_be_bytes());
-            Ok(response)
-        }
-        35 | 36 => {
-            let mut cursor = Cursor::new(rest);
-            let request_id = cursor
-                .fixed(16)?
-                .try_into()
-                .map_err(|_| Failure::Unavailable)?;
-            let verification = match cursor.fixed(1)? {
-                [1] => HumanVerification::Presence,
-                [2] => HumanVerification::Verified,
-                _ => return Err(Failure::Unavailable),
-            };
-            cursor.finish()?;
-            let provider = passkey_provider(service)?;
-            let status = if opcode == 35 {
-                let request = provider
-                    .pending_request(request_id)
-                    .map_err(|_| Failure::Unavailable)?
-                    .filter(|value| value.operation() == PasskeyOperation::Create)
-                    .ok_or(Failure::Unavailable)?;
-                let registration = vault
-                    .prepare_passkey_registration(&request)
-                    .map_err(|_| Failure::Unavailable)?;
-                commit_authority(vault, registration.prepared())?;
-                provider
-                    .response(request_id)
-                    .map_err(|_| Failure::Unavailable)?
-                    .ok_or(Failure::Unavailable)?
-            } else {
-                provider
-                    .confirm_assertion(vault, request_id, verification)
-                    .map_err(|_| Failure::Unavailable)?
-            };
-            let mut response = vec![0];
-            push_bytes(&mut response, &status.to_bytes())?;
-            Ok(response)
-        }
-        37 => {
-            let request_id = rest.try_into().map_err(|_| Failure::Unavailable)?;
-            let provider = passkey_provider(service)?;
-            let item = provider
-                .registered_item(request_id)
-                .map_err(|_| Failure::Unavailable)?;
-            let prepared = vault
-                .prepare_enable(item)
-                .map_err(|_| Failure::Unavailable)?;
-            commit_authority(vault, &prepared)?;
-            Ok(vec![0])
-        }
-        59 => handle_human_pending(vault, service, rest),
-        _ => Err(Failure::Unavailable),
-    }
-}
-
-#[allow(clippy::too_many_lines)]
-fn handle_human_pending(
-    vault: &mut HumanVault,
-    service: &VaultService,
-    request: &[u8],
-) -> Result<Vec<u8>, Failure> {
-    let (action, rest) = request.split_first().ok_or(Failure::Unavailable)?;
-    let attempts = AttemptVault::open(
-        DelegatedVault::open(
-            &service.path,
-            service.device,
-            Arc::clone(&service.audit_custody),
-        )
-        .map_err(|_| Failure::Unavailable)?,
-    )
-    .map_err(|_| Failure::Unavailable)?;
-    match action {
-        0 if rest.is_empty() => {
-            let values = attempts
-                .human_pending(vault)
-                .map_err(|_| Failure::Unavailable)?;
-            let provider = passkey_provider(service)?;
-            let mut response = vec![0];
-            response.extend_from_slice(
-                &u16::try_from(values.len())
-                    .map_err(|_| Failure::Unavailable)?
-                    .to_be_bytes(),
-            );
-            for value in values {
-                response.extend_from_slice(value.attempt_id());
-                response.extend_from_slice(value.credential_id());
-                response.extend_from_slice(value.owner_subject());
-                response.extend_from_slice(&value.owner_generation().to_be_bytes());
-                push_bytes(&mut response, value.agent_status().as_bytes())?;
-                push_bytes(&mut response, value.title().as_bytes())?;
-                push_bytes(&mut response, value.integration_id().as_bytes())?;
-                push_bytes(&mut response, attempt_state_name(value.state()).as_bytes())?;
-                push_bytes(&mut response, value.reason().unwrap_or("").as_bytes())?;
-                response.extend_from_slice(&value.expires_at_us().to_be_bytes());
-                let prompt = if value.state() == AttemptState::WaitingForHuman {
-                    if let Some(id) = value.passkey_request() {
-                        provider
-                            .pending_prompt(*id)
-                            .map_err(|_| Failure::Unavailable)?
-                            .map(|prompt| (*id, prompt))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                response.push(u8::from(prompt.is_some()));
-                if let Some((request_id, prompt)) = prompt {
-                    response.extend_from_slice(&request_id);
-                    response.push(match prompt.user_verification() {
-                        pm_vault::UserVerificationRequirement::Required => 2,
-                        pm_vault::UserVerificationRequirement::Preferred
-                        | pm_vault::UserVerificationRequirement::Discouraged => 1,
-                    });
-                    for field in [
-                        prompt.rp_id().as_bytes(),
-                        prompt.account().as_bytes(),
-                        prompt.origin().as_bytes(),
-                        prompt.document_id().as_bytes(),
-                    ] {
-                        push_bytes(&mut response, field)?;
-                    }
-                }
-            }
-            Ok(response)
-        }
-        1 => {
-            let attempt = rest.try_into().map_err(|_| Failure::Unavailable)?;
-            let snapshot = attempts
-                .human_cancel(vault, attempt)
-                .map_err(|_| Failure::Unavailable)?;
-            let mut response = vec![0];
-            push_bytes(
-                &mut response,
-                attempt_state_name(snapshot.state()).as_bytes(),
-            )?;
-            Ok(response)
-        }
-        2 => {
-            let mut cursor = Cursor::new(rest);
-            let request_id = cursor
-                .fixed(16)?
-                .try_into()
-                .map_err(|_| Failure::Unavailable)?;
-            let verification = match cursor.fixed(1)? {
-                [1] => HumanVerification::Presence,
-                [2] => HumanVerification::Verified,
-                _ => return Err(Failure::Unavailable),
-            };
-            cursor.finish()?;
-            let provider = passkey_provider(service)?;
-            let pending = provider
-                .pending_request(request_id)
-                .map_err(|_| Failure::Unavailable)?
-                .ok_or(Failure::Unavailable)?;
-            if pending.operation() != PasskeyOperation::Get {
-                return Err(Failure::Unavailable);
-            }
-            let status = provider
-                .confirm_assertion(vault, request_id, verification)
-                .map_err(|_| Failure::Unavailable)?;
-            let mut response = vec![0];
-            push_bytes(&mut response, &status.to_bytes())?;
             Ok(response)
         }
         _ => Err(Failure::Unavailable),

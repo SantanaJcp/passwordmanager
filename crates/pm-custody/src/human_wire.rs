@@ -4,11 +4,12 @@
 
 use pm_crypto::KdfProfile;
 use pm_vault::{
-    AgentEnrollment, AuditAction, AuthRecord, AuthorizationReason, CsvDelimiter, CsvEncoding,
-    CsvField, CsvImportDecision, CsvImportProfile, CsvMapping, CsvRowStatus, Destination,
-    GeneratorConfig, HumanCommitError, HumanMetadata, HumanVault, ItemLifecycle, LogicalRecord,
-    LogicalValue, PasswordRecord, PreparedHumanCommand, PrivateKeyFormat, RecordKind, SearchQuery,
-    SourceEncoding, TotpAlgorithm,
+    AgentEnrollment, AttemptState, AttemptVault, AuditAction, AuthRecord, AuthorizationReason,
+    CsvDelimiter, CsvEncoding, CsvField, CsvImportDecision, CsvImportProfile, CsvMapping,
+    CsvRowStatus, DelegatedVault, Destination, GeneratorConfig, HumanCommitError, HumanMetadata,
+    HumanVault, HumanVerification, ItemLifecycle, LogicalRecord, LogicalValue, PasskeyOperation,
+    PasskeyProvider, PasswordRecord, PreparedHumanCommand, PrivateKeyFormat, RecordKind,
+    SearchQuery, SourceEncoding, TotpAlgorithm,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -22,11 +23,14 @@ const LAB_AGENT_B: [u8; 16] = [0xb2; 16];
 /// owned by another shared human-wire slice.
 pub(crate) fn handle_request_slice(
     vault: &mut HumanVault,
+    path: &std::path::Path,
     device: [u8; 16],
+    audit_custody: &std::sync::Arc<pm_vault::AuditDeviceCustody>,
     opcode: u8,
     request: &[u8],
 ) -> Option<Result<Vec<u8>, Failure>> {
-    if !matches!(opcode, 2..=13 | 15..=16 | 19..=30 | 33 | 40..=41 | 43 | 45..=46 | 49..=58) {
+    if !matches!(opcode, 2..=13 | 15..=16 | 19..=30 | 33 | 35..=37 | 40..=41 | 43 | 45..=46 | 49..=59)
+    {
         return None;
     }
     let rest = request;
@@ -241,6 +245,55 @@ pub(crate) fn handle_request_slice(
                 .map_err(|_| Failure::Unavailable)?;
             encode_prepared(vault, &prepared)
         }
+        35 | 36 => {
+            let mut cursor = Cursor::new(rest);
+            let request_id = cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            let verification = match cursor.fixed(1)? {
+                [1] => HumanVerification::Presence,
+                [2] => HumanVerification::Verified,
+                _ => return Err(Failure::Unavailable),
+            };
+            cursor.finish()?;
+            let provider = passkey_provider(path, device, audit_custody)?;
+            let status = if opcode == 35 {
+                let request = provider
+                    .pending_request(request_id)
+                    .map_err(|_| Failure::Unavailable)?
+                    .filter(|value| value.operation() == PasskeyOperation::Create)
+                    .ok_or(Failure::Unavailable)?;
+                let registration = vault
+                    .prepare_passkey_registration(&request)
+                    .map_err(|_| Failure::Unavailable)?;
+                commit_authority(vault, registration.prepared())?;
+                provider
+                    .response(request_id)
+                    .map_err(|_| Failure::Unavailable)?
+                    .ok_or(Failure::Unavailable)?
+            } else {
+                provider
+                    .confirm_assertion(vault, request_id, verification)
+                    .map_err(|_| Failure::Unavailable)?
+            };
+            let mut response = vec![0];
+            push_bytes(&mut response, &status.to_bytes())?;
+            Ok(response)
+        }
+        37 => {
+            let request_id = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let provider = passkey_provider(path, device, audit_custody)?;
+            let item = provider
+                .registered_item(request_id)
+                .map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_enable(item)
+                .map_err(|_| Failure::Unavailable)?;
+            commit_authority(vault, &prepared)?;
+            Ok(vec![0])
+        }
+        59 => handle_human_pending(vault, path, device, audit_custody, rest),
         40 => {
             if !rest.is_empty() {
                 return Err(Failure::Unavailable);
@@ -1428,4 +1481,140 @@ fn create_and_enable(vault: &mut HumanVault, record: &LogicalRecord) -> Result<(
         .prepare_enable(item)
         .map_err(|_| Failure::Unavailable)?;
     commit_authority(vault, &prepared)
+}
+
+#[allow(clippy::too_many_lines)]
+fn handle_human_pending(
+    vault: &mut HumanVault,
+    path: &std::path::Path,
+    device: [u8; 16],
+    audit_custody: &std::sync::Arc<pm_vault::AuditDeviceCustody>,
+    request: &[u8],
+) -> Result<Vec<u8>, Failure> {
+    let (action, rest) = request.split_first().ok_or(Failure::Unavailable)?;
+    let attempts = AttemptVault::open(
+        DelegatedVault::open(path, device, std::sync::Arc::clone(audit_custody))
+            .map_err(|_| Failure::Unavailable)?,
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    match action {
+        0 if rest.is_empty() => {
+            let values = attempts
+                .human_pending(vault)
+                .map_err(|_| Failure::Unavailable)?;
+            let provider = passkey_provider(path, device, audit_custody)?;
+            let mut response = vec![0];
+            response.extend_from_slice(
+                &u16::try_from(values.len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            for value in values {
+                response.extend_from_slice(value.attempt_id());
+                response.extend_from_slice(value.credential_id());
+                response.extend_from_slice(value.owner_subject());
+                response.extend_from_slice(&value.owner_generation().to_be_bytes());
+                push_bytes(&mut response, value.agent_status().as_bytes())?;
+                push_bytes(&mut response, value.title().as_bytes())?;
+                push_bytes(&mut response, value.integration_id().as_bytes())?;
+                push_bytes(&mut response, attempt_state_name(value.state()).as_bytes())?;
+                push_bytes(&mut response, value.reason().unwrap_or("").as_bytes())?;
+                response.extend_from_slice(&value.expires_at_us().to_be_bytes());
+                let prompt = if value.state() == AttemptState::WaitingForHuman {
+                    if let Some(id) = value.passkey_request() {
+                        provider
+                            .pending_prompt(*id)
+                            .map_err(|_| Failure::Unavailable)?
+                            .map(|prompt| (*id, prompt))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                response.push(u8::from(prompt.is_some()));
+                if let Some((request_id, prompt)) = prompt {
+                    response.extend_from_slice(&request_id);
+                    response.push(match prompt.user_verification() {
+                        pm_vault::UserVerificationRequirement::Required => 2,
+                        pm_vault::UserVerificationRequirement::Preferred
+                        | pm_vault::UserVerificationRequirement::Discouraged => 1,
+                    });
+                    for field in [
+                        prompt.rp_id().as_bytes(),
+                        prompt.account().as_bytes(),
+                        prompt.origin().as_bytes(),
+                        prompt.document_id().as_bytes(),
+                    ] {
+                        push_bytes(&mut response, field)?;
+                    }
+                }
+            }
+            Ok(response)
+        }
+        1 => {
+            let attempt = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let snapshot = attempts
+                .human_cancel(vault, attempt)
+                .map_err(|_| Failure::Unavailable)?;
+            let mut response = vec![0];
+            push_bytes(
+                &mut response,
+                attempt_state_name(snapshot.state()).as_bytes(),
+            )?;
+            Ok(response)
+        }
+        2 => {
+            let mut cursor = Cursor::new(rest);
+            let request_id = cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            let verification = match cursor.fixed(1)? {
+                [1] => HumanVerification::Presence,
+                [2] => HumanVerification::Verified,
+                _ => return Err(Failure::Unavailable),
+            };
+            cursor.finish()?;
+            let provider = passkey_provider(path, device, audit_custody)?;
+            let pending = provider
+                .pending_request(request_id)
+                .map_err(|_| Failure::Unavailable)?
+                .ok_or(Failure::Unavailable)?;
+            if pending.operation() != PasskeyOperation::Get {
+                return Err(Failure::Unavailable);
+            }
+            let status = provider
+                .confirm_assertion(vault, request_id, verification)
+                .map_err(|_| Failure::Unavailable)?;
+            let mut response = vec![0];
+            push_bytes(&mut response, &status.to_bytes())?;
+            Ok(response)
+        }
+        _ => Err(Failure::Unavailable),
+    }
+}
+
+pub(crate) fn passkey_provider(
+    path: &std::path::Path,
+    device: [u8; 16],
+    audit_custody: &std::sync::Arc<pm_vault::AuditDeviceCustody>,
+) -> Result<PasskeyProvider, Failure> {
+    let delegated = DelegatedVault::open(path, device, std::sync::Arc::clone(audit_custody))
+        .map_err(|_| Failure::Unavailable)?;
+    let attempts = AttemptVault::open(delegated).map_err(|_| Failure::Unavailable)?;
+    PasskeyProvider::open(attempts).map_err(|_| Failure::Unavailable)
+}
+
+fn attempt_state_name(state: pm_vault::AttemptState) -> &'static str {
+    match state {
+        pm_vault::AttemptState::Created => "CREATED",
+        pm_vault::AttemptState::Running => "RUNNING",
+        pm_vault::AttemptState::WaitingForHuman => "WAITING_FOR_HUMAN",
+        pm_vault::AttemptState::Succeeded => "SUCCEEDED",
+        pm_vault::AttemptState::Failed => "FAILED",
+        pm_vault::AttemptState::Cancelled => "CANCELLED",
+        pm_vault::AttemptState::Expired => "EXPIRED",
+        pm_vault::AttemptState::Indeterminate => "INDETERMINATE",
+    }
 }
