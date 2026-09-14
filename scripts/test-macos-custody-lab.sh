@@ -2,6 +2,24 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 set -euo pipefail
 
+diagnostic_features=()
+harness_mode=()
+case "$#" in
+  0) ;;
+  1)
+    if [[ "$1" != --diagnostic ]]; then
+      echo "ticket 26 laboratory accepts only the optional --diagnostic mode" >&2
+      exit 1
+    fi
+    diagnostic_features=(--features macos-ticket26-diagnostics)
+    harness_mode=(--diagnostic)
+    ;;
+  *)
+    echo "ticket 26 laboratory accepts at most one --diagnostic argument" >&2
+    exit 1
+    ;;
+esac
+
 if [[ "$(uname -s)" != Darwin ]]; then
   echo "ticket 26 laboratory requires a native macOS runner" >&2
   exit 1
@@ -25,12 +43,12 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 libsodium_out_dir=$(
   ./scripts/cargo-local.sh build -p pm-custody -p pm-cli \
-    --features macos-ticket26-diagnostics --locked --offline \
+    "${diagnostic_features[@]}" --locked --offline \
     --message-format=json-render-diagnostics |
     python3 scripts/extract-libsodium-build-metadata.py
 )
 ./scripts/cargo-local.sh test -p pm-native-channel -p pm-vault -p pm-crypto \
-  --features macos-ticket26-diagnostics --locked --offline
+  "${diagnostic_features[@]}" --locked --offline
 plutil -lint packaging/macos/com.santanajcp.passwordmanager.plist >/dev/null
 
 machine=$(uname -m)
@@ -55,6 +73,7 @@ for binary in target/debug/pm-custody target/debug/pm; do
 done
 
 python3 crates/pm-custody/tests/macos_lab.py \
+  "${harness_mode[@]}" \
   "$root/target/debug/pm-custody" \
   "$root/target/debug/pm" \
   "$root/packaging/macos/com.santanajcp.passwordmanager.plist" \

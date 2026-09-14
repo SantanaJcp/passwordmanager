@@ -387,7 +387,7 @@ def publish_rpk(source, destination):
     assert sudo(["cmp", "-s", source, destination], check=False).returncode == 0
 
 
-def create_vault(cli, path):
+def create_vault(cli, path, diagnostic):
     process = subprocess.Popen(
         ["sudo", "-n", "-u", CUSTODIAN, str(cli), "vault", "create", str(path)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -399,9 +399,10 @@ def create_vault(cli, path):
     derivation_started = time.monotonic_ns()
     recovery = process.stdout.readline()
     derivation_ms = min((time.monotonic_ns() - derivation_started) // 1_000_000, 999_999)
-    creation_status = f"PM26_DIAGNOSTIC vault-root-create-ms={derivation_ms}".encode()
-    diagnostic_lines(creation_status)
-    print(creation_status.decode())
+    if diagnostic:
+        creation_status = f"PM26_DIAGNOSTIC vault-root-create-ms={derivation_ms}".encode()
+        diagnostic_lines(creation_status)
+        print(creation_status.decode())
     assert recovery.startswith(b"Recovery code (store externally): PMR1-")
     assert process.stdout.readline() == b"Reintroduce recovery code to confirm the external copy:\n"
     process.stdin.write(recovery.split(b": ", 1)[1]); process.stdin.close()
@@ -450,12 +451,16 @@ def parse_sodium_cflags(config_log):
     return b"opt0" if opt0 else b"optimized"
 
 
-def classify_native_sodium(config_log):
+def classify_native_sodium(config_log, diagnostic):
     assert config_log.is_file(), "native libsodium build metadata is unavailable"
     classification = parse_sodium_cflags(config_log.read_bytes())
-    status = b"PM26_DIAGNOSTIC sodium-cflags=" + classification
-    diagnostic_lines(status)
-    print(status.decode())
+    assert classification == b"optimized", "native libsodium build is not optimized"
+    if diagnostic:
+        status = b"PM26_DIAGNOSTIC sodium-cflags=" + classification
+        diagnostic_lines(status)
+        print(status.decode())
+    else:
+        print("PASS macos-libsodium cflags=optimized")
 
 
 def classify_launchd_service(result, expected_pid):
@@ -469,13 +474,24 @@ def classify_launchd_service(result, expected_pid):
     return b"same-pid" if int(match.group(1)) == expected_pid else b"different-pid"
 
 
-def human_authorization_setup(binary, profile, private, endpoint, first, second, service_pid):
+def human_authorization_setup(
+    binary, profile, private, endpoint, first, second, service_pid, diagnostic,
+):
     command = [
-        "env", f"{DIAGNOSTIC_ENV}=1", binary, "human-authorization",
+        binary, "human-authorization",
         "--profile", profile, "--private", private, "--socket", endpoint,
         "--action", "setup",
     ]
+    if diagnostic:
+        command = ["env", f"{DIAGNOSTIC_ENV}=1"] + command
     result = run(command, check=False, input=wire_fields([PASSWORD, first, second]))
+    if not diagnostic:
+        assert result.returncode == 0, (
+            "human authorization setup failed in normal mode", result.returncode,
+        )
+        assert result.stdout == b"PASS human-authorization action=setup\n"
+        assert result.stderr == b""
+        return result
     diagnostic_stderr = result.stderr
     if result.returncode == 4:
         assert diagnostic_stderr.endswith(b"CUSTODY_UNAVAILABLE\n")
@@ -560,13 +576,26 @@ def fake_server_rejected_before_tls(binary, profile, private, impostor_home):
     assert server.returncode == 0 and stdout == b"0\n" and stderr == b"", (stdout, stderr)
 
 
+def parse_lab_arguments(values):
+    arguments = list(values)
+    diagnostic = bool(arguments and arguments[0] == "--diagnostic")
+    if diagnostic:
+        arguments.pop(0)
+    assert len(arguments) == 4 and not any(
+        value.startswith("--") for value in arguments
+    ), "usage: macos_lab.py [--diagnostic] CUSTODY CLI PLIST SODIUM_CONFIG"
+    return diagnostic, tuple(pathlib.Path(value).resolve() for value in arguments)
+
+
 def main():
     assert sys.platform == "darwin" and os.geteuid() != 0
     assert os.environ.get("PM_MACOS_EPHEMERAL_CI") == "1"
-    binary, cli, source_plist, sodium_config = map(
-        lambda value: pathlib.Path(value).resolve(), sys.argv[1:]
+    assert DIAGNOSTIC_ENV not in os.environ, (
+        "ticket 26 diagnostic activation must be injected only into owned fixture processes"
     )
-    classify_native_sodium(sodium_config)
+    diagnostic, paths = parse_lab_arguments(sys.argv[1:])
+    binary, cli, source_plist, sodium_config = paths
+    classify_native_sodium(sodium_config, diagnostic)
     guarded = [INSTALL, STATE, RUNTIME, PLIST]
     collisions = [str(path) for path in guarded if path.exists()]
     assert not collisions, f"refusing to replace pre-existing host paths: {collisions}"
@@ -661,18 +690,21 @@ def main():
                   "--server-public", server_pub, "--server-uid", str(custodian_uid),
                   "--role", role])
         sudo(["chmod", "0444", agent_profile, human_profile])
-        create_vault(INSTALL / "pm", STATE / "vault.sqlite3")
+        create_vault(INSTALL / "pm", STATE / "vault.sqlite3", diagnostic)
 
-        diagnostic_plist = scratch / "ticket26-launchd.plist"
         with open(source_plist, "rb") as source:
             launchd_config = plistlib.load(source)
         assert "EnvironmentVariables" not in launchd_config
         assert "StandardErrorPath" not in launchd_config
-        launchd_config["EnvironmentVariables"] = {DIAGNOSTIC_ENV: "1"}
-        launchd_config["StandardErrorPath"] = str(DIAGNOSTIC_LOG)
-        with open(diagnostic_plist, "wb") as destination:
-            plistlib.dump(launchd_config, destination)
-        sudo(["install", "-o", "root", "-g", "wheel", "-m", "0644", diagnostic_plist, PLIST])
+        plist_to_install = source_plist
+        if diagnostic:
+            diagnostic_plist = scratch / "ticket26-launchd.plist"
+            launchd_config["EnvironmentVariables"] = {DIAGNOSTIC_ENV: "1"}
+            launchd_config["StandardErrorPath"] = str(DIAGNOSTIC_LOG)
+            with open(diagnostic_plist, "wb") as destination:
+                plistlib.dump(launchd_config, destination)
+            plist_to_install = diagnostic_plist
+        sudo(["install", "-o", "root", "-g", "wheel", "-m", "0644", plist_to_install, PLIST])
         owned_paths.append(("plist", PLIST))
         sudo(["plutil", "-lint", PLIST])
         sudo(["launchctl", "bootstrap", "system", PLIST]); bootstrapped = True
@@ -698,7 +730,7 @@ def main():
         require_readable_regular(AGENT, agent_key, agent_uid, 0o400)
         assert launchd_peer_uid(AGENT, RUNTIME / "agent.sock") == custodian_uid
         probe(INSTALL / "pm-custody", AGENT, agent_profile, agent_key,
-              RUNTIME / "agent.sock", diagnostic=True)
+              RUNTIME / "agent.sock", diagnostic=diagnostic)
         probe(INSTALL / "pm-custody", pwd.getpwuid(os.getuid()).pw_name,
               human_profile, human_key, RUNTIME / "human.sock")
 
@@ -754,6 +786,7 @@ def main():
         human_authorization_setup(
             INSTALL / "pm-custody", human_profile, human_key, RUNTIME / "human.sock",
             published_agent_pub.read_bytes(), published_other_pub.read_bytes(), pid,
+            diagnostic,
         )
         suspend = run([INSTALL / "pm-custody", "human-authorization", "--profile", human_profile,
                        "--private", human_key, "--socket", RUNTIME / "human.sock", "--action", "suspend"],
@@ -769,6 +802,11 @@ def main():
 
         tty_clipboard = run(["script", "-q", "/dev/null", INSTALL / "pm-custody", "macos-native-probe"])
         assert b"PASS macos-native tty=real rlimit-core=0 clipboard=AppKit-changeCount" in tty_clipboard.stdout
+        if not diagnostic:
+            diagnostic_log = sudo(["test", "-e", DIAGNOSTIC_LOG], check=False)
+            assert diagnostic_log.returncode != 0 and diagnostic_log.stdout == b"", (
+                "normal mode created a diagnostic log"
+            )
     except BaseException as error:
         lab_error = error
 

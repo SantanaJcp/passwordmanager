@@ -91,6 +91,10 @@ require_literal '[macOS custody acceptance workflow](../../.github/workflows/mac
 require_literal 'fetch --locked' "$fetch"
 require_literal '--locked --offline' "$lab"
 require_literal 'lipo -archs' "$lab"
+require_literal 'diagnostic_features=()' "$lab"
+require_literal 'harness_mode=()' "$lab"
+require_literal 'diagnostic_features=(--features macos-ticket26-diagnostics)' "$lab"
+require_literal 'harness_mode=(--diagnostic)' "$lab"
 require_literal 'scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")' "$harness"
 require_literal 'require_owner_mode(scratch.parent, (0, 0o1777))' "$harness"
 require_literal 'stat.S_IMODE(full_mode)' "$harness"
@@ -141,6 +145,11 @@ require_literal 'require_safe_existing_parent(install_parent)' "$harness"
 require_literal 'owned_empty_directories.append(("install-parent", install_parent))' "$harness"
 require_literal 'attempt(f"rmdir-{name}", ["rmdir", path])' "$harness"
 require_literal '"env", f"{DIAGNOSTIC_ENV}=1"' "$harness"
+require_literal 'plist_to_install = source_plist' "$harness"
+require_literal 'diagnostic=diagnostic' "$harness"
+require_literal 'classify_native_sodium(sodium_config, diagnostic)' "$harness"
+require_literal 'assert DIAGNOSTIC_ENV not in os.environ' "$harness"
+require_literal '"normal mode created a diagnostic log"' "$harness"
 if grep -Fq 'RUNNER_TEMP' "$harness"; then
     echo 'macOS custody laboratory still depends on the private runner temp root' >&2
     exit 1
@@ -153,14 +162,54 @@ if grep -Fq 'macos-ticket26-diagnostics' "$workflow" ||
 fi
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$harness" <<'PY'
+import contextlib
 import importlib.util
+import io
 import pathlib
 import sys
+import tempfile
 
 path = pathlib.Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("pm_macos_lab", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+
+normal, paths = module.parse_lab_arguments(["custody", "cli", "plist", "config"])
+assert normal is False and len(paths) == 4
+diagnostic, paths = module.parse_lab_arguments(
+    ["--diagnostic", "custody", "cli", "plist", "config"]
+)
+assert diagnostic is True and len(paths) == 4
+for rejected in (
+    ["--unknown", "cli", "plist", "config"],
+    ["--diagnostic", "--unknown", "cli", "plist", "config"],
+    ["custody", "cli", "plist"],
+):
+    try:
+        module.parse_lab_arguments(rejected)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("unknown or incomplete laboratory mode was accepted")
+
+with tempfile.TemporaryDirectory() as temporary:
+    config = pathlib.Path(temporary) / "config.log"
+    config.write_bytes(b"CFLAGS='-O2 -g'\n")
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        module.classify_native_sodium(config, False)
+    assert output.getvalue() == "PASS macos-libsodium cflags=optimized\n"
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        module.classify_native_sodium(config, True)
+    assert output.getvalue() == "PM26_DIAGNOSTIC sodium-cflags=optimized\n"
+    config.write_bytes(b"CFLAGS='-O0 -g'\n")
+    try:
+        module.classify_native_sodium(config, False)
+    except AssertionError as error:
+        assert "not optimized" in str(error)
+    else:
+        raise AssertionError("unoptimized native libsodium metadata was accepted")
 
 assert module.parse_owner_mode("0 041777") == (0, 0o1777)
 assert module.parse_owner_mode("501 0100400") == (501, 0o400)

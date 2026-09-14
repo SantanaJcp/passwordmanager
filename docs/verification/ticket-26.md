@@ -48,6 +48,27 @@ run is recorded below. Its only product entry point is:
 PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh
 ```
 
+That command is the normal acceptance mode. It builds the ordinary binaries
+without `macos-ticket26-diagnostics`, launches the unmodified production plist,
+sets no diagnostic environment variable and creates or reads no diagnostic
+log. It must exercise the same identity, TLS/RPK, ACL, durability, restart,
+terminal, clipboard and strict owned-cleanup gates described below. The pinned
+libsodium build metadata remains a build-input gate and must classify the exact
+build as optimized; it is not a product diagnostic channel.
+
+The previous bounded diagnostic path remains available only through the exact
+explicit opt-in:
+
+```text
+PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh --diagnostic
+```
+
+That mode alone enables the compile-time diagnostic feature, injects the fixed
+diagnostic environment into the synthetic client and launchd fixture, and
+validates the protected diagnostic log. Unknown or additional arguments fail;
+normal-mode failure never selects diagnostic mode. Native acceptance requires
+the default normal command, while diagnostic runs remain supporting evidence.
+
 Prerequisites are a fresh macOS 13-or-newer Intel or Apple-silicon CI runner,
 the repository-pinned Rust 1.98.1 toolchain, Xcode command-line tools,
 Python 3, a logged-in non-root console user, and passwordless `sudo`. The
@@ -694,11 +715,35 @@ Fake-command checks must cover existing-parent preservation, created-parent
 ordering, nonempty `rmdir` failure and continued cleanup attempts. This remains
 fixture-only and needs the same native two-architecture run.
 
+Native cleanup run
+[`34837550960`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34837550960)
+on `c7f6fb6` passed on both `macos-15-intel` and `macos-15`. Both jobs completed
+the custody, identity, TLS/RPK, ACL, persistence, terminal and AppKit gates and
+then removed the exact owned launchd job, paths, accounts and conditionally
+created install parent with verified absence. This closes the reported fixture
+cleanup defect, but the jobs still used the explicit diagnostic build and do
+not establish the normal-binary or complete TUI requirements.
+
+### Normal-mode checkpoint
+
+The laboratory now defaults to the normal mode defined above. The shell passes
+no feature or harness-mode argument in that path; the harness installs the
+unchanged production plist, rejects ambient diagnostic activation, runs agent
+and human operations without the diagnostic environment, and requires the
+protected diagnostic log to remain absent. `--diagnostic` is the sole explicit
+alternative and retains the prior bounded diagnostic assertions. Both modes
+still bind and reject ambiguous libsodium build metadata, and require the exact
+build to be optimized.
+
+The static checker covers both closed argument forms, rejects unknown and
+incomplete modes, distinguishes normal versus diagnostic output, rejects
+unoptimized metadata, and pins normal plist/log behavior. Shell syntax, Python
+AST parsing, the static macOS checker and `git diff --check` passed. No Cargo,
+build, native laboratory or product behavior was executed for this checkpoint;
+the default command must run on both native architectures before it is evidence.
+
 ## Remaining acceptance work
 
-- Resolve and verify the inherited cleanup behavior only after its separate
-  authorization decision; do not treat the two successful jobs as approval to
-  change that path.
 - Verify the normal non-diagnostic binary and complete keyboard TUI composition
   rather than treating the diagnostic custody flow as the daily human UI.
 - Complete the separately scoped reboot/FileVault and signing/notarization
