@@ -767,10 +767,103 @@ explicit opt-in exactly once. Shell syntax, Python AST parsing, the complete
 static macOS checker and `git diff --check` also passed. No Cargo command or
 native product behavior was executed for this checkpoint.
 
+Native normal-mode run
+[`34841029441`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34841029441)
+on `1be9f4c` passed on both `macos-15-intel` and `macos-15`. Both jobs built the
+ordinary single-architecture binaries without
+`macos-ticket26-diagnostics`, installed the production plist without a
+diagnostic environment or log, classified the exact libsodium build as
+optimized, and passed the live LaunchDaemon, bilateral `getpeereid`, TLS/RPK,
+ACL/wrong-UID, persistent suspension/restart, `/dev/tty`, AppKit clipboard,
+SQLite full-fsync and strict owned-cleanup gates. This closes the normal-mode
+checkpoint. The applicable native Rust selection still contained nine tests
+and several Linux-gated executables reported zero tests, so this run does not
+claim the integrated keyboard TUI or complete native workspace coverage.
+
+### Integrated native keyboard-TUI method
+
+This method is fixed before composing the already integrated Ticket 23--25
+interfaces into the macOS branch. The acceptance entry point remains the
+normal, non-diagnostic laboratory. It must build and architecture-check
+`pm-custody`, `pm` and `pm-sync`, install the ordinary custody binary, and run
+the TUI through the same live system LaunchDaemon, vault engine, human Unix
+socket, TLS 1.3/RPK profile and native peer-UID checks used above. A separate
+CLI-only invocation, a second engine, a simulated terminal or a diagnostic
+feature is not TUI evidence.
+
+The harness will use Python's native `forkpty`/PTY primitives, not a Linux user
+or mount namespace and not an optional terminal package. The child is the
+logged-in non-root human and runs the public `pm-custody tui` command with the
+owned human profile/key and live human socket. The parent sends only keyboard
+bytes, reads the rendered PTY stream, and changes the terminal dimensions with
+`TIOCSWINSZ`. It must observe 80x24, 42x12 and 100x30 rendering. Before sending
+Enter for visible input, it waits for that exact input to be rendered; this is
+only synchronization with Crossterm consumption, not an operation retry or a
+deadline extension. Password and recovery re-entry remain hidden and are
+never searched for in the captured stream.
+
+The native run must replay the complete observable keyboard contracts of
+Tickets 23, 24 and 25, rather than accepting a screen that merely starts:
+
+1. seed and browse all seven record kinds and every field descriptor, including
+   notes, custom/source, every auth member and attachment descriptors; prove
+   selection alone exposes no value, then use exact-field reveal and copy;
+   cover search, tags, favorite, generator, history, trash, restore and both
+   purge ceremonies, Unicode/control sanitization, reveal expiry and idle lock;
+2. operate the access and pending views by keyboard: closed enrollment,
+   enable/disable, suspend/resume, revoke, safe pending context and cancel;
+   check the resulting state from a real agent process, and prove human lock
+   does not transfer ownership of the channel or suspend the agent;
+3. execute CSV and 1PUX preview/mapping/duplicate/cancel/confirm, encrypted
+   backup, warned plaintext export, restore, both rotations, real pinned sync
+   pairing/status/offline/failure/restart, causal retirement, audit query and
+   purge, and streaming download of an attachment larger than the human frame.
+   Every negative remains an explicit failure and no source is mutated.
+
+The platform composition itself has two closed requirements. First, the TUI
+module and `tui` command must compile and execute on both Linux and macOS from
+the one custody implementation; a macOS cfg that omits the command or reports
+zero applicable TUI tests is a failure. Second, explicit copy on macOS must use
+`pm_native_channel::OwnedClipboard`, which publishes through AppKit and clears
+only while its recorded `NSPasteboard.changeCount` still owns the selection.
+It must not invoke Linux `wl-copy`, `pbcopy`, OSC52 or an alternate clipboard
+backend. The test observer may read the pasteboard to compare the synthetic
+value and publish a synthetic replacement; after the copy lease expires that
+replacement must remain. The agent account must be unable to obtain the copied
+value. This observer use is not a product execution path.
+
+The existing wrong-UID cases remain mandatory with the integrated binary: a
+copied correct RPK under the wrong native UID is rejected, the agent cannot use
+the human endpoint, and the human cannot use the agent endpoint. After keyboard
+lock and after idle lock, the PTY must terminate, an agent operation must still
+work when authorization is otherwise enabled, and a fresh human connection
+must require the master password again. A wrong password must leave the vault
+unchanged and must not produce an unlock-success audit record. Terminal bytes
+must contain neither fixture secrets outside explicit timed exposure nor an
+executed OSC52 sequence.
+
+All fixture resources join the existing collision-checked ownership ledger.
+The TUI child, sync/provider processes and clipboard observer are stopped and
+waited; then the strict launchd/path/account cleanup and exact absence checks
+run before any PASS line. Cleanup failures are aggregated and prevent success.
+The native TUI PASS must name keyboard, PTY, TLS/RPK, seven kinds/all fields,
+access/pending, operations, AppKit ownership race, wrong UID, explicit lock and
+idle lock. It must appear on both authorized architectures in the same run.
+
+Before native dispatch, static verification must establish that the new
+harness parses, its command/fixture inventory is closed, its PTY driver waits
+for visible input before Enter, and the workflow still invokes only the normal
+entry point. Native success then requires every prior custody assertion plus
+the integrated TUI assertion on both architectures. The separate merger must
+also repeat `scripts/check.sh`, the clean locked/offline build and the complete
+ordered Linux laboratory set after composition. None of those local gates,
+the prior nine native tests, or run 18 substitutes for this native PTY run.
+
 ## Remaining acceptance work
 
-- Verify the normal non-diagnostic binary and complete keyboard TUI composition
-  rather than treating the diagnostic custody flow as the daily human UI.
+- Compose and verify the complete keyboard TUI through the normal
+  non-diagnostic binary; run 18 verifies that binary's custody flow but not the
+  TUI command or Ticket 23--25 keyboard operations.
 - Complete the separately scoped reboot/FileVault and signing/notarization
   gates.
 - Execute or recover the intended pre-port behavioral red if the acceptance
