@@ -188,12 +188,12 @@ use std::{
 #[test]
 #[allow(clippy::too_many_lines)]
 fn replica_push_and_pull_cross_the_real_tls_rpc_process() {
-    let audit_custody = test_audit_custody();
     use std::{
         os::unix::fs::PermissionsExt,
         thread,
         time::{Duration, Instant},
     };
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new();
     let seed = dir.path("seed-tls.sqlite3");
     persist(&seed);

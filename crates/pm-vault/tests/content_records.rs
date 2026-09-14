@@ -32,8 +32,8 @@ impl PasswordRng for FailingRng {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn attachment_above_16_mib_streams_atomically_in_bounded_chunks() {
-    let audit_custody = test_audit_custody();
     const SIZE: u64 = 16 * 1024 * 1024 + 4096;
+    let audit_custody = test_audit_custody();
     let directory = tempfile_dir("streaming");
     let path = directory.join("vault.sqlite3");
     persist_test_vault(&path);
