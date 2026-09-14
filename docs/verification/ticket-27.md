@@ -1732,3 +1732,13 @@ ACE, peer impostor, PID cambiado, pseudohandle/source inválido, reparse/link y
 cambio concurrente del DACL. El caso positivo procesa un 1PUX sintético mayor
 que un frame desde el mismo handle. Ningún test modifica el DACL de un proceso o
 sesión ajenos; el fixture usa exclusivamente el proceso TUI propio efímero.
+
+La corrida Windows 11 ARM64
+[`34869286841`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34869286841)
+sobre `6759151694773d68df832677030e7caaef1e06c5` tampoco alcanzó el producto.
+El target library de `pm-custody` encontró que la primera extracción común no
+había llevado sus imports `Read`/`Write`, el límite `MAX_HUMAN_FRAME` ni el
+lector acotado `read_frame_bounded`. Es un fallo de composición/compilación, no
+un RED de pantalla. La unidad común posterior posee explícitamente esas
+primitivas y mantiene el límite de 18 MiB para frames de control y de 1 MiB para
+streaming; debe pasar check local antes de otra publicación nativa.
