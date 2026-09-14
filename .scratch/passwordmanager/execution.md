@@ -203,3 +203,47 @@ y una única barrida secuencial `count=20 failures=0` (617 s), con logs
 `/tmp/pm25-final4-test-linux-*-lab.log`. No hubo skips, retries de producto ni
 cambios de deadline. 25 queda integrado y resuelto para Linux x86_64; no
 acredita nativos ni la revisión formal final.
+
+## Propagación de errores de cleanup — integración distinta
+
+El candidato `4400ffb6af241dcb03e806abb594359a71e49762` se integró sobre la
+raíz limpia `9db150c` por un merger distinto. Hubo un único conflicto textual
+en `crates/pm-custody/src/linux/tui.rs`; la resolución conservó el flujo de
+acceso/pendientes y reautenticación de 24 junto con los guardas de cleanup del
+candidato. No se tocaron otros worktrees, gates nativos, `master` ni la
+revisión formal.
+
+La honestidad TDD queda explícita: `cd320084951b3a8e1328c7367c8882a43eafe456`
+era un checkpoint de especificación que no compilaba por helpers ausentes,
+no un RED conductual. Los fallos posteriores de compilación/Clippy fueron
+defectos del harness o del código en desarrollo; no prueban una regresión
+conductual previa. Las comprobaciones finales de inyección de fallos sí
+quedaron verdes, pero no se inventa una transición red→green de comportamiento.
+
+En la única ventana Linux exclusiva, después de dos filtros enfocados, pasaron
+`scripts/check.sh` (rc 0), `scripts/clean-offline-build.sh` (rc 0) y una sola
+barrida secuencial de los 20 laboratorios con los artefactos absolutos fijados:
+
+```text
+PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3
+PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64
+SUMMARY count=20 failures=0
+```
+
+Los logs son `/tmp/pm-cleanup-check-final.log`,
+`/tmp/pm-cleanup-clean-final.log` y
+`/tmp/pm-cleanup-final-test-linux-*-lab.log`. El filtro enfocado de cleanup
+quedó en 3 tests de `pm-vault` y 4 de `pm-custody`; la corrección adicional
+del test de publicación enumera y verifica sus seis rutas propias (target y
+temporary, cada una con WAL/SHM), sin glob ni ignorar errores distintos de
+`NotFound`. Los ocho sidecars regulares `0600`, UID-1000, de los PIDs
+`3809446`, `3811566`, `3827457` y `3832552` se verificaron como residuos
+propios de tests/checks previos de esta ventana y se eliminaron por ruta
+exacta. Seis pares más antiguos (`3682543`, `3692174`, `3697766`, `3729529`,
+`3743420` y `3748215`) no tienen proveniencia demostrable en los logs
+disponibles y se dejaron intactos; no se afirma que el directorio temporal
+global esté vacío. El filtro final y la barrida final no dejaron nuevas rutas.
+
+La evidencia acredita sólo Linux x86_64. Las líneas `LIMIT` de los laboratorios
+siguen siendo límites de aceptación para browser de producto, targets nativos,
+cross-platform y servicios externos; no se convierten en gates cerrados.
