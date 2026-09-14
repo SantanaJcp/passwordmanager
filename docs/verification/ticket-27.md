@@ -1762,6 +1762,14 @@ no se vuelven a implementar por plataforma. Los opcodes 63 y 66 deben usar un
 único `sync_job::Manager` común y conservar el journal durable y las fases
 cerradas actuales; una consulta de estado no relanza ni reautentica el trabajo.
 
+El checkpoint `815b18b466c2f4bc30aff00435da42328344dbbf` mueve ese manager
+sin copiarlo a un módulo común y conecta 63/66 al servicio Windows. Config y
+status Windows se crean con el seam privado nativo, se leen por handle regular
+sin reparse y link único, y sus escrituras exigen flush de archivo y directorio.
+Esto sólo compone el journal: no acredita transporte porque el ejecutable
+`pm-sync` continúa Linux-only, ni acredita reemplazo atómico del status sobre
+Windows. Ambos quedan como siguientes RED/vertical, no como éxito degradado.
+
 El binario `pm-sync` sigue hoy limitado explícitamente a Linux y su transporte
 de producción usa `UnixStream`. La composición Windows requiere extraer sólo
 el protocolo TLS-RPK/ALPN/framing y conectarlo a un adaptador Named Pipe local
