@@ -236,10 +236,13 @@ Los logs son `/tmp/pm-cleanup-check-final.log`,
 quedó en 3 tests de `pm-vault` y 4 de `pm-custody`; la corrección adicional
 del test de publicación enumera y verifica sus seis rutas propias (target y
 temporary, cada una con WAL/SHM), sin glob ni ignorar errores distintos de
-`NotFound`. Las corridas anteriores dejaron sidecars sintéticos con los PIDs
-`3682543`, `3692174`, `3697766`, `3729529`, `3743420`, `3748215`, `3809446`,
-`3811566`, `3827457` y `3832552`; no se borraron para no atribuir o eliminar
-residuos ajenos. El filtro final y la barrida final no dejaron nuevas rutas.
+`NotFound`. Los ocho sidecars regulares `0600`, UID-1000, de los PIDs
+`3809446`, `3811566`, `3827457` y `3832552` se verificaron como residuos
+propios de tests/checks previos de esta ventana y se eliminaron por ruta
+exacta. Seis pares más antiguos (`3682543`, `3692174`, `3697766`, `3729529`,
+`3743420` y `3748215`) no tienen proveniencia demostrable en los logs
+disponibles y se dejaron intactos; no se afirma que el directorio temporal
+global esté vacío. El filtro final y la barrida final no dejaron nuevas rutas.
 
 La evidencia acredita sólo Linux x86_64. Las líneas `LIMIT` de los laboratorios
 siguen siendo límites de aceptación para browser de producto, targets nativos,

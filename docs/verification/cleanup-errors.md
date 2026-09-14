@@ -142,12 +142,16 @@ coverage.
 
 The published-target regression was tightened after an observed test-owned
 residue: it now inventories the exact temporary database and sidecars plus
-the target database and sidecars, bounds the read-only assertion before cleanup, and
-removes/verifies each owned path without globbing or ignoring non-`NotFound`
-errors. The final focused run and the final check left no new artifact. Older
-sidecars from earlier pre-fix test PIDs were not removed; they remain listed
-as pre-existing `/tmp/pm-cleanup-published-<pid>-0-{wal,shm}` paths rather than
-being misreported as a clean sweep.
+the target database and sidecars, bounds the read-only assertion before
+cleanup, and removes/verifies each owned path without globbing or ignoring
+non-`NotFound` errors. The final focused run and the final check left no new
+artifact. The eight regular `0600`, UID-1000 sidecars for PIDs `3809446`,
+`3811566`, `3827457` and `3832552` were verified as the merger's earlier
+test/check artifacts and removed by their exact paths. Six older sidecar pairs
+for PIDs `3682543`, `3692174`, `3697766`, `3729529`, `3743420` and `3748215`
+predate the merger window; available logs do not prove their provenance, so
+they were enumerated and left untouched rather than claimed as zero residuals
+or deleted by a glob.
 
 This evidence is Linux x86_64 only. It does not close native gates, dispatch
 or publish anything, and it is not the formal Astra review.
