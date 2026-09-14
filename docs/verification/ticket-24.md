@@ -93,3 +93,69 @@ UIDs mapeados 100002–100005 pese al exit 0. La supresión convierte un fallo r
 de laboratorio en éxito aparente, contrario al método de propagación exigido.
 No se ejecutó retry. Se requiere corregir el lab y repetir la verificación antes
 de resolver 24; esta evidencia no cambia los límites nativos ya declarados.
+
+### Método de remediación del cleanup
+
+Antes de modificar el lab se fija este criterio: el proceso principal conserva
+la ruta única que creó, valida que sea un directorio real hijo directo de
+`/tmp` con el prefijo `pm-tui-access-linux-lab-`, y enumera de forma cerrada
+cada recurso superior y su UID esperado. Tras detener sus procesos, hijos
+efímeros con los UID ya mapeados eliminan únicamente el contenido de sus
+directorios; el proceso dueño del root elimina después esos directorios, sus
+archivos superiores y el root. Cada `unlink`, `rmdir`, salida de hijo y ausencia
+final se comprueba; no se usa `sudo`, `ignore_errors`, una ruta alternativa ni
+se toca el residuo de la corrida roja. Los dos mensajes `PASS tui-*` solo se
+emiten después de comprobar que la raíz de esa corrida ya no existe.
+
+La regresión enfocada compara el conjunto de raíces con ese prefijo antes y
+después de una ejecución completa. RED es el residuo nuevo conservado arriba;
+GREEN exige exit 0, mensajes PASS posteriores al cleanup y conjunto final
+idéntico al inicial. Después se repiten `check.sh`, clean locked/offline y los
+19 labs con propagación explícita, sin disminuir ninguna prueba.
+
+
+### Remediación y GREEN observados
+
+La remediación elimina `ignore_errors`, fija la creación bajo `/tmp`, valida el
+prefijo/ruta, tipo y owner de cada entrada superior, borra el contenido con el
+UID mapeado propietario y propaga cada salida/error mediante `ExceptionGroup`.
+Los PASS se movieron después de comprobar que la raíz desapareció.
+
+La primera ejecución de la implementación estricta produjo otro RED útil: el
+inventario cerrado detectó `terminal.raw`, que el método aún no había declarado,
+y abortó sin emitir PASS. Tras añadir ese archivo regular root-owned al
+inventario, se eliminó de forma segura únicamente la raíz de esa ejecución
+fallida. La raíz del RED original `pm-tui-access-linux-lab-c4d1o_6i` se conservó
+como evidencia y no se tocó.
+
+La regresión enfocada final comparó raíces antes/después y pasó:
+
+```text
+PASS tui-access ... cleanup=verified
+PASS tui-pending ... cleanup=verified
+focused-exit=0 cleanup-set=UNCHANGED
+```
+
+El gate final se ejecutó dentro de una ventana Linux coordinada y exclusiva:
+los worktrees comparten toolchain, artefactos y CPU, por lo que ningún otro
+`check`, clean build o lab pesado local puede correr simultáneamente. No se
+cambió producto ni se ampliaron plazos para acomodar contención. Resultado:
+
+```text
+git diff --check
+# exit 0
+
+scripts/check.sh
+# exit 0; fmt, suite Rust y clippy -D warnings
+
+scripts/clean-offline-build.sh
+# Removed 11,644 files / 4.0 GiB; build locked/offline 1m 01s; exit 0
+
+# una ejecución por lab; acumulación de rc y comprobación del conjunto de raíces
+LAB-SUMMARY count=19 failures=0 ticket24-cleanup-set-changed=0
+```
+
+Al finalizar no quedaron procesos ni raíces de laboratorio creadas por esta
+ventana; solo permanece el residuo del RED original, identificado arriba. Los
+límites de plataforma/product browser y la revisión formal final continúan sin
+cambio.

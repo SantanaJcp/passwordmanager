@@ -164,3 +164,25 @@ sintéticos de UIDs mapeados aunque devolvió 0. La resolución provisional se
 revirtió en `3205ae9`; 24 permanece claimed hasta corregir el lab y volver a
 verificar sin convertir cleanup fallido en éxito. No se repitió la barrida ni
 se atribuye este hallazgo al motor productivo.
+
+
+## Ventana local coordinada de verificación
+
+Los worktrees comparten `.toolchain/`, artefactos y CPU. Antes de ejecutar
+`scripts/check.sh`, clean builds o barridas de labs pesadas, root concede una
+única ventana Linux local; otros worktrees detienen esas ejecuciones hasta el
+handback. Native CI en runners separados puede continuar. No se cambian el
+producto ni sus plazos para ocultar contención del host.
+
+## TUI24 — cleanup corregido e integración aceptada
+
+El RED de `ignore_errors=True` se corrigió en raíz sin tocar producto: limpieza
+cerrada por ruta/owner y UID mapeado, propagación de todos los errores y PASS
+solo después de verificar ausencia de la raíz propia. La primera variante
+estricta rechazó correctamente el `terminal.raw` todavía no inventariado; tras
+registrarlo, la regresión enfocada pasó sin añadir residuos y sin tocar el RED
+original. En ventana local exclusiva, `git diff --check`, `scripts/check.sh`,
+clean locked/offline (1m 01s; 11,644 archivos/4.0 GiB) y una única barrida final
+pasaron con `count=19 failures=0 ticket24-cleanup-set-changed=0`. No quedaron
+procesos o residuos propios nuevos. 24 queda resuelto; no acredita nativos,
+Chromium de producto, ticket25 ni revisión formal Astra.

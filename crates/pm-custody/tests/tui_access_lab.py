@@ -9,6 +9,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import stat
 import struct
 import subprocess
 import sys
@@ -22,6 +23,8 @@ if len(sys.argv) <= 1 or sys.argv[1] != "provider":
 
 CUSTODIAN, HUMAN, AGENT_A, AGENT_B, AGENT_C, PROVIDER = 1, 0, 3, 4, 6, 5
 DEVICE = "24242424242424242424242424242424"
+LAB_PREFIX = "pm-tui-access-linux-lab-"
+LAB_PARENT = pathlib.Path("/tmp")
 
 
 def frame(value):
@@ -149,6 +152,88 @@ def close_tui(root):
     time.sleep(0.1)
 
 
+def stop_owned_tmux(root):
+    result = tmux(root, "has-session", check=False)
+    if result.returncode == 0:
+        tmux(root, "kill-server")
+        return
+    expected = b"no server running on"
+    assert result.returncode == 1 and expected in result.stderr, result
+
+
+def remove_as_owner(path, uid):
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setgroups([])
+            os.setgid(uid)
+            os.setuid(uid)
+            for entry in path.iterdir():
+                if entry.is_symlink() or not entry.is_dir():
+                    entry.unlink()
+                else:
+                    shutil.rmtree(entry)
+        except BaseException as error:
+            message = f"cleanup failed for {path.name} as uid {uid}: {type(error).__name__}\n"
+            os.write(2, message.encode())
+            os._exit(1)
+        os._exit(0)
+    waited, status = os.waitpid(pid, 0)
+    assert waited == pid and os.waitstatus_to_exitcode(status) == 0, (path, uid, status)
+
+
+def cleanup_owned_root(root):
+    expected = {
+        "state": ("directory", CUSTODIAN),
+        "run": ("directory", CUSTODIAN),
+        "human": ("directory", HUMAN),
+        "profiles": ("directory", HUMAN),
+        "provider": ("directory", PROVIDER),
+        "agent-3": ("directory", AGENT_A),
+        "agent-4": ("directory", AGENT_B),
+        "agent-6": ("directory", AGENT_C),
+        "pm": ("file", HUMAN),
+        "pm-custody": ("file", HUMAN),
+        "terminal.raw": ("file", HUMAN),
+    }
+    parent = LAB_PARENT.resolve(strict=True)
+    assert root.parent.resolve(strict=True) == parent and root.name.startswith(LAB_PREFIX), root
+    root_stat = root.lstat()
+    assert stat.S_ISDIR(root_stat.st_mode) and root_stat.st_uid == HUMAN, root_stat
+    children = list(root.iterdir())
+    assert all(child.name in expected for child in children), children
+    for child in children:
+        kind, uid = expected[child.name]
+        child_stat = child.lstat()
+        if kind == "directory":
+            assert stat.S_ISDIR(child_stat.st_mode) and child_stat.st_uid == uid, (child, child_stat)
+            remove_as_owner(child, uid)
+            child.rmdir()
+        else:
+            assert stat.S_ISREG(child_stat.st_mode) and child_stat.st_uid == uid, (child, child_stat)
+            child.unlink()
+    root.rmdir()
+    assert not root.exists(), root
+
+
+def finish_owned_resources(root, daemon, provider_process):
+    errors = []
+    actions = [("tmux", lambda: stop_owned_tmux(root))]
+    if daemon is not None:
+        actions.append(("custody", lambda: stop(daemon)))
+    if provider_process is not None:
+        actions.append(("provider", lambda: stop(provider_process)))
+    actions.append(("root", lambda: cleanup_owned_root(root)))
+    for name, action in actions:
+        try:
+            action()
+        except BaseException as error:
+            error.add_note(f"ticket24 cleanup resource: {name}")
+            errors.append(error)
+    if errors:
+        raise ExceptionGroup("ticket24 cleanup failed", errors)
+
+
 def agent_start(binary, uid, key, profile, socket_path, item):
     result = as_uid(uid, [binary, "agent-attempt", "--profile", profile, "--private", key,
         "--socket", socket_path, "--action", "start", "--item", item,
@@ -179,7 +264,7 @@ def wait_state(binary, uid, key, profile, socket_path, attempt, wanted):
 def main():
     assert os.geteuid() == 0 and len(sys.argv) == 3
     source_binary, source_cli = (pathlib.Path(value).resolve() for value in sys.argv[1:])
-    root = pathlib.Path(tempfile.mkdtemp(prefix="pm-tui-access-linux-lab-"))
+    root = pathlib.Path(tempfile.mkdtemp(prefix=LAB_PREFIX, dir=LAB_PARENT))
     daemon = provider_process = None
     try:
         root.chmod(0o711)
@@ -283,15 +368,10 @@ def main():
         assert db.execute("select state from authentication_attempts where attempt_id=?",
             (bytes.fromhex(attempt),)).fetchone() == ("cancelled",)
         db.close()
-        print("PASS tui-access keyboard=enroll+enable+disable+suspend+resume+revoke agents=2 common-set=same human-lock=independent")
-        print("PASS tui-pending safe-context=1 provider=separate-uid cancel=terminal secrets=absent")
     finally:
-        tmux(root, "kill-server", check=False)
-        if daemon is not None:
-            stop(daemon)
-        if provider_process is not None:
-            stop(provider_process)
-        shutil.rmtree(root, ignore_errors=True)
+        finish_owned_resources(root, daemon, provider_process)
+    print("PASS tui-access keyboard=enroll+enable+disable+suspend+resume+revoke agents=2 common-set=same human-lock=independent cleanup=verified")
+    print("PASS tui-pending safe-context=1 provider=separate-uid cancel=terminal secrets=absent cleanup=verified")
 
 
 if __name__ == "__main__":
