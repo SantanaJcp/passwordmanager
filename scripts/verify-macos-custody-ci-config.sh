@@ -16,8 +16,9 @@ crypto_manifest="$root/crates/pm-crypto/Cargo.toml"
 crypto_source="$root/crates/pm-crypto/src/root.rs"
 crypto_diagnostic_test="$root/crates/pm-crypto/tests/ticket26_diagnostics.rs"
 metadata_parser="$root/scripts/extract-libsodium-build-metadata.py"
+workspace_manifest="$root/Cargo.toml"
 
-for file in "$workflow" "$method" "$lab" "$harness" "$fetch" "$custody_manifest" "$custody_source" "$vault_manifest" "$vault_source" "$crypto_manifest" "$crypto_source" "$crypto_diagnostic_test" "$metadata_parser"; do
+for file in "$workflow" "$method" "$lab" "$harness" "$fetch" "$custody_manifest" "$custody_source" "$vault_manifest" "$vault_source" "$crypto_manifest" "$crypto_source" "$crypto_diagnostic_test" "$metadata_parser" "$workspace_manifest"; do
     test -f "$file" || {
         echo "required macOS custody CI file is absent: $file" >&2
         exit 1
@@ -106,6 +107,12 @@ require_literal 'scripts/extract-libsodium-build-metadata.py' "$lab"
 require_literal 'source/libsodium-stable/config.log' "$lab"
 require_literal 'PACKAGE_SUFFIX = "#libsodium-sys-stable@1.24.0"' "$metadata_parser"
 require_literal 'message.get("reason") != "build-script-executed"' "$metadata_parser"
+require_literal '[profile.dev.package."libsodium-sys-stable:1.24.0"]' "$workspace_manifest"
+require_literal 'opt-level = 2' "$workspace_manifest"
+if grep -Eq 'libsodium-sys-stable.*features.*optimized|march=native|mtune=native' "$workspace_manifest"; then
+    echo 'portable libsodium optimization was replaced by target-native tuning' >&2
+    exit 1
+fi
 require_literal 'PM_MACOS_TICKET26_DIAGNOSTIC' "$harness"
 require_literal 'feature = "macos-ticket26-diagnostics"' "$custody_source"
 require_literal 'feature = "macos-ticket26-diagnostics"' "$vault_source"

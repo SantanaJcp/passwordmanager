@@ -42,3 +42,6 @@ russh = { version = "=0.63.3", default-features = false, features = ["aws-lc-rs"
 tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 zeroize = "=1.9.0"
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[profile.dev.package."libsodium-sys-stable:1.24.0"]
+opt-level = 2

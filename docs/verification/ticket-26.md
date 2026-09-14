@@ -565,6 +565,40 @@ requires its fixed `source/libsodium-stable/config.log`; it never globs, picks
 the first result or derives a category from another feature build. The existing
 closed CFLAGS parser and `opt0|optimized` output remain unchanged.
 
+Native run `34810631226` on `902018b` completed the discriminant on both
+architectures. Both exact builds reported `sodium-cflags=opt0`. Intel measured
+the existing root creation at 6,318 ms and its service unlock KDF at 4,156 ms
+(4,161 ms for the whole unlock), then passed. Apple silicon measured creation
+at 9,108 ms; service unlock reached `channel-verified` (0 ms), `sqlite-opened`
+(3 ms), `durability-configured` (5 ms), `bundle-loaded` (1 ms) and `kdf-start`,
+then the unchanged client deadline expired at 15,003 ms with the same launchd
+PID and no `kdf-end`. This verifies the ARM hotspot is the password KDF, not
+channel authentication, SQLite, durability, bundle I/O or audit.
+
+The bounded correction keeps the dev/test product and every workspace crate at
+their existing profiles except the exact locked native package
+`libsodium-sys-stable:1.24.0`, whose package override sets `opt-level=2`.
+The [Cargo profile override contract](https://doc.rust-lang.org/cargo/reference/profiles.html#overrides)
+documents that a named package override has precedence for that package;
+the pinned `cc` 1.4.5 source obtains its C compiler optimization from Cargo's
+`OPT_LEVEL`, and the pinned libsodium build obtains its `CFLAGS` from that
+`cc::Build`. This selects ordinary portable `-O2`; it does not enable the
+dependency's `optimized` feature (which adds `--enable-opt` and native tuning),
+change Argon2id parameters, deadlines, QoS, Rust workspace optimization or any
+public format/operation. Local verification must cover the existing crypto byte
+vectors, root open/create behavior, vault regressions, full check and clean
+offline rebuild. The next native run must still obtain its exact current build
+metadata and assert `sodium-cflags=optimized`; unavailable or unclassified
+metadata remains a hard failure, never permission to use an alternate build.
+
+Local verification of this correction passed the full feature-enabled
+`pm-crypto` suite (including fixed format/root vectors and the diagnostic
+equivalence test), the three `pm-vault` local persistence/root regressions, the
+complete `./scripts/check.sh`, the macOS static checker, and
+`./scripts/clean-offline-build.sh`. The exact clean Linux build metadata
+classified as portable `-O2`; that confirms the Cargo/cc seam locally but does
+not predict either native macOS result.
+
 ## Remaining acceptance work
 
 - Rerun the repaired checkpoint on both authorized ephemeral macOS
