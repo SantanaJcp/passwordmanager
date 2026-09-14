@@ -196,6 +196,23 @@ numeric UIDs, modes, return codes and bounded stdout/stderr. They never read or
 print private-key bytes, and the public `probe` failure remains exactly
 `CUSTODY_UNAVAILABLE`.
 
+The next diagnostic checkpoint keeps that public failure contract unchanged.
+Before the first probe, the harness must additionally verify the complete safe
+metadata tuple (type, owner, permission bits, link count and byte count), path
+traversal and effective readability of the agent profile and private-key file
+under the real agent UID. If those gates pass, the native binary is built with
+the explicit `macos-ticket26-diagnostics` laboratory-only feature. That feature
+is inert unless the fixture supplies the exact
+`PM_MACOS_TICKET26_DIAGNOSTIC=1` opt-in. It may emit only fixed phase codes for
+process hardening, profile/key parsing, Unix connect/configuration, bilateral
+peer UID, TLS 1.3 handshake, pinned RPK, ALPN and READY; it must not emit key or
+profile bytes, dynamic paths, credentials or expanded public errors. The
+fixture captures the service phases in its owned protected state, validates
+the fixed grammar and reports only a bounded suffix if the probe remains red.
+The checker must require both compile-time and fixture opt-ins and reject
+activation in the workflow or ordinary builds. This is diagnosis, not native
+acceptance and not permission to weaken any guard.
+
 The acceptance-workflow checker was written before the workflow existed:
 
 ```text

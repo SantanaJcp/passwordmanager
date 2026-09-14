@@ -8,8 +8,10 @@ method="$root/docs/verification/ticket-26.md"
 lab="$root/scripts/test-macos-custody-lab.sh"
 harness="$root/crates/pm-custody/tests/macos_lab.py"
 fetch="$root/scripts/fetch-dependencies.sh"
+custody_manifest="$root/crates/pm-custody/Cargo.toml"
+custody_source="$root/crates/pm-custody/src/linux.rs"
 
-for file in "$workflow" "$method" "$lab" "$harness" "$fetch"; do
+for file in "$workflow" "$method" "$lab" "$harness" "$fetch" "$custody_manifest" "$custody_source"; do
     test -f "$file" || {
         echo "required macOS custody CI file is absent: $file" >&2
         exit 1
@@ -89,8 +91,20 @@ require_literal 'scratch.mkdir(mode=0o711)' "$harness"
 require_literal 'synthetic keygen failed' "$harness"
 require_literal 'cross_uid_peer_diagnostic(agent_uid, scratch)' "$harness"
 require_literal 'assert launchd_peer_uid(AGENT, RUNTIME / "agent.sock") == custodian_uid' "$harness"
+require_literal 'macos-ticket26-diagnostics = []' "$custody_manifest"
+require_literal '--features macos-ticket26-diagnostics' "$lab"
+require_literal 'PM_MACOS_TICKET26_DIAGNOSTIC' "$harness"
+require_literal 'feature = "macos-ticket26-diagnostics"' "$custody_source"
+require_literal 'require_readable_regular(AGENT, agent_profile' "$harness"
+require_literal 'require_readable_regular(AGENT, agent_key' "$harness"
 if grep -Fq 'RUNNER_TEMP' "$harness"; then
     echo 'macOS custody laboratory still depends on the private runner temp root' >&2
+    exit 1
+fi
+if grep -Fq 'macos-ticket26-diagnostics' "$workflow" ||
+   grep -Fq 'PM_MACOS_TICKET26_DIAGNOSTIC' "$workflow" ||
+   grep -Fq 'PM_MACOS_TICKET26_DIAGNOSTIC' "$root/packaging/macos/com.santanajcp.passwordmanager.plist"; then
+    echo 'macOS ticket-26 diagnostics escaped the explicit laboratory fixture' >&2
     exit 1
 fi
 
@@ -106,12 +120,30 @@ spec.loader.exec_module(module)
 
 assert module.parse_owner_mode("0 041777") == (0, 0o1777)
 assert module.parse_owner_mode("501 0100400") == (501, 0o400)
+assert module.parse_regular_metadata("502 0100400 1 128") == (502, 0o400, 1, 128)
 try:
     module.parse_owner_mode("0 0120777")
 except AssertionError as error:
     assert "symbolic link" in str(error)
 else:
     raise AssertionError("symbolic-link metadata was accepted")
+
+try:
+    module.parse_regular_metadata("502 0120777 1 128")
+except AssertionError as error:
+    assert "not a regular file" in str(error)
+else:
+    raise AssertionError("non-regular readable fixture was accepted")
+
+assert module.diagnostic_lines(b"PM26_DIAGNOSTIC phase=client-profile\n") == [
+    b"PM26_DIAGNOSTIC phase=client-profile"
+]
+try:
+    module.diagnostic_lines(b"PM26_DIAGNOSTIC phase=client-profile path=/secret\n")
+except AssertionError:
+    pass
+else:
+    raise AssertionError("dynamic diagnostic content was accepted")
 
 module.owner_mode = lambda _path: (501, 0o755)
 try:

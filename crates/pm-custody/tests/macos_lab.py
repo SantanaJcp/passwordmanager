@@ -6,6 +6,7 @@
 import ctypes
 import os
 import pathlib
+import plistlib
 import pwd
 import re
 import shutil
@@ -24,6 +25,9 @@ STATE = pathlib.Path("/Library/Application Support/PasswordManager")
 RUNTIME = pathlib.Path("/var/run/passwordmanager")
 PLIST = pathlib.Path(f"/Library/LaunchDaemons/{LABEL}.plist")
 PASSWORD = b"synthetic ticket 26 master password"
+DIAGNOSTIC_ENV = "PM_MACOS_TICKET26_DIAGNOSTIC"
+DIAGNOSTIC_LOG = STATE / "ticket26-diagnostic.log"
+DIAGNOSTIC_LINE = re.compile(rb"PM26_DIAGNOSTIC phase=[a-z-]+$")
 PEER_UID_SCRIPT = """
 import ctypes, socket, sys
 stream = socket.socket(socket.AF_UNIX)
@@ -131,6 +135,30 @@ def require_owner_mode(path, expected):
     )
 
 
+def parse_regular_metadata(output):
+    owner, mode, links, size = output.strip().split()
+    full_mode = int(mode, 8)
+    assert stat.S_ISREG(full_mode), (
+        f"fixture is not a regular file: owner={owner}, mode={mode}, "
+        f"links={links}, size={size}"
+    )
+    return int(owner), stat.S_IMODE(full_mode), int(links), int(size)
+
+
+def require_readable_regular(user, path, expected_uid, expected_mode):
+    metadata = sudo(["stat", "-f", "%u %p %l %z", path])
+    actual = parse_regular_metadata(metadata.stdout.decode())
+    expected = (expected_uid, expected_mode)
+    assert actual[:2] == expected and actual[2] == 1 and 1 <= actual[3] <= 16 * 1024, (
+        f"unsafe readable-file metadata: path={path}, expected={expected}, actual={actual}"
+    )
+    readable = sudo(["test", "-r", path], user=user, check=False)
+    assert readable.returncode == 0 and readable.stdout == b"" and readable.stderr == b"", (
+        f"effective fixture read failed: user={user}, path={path}, "
+        f"returncode={readable.returncode}, stderr={readable.stderr[:1024]!r}"
+    )
+
+
 def require_traversal(user, path):
     result = sudo(["test", "-x", path], user=user, check=False)
     assert result.returncode == 0, (
@@ -234,11 +262,32 @@ def wait_for_service():
     raise AssertionError((details.returncode, details.stdout, details.stderr))
 
 
-def probe(binary, user, profile, private, endpoint, *, allowed=True):
-    result = sudo([binary, "probe", "--profile", profile, "--private", private,
-                   "--socket", endpoint], user=user, check=False)
+def diagnostic_lines(value):
+    lines = value.splitlines()
+    assert lines and len(lines) <= 32 and all(DIAGNOSTIC_LINE.fullmatch(line) for line in lines), (
+        "unsafe or missing ticket-26 diagnostic output", len(lines),
+    )
+    return lines
+
+
+def probe(binary, user, profile, private, endpoint, *, allowed=True, diagnostic=False):
+    command = [binary, "probe", "--profile", profile, "--private", private,
+               "--socket", endpoint]
+    if diagnostic:
+        command = ["env", f"{DIAGNOSTIC_ENV}=1"] + command
+    result = sudo(command, user=user, check=False)
+    diagnostic_stderr = result.stderr
+    if diagnostic and result.returncode == 4:
+        assert diagnostic_stderr.endswith(b"CUSTODY_UNAVAILABLE\n")
+        diagnostic_stderr = diagnostic_stderr.removesuffix(b"CUSTODY_UNAVAILABLE\n")
+    if diagnostic:
+        client = diagnostic_lines(diagnostic_stderr)
+        service = sudo(["cat", DIAGNOSTIC_LOG]).stdout
+        server = diagnostic_lines(service)[-32:]
+        print("PM26_DIAGNOSTIC client=" + ",".join(line.decode() for line in client))
+        print("PM26_DIAGNOSTIC server=" + ",".join(line.decode() for line in server))
     if allowed:
-        assert result.returncode == 0 and result.stderr == b"", result
+        assert result.returncode == 0 and (diagnostic or result.stderr == b""), result
         assert result.stdout.startswith(b"READY role="), result.stdout
     else:
         assert result.returncode == 4 and result.stdout == b""
@@ -357,7 +406,16 @@ def main():
         sudo(["chmod", "0444", agent_profile, human_profile])
         create_vault(INSTALL / "pm", STATE / "vault.sqlite3")
 
-        sudo(["install", "-o", "root", "-g", "wheel", "-m", "0644", source_plist, PLIST])
+        diagnostic_plist = scratch / "ticket26-launchd.plist"
+        with open(source_plist, "rb") as source:
+            launchd_config = plistlib.load(source)
+        assert "EnvironmentVariables" not in launchd_config
+        assert "StandardErrorPath" not in launchd_config
+        launchd_config["EnvironmentVariables"] = {DIAGNOSTIC_ENV: "1"}
+        launchd_config["StandardErrorPath"] = str(DIAGNOSTIC_LOG)
+        with open(diagnostic_plist, "wb") as destination:
+            plistlib.dump(launchd_config, destination)
+        sudo(["install", "-o", "root", "-g", "wheel", "-m", "0644", diagnostic_plist, PLIST])
         sudo(["plutil", "-lint", PLIST])
         sudo(["launchctl", "bootstrap", "system", PLIST]); bootstrapped = True
         wait_for_service()
@@ -375,8 +433,14 @@ def main():
                                 (agent_key, agent_uid, 0o400),
                                 (RUNTIME / "agent.sock", custodian_uid, 0o666)]:
             require_owner_mode(path, (uid, mode))
+        require_owner_mode(profiles, (0, 0o755))
+        require_traversal(AGENT, profiles)
+        require_traversal(AGENT, agent)
+        require_readable_regular(AGENT, agent_profile, 0, 0o444)
+        require_readable_regular(AGENT, agent_key, agent_uid, 0o400)
         assert launchd_peer_uid(AGENT, RUNTIME / "agent.sock") == custodian_uid
-        probe(INSTALL / "pm-custody", AGENT, agent_profile, agent_key, RUNTIME / "agent.sock")
+        probe(INSTALL / "pm-custody", AGENT, agent_profile, agent_key,
+              RUNTIME / "agent.sock", diagnostic=True)
         probe(INSTALL / "pm-custody", pwd.getpwuid(os.getuid()).pw_name,
               human_profile, human_key, RUNTIME / "human.sock")
 

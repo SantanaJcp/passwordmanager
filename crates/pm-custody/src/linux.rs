@@ -86,6 +86,57 @@ enum Role {
     Human,
 }
 
+#[derive(Clone, Copy)]
+enum Ticket26DiagnosticPhase {
+    ClientProcess,
+    ClientProfile,
+    ClientKey,
+    ClientConnected,
+    ClientStreamConfigured,
+    ClientPeer,
+    ClientTlsConfigured,
+    ClientTlsFlushed,
+    ClientReady,
+    ServerStreamConfigured,
+    ServerPeer,
+    ServerTlsConfigured,
+    ServerTlsRequest,
+    ServerAlpn,
+    ServerReady,
+}
+
+impl Ticket26DiagnosticPhase {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::ClientProcess => "client-process",
+            Self::ClientProfile => "client-profile",
+            Self::ClientKey => "client-key",
+            Self::ClientConnected => "client-connected",
+            Self::ClientStreamConfigured => "client-stream-configured",
+            Self::ClientPeer => "client-peer",
+            Self::ClientTlsConfigured => "client-tls-configured",
+            Self::ClientTlsFlushed => "client-tls-flushed",
+            Self::ClientReady => "client-ready",
+            Self::ServerStreamConfigured => "server-stream-configured",
+            Self::ServerPeer => "server-peer",
+            Self::ServerTlsConfigured => "server-tls-configured",
+            Self::ServerTlsRequest => "server-tls-request",
+            Self::ServerAlpn => "server-alpn",
+            Self::ServerReady => "server-ready",
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic(phase: Ticket26DiagnosticPhase) {
+    if std::env::var_os("PM_MACOS_TICKET26_DIAGNOSTIC").as_deref() == Some(OsStr::new("1")) {
+        eprintln!("PM26_DIAGNOSTIC phase={}", phase.name());
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic(_phase: Ticket26DiagnosticPhase) {}
+
 impl Role {
     const fn byte(self) -> u8 {
         match self {
@@ -598,11 +649,16 @@ fn probe(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> 
     let private_path = take_path(arguments, "--private")?;
     let socket_path = take_path(arguments, "--socket")?;
     finish_arguments(arguments)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientProcess);
     let profile = read_profile(&profile_path)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientProfile);
     let key = read_key(&private_path, current_uid())?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientKey);
 
     let stream = UnixStream::connect(socket_path).map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientConnected);
     configure_unix_stream(&stream)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientStreamConfigured);
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
         .map_err(|_| Failure::Unavailable)?;
@@ -613,20 +669,24 @@ fn probe(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> 
     if observed_uid != profile.server_uid {
         return Err(Failure::Unavailable);
     }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientPeer);
     let config = client_config(&key, &profile.server_spki, profile.role)?;
     let server_name =
         ServerName::try_from("passwordmanager.invalid").map_err(|_| Failure::Unavailable)?;
     let connection =
         ClientConnection::new(Arc::new(config), server_name).map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientTlsConfigured);
     let mut tls = rustls::StreamOwned::new(connection, stream);
     tls.write_all(b"PING\n").map_err(|_| Failure::Unavailable)?;
     tls.flush().map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientTlsFlushed);
     let mut response = [0_u8; 5];
     tls.read_exact(&mut response)
         .map_err(|_| Failure::Unavailable)?;
     if response != *b"READY" || tls.conn.alpn_protocol() != Some(profile.role.alpn()) {
         return Err(Failure::Unavailable);
     }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientReady);
     println!(
         "READY role={} peer_uid={} tls=1.3 rpk=pinned alpn={}",
         profile.role.name(),
@@ -4757,6 +4817,7 @@ fn accept_one(
     if configure_unix_stream(&stream).is_err() {
         return;
     }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerStreamConfigured);
     let _ = handle_connection(stream, expected_uid, role, config, vault, peer_rpk);
 }
 
@@ -4802,6 +4863,7 @@ fn handle_connection(
     if unix_peer_uid(&stream).map_err(|_| Failure::Unavailable)? != expected_uid {
         return Err(Failure::Unavailable);
     }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerPeer);
     let human_channel = if role == Role::Human && vault.is_some() {
         Some(
             AuthenticatedHumanChannel::authenticate(
@@ -4814,13 +4876,16 @@ fn handle_connection(
         None
     };
     let connection = ServerConnection::new(config.clone()).map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerTlsConfigured);
     let mut tls = rustls::StreamOwned::new(connection, stream);
     let mut request = [0_u8; 5];
     tls.read_exact(&mut request)
         .map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerTlsRequest);
     if tls.conn.alpn_protocol() != Some(role.alpn()) {
         return Err(Failure::Unavailable);
     }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerAlpn);
     if request == *HUMAN_MAGIC && role == Role::Human {
         let service = vault.ok_or(Failure::Unavailable)?;
         return handle_human_rpc(
@@ -4837,7 +4902,9 @@ fn handle_connection(
         return Err(Failure::Unavailable);
     }
     tls.write_all(b"READY").map_err(|_| Failure::Unavailable)?;
-    tls.flush().map_err(|_| Failure::Unavailable)
+    tls.flush().map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerReady);
+    Ok(())
 }
 
 fn crypto_provider() -> CryptoProvider {
