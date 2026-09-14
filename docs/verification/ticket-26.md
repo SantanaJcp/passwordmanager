@@ -1343,10 +1343,14 @@ the normal generic failure path. A native pass of the revised fixture is not
 by itself Ticket 26 acceptance: the full TUI 23--25 matrix, reboot/FileVault,
 signing/notarization and final integration gates remain separate.
 
-The checkpoint was prepared statically on Linux only: Python AST parsing,
-shell syntax checks, the macOS custody checker, and `git diff --check` pass for
-this correction. No Cargo, build, parser runtime, system lab or native run was
-executed for this correction; native behavior remains pending.
+That earlier checkpoint was prepared statically on Linux only with Python AST,
+shell syntax and `git diff --check`; its statement that the macOS custody
+checker passed does not apply after the later helper-drain addition. The
+checker then failed because its broad `SIGKILL` grep rejected the helper's
+single owned-group teardown. The current candidate narrows that check
+semantically; its updated static result is recorded below. No Cargo, build,
+parser runtime, system lab or native run was executed for that correction;
+native behavior remains pending.
 
 ### Native run 27 shared-control PTY-close RED and bounded correction
 
@@ -1434,6 +1438,15 @@ group, and performs one bounded group teardown on timeout or parser failure.
 It does not alter the product, lease/idle deadlines, parser strictness,
 pasteboard assertion, or isolation profile.
 
+On helper timeout or strict parser failure, the fixture performs one direct
+`os.killpg(process.pid, signal.SIGKILL)` against the process group created by
+`start_new_session`; it then waits, closes both captured streams and preserves
+every cleanup error. This is a fatal teardown of an owned test helper, not a
+SIGTERM-to-SIGKILL escalation or an alternate product path, and it is never
+retried. The checker uses Python's standard-library AST to allow exactly that
+call inside `terminate_owned_group` and rejects any other `SIGKILL` reference,
+including one in `MacPtySession.close`.
+
 Before executing the local regression, the following method was written and
 approved for the short Linux-only verification window. It does not start a
 Password Manager binary, Cargo, a system lab, or a native runner:
@@ -1453,6 +1466,15 @@ Password Manager binary, Cargo, a system lab, or a native runner:
    helper is alive. Require the strict `UnsupportedVtSequence` category and
    verify the owned helper cannot create its marker; the same parser bytes are
    not fed again during cleanup.
+
+The launchd observation has a separate fixed-input regression in
+`assert_pasteboard_diagnostic_regression`: an exact `launchctl print` record
+with `last exit code = 0` is accepted, while a nonzero, absent, malformed or
+duplicate field is rejected. `wait_for_agent_launch` applies that parser only
+after the owned result file exists and the job has no PID, so a result left by a
+child that later exits nonzero cannot be treated as success. The parser emits
+no status text or dynamic error data. The field and `print` status contract are
+documented by Apple's [`launchctl.1`](https://raw.githubusercontent.com/apple-oss-distributions/launchd/main/man/launchctl.1).
 
 Each case closes its own PTY and removes only its own synthetic marker. The
 method treats a timeout, parser error, nonzero status, unknown status, helper
@@ -1484,7 +1506,13 @@ The run's sole log is `/tmp/pm26-helper-focused-20260914.log`. Its cleanup
 check found no `pm26-helper-descendant-*` or `pm26-helper-parser-*` marker and
 no owned helper process. This verifies only the Python fixture helper and its
 synthetic PTY cases on Linux; it is not a macOS product, Cargo, system-lab or
-Ticket 26 acceptance result. The native corrected fixture remains pending.
+Ticket 26 acceptance result. The later launchd last-exit parser cases were
+added after this focused runtime and were not rerun locally; only AST, shell
+syntax, the updated scoped checker and `git diff --check` cover this latest
+checkpoint. The follow-up static commands all exited zero: `ast.parse` for
+`macos_lab.py`, `bash -n scripts/verify-macos-custody-ci-config.sh`, the
+updated checker, and `git diff --check`. The native corrected fixture remains
+pending.
 
 ### Static native TUI coverage matrix (not yet executed on macOS)
 

@@ -222,10 +222,94 @@ if grep -Eq 'wl-copy|pbcopy|OSC52|tmux' "$harness"; then
     echo 'macOS TUI laboratory contains a non-AppKit clipboard or simulated-terminal path' >&2
     exit 1
 fi
-if grep -Eq 'SIGKILL|decode\("utf-8",[[:space:]]*"replace"\)' "$harness"; then
-    echo 'macOS TUI laboratory hides malformed output or uses forced cleanup fallback' >&2
+if grep -Eq 'decode\("utf-8",[[:space:]]*"replace"\)' "$harness"; then
+    echo 'macOS TUI laboratory hides malformed output with replacement decoding' >&2
     exit 1
 fi
+PYTHONDONTWRITEBYTECODE=1 python3 - "$harness" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+
+class KillScopeVisitor(ast.NodeVisitor):
+    def __init__(self):
+        self.function_stack = []
+        self.sigkill_refs = []
+        self.killpg_calls = []
+
+    def visit_FunctionDef(self, node):
+        self.function_stack.append(node.name)
+        self.generic_visit(node)
+        self.function_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node):
+        self.function_stack.append(node.name)
+        self.generic_visit(node)
+        self.function_stack.pop()
+
+    def visit_Attribute(self, node):
+        if (
+            isinstance(node.value, ast.Name)
+            and node.value.id == "signal"
+            and node.attr == "SIGKILL"
+        ):
+            self.sigkill_refs.append((node, tuple(self.function_stack)))
+        self.generic_visit(node)
+
+    def visit_Call(self, node):
+        if (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+            and node.func.attr == "killpg"
+        ):
+            self.killpg_calls.append((node, tuple(self.function_stack)))
+        self.generic_visit(node)
+
+
+def is_process_pid(node):
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "process"
+        and node.attr == "pid"
+    )
+
+
+def is_sigkill(node):
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "signal"
+        and node.attr == "SIGKILL"
+    )
+
+
+path = Path(sys.argv[1])
+visitor = KillScopeVisitor()
+visitor.visit(ast.parse(path.read_text(), filename=str(path)))
+if len(visitor.sigkill_refs) != 1 or len(visitor.killpg_calls) != 1:
+    raise SystemExit(
+        "macOS TUI helper must contain exactly one SIGKILL killpg teardown"
+    )
+call, stack = visitor.killpg_calls[0]
+if stack != ("run_while_draining", "terminate_owned_group"):
+    raise SystemExit(
+        "SIGKILL killpg must be directly inside the owned helper teardown"
+    )
+if (
+    len(call.args) != 2
+    or call.keywords
+    or not is_process_pid(call.args[0])
+    or not is_sigkill(call.args[1])
+):
+    raise SystemExit(
+        "SIGKILL teardown must directly call os.killpg(process.pid, signal.SIGKILL)"
+    )
+if visitor.sigkill_refs[0][1] != stack:
+    raise SystemExit("SIGKILL must not be referenced outside the owned helper teardown")
+PY
 if grep -Fq 'macos-ticket26-diagnostics' "$workflow" ||
    grep -Fq 'PM_MACOS_TICKET26_DIAGNOSTIC' "$workflow" ||
    grep -Fq 'PM_MACOS_TICKET26_DIAGNOSTIC' "$root/packaging/macos/com.santanajcp.passwordmanager.plist"; then

@@ -917,7 +917,9 @@ class MacPtySession:
             try:
                 # start_new_session gives this fixture helper an owned process
                 # group.  Kill the group even if the Popen leader has already
-                # exited: a descendant may still hold a pipe open.
+                # exited: a descendant may still hold a pipe open.  This is
+                # the single owned teardown action; no second signal or retry
+                # is used when it fails to close cleanly.
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
@@ -1469,6 +1471,23 @@ def assert_pasteboard_diagnostic_regression():
     assert classify_shared_control_exit(0, True) == (b"natural-zero", b"0")
     assert classify_shared_control_exit(143, True) == (b"owned-termination", b"143")
     assert classify_shared_control_exit(None, False) == (b"unknown", b"unknown")
+    assert parse_launchd_last_exit_code(
+        b"state = not running\nlast exit code = 0\n"
+    ) == 0
+    assert parse_launchd_last_exit_code(
+        b"last exit code = 4: EXAMPLE\n"
+    ) == 4
+    for malformed in (
+        b"state = not running\n",
+        b"last exit code = nope\n",
+        b"last exit code = 0\nlast exit code = 0\n",
+    ):
+        try:
+            parse_launchd_last_exit_code(malformed)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("launchd last-exit parser accepted malformed output")
 
 
 def assert_human_pasteboard_canary(secret, *, diagnostic=False, phase=None, session=None):
@@ -1585,6 +1604,20 @@ def launchd_manager_context():
     return int(uid, 10), name.decode("ascii")
 
 
+def parse_launchd_last_exit_code(output):
+    try:
+        lines = output.decode("ascii").splitlines()
+    except UnicodeDecodeError as error:
+        raise AssertionError("isolated pasteboard launch status was malformed") from error
+    matches = [line.strip() for line in lines if line.strip().startswith("last exit code = ")]
+    if len(matches) != 1:
+        raise AssertionError("isolated pasteboard launch status lacked one last-exit field")
+    match = re.fullmatch(r"last exit code = (-?[0-9]+)(?:: .+)?", matches[0])
+    if match is None:
+        raise AssertionError("isolated pasteboard launch status had malformed last-exit field")
+    return int(match.group(1), 10)
+
+
 def wait_for_agent_launch(label, result_path, *, session=None):
     # The job may spend both fixed 10-second metadata bounds before the exact
     # public probe's fixed 30-second bound.  This is a fixture lifecycle bound,
@@ -1598,6 +1631,8 @@ def wait_for_agent_launch(label, result_path, *, session=None):
             raise AssertionError("isolated pasteboard launch job disappeared")
         running = re.search(rb"\bpid = [0-9]+\b", details.stdout) is not None
         if result_exists and not running:
+            if parse_launchd_last_exit_code(details.stdout) != 0:
+                raise AssertionError("isolated pasteboard launch exited nonzero")
             return
         if session is None:
             time.sleep(0.1)
