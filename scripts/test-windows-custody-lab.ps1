@@ -3,7 +3,8 @@
 [CmdletBinding()]
 param(
     [switch]$EphemeralCI,
-    [switch]$ServiceDiagnostics
+    [switch]$ServiceDiagnostics,
+    [switch]$TuiConPtyRed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -454,12 +455,27 @@ try {
 
     Invoke-Checked 'cargo' @('test', '-p', 'pm-native-channel', '--all-targets', '--locked', '--offline')
     Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
+    if ($TuiConPtyRed) {
+        Invoke-Checked 'cargo' @('build', '-p', 'pm-native-channel', '--example', 'windows_tui_conpty_fixture', '--locked', '--offline')
+    }
     $custody = Join-Path $repo 'target\debug\pm-custody.exe'
     $cli = Join-Path $repo 'target\debug\pm.exe'
     Assert-True ((Get-Item $custody).VersionInfo.FileName.EndsWith('.exe')) 'native PE custody binary missing'
     Assert-True ((Get-Item $cli).VersionInfo.FileName.EndsWith('.exe')) 'native PE CLI binary missing'
     Assert-NativeStaticMsvcBinary $dumpbin $custody 'pm-custody.exe'
     Assert-NativeStaticMsvcBinary $dumpbin $cli 'pm.exe'
+    $tuiFixture = $null
+    $tuiCustody = $null
+    if ($TuiConPtyRed) {
+        $builtFixture = Join-Path $repo 'target\debug\examples\windows_tui_conpty_fixture.exe'
+        Assert-NativeStaticMsvcBinary $dumpbin $builtFixture 'windows_tui_conpty_fixture.exe'
+        $tuiFixture = Join-Path $humanDir 'windows_tui_conpty_fixture.exe'
+        $tuiCustody = Join-Path $humanDir 'pm-custody.exe'
+        Copy-Item -LiteralPath $builtFixture -Destination $tuiFixture -ErrorAction Stop
+        Copy-Item -LiteralPath $custody -Destination $tuiCustody -ErrorAction Stop
+        Add-OwnedPath $ownedPaths $tuiFixture
+        Add-OwnedPath $ownedPaths $tuiCustody
+    }
 
     $agentSid = Get-Sid "$env:COMPUTERNAME\$agentName"
     $humanSid = Get-Sid "$env:COMPUTERNAME\$humanName"
@@ -529,13 +545,14 @@ try {
     $agentOut = Join-Path $harnessDir 'probe.out'; $agentErr = Join-Path $harnessDir 'probe.err'
     $humanInput = Join-Path $harnessDir 'master.in'
     $humanOut = Join-Path $harnessDir 'human.out'; $humanErr = Join-Path $harnessDir 'human.err'
+    $tuiOut = Join-Path $harnessDir 'tui.out'; $tuiErr = Join-Path $harnessDir 'tui.err'
     $badOut = Join-Path $harnessDir 'bad.out'; $badErr = Join-Path $harnessDir 'bad.err'
-    foreach ($path in @($emptyInput, $agentOut, $agentErr, $humanInput, $humanOut, $humanErr, $badOut, $badErr)) {
+    foreach ($path in @($emptyInput, $agentOut, $agentErr, $humanInput, $humanOut, $humanErr, $tuiOut, $tuiErr, $badOut, $badErr)) {
         Add-OwnedPath $ownedPaths $path
     }
     [IO.File]::WriteAllBytes($emptyInput, [byte[]]@())
     [IO.File]::WriteAllText($humanInput, $master + [Environment]::NewLine)
-    foreach ($path in @($agentOut, $agentErr, $humanOut, $humanErr, $badOut, $badErr)) {
+    foreach ($path in @($agentOut, $agentErr, $humanOut, $humanErr, $tuiOut, $tuiErr, $badOut, $badErr)) {
         [IO.File]::WriteAllText($path, [string]::Empty)
     }
 
@@ -573,6 +590,13 @@ try {
     Assert-True ($p.ExitCode -eq 0) 'agent RPK channel failed after SCM restart'
     $p = Start-AsUser $humanCredential $custody @('probe', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $emptyInput $humanOut $humanErr
     Assert-True ($p.ExitCode -eq 0) 'human RPK channel failed after SCM restart'
+
+    if ($TuiConPtyRed) {
+        $stationSddl = "D:P(A;;GA;;;SY)(A;;GA;;;$humanSid)"
+        $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $emptyInput $tuiOut $tuiErr
+        Assert-True ($p.ExitCode -eq 0) ('normal pm-custody TUI did not complete its ConPTY tracer: ' + (Get-Content $tuiErr -Raw))
+        Assert-True ((Get-Content $tuiOut -Raw) -eq "TUI_CONPTY_READY$([Environment]::NewLine)") 'TUI fixture emitted unexpected public output'
+    }
 
     $p = Start-AsUser $humanCredential $custody @('human-lock', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $humanInput $humanOut $humanErr
     Write-ServiceSubphaseDiagnostics $diagnosticPath

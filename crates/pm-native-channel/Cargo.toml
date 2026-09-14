@@ -17,6 +17,7 @@ workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
@@ -28,6 +29,7 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Ole",
     "Win32_System_Pipes",
     "Win32_System_Services",
+    "Win32_System_StationsAndDesktops",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }

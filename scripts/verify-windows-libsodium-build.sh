@@ -12,11 +12,12 @@ attributes="$root/.gitattributes"
 cargo_config="$root/.cargo/config.toml"
 windows_service="$root/crates/pm-custody/src/windows.rs"
 native_channel="$root/crates/pm-native-channel/src/windows.rs"
+tui_fixture="$root/crates/pm-native-channel/examples/windows_tui_conpty_fixture.rs"
 native_fs="$root/crates/pm-vault/src/native_fs.rs"
 vault_lib="$root/crates/pm-vault/src/lib.rs"
 vault_tests="$root/crates/pm-vault/src/onepux.rs"
 
-for file in "$workflow" "$prepare" "$lab" "$storage_diagnostics" "$verifier" "$attributes" "$cargo_config" "$windows_service" "$native_channel" "$native_fs" "$vault_lib" "$vault_tests"; do
+for file in "$workflow" "$prepare" "$lab" "$storage_diagnostics" "$verifier" "$attributes" "$cargo_config" "$windows_service" "$native_channel" "$tui_fixture" "$native_fs" "$vault_lib" "$vault_tests"; do
     test -f "$file" || {
         echo "required Windows source-build file is absent: $file" >&2
         exit 1
@@ -156,6 +157,9 @@ require_literal 'ServiceSpecificExitCode' "$lab"
 require_literal 'service_diagnostics:' "$workflow"
 require_literal "inputs.service_diagnostics" "$workflow"
 require_literal '-ServiceDiagnostics' "$workflow"
+require_literal 'tui_conpty_red:' "$workflow"
+require_literal 'inputs.tui_conpty_red' "$workflow"
+require_literal '-TuiConPtyRed' "$workflow"
 service_diagnostics_input_block=$(awk '
     /^      service_diagnostics:/ { inside = 1 }
     inside && /^      [[:alnum:]_-]+:/ && $0 !~ /^      service_diagnostics:/ { exit }
@@ -169,6 +173,22 @@ printf '%s\n' "$service_diagnostics_input_block" | grep -Fq 'type: boolean' || {
     echo 'service diagnostics workflow input must be an explicit boolean' >&2
     exit 1
 }
+
+require_literal '[switch]$TuiConPtyRed' "$lab"
+require_literal "@('build', '-p', 'pm-native-channel', '--example', 'windows_tui_conpty_fixture', '--locked', '--offline')" "$lab"
+require_literal 'D:P(A;;GA;;;SY)(A;;GA;;;$humanSid)' "$lab"
+require_literal '@($stationSddl, $tuiCustody, '\''tui'\''' "$lab"
+require_literal 'TUI_CONPTY_READY' "$lab"
+for literal in CreateWindowStationW CWF_CREATE_ONLY CreateDesktopW CreatePseudoConsole \
+    STARTUPINFOEXW PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE CreateProcessW \
+    'COORD { X: 42, Y: 12 }' 'COORD { X: 100, Y: 30 }' \
+    'WaitForSingleObject(fixture.process, 15_000)' TUI_CONPTY_RED TUI_CONPTY_READY; do
+    require_literal "$literal" "$tui_fixture"
+done
+if grep -Eq 'TerminateProcess|Command::new|winsta0|OpenClipboard' "$tui_fixture"; then
+    echo 'Windows TUI tracer contains a process/terminal/clipboard substitute' >&2
+    exit 1
+fi
 
 # Service subphase diagnostics are opt-in and write only fixed literals to a
 # pre-created, owned fixture file. Keep this contract textual because Linux
@@ -347,7 +367,7 @@ test "$diagnostic_dir_line" -lt "$diagnostic_dir_owned_line" &&
 }
 
 build_line=$(grep -nF "Invoke-Checked 'cargo' @('build', '-p', 'pm-custody'" "$lab" | cut -d: -f1)
-dumpbin_line=$(grep -nF 'Assert-NativeStaticMsvcBinary $dumpbin' "$lab" | cut -d: -f1)
+dumpbin_line=$(grep -nE 'Assert-NativeStaticMsvcBinary \$dumpbin \$(custody|cli) ' "$lab" | cut -d: -f1)
 test "$(printf '%s\n' "$dumpbin_line" | wc -l)" -eq 2 || {
     echo 'Windows custody lab must inspect both native product executables' >&2
     exit 1

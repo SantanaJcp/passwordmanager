@@ -13,6 +13,11 @@ on:
         required: true
         default: false
         type: boolean
+      tui_conpty_red:
+        description: Exercise the first real normal-binary ConPTY TUI tracer (expected RED until product support exists)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -53,10 +58,20 @@ jobs:
         shell: pwsh
         run: |
           if ('${{ inputs.service_diagnostics }}' -eq 'true') {
-            ./scripts/test-windows-custody-lab.ps1 -EphemeralCI -ServiceDiagnostics
+            if ('${{ inputs.tui_conpty_red }}' -eq 'true') {
+              ./scripts/test-windows-custody-lab.ps1 -EphemeralCI -ServiceDiagnostics -TuiConPtyRed
+            }
+            else {
+              ./scripts/test-windows-custody-lab.ps1 -EphemeralCI -ServiceDiagnostics
+            }
           }
           else {
-            ./scripts/test-windows-custody-lab.ps1 -EphemeralCI
+            if ('${{ inputs.tui_conpty_red }}' -eq 'true') {
+              ./scripts/test-windows-custody-lab.ps1 -EphemeralCI -TuiConPtyRed
+            }
+            else {
+              ./scripts/test-windows-custody-lab.ps1 -EphemeralCI
+            }
           }
 
   windows-arm64-storage-diagnostics:
