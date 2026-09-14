@@ -1708,6 +1708,16 @@ corrección sólo puede seguir después de conservar ese RED Windows y debe volv
 a ejecutar además la publicación sync y el backup/restore reales que dependen
 de persistencia durable; el test directo no los sustituye.
 
+La corrida Windows ARM64
+[`34873474296`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34873474296)
+sobre `0b0544a47a5f845c611d2f8949a845c1e27cc12a` confirmó el RED: ocho tests
+nativos pasaron y `native_directory_flush_reports_the_real_kernel_result`
+devolvió `PermissionDenied`/OS 5. La causa observada coincide con el handle
+abierto sólo con `GENERIC_READ`; la corrección solicita explícitamente
+`GENERIC_READ | GENERIC_WRITE` sobre el mismo directorio exacto y conserva
+`BACKUP_SEMANTICS`, `OPEN_REPARSE_POINT`, validación de tipo/identidad y el
+resultado real de `FlushFileBuffers`.
+
 ### Método de transferencia 1PUX por handle en Windows
 
 La transferencia Windows no reabre un path ni concede derechos sobre el

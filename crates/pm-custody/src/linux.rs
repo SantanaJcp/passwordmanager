@@ -58,9 +58,8 @@ use crate::human_wire::{
     handle_native_recovery, handle_plaintext_backup_download, handle_recovery_rotation,
     handle_stream_download, handle_stream_upload, read_frame, write_frame,
 };
+use crate::sync_job;
 use crate::{Failure, take_path};
-
-mod sync_job;
 
 fn passkey_provider(service: &VaultService) -> Result<PasskeyProvider, Failure> {
     crate::human_wire::passkey_provider(&service.path, service.device, &service.audit_custody)
@@ -3935,7 +3934,7 @@ fn validate_spki(spki: &[u8]) -> Result<(), Failure> {
     Ok(())
 }
 
-fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Failure> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Failure> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -4005,7 +4004,7 @@ pub(super) fn finish_arguments(
     }
 }
 
-pub(super) fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     // SAFETY: `geteuid` has no preconditions.
     unsafe { libc::geteuid() }
 }

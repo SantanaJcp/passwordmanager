@@ -259,6 +259,7 @@ struct VaultService {
     device: [u8; 16],
     audit_custody: Arc<AuditDeviceCustody>,
     diagnostics: Option<ServiceDiagnostics>,
+    sync_jobs: Arc<crate::sync_job::Manager>,
 }
 
 struct PreparedRole {
@@ -535,11 +536,14 @@ fn serve_vault(
         if let Some(diagnostics) = diagnostics.as_ref() {
             diagnostics.record(ServiceDiagnosticPhase::AuditOk)?;
         }
+        let sync_jobs = crate::sync_job::Manager::open(&vault_path)?;
+        sync_jobs.resume()?;
         let service = Arc::new(VaultService {
             path: vault_path,
             device,
             audit_custody,
             diagnostics: diagnostics.clone(),
+            sync_jobs,
         });
         let agent_role = prepare_role(Role::Agent, &vault_id, &bootstrap, &service, stop)?;
         let human_role = prepare_role(Role::Human, &vault_id, &bootstrap, &service, stop)?;
@@ -831,6 +835,7 @@ fn serve_human(
             opcode,
             rest,
         )
+        .or_else(|| handle_sync_request(&mut vault, service, opcode, rest))
         .ok_or(Failure::Unavailable)??;
         write_frame(tls, &response)?;
     }
@@ -863,6 +868,60 @@ fn serve_human(
         diagnostics.record(ServiceDiagnosticPhase::HumanLockAck)?;
     }
     Ok(())
+}
+
+fn handle_sync_request(
+    vault: &mut HumanVault,
+    service: &VaultService,
+    opcode: u8,
+    request: &[u8],
+) -> Option<Result<Vec<u8>, Failure>> {
+    Some((|| match opcode {
+        63 => {
+            let mut cursor = Cursor::new(request);
+            let protected = Zeroizing::new(cursor.bytes()?);
+            let program = PathBuf::from(
+                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+            );
+            let socket = PathBuf::from(
+                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+            );
+            let client_key = PathBuf::from(
+                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+            );
+            let server_public = PathBuf::from(
+                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+            );
+            let pin = cursor
+                .fixed(44)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            cursor.finish()?;
+            let pairing = vault
+                .open_sync_pairing(&protected)
+                .map_err(|_| Failure::Unavailable)?;
+            let job = service.sync_jobs.start(
+                &pairing,
+                program,
+                socket,
+                client_key,
+                server_public,
+                pin,
+            )?;
+            let mut response = vec![0];
+            response.extend_from_slice(&job);
+            Ok(response)
+        }
+        66 => {
+            let job = request.try_into().map_err(|_| Failure::Unavailable)?;
+            let status = service.sync_jobs.status(job)?;
+            let mut response = vec![0, status.phase.byte()];
+            response.extend_from_slice(&status.pushed.to_be_bytes());
+            response.extend_from_slice(&status.pulled.to_be_bytes());
+            Ok(response)
+        }
+        _ => return None,
+    })())
 }
 
 fn human_unlock_failure_phase(error: &HumanCommitError) -> ServiceDiagnosticPhase {

@@ -22,6 +22,8 @@ mod human_wire;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
+mod sync_job;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod tui;
 #[cfg(target_os = "windows")]
 mod windows;

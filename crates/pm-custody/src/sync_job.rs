@@ -1,18 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+#[cfg(windows)]
+use std::io::Write;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs,
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+};
+#[cfg(unix)]
+use std::{
+    fs::OpenOptions,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
 };
 
 use pm_crypto::{SyncPairing, random_id};
 use pm_sync::{ProcessTlsTransport, SyncError, SyncReplica};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::{Failure, current_uid};
+use crate::Failure;
 
 const CONFIG_MAGIC: &[u8; 5] = b"PMSJ1";
 const STATUS_MAGIC: &[u8; 5] = b"PMSS1";
@@ -162,7 +168,7 @@ impl Manager {
             pin,
         };
         let bytes = Zeroizing::new(encode_config(&config)?);
-        super::write_new(&self.config_path, &bytes, 0o400)?;
+        write_private(&self.config_path, &bytes)?;
         let id = config.id;
         if let Err(error) = self.launch(config, false) {
             fs::remove_file(&self.config_path).map_err(|_| Failure::Unavailable)?;
@@ -319,13 +325,23 @@ const fn phase_for_error(error: &SyncError) -> Phase {
     }
 }
 
+#[cfg(unix)]
 fn validate_program(program: &Path) -> Result<(), SyncError> {
     let metadata = fs::symlink_metadata(program).map_err(|_| SyncError::Unavailable)?;
     if !metadata.file_type().is_file()
-        || metadata.uid() != current_uid()
+        || metadata.uid() != crate::linux::current_uid()
         || metadata.mode() & 0o022 != 0
         || fs::canonicalize(program).map_err(|_| SyncError::Unavailable)? != program
     {
+        return Err(SyncError::Unauthorized);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_program(program: &Path) -> Result<(), SyncError> {
+    let file = pm_native_channel::open_regular_file(program).map_err(|_| SyncError::Unavailable)?;
+    if file.metadata().map_err(|_| SyncError::Unavailable)?.len() == 0 {
         return Err(SyncError::Unauthorized);
     }
     Ok(())
@@ -416,17 +432,17 @@ fn decode_status(bytes: &[u8]) -> Result<Status, Failure> {
 fn persist_status(path: &Path, status: Status) -> Result<(), Failure> {
     let suffix = random_id().map_err(|_| Failure::Unavailable)?;
     let temporary = path.with_extension(format!("sync-status-{}", hex(&suffix)));
-    super::write_new(&temporary, &encode_status(status), 0o400)?;
+    write_private(&temporary, &encode_status(status))?;
     fs::rename(&temporary, path).map_err(|_| Failure::Unavailable)?;
     sync_parent(path)
 }
 
 fn sync_parent(path: &Path) -> Result<(), Failure> {
-    File::open(path.parent().ok_or(Failure::Unavailable)?)
-        .and_then(|directory| directory.sync_all())
+    pm_native_channel::sync_directory(path.parent().ok_or(Failure::Unavailable)?)
         .map_err(|_| Failure::Unavailable)
 }
 
+#[cfg(unix)]
 fn read_private(path: &Path, maximum: u64) -> Result<Zeroizing<Vec<u8>>, Failure> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -435,7 +451,7 @@ fn read_private(path: &Path, maximum: u64) -> Result<Zeroizing<Vec<u8>>, Failure
         .map_err(|_| Failure::Unavailable)?;
     let metadata = file.metadata().map_err(|_| Failure::Unavailable)?;
     if !metadata.file_type().is_file()
-        || metadata.uid() != current_uid()
+        || metadata.uid() != crate::linux::current_uid()
         || metadata.mode() & 0o7777 != 0o400
         || metadata.nlink() != 1
         || metadata.len() == 0
@@ -451,6 +467,58 @@ fn read_private(path: &Path, maximum: u64) -> Result<Zeroizing<Vec<u8>>, Failure
     (bytes.len() as u64 == metadata.len())
         .then_some(bytes)
         .ok_or(Failure::Unavailable)
+}
+
+#[cfg(windows)]
+fn read_private(path: &Path, maximum: u64) -> Result<Zeroizing<Vec<u8>>, Failure> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
+    };
+
+    let mut file = pm_native_channel::open_regular_file(path).map_err(|_| Failure::Unavailable)?;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut information) } == 0 {
+        return Err(Failure::Unavailable);
+    }
+    let length = (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
+    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || information.nNumberOfLinks != 1
+        || !(1..=maximum).contains(&length)
+    {
+        return Err(Failure::Unavailable);
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(length).map_err(|_| Failure::Unavailable)?,
+    ));
+    file.read_to_end(&mut bytes)
+        .map_err(|_| Failure::Unavailable)?;
+    if u64::try_from(bytes.len()).ok() != Some(length) {
+        return Err(Failure::Unavailable);
+    }
+    Ok(bytes)
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
+    #[cfg(unix)]
+    {
+        crate::linux::write_new(path, bytes, 0o400)
+    }
+    #[cfg(windows)]
+    {
+        let mut file = pm_native_channel::create_private_file(path, true, true)
+            .map_err(|_| Failure::Unavailable)?;
+        let operation = file
+            .write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| Failure::Unavailable)
+            .and_then(|()| sync_parent(path));
+        if let Err(error) = operation {
+            drop(file);
+            return Err(error.after_owned_path_cleanup(fs::remove_file(path)));
+        }
+        Ok(())
+    }
 }
 
 fn push(output: &mut Vec<u8>, value: &[u8]) -> Result<(), Failure> {
@@ -510,7 +578,7 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         fs,
@@ -574,11 +642,7 @@ mod tests {
         let config = PathBuf::from(format!("{}.sync-job", vault.display()));
         let status = PathBuf::from(format!("{}.sync-status", vault.display()));
         let id = [0x26; 16];
-        must(super::super::write_new(
-            &config,
-            b"sensitive unfinished container",
-            0o400,
-        ));
+        must(write_private(&config, b"sensitive unfinished container"));
         must(persist_status(
             &status,
             Status {
@@ -602,11 +666,7 @@ mod tests {
         let config = PathBuf::from(format!("{}.sync-job", vault.display()));
         let status_path = PathBuf::from(format!("{}.sync-status", vault.display()));
         let id = [0x27; 16];
-        must(super::super::write_new(
-            &config,
-            b"sensitive terminal container",
-            0o400,
-        ));
+        must(write_private(&config, b"sensitive terminal container"));
         must(persist_status(
             &status_path,
             Status {
