@@ -1,0 +1,42 @@
+name: Ticket 27 Windows custody
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_AUTO_INSTALL: '0'
+  RUSTUP_HOME: ${{ github.workspace }}/.toolchain/rustup
+  CARGO_HOME: ${{ github.workspace }}/.toolchain/cargo
+  RUSTUP_TOOLCHAIN: 1.98.1-aarch64-pc-windows-msvc
+
+jobs:
+  windows-arm64-custody:
+    name: Ticket 27 windows-arm64 product
+    runs-on: windows-11-vs2026-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          persist-credentials: false
+      - name: Install exact toolchain into repository toolchain home
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw "Exact Rust toolchain installation failed with exit code $LASTEXITCODE" }
+      - name: Verify native Windows 11 ARM64 environment
+        shell: pwsh
+        run: ./scripts/ci/native-preflight-windows.ps1
+      - name: Fetch the locked Rust graph before offline product verification
+        shell: pwsh
+        run: |
+          cargo fetch --locked
+          if ($LASTEXITCODE -ne 0) { throw "Locked fetch failed with exit code $LASTEXITCODE" }
+      - name: Build authenticated libsodium source with native MSVC
+        shell: pwsh
+        run: ./scripts/prepare-windows-libsodium.ps1 -EphemeralCI
+      - name: Run native custody product lab
+        shell: pwsh
+        run: ./scripts/test-windows-custody-lab.ps1 -EphemeralCI
