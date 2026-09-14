@@ -73,12 +73,72 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
         'phase=agent-pipe-ok'
         'phase=human-tls-ok'
         'phase=human-pipe-ok'
+        'phase=human-accepted'
+        'phase=human-magic-alpn'
+        'phase=human-unlock-request'
+        'phase=human-unlock-wrong-channel'
+        'phase=human-unlock-storage-io'
+        'phase=human-unlock-vault-crypto'
+        'phase=human-unlock-vault-format'
+        'phase=human-unlock-other'
+        'phase=human-unlock-ok'
+        'phase=human-unlock-ack'
+        'phase=human-lock-request'
+        'phase=human-audit-open'
+        'phase=human-audit-append'
+        'phase=human-lock-ack'
         'phase=service-failed'
     )
     foreach ($line in $lines) {
         Assert-True ($allowed -contains [string]$line) 'unexpected service diagnostic phase'
         Write-Host "SERVICE_PHASE $line"
     }
+    Assert-HumanDiagnosticTrace $lines
+}
+
+function Assert-HumanDiagnosticTrace([object[]]$Lines) {
+    $observed = @($Lines | Where-Object { [string]$_ -like 'phase=human-*' -and $_ -notin @('phase=human-tls-ok', 'phase=human-pipe-ok') })
+    $prefix = @(
+        'phase=human-accepted'
+        'phase=human-magic-alpn'
+        'phase=human-unlock-request'
+    )
+    $success = @($prefix) + @(
+        'phase=human-unlock-ok'
+        'phase=human-unlock-ack'
+        'phase=human-lock-request'
+        'phase=human-audit-open'
+        'phase=human-audit-append'
+        'phase=human-lock-ack'
+    )
+    $failurePhases = @(
+        'phase=human-unlock-wrong-channel'
+        'phase=human-unlock-storage-io'
+        'phase=human-unlock-vault-crypto'
+        'phase=human-unlock-vault-format'
+        'phase=human-unlock-other'
+    )
+    $candidates = @()
+    $candidates += ,$success
+    foreach ($failure in $failurePhases) {
+        $candidates += ,(@($prefix) + @($failure))
+    }
+    $validPrefix = $false
+    foreach ($candidate in $candidates) {
+        if ($observed.Count -gt $candidate.Count) { continue }
+        $matches = $true
+        for ($index = 0; $index -lt $observed.Count; $index++) {
+            if ([string]$observed[$index] -ne [string]$candidate[$index]) {
+                $matches = $false
+                break
+            }
+        }
+        if ($matches) {
+            $validPrefix = $true
+            break
+        }
+    }
+    Assert-True $validPrefix 'human service diagnostic phases are out of order or repeated'
 }
 
 function Get-Sid([string]$Name) {
@@ -405,6 +465,7 @@ try {
     Assert-True ((Get-Content $agentOut -Raw) -match 'tls=1.3 rpk=pinned named-pipe=bilateral') 'agent did not prove pinned transport'
 
     $p = Start-AsUser $humanCredential $custody @('human-lock', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $humanInput $humanOut $humanErr
+    Write-ServiceSubphaseDiagnostics $diagnosticPath
     Assert-True ($p.ExitCode -eq 0) ('human native channel failed: ' + (Get-Content $humanErr -Raw))
 
     # Cross-role RPK/SID substitution must fail before vault operation.

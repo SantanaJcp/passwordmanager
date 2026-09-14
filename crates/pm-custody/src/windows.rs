@@ -45,7 +45,7 @@ use pm_custody::{
 use pm_native_channel::{dpapi_protect_machine, dpapi_unprotect};
 use pm_vault::{
     AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome,
-    AutonomousAuditVault, HumanVault,
+    AutonomousAuditVault, HumanCommitError, HumanVault, VaultError,
 };
 
 use crate::{Failure, take_path};
@@ -128,6 +128,20 @@ enum ServiceDiagnosticPhase {
     AgentPipeOk,
     HumanTlsOk,
     HumanPipeOk,
+    HumanAccepted,
+    HumanMagicAlpn,
+    HumanUnlockRequest,
+    HumanUnlockWrongChannel,
+    HumanUnlockStorageIo,
+    HumanUnlockVaultCrypto,
+    HumanUnlockVaultFormat,
+    HumanUnlockOther,
+    HumanUnlockOk,
+    HumanUnlockAck,
+    HumanLockRequest,
+    HumanAuditOpen,
+    HumanAuditAppend,
+    HumanLockAck,
     ServiceFailed,
 }
 
@@ -141,6 +155,20 @@ impl ServiceDiagnosticPhase {
             Self::AgentPipeOk => b"phase=agent-pipe-ok\n",
             Self::HumanTlsOk => b"phase=human-tls-ok\n",
             Self::HumanPipeOk => b"phase=human-pipe-ok\n",
+            Self::HumanAccepted => b"phase=human-accepted\n",
+            Self::HumanMagicAlpn => b"phase=human-magic-alpn\n",
+            Self::HumanUnlockRequest => b"phase=human-unlock-request\n",
+            Self::HumanUnlockWrongChannel => b"phase=human-unlock-wrong-channel\n",
+            Self::HumanUnlockStorageIo => b"phase=human-unlock-storage-io\n",
+            Self::HumanUnlockVaultCrypto => b"phase=human-unlock-vault-crypto\n",
+            Self::HumanUnlockVaultFormat => b"phase=human-unlock-vault-format\n",
+            Self::HumanUnlockOther => b"phase=human-unlock-other\n",
+            Self::HumanUnlockOk => b"phase=human-unlock-ok\n",
+            Self::HumanUnlockAck => b"phase=human-unlock-ack\n",
+            Self::HumanLockRequest => b"phase=human-lock-request\n",
+            Self::HumanAuditOpen => b"phase=human-audit-open\n",
+            Self::HumanAuditAppend => b"phase=human-audit-append\n",
+            Self::HumanLockAck => b"phase=human-lock-ack\n",
             Self::ServiceFailed => b"phase=service-failed\n",
         }
     }
@@ -473,10 +501,12 @@ fn handle_server_connection(
 ) -> Result<(), Failure> {
     let tls_pipe = pipe.try_clone().map_err(|_| Failure::Unavailable)?;
     let human_channel = if role == Role::Human {
-        Some(
-            AuthenticatedHumanChannel::authenticate_windows(pipe)
-                .map_err(|_| Failure::Unavailable)?,
-        )
+        let channel = AuthenticatedHumanChannel::authenticate_windows(pipe)
+            .map_err(|_| Failure::Unavailable)?;
+        if let Some(diagnostics) = service.diagnostics.as_ref() {
+            diagnostics.record(ServiceDiagnosticPhase::HumanAccepted)?;
+        }
+        Some(channel)
     } else {
         pipe.accept().map_err(|_| Failure::Unavailable)?;
         None
@@ -488,6 +518,11 @@ fn handle_server_connection(
         .map_err(|_| Failure::Unavailable)?;
     if tls.conn.alpn_protocol() != Some(role.alpn()) {
         return Err(Failure::Unavailable);
+    }
+    if role == Role::Human
+        && let Some(diagnostics) = service.diagnostics.as_ref()
+    {
+        diagnostics.record(ServiceDiagnosticPhase::HumanMagicAlpn)?;
     }
     match role {
         Role::Agent if magic == *AGENT_MAGIC => crate::agent_wire::serve_agent(
@@ -518,19 +553,39 @@ fn serve_human(
     cursor.expect(&[1])?;
     let mut password = Zeroizing::new(cursor.bytes()?);
     cursor.finish()?;
-    let vault = HumanVault::unlock_with_audit_custody(
+    if let Some(diagnostics) = service.diagnostics.as_ref() {
+        diagnostics.record(ServiceDiagnosticPhase::HumanUnlockRequest)?;
+    }
+    let vault_result = HumanVault::unlock_with_audit_custody(
         &service.path,
         &password,
         service.device,
         channel,
         Arc::clone(&service.audit_custody),
-    )
-    .map_err(|_| Failure::Unavailable)?;
+    );
     password.zeroize();
+    let vault = match vault_result {
+        Ok(vault) => vault,
+        Err(error) => {
+            if let Some(diagnostics) = service.diagnostics.as_ref() {
+                diagnostics.record(human_unlock_failure_phase(&error))?;
+            }
+            return Err(Failure::Unavailable);
+        }
+    };
+    if let Some(diagnostics) = service.diagnostics.as_ref() {
+        diagnostics.record(ServiceDiagnosticPhase::HumanUnlockOk)?;
+    }
     write_frame(tls, &[0])?;
+    if let Some(diagnostics) = service.diagnostics.as_ref() {
+        diagnostics.record(ServiceDiagnosticPhase::HumanUnlockAck)?;
+    }
     let request = read_frame(tls)?;
     if request != [14] {
         return Err(Failure::Unavailable);
+    }
+    if let Some(diagnostics) = service.diagnostics.as_ref() {
+        diagnostics.record(ServiceDiagnosticPhase::HumanLockRequest)?;
     }
     drop(vault);
     let mut autonomous = AutonomousAuditVault::open(
@@ -539,6 +594,9 @@ fn serve_human(
         Arc::clone(&service.audit_custody),
     )
     .map_err(|_| Failure::Unavailable)?;
+    if let Some(diagnostics) = service.diagnostics.as_ref() {
+        diagnostics.record(ServiceDiagnosticPhase::HumanAuditOpen)?;
+    }
     autonomous
         .append(&AuditEvent::new(
             AuditActorKind::System,
@@ -547,7 +605,32 @@ fn serve_human(
             AuditOutcome::Succeeded,
         ))
         .map_err(|_| Failure::Unavailable)?;
-    write_frame(tls, &[0])
+    if let Some(diagnostics) = service.diagnostics.as_ref() {
+        diagnostics.record(ServiceDiagnosticPhase::HumanAuditAppend)?;
+    }
+    write_frame(tls, &[0])?;
+    if let Some(diagnostics) = service.diagnostics.as_ref() {
+        diagnostics.record(ServiceDiagnosticPhase::HumanLockAck)?;
+    }
+    Ok(())
+}
+
+fn human_unlock_failure_phase(error: &HumanCommitError) -> ServiceDiagnosticPhase {
+    match error {
+        HumanCommitError::WrongChannel => ServiceDiagnosticPhase::HumanUnlockWrongChannel,
+        HumanCommitError::Storage(_)
+        | HumanCommitError::Io(_)
+        | HumanCommitError::Vault(VaultError::Storage(_) | VaultError::Io(_)) => {
+            ServiceDiagnosticPhase::HumanUnlockStorageIo
+        }
+        HumanCommitError::Vault(VaultError::Crypto(_)) => {
+            ServiceDiagnosticPhase::HumanUnlockVaultCrypto
+        }
+        HumanCommitError::Vault(VaultError::InvalidFormat | VaultError::AlreadyExists) => {
+            ServiceDiagnosticPhase::HumanUnlockVaultFormat
+        }
+        _ => ServiceDiagnosticPhase::HumanUnlockOther,
+    }
 }
 
 trait ReadWrite: Read + Write {}

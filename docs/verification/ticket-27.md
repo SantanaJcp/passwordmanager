@@ -938,3 +938,83 @@ Antes del ajuste se fija este ciclo:
 3. El `Drop` heredado de `WindowsServerPipe` no se modifica: esta corrección
    está limitada al fixture `#[cfg(test)]`. No cambia producción, permisos,
    fallback ni la semántica del canal.
+
+## Diagnóstico acotado de la operación humana (método antes del código)
+
+La corrida diagnóstica nativa 15 sobre `776bf26`, conservada en el log de
+ejecución entregado para este diagnóstico, pasó los cinco tests nativos del
+canal y el contrato de nombres de pipe. El servicio
+llegó a `RUNNING` y registró las siete fases de inicialización hasta
+`human-pipe-ok` y `agent-pipe-ok`. Esas dos fases prueban únicamente la creación
+de la primera instancia de cada pipe, no `accept`, handshake ni una petición.
+El `human-lock` devolvió el error público opaco `CUSTODY_UNAVAILABLE`; las fases
+actuales no permiten ubicarlo. La contraseña sintética coincide con la usada
+para crear la bóveda, pero eso no prueba canal, KDF, almacenamiento ni auditoría.
+
+El `probe` agente vigente sí acredita el handshake: antes de consumir el primer
+write, rustls 0.23.44 ejecuta `complete_prior_io` y propaga el error de
+`complete_io` mientras la conexión está en handshake. El I/O posterior a
+consumir esos bytes puede diferir su error hasta la operación siguiente; como
+el probe termina sin lectura ni `flush`, su PASS no acredita que el servidor
+aceptó el MAGIC aplicativo ni que produjo la respuesta del rol. Tampoco prueba
+la identidad, canal o operación humana, que usan otro pipe y RPK.
+
+Con el `-ServiceDiagnostics` ya autorizado se añade un único discriminante,
+sin otra autenticación ni operación de bóveda:
+
+1. El servicio registra literales fijas después de completar cada frontera de
+   la misma operación: `human-accepted`, `human-magic-alpn`,
+   `human-unlock-request`, `human-unlock-ok`, `human-unlock-ack`,
+   `human-lock-request`, `human-audit-open`, `human-audit-append` y
+   `human-lock-ack`.
+2. Si la única llamada a `unlock_with_audit_custody` falla, registra exactamente
+   una categoría terminal derivada de la variante ya disponible, nunca de su
+   texto: `human-unlock-wrong-channel`, `human-unlock-storage-io`,
+   `human-unlock-vault-crypto`, `human-unlock-vault-format` o
+   `human-unlock-other`. El error público continúa siendo
+   `CUSTODY_UNAVAILABLE`; no se escriben tiempos, códigos, rutas, SIDs, datos de
+   bóveda, contraseña ni mensajes dinámicos.
+3. El parser del fixture conserva la gramática cerrada, exige cardinalidad
+   máxima uno para cada fase humana y acepta únicamente un prefijo ordenado de
+   la traza de éxito o una traza que termina en una sola categoría de fallo.
+   Lee el archivo inmediatamente después de `human-lock`, antes de afirmar su
+   salida pública, de modo que el RED también preserva el discriminante.
+4. No cambia ningún timeout, ACL, RPK, pipe, KDF, retry ni resultado. Si no se
+   observa siquiera `human-accepted`, hará falta proponer por separado un seam
+   cliente; este cambio no lo anticipa.
+
+La regresión estática debe escribirse antes de Rust y dar RED por las fases
+ausentes. Después verifica que todas las literales están en el enum cerrado,
+que el lab valida orden/cardinalidad y que el resultado de una sola llamada de
+unlock selecciona la categoría sin imprimir el error. Solo una nueva corrida
+Windows con `-ServiceDiagnostics` puede localizar el fallo.
+
+La regresión dio RED contra `776bf26` por ausencia de
+`human_unlock_failure_phase`. Tras implementar el seam, el checker completo,
+su sintaxis `sh -n` y `git diff --check` pasaron. La inspección `rustfmt --check`
+alcanzó tres diferencias de formato ya presentes fuera de los bloques
+instrumentados; no se reescribió el archivo completo ni se presenta ese
+resultado como verde. No se ejecutaron Cargo, PowerShell, build ni
+laboratorio. La clasificación humana permanece sin observar hasta la próxima
+corrida diagnóstica Windows.
+
+## Déficit contractual de parada SCM (plan, no implementación)
+
+La misma corrida mostró `NOT_STOPPABLE` y el cleanup no pudo ejecutar
+`Stop-Service`. La causa es directa: `service_main` publica
+`dwControlsAccepted=0` y `service_control` devuelve siempre 120. Aceptar STOP
+con un booleano y llamar `CancelSynchronousIo` una sola vez no es suficiente:
+existe una carrera entre comprobar el booleano y comenzar un nuevo I/O; la
+cancelación puede devolver `ERROR_NOT_FOUND` y el hilo bloquearse después.
+
+La realización futura debe usar I/O overlapped y un evento STOP propiedad del
+servicio en el mismo wait que cada connect/read/write. Al observar STOP no
+inicia otra operación; si una ya está pendiente, usa `CancelIoEx` sobre ese
+`OVERLAPPED`, espera y drena su finalización antes de liberar handles. Solo
+entonces une ambos hilos, informa `STOPPED` y permite cleanup. El handler acepta
+únicamente `SERVICE_CONTROL_STOP`, señala el evento y el servicio anuncia
+`SERVICE_ACCEPT_STOP` solo al estar listo; otros controles siguen devolviendo
+no implementado. La prueba nativa deberá parar con `Stop-Service` sin `-Force`,
+incluido mientras ambos roles esperan conexión, verificar el mismo PID
+terminado y luego reiniciar ambos roles. No se autoriza force-kill, polling
+arbitrario, conexión sustituta, segundo motor ni ampliación de plazos.

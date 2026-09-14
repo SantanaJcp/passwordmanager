@@ -197,6 +197,16 @@ require_literal 'ServiceDiagnosticPhase::HumanTlsOk' "$windows_service"
 require_literal 'ServiceDiagnosticPhase::HumanPipeOk' "$windows_service"
 require_literal 'diagnostics.as_ref()' "$windows_service"
 require_literal 'record(ServiceDiagnosticPhase::ServiceFailed)' "$windows_service"
+require_literal 'fn human_unlock_failure_phase' "$windows_service"
+human_phases='human-accepted human-magic-alpn human-unlock-request human-unlock-wrong-channel human-unlock-storage-io human-unlock-vault-crypto human-unlock-vault-format human-unlock-other human-unlock-ok human-unlock-ack human-lock-request human-audit-open human-audit-append human-lock-ack'
+for phase in $human_phases; do
+    require_literal "b\"phase=$phase\\n\"" "$windows_service"
+done
+unlock_calls=$(grep -Fc 'HumanVault::unlock_with_audit_custody(' "$windows_service")
+test "$unlock_calls" -eq 1 || {
+    echo "Windows human diagnostic must preserve one unlock operation, got $unlock_calls" >&2
+    exit 1
+}
 
 # CreateNamedPipeW accepts only server open-mode flags; SQOS belongs on the
 # client CreateFileW call. The Windows unit regression exercises the real API
@@ -295,13 +305,27 @@ require_literal 'Write-ServiceSubphaseDiagnostics $diagnosticPath' "$lab"
 for phase in args-ok bootstrap-ok audit-ok agent-tls-ok agent-pipe-ok human-tls-ok human-pipe-ok service-failed; do
     require_literal "'phase=$phase'" "$lab"
 done
+require_literal 'function Assert-HumanDiagnosticTrace' "$lab"
+require_literal 'Assert-HumanDiagnosticTrace $lines' "$lab"
+for phase in $human_phases; do
+    require_literal "'phase=$phase'" "$lab"
+done
+human_run_line=$(grep -nF "@('human-lock', '--profile'" "$lab" | cut -d: -f1)
+human_diagnostic_line=$(grep -nF 'Write-ServiceSubphaseDiagnostics $diagnosticPath' "$lab" | tail -n1 | cut -d: -f1)
+human_assert_line=$(grep -nF "'human native channel failed: '" "$lab" | cut -d: -f1)
+test -n "$human_run_line" && test -n "$human_diagnostic_line" &&
+    test -n "$human_assert_line" && test "$human_run_line" -lt "$human_diagnostic_line" &&
+    test "$human_diagnostic_line" -lt "$human_assert_line" || {
+    echo 'Windows human diagnostic must be read after the operation and before its public assertion' >&2
+    exit 1
+}
 
 diagnostic_dir_line=$(grep -nF 'New-Item -ItemType Directory -Path $diagnosticDir' "$lab" | cut -d: -f1)
 diagnostic_dir_owned_line=$(grep -nF 'Add-OwnedPath $ownedPaths $diagnosticDir' "$lab" | cut -d: -f1)
 diagnostic_file_owned_line=$(grep -nF 'Add-OwnedPath $ownedPaths $diagnosticPath' "$lab" | cut -d: -f1)
 diagnostic_file_write_line=$(grep -nF '[IO.File]::WriteAllText($diagnosticPath' "$lab" | cut -d: -f1)
 diagnostic_final_acl_line=$(grep -nF 'Set-ExactTreeAcl $diagnosticDir @(' "$lab" | tail -n1 | cut -d: -f1)
-diagnostic_read_line=$(grep -nF 'Write-ServiceSubphaseDiagnostics $diagnosticPath' "$lab" | cut -d: -f1)
+diagnostic_read_line=$(grep -nF 'Write-ServiceSubphaseDiagnostics $diagnosticPath' "$lab" | head -n1 | cut -d: -f1)
 service_assert_line=$(grep -nF "Assert-True ((Get-Service \$serviceName).Status -eq 'Running')" "$lab" | head -n1 | cut -d: -f1)
 test -n "$diagnostic_dir_line" && test -n "$diagnostic_dir_owned_line" &&
     test -n "$diagnostic_file_owned_line" && test -n "$diagnostic_file_write_line" &&
