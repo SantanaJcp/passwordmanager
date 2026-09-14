@@ -247,3 +247,44 @@ global esté vacío. El filtro final y la barrida final no dejaron nuevas rutas.
 La evidencia acredita sólo Linux x86_64. Las líneas `LIMIT` de los laboratorios
 siguen siendo límites de aceptación para browser de producto, targets nativos,
 cross-platform y servicios externos; no se convierten en gates cerrados.
+
+## Evidencia nativa y memoria — checkpoint 2026-09-14
+
+La raíz conserva 25/35 tickets integrados. Los siguientes resultados pertenecen
+al trabajo aislado de 26–28, no cierran tickets ni sustituyen la integración
+por merger o la revisión global final.
+
+- **macOS:** el [run 34847582724](https://github.com/SantanaJcp/passwordmanager/actions/runs/34847582724)
+  en `6c3c5e0` falló antes del harness: cinco `expect` nuevos exigían `Debug`
+  para `Failure`. La corrección de test `a247340` mantuvo el error opaco.
+  El [run 34848148030](https://github.com/SantanaJcp/passwordmanager/actions/runs/34848148030)
+  compiló y ejecutó correctamente el test AppKit en biblioteca y binario,
+  tanto Intel como Apple Silicon. El primer arranque TUI mediante `forkpty`
+  devolvió `CUSTODY_UNAVAILABLE` antes de pedir contraseña en ambos targets.
+  No se acredita la aceptación TUI. El candidato con documentación `7d3bba5`
+  pasó check completo y clean build Linux; la causa nativa sigue en diagnóstico.
+- **Windows:** `5d64bc2` pasó check y clean build Linux, que no compilan los
+  bloques Windows. El run `34848390243` fue cancelado por root tras detectar
+  estáticamente la falta de `Send` en el pipe transferido al worker; no es RED
+  de compilación ni conductual. La corrección `0a0ec3d` pasó 6 tests nativos y
+  1 contrato de pipe en el [run 34848533955](https://github.com/SantanaJcp/passwordmanager/actions/runs/34848533955).
+  Se verificaron `RUNNING` con STOP, detención SCM, ausencia del PID anterior,
+  reinicio con PID distinto y probes de ambos roles antes del primer unlock.
+  `human-lock` volvió a fallar en el límite de auditoría vacía ya identificado;
+  segundo STOP y crash/restart posteriores no se ejecutaron. Cleanup retornó
+  sin error, pero el harness aún no consulta ausencia final de servicio,
+  usuario y directorio después de borrarlos. Las tres apariciones de `args-ok`
+  en consola reflejan dos generaciones y una reimpresión de la historia, no
+  tres arranques. Cambiar la API pública de unlock para exigir custodia de
+  auditoría estable sigue pendiente de autorización; su WIP está aislado.
+- **Memoria (28):** `3b9a34f` pasó tests enfocados crypto/CLI y una ejecución
+  del lab de fallos, tras RED real que mostraba lectura antes de proteger la
+  primera línea. Este corte protege el buffer antes de la confirmación, no
+  durante su lectura inicial. El test posterior `6063859` mantiene stdin
+  abierto y envía cero bytes: reprodujo que el cliente espera entrada antes
+  de reservar memoria bloqueada. Su corrección está en verificación separada;
+  no se declara G7 cerrado ni se amplían sus excepciones de memoria.
+
+Los cuatro errores de cleanup heredados adicionales ya señalados y el cambio
+público de custodia de auditoría permanecen pendientes de aprobación. No se
+alteran por deducir permiso de autorizaciones anteriores con otro alcance.
