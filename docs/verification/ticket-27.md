@@ -967,7 +967,8 @@ sin otra autenticación ni operación de bóveda:
    `human-unlock-request`, `human-unlock-ok`, `human-unlock-ack`,
    `human-lock-request`, `human-audit-open`, `human-audit-append` y
    `human-lock-ack`.
-2. Si la única llamada a `unlock_with_audit_custody` falla, registra exactamente
+2. Si la única llamada a `HumanVault::unlock` con custodia explícita falla,
+   registra exactamente
    una categoría terminal derivada de la variante ya disponible, nunca de su
    texto: `human-unlock-wrong-channel`, `human-unlock-storage-io`,
    `human-unlock-vault-crypto`, `human-unlock-vault-format` o
@@ -1018,7 +1019,7 @@ está después de recibir lock y antes de abrir la auditoría autónoma. Esto no
 evidencia de un fallo de I/O o KDF.
 
 La causa común está en el motor, no en Named Pipe. Una bóveda recién persistida
-no contiene fila en `audit_keys`. `HumanVault::unlock_with_audit_custody`
+no contiene fila en `audit_keys`. La apertura humana anterior
 verifica el canal, abre SQLite y KH, pero no provisiona KAUD ni registra
 `human_unlock`. Al soltar esa sesión, tanto Windows como Linux llaman
 `AutonomousAuditVault::open`; esta exige una fila coincidente mediante
@@ -1040,35 +1041,34 @@ misma `AuditDeviceCustody` estable debe comprobar:
 4. un fallo sintético de inserción del primer registro hace fallar unlock y
    revierte también paquete, estado y segmento. No se permite una sesión
    desbloqueada sin su evento ni una fila KAUD parcial;
-5. después de crear la generación inicial, intentar unlock con otra custodia
-   no puede rotar silenciosamente como efecto secundario del unlock. Este punto
-   entra en tensión con el contrato público heredado descrito abajo y todavía
-   no tiene cambio de API autorizado.
+5. después de crear la generación inicial, la apertura autónoma con otra
+   custodia falla cerrada y no crea una generación; una custodia de reemplazo
+   proporcionada explícitamente a una apertura humana autenticada por KH sí
+   conserva la rotación histórica y abre una generación enlazada.
 
-El prototipo mínimo pertenece a `HumanVault::unlock_with_audit_custody`, que es
-el seam compartido por Linux, macOS y Windows. Después de abrir KH y revalidar
+El seam compartido por Linux, macOS y Windows es la única API pública
+`HumanVault::unlock(path, password, device, channel, audit_custody)`. Después de abrir KH y revalidar
 el canal humano, inicia una transacción SQLite `IMMEDIATE`, obtiene la frontera
 de autoridad y llama una sola vez a `append_event` con el root humano,
 `HumanUnlock/Succeeded` y la custodia estable entregada por el servicio. Para
 el servicio instalado, la transacción debe distinguir ausencia inicial real de
-una custodia incompatible: sólo sin `audit_keys` del dispositivo puede crear la
-generación inicial; un paquete existente que no abre con la custodia del
-servicio no puede convertirse silenciosamente en generación nueva. La misma
+la custodia suministrada. `ensure_package` continúa la generación si coincide;
+si la apertura humana autenticada entrega deliberadamente una custodia de
+reemplazo, crea la siguiente generación enlazada conforme a
+`security-operations.md` §4. Esto no autoriza a la apertura autónoma a rotar:
+sin KH, una custodia que no coincide devuelve `AuditKeyUnavailable`. La misma
 transacción confirma paquete, evento, estado, segmento y manifiesto antes de
 construir la sesión. Cualquier error revierte y mantiene el fallo cerrado. La
 contraseña incorrecta no llega a esa transacción y no produce un evento.
 
-Sin embargo, el contrato público existente también expone
-`HumanVault::unlock`, que genera una `AuditDeviceCustody` nueva en cada llamada,
-y la regresión `replacing_device_custody_opens_a_linked_audit_generation`
-espera hoy que una nueva custodia abra una generación enlazada. Exigir
-coincidencia en todo unlock impide reabrir mediante esa API y elimina aquella
-rotación implícita: es una reducción/prerrequisito nuevo, no una mera corrección
-de fixture. No se autoriza resolverlo con estado global, cache, una ruta sin
-auditoría ni una custodia sustituta. La propuesta pendiente es hacer explícita
-la custodia estable en la API pública y diseñar, si se conserva, una ceremonia
-separada y explícita de cambio de custodia; eso requiere autorización por su
-impacto de compatibilidad.
+El usuario autorizó hacer explícita la custodia estable en la API pública. Se
+elimina la variante que generaba custodia aleatoria por llamada y no queda un
+alias, cache global, valor sustituto ni ruta sin auditoría. Cada consumidor
+mantiene la custodia de su dispositivo y la pasa en todas las reaperturas. La
+regresión histórica
+`replacing_device_custody_opens_a_linked_audit_generation` permanece positiva:
+es reemplazo humano explícito respaldado por KH, no rotación autónoma o
+accidental.
 
 Primero se añade el test de estas observaciones a la superficie pública de
 `pm-vault`; queda preparado para observar su RED contra el comportamiento
@@ -1095,12 +1095,36 @@ expectativa heredada de rotación implícita en una negativa; ese cambio no
 estaba autorizado y se revirtió, por lo que no constituye un GREEN aceptable.
 Al ampliar a todo `pm-vault` apareció además un RED distinto y verificable: los
 helpers antiguos llaman
-`HumanVault::unlock`, que genera una custodia nueva en cada llamada. Una segunda
+la antigua `HumanVault::unlock`, que generaba una custodia nueva en cada llamada. Una segunda
 apertura del mismo dispositivo ya no puede coincidir con el paquete estable y
 `backup_lifecycle` falla con `AuditKeyUnavailable`. El producto Linux/Windows
-usa `unlock_with_audit_custody` con custodia estable; no se añadirá un cache,
-una rotación implícita ni una ruta sin auditoría para hacer verde ese helper.
-La decisión de API/custodia permanece pendiente y el gate completo no es GREEN.
+ya conservaba custodia estable. La autorización posterior reemplaza ambas
+variantes por una sola firma explícita y migra fixtures/consumidores; no se
+añade cache, custodia sustituta ni ruta sin auditoría. Hasta ejecutar los gates
+enfocados y completos de este candidato, el gate completo sigue sin ser GREEN.
+
+La verificación posterior a la migración se ejecutará en ventana Linux
+exclusiva y conservará cada intento por separado. Primero:
+
+1. `cargo test -p pm-vault --test audit_lifecycle` debe cubrir creación inicial,
+   reapertura estable, rechazo autónomo de custodia incorrecta, rollback del
+   primer evento y la rotación humana enlazada original;
+2. `cargo test -p pm-vault --test human_transactions` y
+   `cargo test -p pm-vault --test backup_lifecycle` deben probar reaperturas con
+   la custodia del fixture sin cambiar la atomicidad de commits/restore;
+3. todos los tests de `pm-vault` y `e2ee_replication` deben verificar que la
+   firma pública única fue migrada y que no queda un consumidor que genere una
+   custodia nueva al reabrir el mismo dispositivo;
+4. `scripts/check.sh`, `scripts/clean-offline-build.sh` y los laboratorios TUI
+   de contenido/acceso/operaciones deben permanecer verdes para acreditar los
+   consumidores CLI/TUI y el canal humano compartido. La corrida Windows STOP
+   se repite sólo después de integrar el seam, porque el GREEN Linux no acredita
+   SCM, Named Pipe ni DPAPI.
+
+Antes de esa ventana sólo se ejecutan `rustfmt` directo, `git diff --check`, el
+checker estático Windows y una comprobación sintáctica de que cada llamada a
+`HumanVault::unlock` tiene los cinco argumentos explícitos. Ninguno de esos
+checks se presenta como evidencia conductual.
 
 ## Déficit contractual de parada SCM (plan, no implementación)
 

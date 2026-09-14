@@ -768,34 +768,18 @@ impl HumanVault {
         )
     }
 
-    /// Opens an existing vault and retains `K_H`/`SK_H` only in this human session.
+    /// Opens an existing vault with explicit device audit custody and retains
+    /// `K_H`/`SK_H` only in this human session.
+    ///
+    /// Reusing the device's stable custody continues its current audit generation.
+    /// Supplying an intentional replacement while the human root is authenticated opens
+    /// the next linked generation; autonomous audit access cannot do that.
     ///
     /// # Errors
     ///
-    /// Returns an error for a wrong channel, password, root, or storage format.
+    /// Returns an error for a wrong channel, password, root, custody, audit write, or
+    /// storage format. The session is not returned unless its `HumanUnlock` event commits.
     pub fn unlock(
-        path: &Path,
-        password: &[u8],
-        device: [u8; 16],
-        channel: HumanChannel,
-    ) -> Result<Self, HumanCommitError> {
-        Self::unlock_with_audit_custody(
-            path,
-            password,
-            device,
-            channel,
-            Arc::new(AuditDeviceCustody::generate()?),
-        )
-    }
-
-    /// Opens a human session attached to stable device audit custody. Sharing
-    /// this opaque handle with the custodian permits later audit writes after KH
-    /// and the human session have been dropped.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a wrong channel, password, root, custody, or storage format.
-    pub fn unlock_with_audit_custody(
         path: &Path,
         password: &[u8],
         device: [u8; 16],
@@ -808,14 +792,6 @@ impl HumanVault {
         let trusted_root = root.trusted_root();
         channel.verify()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let has_device_audit_package: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM audit_keys WHERE device_id=?1)",
-            [device.as_slice()],
-            |row| row.get(0),
-        )?;
-        if has_device_audit_package {
-            audit::load_matching_package(&transaction, &trusted_root, device, &audit_custody)?;
-        }
         let frontier = audit::current_frontier(&transaction)?;
         audit::append_event(
             &transaction,

@@ -38,7 +38,7 @@ fn empty_vault_unlock_initializes_audit_once_and_enables_autonomous_lock() {
     let uid = unsafe { libc::geteuid() };
     let wrong_channel = HumanChannel::authenticate(wrong_server, uid).unwrap();
     assert!(
-        HumanVault::unlock_with_audit_custody(
+        HumanVault::unlock(
             &path,
             b"synthetic definitely wrong",
             DEVICE,
@@ -66,25 +66,15 @@ fn empty_vault_unlock_initializes_audit_once_and_enables_autonomous_lock() {
     assert_eq!(query.records()[0].outcome(), AuditOutcome::Succeeded);
     assert_eq!(count(&path, "audit_keys"), 1);
 
-    let replacement_custody = Arc::new(AuditDeviceCustody::generate().unwrap());
-    let (replacement_server, replacement_peer) = UnixStream::pair().unwrap();
-    let replacement_channel = HumanChannel::authenticate(replacement_server, uid).unwrap();
-    assert!(
-        HumanVault::unlock_with_audit_custody(
-            &path,
-            PASSWORD,
-            DEVICE,
-            replacement_channel,
-            replacement_custody,
-        )
-        .is_err(),
-        "custody mismatch rotated the audit key during unlock"
-    );
-    drop(replacement_peer);
-    assert_eq!(count(&path, "audit_keys"), 1);
-
     drop(human);
     drop(peer);
+    let wrong_custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    assert!(
+        AutonomousAuditVault::open(&path, DEVICE, wrong_custody).is_err(),
+        "autonomous audit opened without the device's stable custody"
+    );
+    assert_eq!(count(&path, "audit_keys"), 1);
+
     let mut autonomous = AutonomousAuditVault::open(&path, DEVICE, Arc::clone(&custody)).unwrap();
     autonomous
         .append(&AuditEvent::new(
@@ -138,7 +128,7 @@ fn first_unlock_audit_failure_rolls_back_initial_package_and_session() {
     let uid = unsafe { libc::geteuid() };
     let channel = HumanChannel::authenticate(server, uid).unwrap();
     assert!(
-        HumanVault::unlock_with_audit_custody(&path, PASSWORD, DEVICE, channel, custody).is_err(),
+        HumanVault::unlock(&path, PASSWORD, DEVICE, channel, custody).is_err(),
         "unlock returned a session without its required audit record"
     );
     drop(peer);
@@ -430,10 +420,13 @@ fn replacing_device_custody_opens_a_linked_audit_generation() {
         .unwrap();
 
     let query = human.query_audit(DEVICE, 2, 1, 16).unwrap();
-    assert_eq!(query.records().len(), 1);
+    assert_eq!(query.records().len(), 2);
     assert_eq!(query.records()[0].seq(), 1);
+    assert_eq!(query.records()[0].action(), AuditAction::HumanUnlock);
+    assert_eq!(query.records()[1].seq(), 2);
+    assert_eq!(query.records()[1].action(), AuditAction::ItemChange);
     let historical = human.query_audit(DEVICE, 1, 1, 16).unwrap();
-    assert_eq!(historical.records().len(), 2);
+    assert_eq!(historical.records().len(), 3);
     let purge = human.prepare_audit_purge(DEVICE, 1, 1).unwrap();
     human
         .commit(
@@ -443,7 +436,7 @@ fn replacing_device_custody_opens_a_linked_audit_generation() {
         )
         .unwrap();
     let historical = human.query_audit(DEVICE, 1, 1, 16).unwrap();
-    assert_eq!(historical.records().len(), 1);
+    assert_eq!(historical.records().len(), 2);
     assert_eq!(historical.discontinuities().len(), 1);
     let connection = Connection::open(&path).unwrap();
     assert_eq!(count(&directory.vault(), "audit_keys"), 2);
@@ -456,7 +449,7 @@ fn replacing_device_custody_opens_a_linked_audit_generation() {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-        2
+        3
     );
     assert!(AutonomousAuditVault::open(&path, DEVICE, first_custody).is_err());
 }
@@ -503,7 +496,7 @@ fn open_human(path: &Path, custody: Arc<AuditDeviceCustody>) -> (HumanVault, Uni
     let uid = unsafe { libc::geteuid() };
     let channel = HumanChannel::authenticate(server, uid).unwrap();
     (
-        HumanVault::unlock_with_audit_custody(path, PASSWORD, DEVICE, channel, custody).unwrap(),
+        HumanVault::unlock(path, PASSWORD, DEVICE, channel, custody).unwrap(),
         client,
     )
 }

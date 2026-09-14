@@ -32,11 +32,12 @@ impl PasswordRng for FailingRng {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn attachment_above_16_mib_streams_atomically_in_bounded_chunks() {
+    let audit_custody = test_audit_custody();
     const SIZE: u64 = 16 * 1024 * 1024 + 4096;
     let directory = tempfile_dir("streaming");
     let path = directory.join("vault.sqlite3");
     persist_test_vault(&path);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
     let expected_hash = pattern_hash(SIZE);
     let attachment = Attachment::descriptor(
         [0x79; 16],
@@ -252,10 +253,11 @@ fn pattern_hash(size: u64) -> [u8; 32] {
 
 #[test]
 fn all_logical_types_unknown_fields_and_unicode_attachments_roundtrip_exactly() {
+    let audit_custody = test_audit_custody();
     let directory = tempfile_dir("roundtrip");
     let path = directory.join("vault.sqlite3");
     persist_test_vault(&path);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
 
     let records = all_records();
     for expected in records {
@@ -286,10 +288,11 @@ fn all_logical_types_unknown_fields_and_unicode_attachments_roundtrip_exactly() 
 
 #[test]
 fn configured_generator_uses_native_rng_and_fails_closed_when_rng_fails() {
+    let audit_custody = test_audit_custody();
     let directory = tempfile_dir("generator");
     let path = directory.join("vault.sqlite3");
     persist_test_vault(&path);
-    let (vault, _peer) = open_human(&path);
+    let (vault, _peer) = open_human(&path, &audit_custody);
     let config = GeneratorConfig {
         length: 96,
         lowercase: false,
@@ -323,10 +326,11 @@ fn configured_generator_uses_native_rng_and_fails_closed_when_rng_fails() {
 
 #[test]
 fn staging_and_rejected_limits_never_truncate_or_persist_canaries() {
+    let audit_custody = test_audit_custody();
     let directory = tempfile_dir("limits");
     let path = directory.join("vault.sqlite3");
     persist_test_vault(&path);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
     let record = LogicalRecord::new(
         RecordKind::File,
         HumanMetadata {
@@ -399,10 +403,11 @@ fn staging_and_rejected_limits_never_truncate_or_persist_canaries() {
 
 #[test]
 fn human_search_tag_and_favorite_use_complete_encrypted_records() {
+    let audit_custody = test_audit_custody();
     let directory = tempfile_dir("organization");
     let path = directory.join("vault.sqlite3");
     persist_test_vault(&path);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
     let record = LogicalRecord::new(
         RecordKind::Note,
         HumanMetadata {
@@ -594,13 +599,29 @@ fn persist_test_vault(path: &Path) {
     pending.persist(path, &confirmation).unwrap();
 }
 
-fn open_human(path: &Path) -> (HumanVault, UnixStream) {
+fn open_human(
+    path: &Path,
+    audit_custody: &std::sync::Arc<pm_vault::AuditDeviceCustody>,
+) -> (HumanVault, UnixStream) {
     let (server, client) = UnixStream::pair().unwrap();
     let uid = unsafe { libc::geteuid() };
     let channel = HumanChannel::authenticate(server, uid).unwrap();
     (
-        HumanVault::unlock(path, PASSWORD, DEVICE, channel).unwrap(),
+        HumanVault::unlock(
+            path,
+            PASSWORD,
+            DEVICE,
+            channel,
+            std::sync::Arc::clone(audit_custody),
+        )
+        .unwrap(),
         client,
+    )
+}
+
+fn test_audit_custody() -> std::sync::Arc<pm_vault::AuditDeviceCustody> {
+    std::sync::Arc::new(
+        pm_vault::AuditDeviceCustody::generate().expect("synthetic device audit custody"),
     )
 }
 

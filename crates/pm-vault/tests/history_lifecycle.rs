@@ -21,11 +21,12 @@ const DEVICE: [u8; 16] = [0x18; 16];
 
 #[test]
 fn streaming_history_restores_incrementally_with_fresh_ciphertext_and_exact_content() {
+    let audit_custody = test_audit_custody();
     const SIZE: u64 = 2 * 1024 * 1024 + 37;
     let dir = TestDir::new("stream-restore");
     let path = dir.path();
     persist(&path);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
     let expected_hash = pattern_hash(SIZE);
     let descriptor = Attachment::descriptor(
         [0x73; 16],
@@ -127,10 +128,11 @@ fn streaming_history_restores_incrementally_with_fresh_ciphertext_and_exact_cont
 
 #[test]
 fn losing_history_restores_as_a_new_revision_without_implicit_enable() {
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new("restore");
     let path = dir.path();
     persist(&path);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
     let first = record("primera", b"ticket18-first-canary");
     let created = vault.prepare_create_record(&first).unwrap();
     let item = *created.item_id();
@@ -188,10 +190,11 @@ fn losing_history_restores_as_a_new_revision_without_implicit_enable() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn revision_and_item_purge_are_scoped_atomic_and_leave_only_replay_markers() {
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new("purge");
     let path = dir.path();
     persist(&path);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
     let first = record("historial", b"ticket18-purged-history-canary");
     let created = vault.prepare_create_record(&first).unwrap();
     let item = *created.item_id();
@@ -481,12 +484,28 @@ fn persist(path: &Path) {
     pending.persist(path, &recovery).unwrap();
 }
 
-fn open_human(path: &Path) -> (HumanVault, UnixStream) {
+fn open_human(
+    path: &Path,
+    audit_custody: &std::sync::Arc<pm_vault::AuditDeviceCustody>,
+) -> (HumanVault, UnixStream) {
     let (server, peer) = UnixStream::pair().unwrap();
     let channel = HumanChannel::authenticate(server, unsafe { libc::geteuid() }).unwrap();
     (
-        HumanVault::unlock(path, MASTER, DEVICE, channel).unwrap(),
+        HumanVault::unlock(
+            path,
+            MASTER,
+            DEVICE,
+            channel,
+            std::sync::Arc::clone(audit_custody),
+        )
+        .unwrap(),
         peer,
+    )
+}
+
+fn test_audit_custody() -> std::sync::Arc<pm_vault::AuditDeviceCustody> {
+    std::sync::Arc::new(
+        pm_vault::AuditDeviceCustody::generate().expect("synthetic device audit custody"),
     )
 }
 
