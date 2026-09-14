@@ -1600,3 +1600,25 @@ error primario `cargo failed (101)`. Esto es un RED de la aserción del fixture,
 no evidencia de pantalla/teclado ni una regresión de producto. El log completo
 está en `/tmp/pm-windows-tui-observer-red-run20-full.log`; la corrección exige
 directamente esos dos `Err` sin cambiar parser, producto ni plazos.
+
+La segunda corrida del observer,
+[`34861192989`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34861192989)
+sobre `6e9f354f228bf9f17cdb93d5610f05f4dd51d74a`, tampoco llegó al launcher:
+pasaron los seis tests nativos, el contrato de pipe y los tres tests del parser,
+pero la composición de `pm-custody` encontró ocho errores de compilación en
+`pm-sync`. El crate importaba `OpenOptionsExt` Unix sin `cfg`, usaba
+`O_CLOEXEC|O_NOFOLLOW` y aplicaba `.mode(0o600)` en cinco temporales. Es un
+fallo de precondición de portabilidad introducido al componer la base TUI, no un
+RED de pantalla ni teclado. El cleanup propio terminó sin error agregado. El
+log está preservado en `/tmp/pm-windows-tui-observer-red-run21-full.log`.
+
+El arreglo mínimo no elimina ni condiciona fuera `pm-sync`. Se añade al seam
+nativo una creación exclusiva de fichero privado (DACL protegida, sólo SYSTEM
+y owner; sin handle heredable) y una apertura de fichero regular que no sigue
+el componente reparse final. `pm-sync` usa esas dos operaciones en todos sus
+temporales/outputs y conserva en Unix los modos 0600 y `O_CLOEXEC|O_NOFOLLOW`.
+Los tests nativos deben comprobar create-new/colisión, DACL protegida, rechazo de
+reparse y que un output sólo se publica después de flush+rename; cualquier
+imposibilidad de consultar la seguridad o identidad es error, no una apertura
+menos protegida. Después se repiten los tests nativos y el lab completo; sólo
+entonces el observer puede producir el RED de producto esperado.

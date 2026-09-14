@@ -12,9 +12,7 @@ use pm_vault::{
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     fmt,
-    fs::OpenOptions,
     io::{Read, Write},
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -125,11 +123,7 @@ impl SyncTransport for ProcessTlsTransport {
     fn put(&self, n: [u8; 32], h: [u8; 32], b: &[u8]) -> Result<(), SyncError> {
         let parent = self.client_key.parent().ok_or(SyncError::Unavailable)?;
         let temporary = parent.join(format!(".pm-sync-put-{}-{}", std::process::id(), hex(&h)));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
+        let mut file = pm_native_channel::create_private_file(&temporary, false, true)
             .map_err(|_| SyncError::Unavailable)?;
         file.write_all(b)
             .and_then(|()| file.sync_all())
@@ -520,11 +514,7 @@ impl SyncReplica {
                 .parent()
                 .ok_or(SyncError::Integrity)?
                 .join(format!("joined-{}", hex(&s.id)));
-            let mut out = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&joined)
+            let mut out = pm_native_channel::create_private_file(&joined, false, true)
                 .map_err(|_| SyncError::Unavailable)?;
             let mut lengths = Vec::new();
             for path in &s.chunks {
@@ -572,11 +562,7 @@ impl SyncReplica {
                     return Err(SyncError::Backpressure);
                 }
                 let path = stage.join(format!("stream-{}-{index}", hex(&id)));
-                let mut out = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&path)
+                let mut out = pm_native_channel::create_private_file(&path, false, true)
                     .map_err(|_| SyncError::Unavailable)?;
                 let copied = std::io::copy(
                     &mut std::io::Read::by_ref(&mut input).take(length),
@@ -637,17 +623,7 @@ impl SyncReplica {
         transport: &impl SyncTransport,
         path: &Path,
     ) -> Result<[u8; 32], SyncError> {
-        let mut input = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(|error| {
-                if error.raw_os_error() == Some(libc::ELOOP) {
-                    SyncError::InvalidRequest
-                } else {
-                    SyncError::Unavailable
-                }
-            })?;
+        let mut input = pm_native_channel::open_regular_file(path).map_err(map_open_error)?;
         let metadata = input.metadata().map_err(|_| SyncError::Unavailable)?;
         if !metadata.file_type().is_file() {
             return Err(SyncError::InvalidRequest);
@@ -743,11 +719,7 @@ impl SyncReplica {
             return Err(SyncError::Backpressure);
         }
         let temporary = output.with_extension(format!("sync-part-{}", std::process::id()));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
+        let mut file = pm_native_channel::create_private_file(&temporary, false, true)
             .map_err(|_| SyncError::Unavailable)?;
         let result = (|| {
             let mut next = 0u64;
@@ -786,6 +758,18 @@ impl SyncReplica {
         result
     }
 }
+
+fn map_open_error(error: std::io::Error) -> SyncError {
+    if error.kind() == std::io::ErrorKind::InvalidInput {
+        return SyncError::InvalidRequest;
+    }
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return SyncError::InvalidRequest;
+    }
+    SyncError::Unavailable
+}
+
 fn encode_object_page(entries: &[BlockRef]) -> Vec<u8> {
     let mut e = Encoder::new(Vec::new());
     e.array(2)

@@ -12,12 +12,14 @@ attributes="$root/.gitattributes"
 cargo_config="$root/.cargo/config.toml"
 windows_service="$root/crates/pm-custody/src/windows.rs"
 native_channel="$root/crates/pm-native-channel/src/windows.rs"
+native_file="$root/crates/pm-native-channel/src/native_file.rs"
+sync_lib="$root/crates/pm-sync/src/lib.rs"
 tui_fixture="$root/crates/pm-native-channel/examples/windows_tui_conpty_fixture.rs"
 native_fs="$root/crates/pm-vault/src/native_fs.rs"
 vault_lib="$root/crates/pm-vault/src/lib.rs"
 vault_tests="$root/crates/pm-vault/src/onepux.rs"
 
-for file in "$workflow" "$prepare" "$lab" "$storage_diagnostics" "$verifier" "$attributes" "$cargo_config" "$windows_service" "$native_channel" "$tui_fixture" "$native_fs" "$vault_lib" "$vault_tests"; do
+for file in "$workflow" "$prepare" "$lab" "$storage_diagnostics" "$verifier" "$attributes" "$cargo_config" "$windows_service" "$native_channel" "$native_file" "$sync_lib" "$tui_fixture" "$native_fs" "$vault_lib" "$vault_tests"; do
     test -f "$file" || {
         echo "required Windows source-build file is absent: $file" >&2
         exit 1
@@ -30,6 +32,18 @@ require_literal() {
         exit 1
     }
 }
+
+require_literal 'pub fn create_private_file' "$native_file"
+require_literal 'D:P(A;;FA;;;SY)(A;;FA;;;OW)' "$native_file"
+require_literal 'FILE_FLAG_OPEN_REPARSE_POINT' "$native_file"
+require_literal 'SE_DACL_PROTECTED' "$native_file"
+require_literal 'regular_open_rejects_a_final_reparse_component' "$native_file"
+require_literal 'pm_native_channel::create_private_file' "$sync_lib"
+require_literal 'pm_native_channel::open_regular_file' "$sync_lib"
+if grep -Eq 'os::unix::fs::OpenOptionsExt|\.mode\(0o600\)|O_NOFOLLOW' "$sync_lib"; then
+    echo 'pm-sync bypasses the native portable file seam' >&2
+    exit 1
+fi
 
 require_literal './scripts/prepare-windows-libsodium.ps1 -EphemeralCI' "$workflow"
 require_literal 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)' "$workflow"

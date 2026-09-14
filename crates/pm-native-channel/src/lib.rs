@@ -4,6 +4,9 @@
 
 use std::fmt;
 
+mod native_file;
+pub use native_file::{create_private_file, open_regular_file};
+
 #[cfg(target_os = "windows")]
 mod windows;
 
