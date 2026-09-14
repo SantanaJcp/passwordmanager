@@ -1454,6 +1454,17 @@ mod windows_fixture {
             .ok_or_else(|| io::Error::other("fixture path has no visible UTF-8 file name"))
     }
 
+    fn encode_operation_field(value: &str) -> String {
+        let mut encoded = String::with_capacity(value.len());
+        for character in value.chars() {
+            if matches!(character, '\\' | '|') {
+                encoded.push('\\');
+            }
+            encoded.push(character);
+        }
+        encoded
+    }
+
     fn open_menu(fixture: &Fixture, key: &str, expected: &str) -> io::Result<()> {
         press(fixture, key)?;
         fixture
@@ -1535,7 +1546,7 @@ mod windows_fixture {
         // no operation is retried by the fixture.
         open_menu(fixture, "m", "Migration:")?;
         open_menu(fixture, "1", "CSV source")?;
-        let csv_request = format!("{}|chrome|keep", paths.csv);
+        let csv_request = format!("{}|chrome|keep", encode_operation_field(paths.csv));
         type_visible_and_submit(fixture, &csv_request, "|chrome|keep")?;
         fixture
             .observer
@@ -1549,7 +1560,7 @@ mod windows_fixture {
 
         open_menu(fixture, "m", "Migration:")?;
         open_menu(fixture, "2", "1PUX source")?;
-        let onepux_request = format!("{}|keep", paths.onepux);
+        let onepux_request = format!("{}|keep", encode_operation_field(paths.onepux));
         type_visible_and_submit(fixture, &onepux_request, "|keep")?;
         fixture
             .observer
@@ -1899,6 +1910,12 @@ mod windows_fixture {
             let diagnostic = observer.diagnostic().unwrap();
             assert!(diagnostic.contains("password:true/flat:true/raw:true"));
             assert!(!diagnostic.contains("synthetic-unreported-value"));
+        }
+
+        #[test]
+        fn operation_field_encoder_preserves_windows_paths_under_existing_grammar() {
+            let encoded = encode_operation_field(r"C:\fixture\a|b.1pux");
+            assert_eq!(encoded, r"C:\\fixture\\a\|b.1pux");
         }
 
         #[test]

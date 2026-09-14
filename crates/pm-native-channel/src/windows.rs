@@ -72,6 +72,8 @@ use windows_sys::Win32::Security::{ACCESS_ALLOWED_ACE, EqualSid, GetAce};
 use windows_sys::Win32::System::DataExchange::GetClipboardData;
 #[cfg(test)]
 use windows_sys::Win32::System::Memory::GlobalSize;
+#[cfg(test)]
+use windows_sys::Win32::System::Threading::PROCESS_TERMINATE;
 
 use crate::{ChannelAuthenticationError, WindowsEndpoint, windows_pipe_sddl};
 
@@ -2021,6 +2023,77 @@ mod tests {
         assert!(ProcessHandleTransferLease::begin().is_err());
         lease.finish().unwrap();
         assert_eq!(current_process_dacl_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn process_transfer_lease_detects_a_visible_dacl_change_without_overwriting_it() {
+        let process = unsafe { GetCurrentProcess() };
+        let (before_descriptor, before_dacl) = query_process_dacl(process).unwrap();
+        let before = acl_bytes(before_dacl).unwrap();
+        let lease = ProcessHandleTransferLease::begin().unwrap();
+        let service = installed_service_sid().unwrap();
+        let mut entry = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: PROCESS_TERMINATE,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: NO_INHERITANCE,
+            ..EXPLICIT_ACCESS_W::default()
+        };
+        entry.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        entry.Trustee.TrusteeType = TRUSTEE_IS_USER;
+        entry.Trustee.ptstrName = service.as_ptr().cast_mut().cast();
+        let mut changed_dacl = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                SetEntriesInAclW(
+                    1,
+                    &raw const entry,
+                    lease.installed_dacl,
+                    &raw mut changed_dacl,
+                )
+            },
+            ERROR_SUCCESS
+        );
+        assert!(!changed_dacl.is_null());
+        assert_eq!(
+            unsafe {
+                SetSecurityInfo(
+                    process,
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    changed_dacl,
+                    ptr::null(),
+                )
+            },
+            ERROR_SUCCESS
+        );
+        let changed = current_process_dacl_bytes().unwrap();
+        assert_ne!(changed, before);
+        assert!(lease.finish().is_err());
+        assert_eq!(current_process_dacl_bytes().unwrap(), changed);
+
+        assert_eq!(
+            unsafe {
+                SetSecurityInfo(
+                    process,
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    before_dacl,
+                    ptr::null(),
+                )
+            },
+            ERROR_SUCCESS
+        );
+        assert_eq!(current_process_dacl_bytes().unwrap(), before);
+        free_local(changed_dacl.cast()).unwrap();
+        free_local(before_descriptor).unwrap();
+        ProcessHandleTransferLease::begin()
+            .unwrap()
+            .finish()
+            .unwrap();
     }
 
     #[test]

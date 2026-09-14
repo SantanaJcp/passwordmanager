@@ -193,7 +193,8 @@ printf '%s\n' "$service_diagnostics_input_block" | grep -Fq 'type: boolean' || {
 require_literal '[switch]$TuiConPtyRed' "$lab"
 require_literal "@('build', '-p', 'pm-native-channel', '--example', 'windows_tui_conpty_fixture', '--locked', '--offline')" "$lab"
 require_literal 'D:P(A;;GA;;;SY)(A;;GA;;;$humanSid)' "$lab"
-require_literal '@($stationSddl, $tuiCustody, '\''tui'\''' "$lab"
+require_literal '@($stationSddl, $tuiCustody, '\''--matrix'\''' "$lab"
+require_literal '$tuiPlaintext, '\''--'\'', '\''tui'\''' "$lab"
 require_literal ') $humanInput $tuiOut $tuiErr' "$lab"
 require_literal 'TUI_CONPTY_READY' "$lab"
 for literal in CreateWindowStationW CWF_CREATE_ONLY CreateDesktopW CreatePseudoConsole \
@@ -210,10 +211,13 @@ for literal in CreateWindowStationW CWF_CREATE_ONLY CreateDesktopW CreatePseudoC
     TUI_CONPTY_RED TUI_CONPTY_READY; do
     require_literal "$literal" "$tui_fixture"
 done
-if grep -Eq 'TerminateProcess|Command::new|winsta0|OpenClipboard|PeekNamedPipe|&raw const fixture\.pseudo_console|mpsc::channel|process::abort' "$tui_fixture"; then
+if grep -Eq 'TerminateProcess|Command::new|winsta0|PeekNamedPipe|&raw const fixture\.pseudo_console|mpsc::channel|process::abort' "$tui_fixture"; then
     echo 'Windows TUI tracer contains a process/terminal/clipboard substitute' >&2
     exit 1
 fi
+require_literal 'OpenClipboard(ptr::null_mut())' "$tui_fixture"
+require_literal 'read_clipboard_utf16()?.as_slice()' "$tui_fixture"
+require_literal 'OwnedClipboard::copy(' "$tui_fixture"
 
 # Service subphase diagnostics are opt-in and write only fixed literals to a
 # pre-created, owned fixture file. Keep this contract textual because Linux

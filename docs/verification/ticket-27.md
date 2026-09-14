@@ -1837,11 +1837,11 @@ cabe, y rechaza controles o anchuras no clasificadas. Nunca reemplaza, recorta
 ni cuenta un glyph ancho como una celda. Las regresiones cubren ancho dos,
 combining, margen, erase y búsqueda textual exacta.
 
-Las entradas compuestas de migración usan `|` como separador. En Windows una
-barra invertida ordinaria pertenece al path y no puede desaparecer como un
-escape genérico. El parser común reconoce únicamente `\|` y `\\` como escapes;
-cualquier otra pareja conserva la barra y un `\` final también se conserva.
-Una regresión usa paths Windows reales y mantiene los casos Unix existentes.
+Las entradas compuestas de migración usan la gramática existente: `|` separa y
+`\` escapa el byte siguiente. El fixture codifica cada `\` de un path Windows
+como `\\` y cada `|` literal como `\|` antes de teclear; una regresión comprueba
+esa codificación. El parser común y su rechazo de un escape final quedan
+intactos, por lo que el port no amplía ni cambia la interpretación Unix.
 
 El siguiente vertical del fixture crea dentro de la raíz humana propia un CSV
 y un 1PUX sintéticos, destinos nuevos y un pairing. Tras observar cada prompt,
@@ -1880,6 +1880,18 @@ agente fuera de la window station, negativas completas peer/PID/source/reparse/
 links/cambio DACL, restore y ambas rotaciones, attachment download de 16 MiB+,
 pair/sync/reinicio/idle/offline/retire y audit purge. El tracer tampoco acredita
 Windows Terminal visible ni x64/reboot/FDE/firma.
+
+La verificación Linux del bloque conserva cada intento. El focused del parser
+TUI pasó 8 tests en library y 8 en binary
+(`/tmp/pm27-fulltui-focused1.log`). `check1` rechazó el literal antiguo del
+checker tras añadir la matriz; `check2` rechazó su prohibición antigua de
+`OpenClipboard` aunque la lectura nueva ocurre sólo dentro de la estación
+privada; `check3` exigió que dumpbin precediera la creación SCM; `check4`
+encontró sólo formato Rust. Se actualizaron los asserts estáticos cerrados, el
+build+dumpbin quedó antes del SCM y los tests que necesitan el SID instalado se
+ejecutan después de crearlo pero antes de iniciar el servicio. `check5` pasó el
+gate completo (`/tmp/pm27-fulltui-check5.log`). Esto compila sólo cfg Linux: no
+acredita las nuevas ramas, PowerShell, ConPTY, DACL ni clipboard Windows.
 
 ### Composición sync nativa pendiente
 

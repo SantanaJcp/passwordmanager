@@ -510,19 +510,6 @@ try {
         Set-ExactTreeAcl $diagnosticDir @('SYSTEM', $installerName)
     }
 
-    # The native process-transfer regression resolves the real virtual service
-    # SID and verifies its short-lived process DACL lease. Provision the
-    # collision-checked owned SCM record before tests; its inert command is
-    # replaced by the normal custody binary before the service is started.
-    # Omit password=: SCM maps absence to the required NULL lpPassword for a
-    # virtual account rather than to an empty password.
-    Invoke-Checked 'sc.exe' @('create', $serviceName, 'type=', 'own', 'start=', 'demand', 'obj=', "NT SERVICE\$serviceName", 'binPath=', 'cmd /c exit 0')
-    $serviceOwned = $true
-    Invoke-Checked 'sc.exe' @('sidtype', $serviceName, 'unrestricted')
-    $serviceSid = Get-Sid "NT SERVICE\$serviceName"
-
-    Invoke-Checked 'cargo' @('test', '-p', 'pm-native-channel', '--all-targets', '--locked', '--offline')
-    Invoke-Checked 'cargo' @('test', '-p', 'pm-sync', '--lib', '--locked', '--offline')
     Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
     if ($TuiConPtyRed) {
         Invoke-Checked 'cargo' @('build', '-p', 'pm-native-channel', '--example', 'windows_tui_conpty_fixture', '--locked', '--offline')
@@ -533,6 +520,19 @@ try {
     Assert-True ((Get-Item $cli).VersionInfo.FileName.EndsWith('.exe')) 'native PE CLI binary missing'
     Assert-NativeStaticMsvcBinary $dumpbin $custody 'pm-custody.exe'
     Assert-NativeStaticMsvcBinary $dumpbin $cli 'pm.exe'
+
+    # The native process-transfer regression resolves the real virtual service
+    # SID and verifies its short-lived process DACL lease. Provision the
+    # collision-checked owned SCM record only after inspecting both product
+    # binaries; its inert command is replaced before the service is started.
+    # Omit password=: SCM maps absence to the required NULL lpPassword for a
+    # virtual account rather than to an empty password.
+    Invoke-Checked 'sc.exe' @('create', $serviceName, 'type=', 'own', 'start=', 'demand', 'obj=', "NT SERVICE\$serviceName", 'binPath=', 'cmd /c exit 0')
+    $serviceOwned = $true
+    Invoke-Checked 'sc.exe' @('sidtype', $serviceName, 'unrestricted')
+    $serviceSid = Get-Sid "NT SERVICE\$serviceName"
+    Invoke-Checked 'cargo' @('test', '-p', 'pm-native-channel', '--all-targets', '--locked', '--offline')
+    Invoke-Checked 'cargo' @('test', '-p', 'pm-sync', '--lib', '--locked', '--offline')
     $tuiFixture = $null
     $tuiCustody = $null
     if ($TuiConPtyRed) {
