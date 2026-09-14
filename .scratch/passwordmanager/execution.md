@@ -300,3 +300,31 @@ y se propagarán los cuatro errores de limpieza ya identificados en
 fallos de cleanup y la propiedad de recursos; no autoriza fallbacks, borrar
 recursos ajenos ni modificar otras omisiones heredadas. Las menciones de
 «pendiente» en el checkpoint anterior son históricas desde esta aprobación.
+
+### Integración de unlock auditado y resultados nativos posteriores
+
+2026-09-14 — El merger distinto integró el cambio común en `a9eb4b8`:
+`HumanVault::unlock` exige custodia estable explícita, registra `HumanUnlock`
+atómicamente y conserva la rotación humana autenticada de generación. Check,
+build limpio offline y la barrida final de **20/20 labs Linux** pasaron.
+Los fallos e intentos intermedios se conservan en
+[el informe de integración](../../docs/verification/audit-unlock.md): el trigger
+de atomicidad se corrigió para alcanzar el commit y permitir la reconexión para
+receipt, no para eludir la nueva auditoría del unlock.
+
+El candidato Windows aislado `50dd1bf` pasó el
+[run 34853430364](https://github.com/SantanaJcp/passwordmanager/actions/runs/34853430364):
+6 tests nativos, contrato de pipe, unlock/lock auditado, STOP/restart,
+crash deliberado y consultas de ausencia final de recursos propios. Esto no
+acredita la TUI completa ni resuelve 27. Su launcher ConPTY sigue en preparación.
+
+macOS `f1a1a51` alcanzó copia TUI en el
+[run 34855277724](https://github.com/SantanaJcp/passwordmanager/actions/runs/34855277724),
+pero el probe de clipboard agente falló: ARM devolvió rc0 sin registrar si
+contenía el canario; Intel agotó el plazo. No hay evidencia suficiente para
+afirmar extracción ni aislamiento. La siguiente prueba debe distinguir ambos
+con flags seguros y controles humanos vigentes, sin imprimir el contenido.
+
+Se mantienen **25/35 tickets integrados**. Los cuatro cleanups recién
+autorizados siguen en 28; este checkpoint no los declara implementados ni
+sustituye la revisión unificada final.
