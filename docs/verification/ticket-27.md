@@ -1540,3 +1540,48 @@ redraw real de `42x12`/`100x30`. La misma estación se ampliará con
 lector/interloper humanos y un proceso agente que debe fallar al abrirla; nunca
 usa la estación interactiva real. No se escribe código de producto hasta
 preservar este RED nativo.
+
+La corrida Windows 11 ARM64
+[`34857970004`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34857970004)
+sobre `7998ebab731233bf2ba362065c60b03c8f5bf330` preservó ese RED. Los seis
+tests nativos y el contrato de pipe pasaron; el launcher creó la estación
+privada, la ConPTY y el proceso normal, y observó output de producto. El primer
+fallo fue exactamente `INVALID_ARGUMENT TUI_CONPTY_RED pm-custody.exe tui
+exited 2 before 15-second liveness interval; conpty-product-output=present`.
+Por tanto el fallo no fue compilación, ACL, creación de estación/ConPTY ni
+ausencia de output: el binario normal aún no aceptaba `tui`. El cleanup eliminó
+el servicio y los recursos propios sin error agregado; las comprobaciones
+terminantes de ausencia se ejecutaron silenciosamente antes de volver a
+propagar el error corporal. El log completo está preservado en
+`/tmp/pm-windows-tui-red-run19-full.log`.
+
+### Método del primer GREEN observable de TUI compartida
+
+La base TUI 23–25 se compone primero mediante merge normal del commit unificado
+`d57a707b2bab3d4e1f0e3109835e8bf7947939b5`; la resolución conserva tanto la
+durabilidad nativa Windows como el estado publicado explícito de los errores de
+cleanup. La extracción posterior debe mover el modelo, render, keymap y
+dispatch humano existentes a módulos comunes. Los módulos de plataforma sólo
+pueden aportar transporte autenticado, terminal, clipboard y transferencia de
+ficheros; no pueden copiar el `match` de opcodes ni sustituir una operación no
+disponible.
+
+Antes del primer GREEN nativo el fixture deja de usar liveness como oráculo de
+UI. Un observer test-only consume todos los bytes UTF-8 de ConPTY y mantiene una
+pantalla 80x24: aplica texto Unicode, CR/LF/backspace y únicamente las
+secuencias CSI/DEC que emite el backend verificado. Bytes UTF-8 inválidos,
+parámetros vacíos ambiguos, secuencias no soportadas, coordenadas fuera de
+pantalla o captura superior al límite son errores categóricos; no se eliminan
+escapes ni se reemplazan glifos. El drainer continúa hasta EOF aunque el
+observer falle para no bloquear `ClosePseudoConsole`.
+
+El test espera en esa pantalla reconstruida el título y `Password required
+(input hidden)` antes de enviar la contraseña sintética. Después espera
+`Unlocked: selection never reveals secrets` y el catálogo de metadatos antes
+de enviar `q`; exige lock auditado, salida del proceso y teardown completo. La
+captura conservada por el observer nunca se imprime y se comprueba que no
+contenga contraseña, secreto ni canario sintético. Sólo este recorrido acredita
+teclado y pantalla reales; el tracer previo de 15 segundos queda como evidencia
+RED, no como aceptación. Resize, clipboard, transferencia Windows y todos los
+flujos 23–25 permanecen tracers posteriores y no se declaran por este primer
+GREEN.
