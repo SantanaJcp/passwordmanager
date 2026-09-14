@@ -111,9 +111,10 @@ Las únicas transiciones intermedias admitidas son:
   token de sujeto, secreto de requester y contraseña maestra por
   `<REDACTED>` antes de mostrarlo. No se reintenta el `start` ni el POST.
 
-El diagnóstico base registró: en el laboratorio de intentos, la rama con el
-worker extraído llegó a reproducir una lectura `RUNNING/INDETERMINATE` en 1 de
-8 corridas después del restart; en passkey la ventana
+El diagnóstico base anterior a la extracción del worker registró, en el
+laboratorio de intentos, una lectura `RUNNING/INDETERMINATE` en 1 de 8 corridas
+después del restart; la variante actual con el worker extraído terminó verde en
+8 de 8 corridas; en passkey la ventana
 `RUNNING/PASSKEY_HUMAN_CONFIRMATION` fue legítima y no reprodujo un fallo
 adicional; en token exchange la negativa de audiencia original retornó un
 código distinto de cero sin `stdout`/`stderr`, sin reproducción en nueve

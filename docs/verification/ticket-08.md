@@ -85,9 +85,10 @@ provider credentials, or changes the one-call journal assertion. Fixed sleeps
 are not used as readiness evidence; the final state and `result` remain the
 contract being asserted.
 
-The historical diagnostic found this race in the worker-extraction baseline
-(one `RUNNING/INDETERMINATE` read in eight attempts runs). The modified lab must
-retain that red evidence and then show the same single-lease/no-blind-retry
+The historical diagnostic found this race before the worker extraction (one
+`RUNNING/INDETERMINATE` read in eight attempts runs). The current extracted-worker
+variant then completed eight of eight runs green. The modified lab retains the
+red evidence and must continue to show the same single-lease/no-blind-retry
 contract green, without changing the attempts engine.
 
 ## Regression evidence and limits
