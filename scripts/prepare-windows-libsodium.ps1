@@ -156,4 +156,5 @@ finally {
     Pop-Location
 }
 Add-Content -LiteralPath $env:GITHUB_ENV -Value "SODIUM_LIB_DIR=$libDir" -Encoding utf8
+Add-Content -LiteralPath $env:GITHUB_ENV -Value "PM_NATIVE_DUMPBIN=$dumpbin" -Encoding utf8
 Write-Output "PASS libsodium-source version=1.0.22 cpu=ARM64 toolset=v145 runtime=MT signature=minisign"

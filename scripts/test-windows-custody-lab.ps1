@@ -57,6 +57,26 @@ function Start-AsUser(
     return Start-Process @parameters
 }
 
+function Assert-Arm64Pe([string]$Dumpbin, [string]$Path, [string]$Label) {
+    Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) "$Label is absent"
+    $headers = @(& $Dumpbin '/headers' $Path)
+    Assert-True ($LASTEXITCODE -eq 0) "$Label dumpbin /headers failed with exit code $LASTEXITCODE"
+    $nativeHeaders = @($headers | Select-String -SimpleMatch 'AA64 machine (ARM64)')
+    $foreignHeaders = @($headers | Select-String -Pattern 'machine \((x64|x86)\)')
+    Assert-True ($nativeHeaders.Count -gt 0) "$Label is not an ARM64 PE"
+    Assert-True ($foreignHeaders.Count -eq 0) "$Label contains a non-ARM64 PE section"
+}
+
+function Assert-NativeStaticMsvcBinary([string]$Dumpbin, [string]$Path, [string]$Label) {
+    Assert-Arm64Pe $Dumpbin $Path $Label
+    $dependents = @(& $Dumpbin '/dependents' $Path)
+    Assert-True ($LASTEXITCODE -eq 0) "$Label dumpbin /dependents failed with exit code $LASTEXITCODE"
+    $dynamicCrt = @(
+        $dependents | Select-String -Pattern '(?i)(api-ms-win-crt-[^\s]+|ucrtbase\.dll|vcruntime[0-9_]*\.dll|msvcp[0-9_]*\.dll|msvcr[0-9_]*\.dll|msvcrt\.dll|concrt[0-9_]*\.dll|vcomp[0-9_]*\.dll)'
+    )
+    Assert-True ($dynamicCrt.Count -eq 0) "$Label links a dynamic MSVC runtime: $($dynamicCrt -join ', ')"
+}
+
 $product = (Get-CimInstance Win32_OperatingSystem).Caption
 Assert-True ($product -match 'Windows 11') "Windows 11 required; observed $product"
 $osArch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
@@ -68,6 +88,9 @@ Assert-True (Test-Path -LiteralPath (Join-Path $env:SODIUM_LIB_DIR 'libsodium.li
 foreach ($name in @('SODIUM_SHARED', 'SODIUM_USE_PKG_CONFIG', 'SODIUM_DIST_DIR')) {
     Assert-True (-not (Test-Path "Env:$name")) "Forbidden libsodium selection variable is present: $name"
 }
+Assert-True (-not [string]::IsNullOrWhiteSpace($env:PM_NATIVE_DUMPBIN)) 'Prepared ARM64 Dumpbin path is required'
+$dumpbin = $env:PM_NATIVE_DUMPBIN
+Assert-Arm64Pe $dumpbin $dumpbin 'Prepared ARM64 Dumpbin'
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $gitCommon = (& git -C $repo rev-parse --path-format=absolute --git-common-dir).Trim()
@@ -124,6 +147,8 @@ try {
     $cli = Join-Path $repo 'target\debug\pm.exe'
     Assert-True ((Get-Item $custody).VersionInfo.FileName.EndsWith('.exe')) 'native PE custody binary missing'
     Assert-True ((Get-Item $cli).VersionInfo.FileName.EndsWith('.exe')) 'native PE CLI binary missing'
+    Assert-NativeStaticMsvcBinary $dumpbin $custody 'pm-custody.exe'
+    Assert-NativeStaticMsvcBinary $dumpbin $cli 'pm.exe'
 
     $agentSid = Get-Sid "$env:COMPUTERNAME\$agentName"
     $humanSid = Get-Sid "$env:COMPUTERNAME\$humanName"

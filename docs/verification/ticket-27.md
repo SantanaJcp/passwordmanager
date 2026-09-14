@@ -274,6 +274,31 @@ ejecutar el checker, `git diff --check`, `./scripts/check.sh` y los labs Linux
 establecidos. Una corrida Windows nativa debe confirmar el binario real y el
 resto del laboratorio; el ticket permanece sin aceptar.
 
+## Inspección PE automatizada y método TDD (extensión escrita antes de implementar)
+
+El run Windows siguiente al checkpoint CRT debe dejar de depender de una
+revisión manual de artefactos. La preparación ya resuelve el `dumpbin.exe`
+ARM64-host/ARM64-target junto con Visual Studio v145; esta extensión exporta esa
+ruta exacta como `PM_NATIVE_DUMPBIN` en `GITHUB_ENV`. El laboratorio la exige,
+comprueba que existe y que el propio ejecutable es ARM64; no busca `dumpbin` en
+`PATH`, no selecciona otra instalación y no descarga ni sustituye la herramienta.
+
+El seam observable es el build real seguido por la inspección PE antes de SCM.
+Antes de implementar se añadió al checker una regresión que exige dos llamadas
+de inspección, una por `pm-custody.exe` y otra por `pm.exe`, después del build y
+antes de crear cualquier fixture. Cada llamada debe ejecutar el `dumpbin`
+resuelto con `/headers` (machine `AA64`, sin x64/x86) y `/dependents`, y fallar
+si aparece una dependencia CRT dinámica (`api-ms-win-crt-*`, `ucrtbase`,
+`vcruntime`, `msvcp`, `msvcr`, `msvcrt`, `concrt` o `vcomp`). La regresión da RED
+contra `8e22acd` porque todavía no existe la exportación ni las llamadas.
+
+La implementación no cambia el linker, no suprime `LNK4098`, no añade retry,
+timeout, fallback ni cambia cuentas/fixtures. El resultado nativo debe mostrar
+la salida normal del linker sin `LNK4098`, dos inspecciones PE exitosas y luego
+el laboratorio completo; cualquier error de `dumpbin` mantiene el job en RED.
+Linux solo puede comprobar el contrato estático y el balance de scripts porque
+no tiene `pwsh`, MSVC, `dumpbin` ni target Windows.
+
 ## Pendiente que bloquea aceptación
 
 Falta compilar y ejecutar el producto y el script en Windows 11 ARM64. El

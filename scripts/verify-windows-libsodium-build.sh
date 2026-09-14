@@ -40,6 +40,13 @@ require_literal '$armObjects = @($headers | Select-String' "$prepare"
 require_literal '$foreignObjects = @($headers | Select-String' "$prepare"
 require_literal 'SODIUM_LIB_DIR=' "$prepare"
 require_literal 'SODIUM_LIB_DIR' "$lab"
+require_literal 'PM_NATIVE_DUMPBIN=' "$prepare"
+require_literal 'PM_NATIVE_DUMPBIN' "$lab"
+require_literal 'Assert-NativeStaticMsvcBinary' "$lab"
+require_literal "'/headers'" "$lab"
+require_literal "'/dependents'" "$lab"
+require_literal 'AA64 machine (ARM64)' "$lab"
+require_literal 'api-ms-win-crt-' "$lab"
 require_literal 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3' "$verifier"
 require_literal 'third_party/libsodium/LATEST.tar.gz -text' "$attributes"
 require_literal 'third_party/libsodium/LATEST.tar.gz.minisig -text' "$attributes"
@@ -80,6 +87,21 @@ case "$service_create_line" in
         ;;
 esac
 require_literal 'NT SERVICE\$serviceName' "$lab"
+
+build_line=$(grep -nF "Invoke-Checked 'cargo' @('build', '-p', 'pm-custody'" "$lab" | cut -d: -f1)
+dumpbin_line=$(grep -nF 'Assert-NativeStaticMsvcBinary $dumpbin' "$lab" | cut -d: -f1)
+test "$(printf '%s\n' "$dumpbin_line" | wc -l)" -eq 2 || {
+    echo 'Windows custody lab must inspect both native product executables' >&2
+    exit 1
+}
+first_dumpbin_line=$(printf '%s\n' "$dumpbin_line" | sed -n '1p')
+last_dumpbin_line=$(printf '%s\n' "$dumpbin_line" | sed -n '2p')
+service_line=$(grep -nF "Invoke-Checked 'sc.exe' @('create', \$serviceName" "$lab" | cut -d: -f1)
+test "$build_line" -lt "$first_dumpbin_line" &&
+    test "$last_dumpbin_line" -lt "$service_line" || {
+    echo 'Native PE dependency inspection must run after build and before SCM fixtures' >&2
+    exit 1
+}
 
 for input in third_party/libsodium/LATEST.tar.gz third_party/libsodium/LATEST.tar.gz.minisig; do
     attribute=$(git -C "$root" check-attr text -- "$input")
