@@ -2,6 +2,12 @@ name: Ticket 27 Windows custody
 
 on:
   workflow_dispatch:
+    inputs:
+      diagnostic_only:
+        description: Run only the opt-in native storage-stage diagnostics (does not test product acceptance)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -15,6 +21,7 @@ env:
 jobs:
   windows-arm64-custody:
     name: Ticket 27 windows-arm64 product
+    if: ${{ inputs.diagnostic_only != true }}
     runs-on: windows-11-vs2026-arm
     timeout-minutes: 45
     steps:
@@ -40,3 +47,16 @@ jobs:
       - name: Run native custody product lab
         shell: pwsh
         run: ./scripts/test-windows-custody-lab.ps1 -EphemeralCI
+
+  windows-arm64-storage-diagnostics:
+    name: Ticket 27 windows-arm64 storage diagnostics (non-acceptance)
+    if: ${{ inputs.diagnostic_only == true }}
+    runs-on: windows-11-vs2026-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          persist-credentials: false
+      - name: Run opt-in native storage-stage diagnostics
+        shell: pwsh
+        run: ./scripts/test-windows-storage-diagnostics.ps1 -EphemeralCI

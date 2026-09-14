@@ -532,3 +532,66 @@ este host solo tiene el target Linux. No se usó `RUSTFLAGS`, `cfg` manual,
 cross-compilation ni mocks para convertirlo en evidencia. Por tanto el
 compilado/ejecución nativos Windows ARM64/x64 siguen siendo prerrequisito del
 runner y este checkpoint no marca aceptación del ticket.
+
+## Diagnóstico acotado de persistencia Windows (método antes de editar Rust)
+
+La corrida nativa `34806610284` sobre `6daece1` compiló los binarios y pasó
+PE/CRT, SCM, keygen, bootstrap y perfiles, pero `vault create` devolvió
+`ERROR_ACCESS_DENIED` antes del sellado final. El cleanup no registró
+`cleanupErrors` y su inventario no incluyó `vault.sqlite3` ni un temporal; esto
+no distingue todavía entre el `sync_all` de solo lectura del temporal, el
+hard-link o el `File::open(parent)` posterior. `VaultError` tampoco conserva la
+fase.
+
+Antes de cambiar el motor se añade el entrypoint opt-in
+`scripts/test-windows-storage-diagnostics.ps1`. Es destructivo únicamente para
+una raíz sintética nueva bajo `ProgramData`, exige `-EphemeralCI`,
+`GITHUB_ACTIONS=true`, `CI=true`, Windows 11 y proceso nativo, y no usa Cargo,
+servicios, cuentas ni secretos. La raíz y un único archivo de bytes sintéticos
+se registran y se eliminan solo por sus rutas propias; todo fallo de cleanup
+falla el diagnóstico.
+
+El workflow manual expone `diagnostic_only` como booleano explícito, cuyo valor
+por defecto es `false`: `false` conserva únicamente el job de producto y sus
+fases Rust/MSVC existentes; `true` selecciona un job separado Windows 11 ARM64
+que hace checkout con la acción SHA fijada y ejecuta solo este entrypoint. El
+job diagnóstico no instala toolchain, no hace `cargo`, no prepara libsodium, no
+ejecuta el laboratorio de producto y no publica artefactos/cache. Aunque el job
+termine con categorías observadas, su nombre y documentación dejan claro que
+no cuenta como aceptación de Windows ni cierra ningún gate.
+
+Con P/Invoke directo a `CreateFileW`, `FlushFileBuffers` y `CloseHandle`, el
+entrypoint ejecuta exactamente estas fases sobre nombres fijos y emite solo
+categorías fijas, sin ruta, código, excepción ni payload:
+
+1. sella el archivo de diagnóstico con DACL protegida exacta
+   `SYSTEM`+instalador, verifica sus ACE y demuestra primero que un handle
+   `GENERIC_READ|GENERIC_WRITE` puede abrirse y hacer flush (`file-flush-write`);
+2. abre ese archivo con `GENERIC_READ` como hace `File::open` y llama a
+   `FlushFileBuffers` para observar `file-flush-readonly`;
+3. abre el directorio con `GENERIC_READ` sin
+   `FILE_FLAG_BACKUP_SEMANTICS` para observar `directory-open-no-backup`;
+4. abre el directorio con `GENERIC_READ` y el flag de backup, y llama a
+   `FlushFileBuffers` para observar `directory-flush-readonly`;
+5. repite el directorio con `GENERIC_READ|GENERIC_WRITE` y el flag para
+   observar `directory-flush-write`.
+
+Cada handle se cierra y un error no se convierte en éxito. La salida puede
+clasificar únicamente `success`, `access-denied`, `invalid-handle`,
+`invalid-function`, `not-supported`, `invalid-parameter`, `not-run` u
+`other-error`; no hay retry, espera, flush del volumen, privilegio
+administrativo adicional, no-op ni fallback. El entrypoint no declara la
+durabilidad del producto ni modifica `persist_new`; solo aporta el
+discriminante nativo para decidir si existe una API Windows equivalente.
+
+El método se basa en las fuentes primarias de Microsoft: [CreateFile](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea)
+exige `FILE_FLAG_BACKUP_SEMANTICS` para abrir directorios; [Directory
+Handles](https://learn.microsoft.com/en-us/windows/win32/fileio/obtaining-a-handle-to-a-directory)
+enumera las operaciones aceptadas sobre esos handles; y
+[FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+exige `GENERIC_WRITE` y devuelve el error del sistema cuando falla. La
+documentación de [File Caching](https://learn.microsoft.com/en-us/windows/win32/fileio/file-caching)
+confirma que el metadata flush es una garantía explícita, no una razón para
+ignorar un resultado fallido. Hasta observar el diagnóstico y una estrategia
+Windows documentada, no se cambia el seam Rust ni se afirma persistencia
+durable equivalente.

@@ -6,11 +6,12 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 workflow="$root/.github/workflows/ticket-27-windows.yml"
 prepare="$root/scripts/prepare-windows-libsodium.ps1"
 lab="$root/scripts/test-windows-custody-lab.ps1"
+storage_diagnostics="$root/scripts/test-windows-storage-diagnostics.ps1"
 verifier="$root/crates/pm-build-input-verifier/src/main.rs"
 attributes="$root/.gitattributes"
 cargo_config="$root/.cargo/config.toml"
 
-for file in "$workflow" "$prepare" "$lab" "$verifier" "$attributes" "$cargo_config"; do
+for file in "$workflow" "$prepare" "$lab" "$storage_diagnostics" "$verifier" "$attributes" "$cargo_config"; do
     test -f "$file" || {
         echo "required Windows source-build file is absent: $file" >&2
         exit 1
@@ -25,6 +26,8 @@ require_literal() {
 }
 
 require_literal './scripts/prepare-windows-libsodium.ps1 -EphemeralCI' "$workflow"
+require_literal 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)' "$workflow"
+require_literal 'persist-credentials: false' "$workflow"
 require_literal 'b20a92e7ec25b285eafa349d721a5bb27e3a8ba94c0816630a127883f1d1b3ab' "$prepare"
 require_literal '2162883303fb903068519916871476b192d5cf31d5e412378db8ae05a0c05895' "$prepare"
 require_literal 'ReleaseLIB' "$prepare"
@@ -47,6 +50,41 @@ require_literal "'/headers'" "$lab"
 require_literal "'/dependents'" "$lab"
 require_literal 'AA64 machine (ARM64)' "$lab"
 require_literal 'api-ms-win-crt-' "$lab"
+require_literal 'function Invoke-NativeStorageDiagnostics' "$storage_diagnostics"
+require_literal 'CreateFileW' "$storage_diagnostics"
+require_literal 'FlushFileBuffers' "$storage_diagnostics"
+require_literal 'FileFlagBackupSemantics' "$storage_diagnostics"
+require_literal 'file-flush-readonly=' "$storage_diagnostics"
+require_literal 'directory-open-no-backup=' "$storage_diagnostics"
+require_literal 'directory-flush-no-backup=' "$storage_diagnostics"
+require_literal 'directory-flush-readonly=' "$storage_diagnostics"
+require_literal 'directory-flush-write=' "$storage_diagnostics"
+require_literal 'file-flush-write=success' "$storage_diagnostics"
+require_literal 'function Assert-ExactProbeFileAcl' "$storage_diagnostics"
+require_literal 'storage diagnostics writable file open failed' "$storage_diagnostics"
+require_literal 'storage diagnostics require explicit EphemeralCI' "$storage_diagnostics"
+require_literal 'storage diagnostics cleanup failed' "$storage_diagnostics"
+require_literal 'Assert-NotReparse' "$storage_diagnostics"
+require_literal '[IO.FileAttributes]::ReparsePoint' "$storage_diagnostics"
+require_literal 'diagnostic_only:' "$workflow"
+require_literal 'default: false' "$workflow"
+require_literal 'type: boolean' "$workflow"
+require_literal 'if: ${{ inputs.diagnostic_only != true }}' "$workflow"
+require_literal 'if: ${{ inputs.diagnostic_only == true }}' "$workflow"
+require_literal './scripts/test-windows-storage-diagnostics.ps1 -EphemeralCI' "$workflow"
+storage_job_block=$(awk '
+    /^  windows-arm64-storage-diagnostics:/ { inside = 1 }
+    inside && /^  [[:alnum:]_-]+:/ && $0 !~ /^  windows-arm64-storage-diagnostics:/ { exit }
+    inside { print }
+' "$workflow")
+printf '%s\n' "$storage_job_block" | grep -Fq './scripts/test-windows-storage-diagnostics.ps1 -EphemeralCI' || {
+    echo 'Diagnostic workflow job must invoke the fixed native storage probe' >&2
+    exit 1
+}
+if printf '%s\n' "$storage_job_block" | grep -Eiq 'cargo|prepare-windows|test-windows-custody|native-preflight|msbuild|rustup'; then
+    echo 'Diagnostic workflow job must not install/build/test the product' >&2
+    exit 1
+fi
 require_literal 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3' "$verifier"
 require_literal 'third_party/libsodium/LATEST.tar.gz -text' "$attributes"
 require_literal 'third_party/libsodium/LATEST.tar.gz.minisig -text' "$attributes"
