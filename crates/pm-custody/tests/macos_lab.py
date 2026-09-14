@@ -10,6 +10,7 @@ import pwd
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -104,10 +105,30 @@ def keygen(binary, user, private, public):
         )
 
 
+def parse_owner_mode(output):
+    owner, mode = output.strip().split()
+    full_mode = int(mode, 8)
+    assert not stat.S_ISLNK(full_mode), (
+        f"refusing symbolic link metadata: owner={owner}, mode={mode}"
+    )
+    return int(owner), stat.S_IMODE(full_mode)
+
+
 def owner_mode(path):
-    result = sudo(["stat", "-f", "%u %Lp", path])
-    owner, mode = result.stdout.decode().strip().split()
-    return int(owner), int(mode, 8)
+    result = sudo(["stat", "-f", "%u %p", path])
+    try:
+        return parse_owner_mode(result.stdout.decode())
+    except (AssertionError, UnicodeDecodeError, ValueError) as error:
+        raise AssertionError(
+            f"invalid owner/mode metadata: path={path}, raw={result.stdout[:128]!r}"
+        ) from error
+
+
+def require_owner_mode(path, expected):
+    actual = owner_mode(path)
+    assert actual == expected, (
+        f"owner/mode mismatch: path={path}, expected={expected}, actual={actual}"
+    )
 
 
 def require_traversal(user, path):
@@ -136,7 +157,7 @@ def cross_uid_peer_diagnostic(agent_uid, scratch):
     endpoint = scratch / "cross-uid-diagnostic.sock"
     listener = socket.socket(socket.AF_UNIX)
     listener.bind(str(endpoint)); endpoint.chmod(0o666)
-    assert owner_mode(endpoint) == (os.getuid(), 0o666)
+    require_owner_mode(endpoint, (os.getuid(), 0o666))
     listener.listen(1); listener.settimeout(5)
     client = subprocess.Popen(
         ["sudo", "-n", "-u", AGENT, sys.executable, "-c", PEER_UID_SCRIPT,
@@ -174,7 +195,7 @@ def launchd_peer_uid(user, endpoint):
 
 def publish_rpk(source, destination):
     sudo(["install", "-o", "root", "-g", "wheel", "-m", "0444", source, destination])
-    assert owner_mode(destination) == (0, 0o444), destination
+    require_owner_mode(destination, (0, 0o444))
     assert sudo(["cmp", "-s", source, destination], check=False).returncode == 0
 
 
@@ -266,12 +287,12 @@ def main():
     created = []
     bootstrapped = False
     scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")
-    assert owner_mode(scratch.parent) == (0, 0o1777)
+    require_owner_mode(scratch.parent, (0, 0o1777))
     assert not scratch.exists(), f"refusing to replace pre-existing scratch path: {scratch}"
     try:
         scratch.mkdir(mode=0o711)
         scratch.chmod(0o711)
-        assert owner_mode(scratch) == (os.getuid(), 0o711)
+        require_owner_mode(scratch, (os.getuid(), 0o711))
         custodian_uid, agent_uid, other_uid = unused_ids(3)
         for name, uid in [(CUSTODIAN, custodian_uid), (AGENT, agent_uid), (OTHER, other_uid)]:
             created.append(name); create_account(name, uid)
@@ -353,7 +374,7 @@ def main():
                                 (published_agent_pub, 0, 0o444),
                                 (agent_key, agent_uid, 0o400),
                                 (RUNTIME / "agent.sock", custodian_uid, 0o666)]:
-            assert owner_mode(path) == (uid, mode), path
+            require_owner_mode(path, (uid, mode))
         assert launchd_peer_uid(AGENT, RUNTIME / "agent.sock") == custodian_uid
         probe(INSTALL / "pm-custody", AGENT, agent_profile, agent_key, RUNTIME / "agent.sock")
         probe(INSTALL / "pm-custody", pwd.getpwuid(os.getuid()).pw_name,

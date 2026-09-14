@@ -83,7 +83,8 @@ require_literal 'fetch --locked' "$fetch"
 require_literal '--locked --offline' "$lab"
 require_literal 'lipo -archs' "$lab"
 require_literal 'scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")' "$harness"
-require_literal 'assert owner_mode(scratch.parent) == (0, 0o1777)' "$harness"
+require_literal 'require_owner_mode(scratch.parent, (0, 0o1777))' "$harness"
+require_literal 'stat.S_IMODE(full_mode)' "$harness"
 require_literal 'scratch.mkdir(mode=0o711)' "$harness"
 require_literal 'synthetic keygen failed' "$harness"
 require_literal 'cross_uid_peer_diagnostic(agent_uid, scratch)' "$harness"
@@ -92,3 +93,33 @@ if grep -Fq 'RUNNER_TEMP' "$harness"; then
     echo 'macOS custody laboratory still depends on the private runner temp root' >&2
     exit 1
 fi
+
+python3 - "$harness" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("pm_macos_lab", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+assert module.parse_owner_mode("0 041777") == (0, 0o1777)
+assert module.parse_owner_mode("501 0100400") == (501, 0o400)
+try:
+    module.parse_owner_mode("0 0120777")
+except AssertionError as error:
+    assert "symbolic link" in str(error)
+else:
+    raise AssertionError("symbolic-link metadata was accepted")
+
+module.owner_mode = lambda _path: (501, 0o755)
+try:
+    module.require_owner_mode("/synthetic-parent", (0, 0o1777))
+except AssertionError as error:
+    diagnostic = str(error)
+    assert "expected=(0, 1023)" in diagnostic
+    assert "actual=(501, 493)" in diagnostic
+else:
+    raise AssertionError("owner/mode mismatch omitted its observed metadata")
+PY
