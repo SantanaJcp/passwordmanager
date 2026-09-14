@@ -3224,7 +3224,7 @@ impl HumanVault {
                     return Err(HumanCommitError::InvalidCommand);
                 }
                 let final_chunk = seen + 1 == *count;
-                let mut plaintext = Zeroizing::new(opener.open_chunk(&ciphertext, final_chunk)?);
+                let plaintext = opener.open_chunk(&ciphertext, final_chunk)?;
                 total = total
                     .checked_add(
                         u64::try_from(plaintext.len())
@@ -3233,7 +3233,6 @@ impl HumanVault {
                     .ok_or(HumanCommitError::InvalidInput)?;
                 digest_state.update(&plaintext);
                 let resealed = sealer.seal_chunk(&plaintext, final_chunk)?;
-                plaintext.zeroize();
                 transaction.execute(
                     "INSERT INTO human_staging_stream_chunks
                      (transaction_id,attachment_id,chunk_index,ciphertext)

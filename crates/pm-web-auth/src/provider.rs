@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::{ExchangeProfile, GithubProfile, Profile, browser, exchange, github};
 
@@ -88,7 +88,7 @@ pub fn serve(
         stream
             .set_write_timeout(Some(Duration::from_secs(30)))
             .map_err(|_| ())?;
-        let Ok(mut request) = read_frame(&mut stream) else {
+        let Ok(request) = read_frame(&mut stream) else {
             continue;
         };
         let response = Zeroizing::new(handle(
@@ -97,7 +97,6 @@ pub fn serve(
             &mut waiting,
             &mut passkey_sessions,
         ));
-        request.zeroize();
         let _ = write_frame(&mut stream, &response);
     }
     Err(ServeError)
@@ -160,7 +159,7 @@ fn handle_github(profile: &GithubProfile, mut cursor: Cursor<'_>) -> Vec<u8> {
         let method = cursor.text()?;
         let destination = cursor.text()?;
         let context = cursor.bytes()?;
-        let token = Zeroizing::new(cursor.bytes()?.to_vec());
+        let token = pm_crypto::ProtectedBytes::copy_from_slice(cursor.bytes()?).map_err(|_| ())?;
         cursor.finish()?;
         if integration != "github-rest-bearer"
             || method != "bearer"
@@ -194,9 +193,10 @@ fn handle_browser(
         let method = cursor.text()?;
         let destination = cursor.text()?;
         let context = cursor.text()?;
-        let username = cursor.text()?.to_owned();
-        let password = Zeroizing::new(cursor.bytes()?.to_vec());
-        let secret = Zeroizing::new(cursor.bytes()?.to_vec());
+        let username = cursor.text()?;
+        let password =
+            pm_crypto::ProtectedBytes::copy_from_slice(cursor.bytes()?).map_err(|_| ())?;
+        let secret = pm_crypto::ProtectedBytes::copy_from_slice(cursor.bytes()?).map_err(|_| ())?;
         let algorithm = cursor.text()?.to_owned();
         let digits = cursor.byte()?;
         let period = u16::from_be_bytes(cursor.fixed::<2>()?);
@@ -261,9 +261,11 @@ fn handle_exchange(profile: &ExchangeProfile, mut cursor: Cursor<'_>) -> Vec<u8>
         let method = cursor.text()?;
         let destination = cursor.text()?;
         let context = cursor.text()?;
-        let requester_client_id = cursor.text()?.to_owned();
-        let requester_client_secret = Zeroizing::new(cursor.bytes()?.to_vec());
-        let subject_token = Zeroizing::new(cursor.bytes()?.to_vec());
+        let requester_client_id = cursor.text()?;
+        let requester_client_secret =
+            pm_crypto::ProtectedBytes::copy_from_slice(cursor.bytes()?).map_err(|_| ())?;
+        let subject_token =
+            pm_crypto::ProtectedBytes::copy_from_slice(cursor.bytes()?).map_err(|_| ())?;
         cursor.finish()?;
         if integration != "keycloak-token-exchange"
             || method != "token_exchange"
@@ -287,7 +289,7 @@ fn handle_exchange(profile: &ExchangeProfile, mut cursor: Cursor<'_>) -> Vec<u8>
     };
     let credential = exchange::ExchangeCredential {
         subject_token: &subject_token,
-        requester_client_id: &requester_client_id,
+        requester_client_id,
         requester_client_secret: &requester_client_secret,
     };
     match exchange::perform(profile, &credential, now) {
@@ -418,14 +420,14 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, ()> {
     Ok(credential.uid)
 }
 
-fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, ()> {
+fn read_frame(stream: &mut UnixStream) -> Result<pm_crypto::ProtectedBytes, ()> {
     let mut header = [0_u8; 4];
     stream.read_exact(&mut header).map_err(|_| ())?;
     let length = u32::from_be_bytes(header) as usize;
     if length == 0 || length > MAX_FRAME {
         return Err(());
     }
-    let mut value = vec![0; length];
+    let mut value = pm_crypto::ProtectedBytes::zeroed(length).map_err(|_| ())?;
     stream.read_exact(&mut value).map_err(|_| ())?;
     Ok(value)
 }

@@ -577,3 +577,37 @@ abrir el key path bajo presión y sólo `claim_next` del payload grande debe fal
 El stream conserva opener preinicializado antes de RLIMIT0. Los parents no
 renderizan stdout/stderr con conversión lossy: reportan únicamente status fijo;
 los canarios nunca entran al diagnóstico.
+
+Ejecución RED discriminada: los primeros logs de crypto y lease, sin marcador
+post-control, quedan clasificados como indeterminados y no acreditan el seam.
+Tras agregar marcadores fijos que sólo se emiten después del paquete pequeño,
+opener o key path exitoso, revision y stream fallaron rc101 porque el destino
+plaintext ordinario fue aceptado (`/tmp/pm28-red-revision-plaintext-attempt2.log`
+y `/tmp/pm28-red-stream-plaintext-attempt2.log`). El lease original falló rc101
+después de abrir el key path y entregar el payload grande en owners ordinarios
+(`/tmp/pm28-red-attempt-lease-plaintext-attempt2.log`). El adapter lab tuvo un
+primer error de fixture `Path` y un intento que sólo alcanzó web; ninguno cuenta.
+El intento válido separado llegó a ambos procesos y terminó rc1 con la categoría
+fija `('web','ssh')`, ambos esperando payload tras el header
+(`/tmp/pm28-red-adapter-protected-frame-attempt3.log`).
+
+El GREEN abre AEAD revision/control y secretstream directamente en
+`ProtectedBytes`, exige longitud y tag exactos, y mantiene owners protegidos en
+`OpenedRevisionPackage`, `OperationalCredential` y leases password/token/TOTP/SSH.
+Los adapters web/SSH reservan el frame protegido después de validar el header y
+antes de leer payload; sus clones propios de secretos de request pasan también a
+owners protegidos hasta la frontera de bibliotecas externas. El primer GREEN de
+lease falló antes de delivery porque proteger el documento auth completo movió
+la denegación a admission; no fue regresión de producto ni se aceptó como prueba.
+El fixture final crea el intento antes de presión, reabre custodia/key path bajo
+esa misma presión y exige que `claim_next` propague `CUSTODY_UNAVAILABLE`.
+
+Evidencia GREEN: crypto focused rc0
+(`/tmp/pm28-green-protected-crypto-focused-attempt2.log`), lease focused rc0
+(`/tmp/pm28-green-attempt-lease-focused-attempt5.log`), adapters rc0
+(`/tmp/pm28-green-adapter-protected-frame.log`), `scripts/check.sh` rc0 tras
+preservar los intentos de lint previos
+(`/tmp/pm28-green-plaintext-block-check-attempt5.log`) y clean/offline rc0 en
+41.71 s (`/tmp/pm28-green-plaintext-block-clean.log`). Este checkpoint no
+acredita todavía serializers/responses sensibles ni todos los frames custody/TUI;
+ticket 28 continúa abierto.

@@ -36,8 +36,10 @@ fn pmb1_payload_uses_independent_pmf1_and_both_human_root_paths() {
         )
         .unwrap(),
     ] {
-        assert_eq!(opener.open_chunk(&first, false).unwrap(), b"manifest-start");
-        assert_eq!(opener.open_chunk(&last, true).unwrap(), b"manifest-end");
+        let opened = opener.open_chunk(&first, false).unwrap();
+        assert!(opened.as_ref() == b"manifest-start", "first chunk mismatch");
+        let opened = opener.open_chunk(&last, true).unwrap();
+        assert!(opened.as_ref() == b"manifest-end", "final chunk mismatch");
         assert!(opener.open_chunk(&last, true).is_err());
     }
 
@@ -93,8 +95,9 @@ fn pmb1_payload_uses_independent_pmf1_and_both_human_root_paths() {
     let imported = destination
         .open_imported_audit_key(&rewrapped, *unlocked.vault_id(), device, 1)
         .unwrap();
-    assert_eq!(
-        imported.open_record(event, &ciphertext).unwrap(),
-        b"historical audit payload"
+    let audit_plaintext = imported.open_record(event, &ciphertext).unwrap();
+    assert!(
+        audit_plaintext.as_ref() == b"historical audit payload",
+        "historical audit plaintext mismatch"
     );
 }

@@ -641,9 +641,8 @@ fn parse_backup(
     loop {
         let next = read_cipher_frame(input)?;
         let final_chunk = next.is_none();
-        let mut plain = Zeroizing::new(opener.open_chunk(&current, final_chunk)?);
+        let plain = opener.open_chunk(&current, final_chunk)?;
         parser.push(&plain, &opener)?;
-        plain.zeroize();
         if let Some(frame) = next {
             current = frame;
         } else {
@@ -1066,8 +1065,7 @@ fn export_attachments(
                         return Err(HumanCommitError::Integrity);
                     }
                     let frame: Vec<u8> = row.get(1)?;
-                    let mut plain =
-                        Zeroizing::new(file_opener.open_chunk(&frame, stored + 1 == count)?);
+                    let plain = file_opener.open_chunk(&frame, stored + 1 == count)?;
                     write_attachment_chunk(
                         writer,
                         state,
@@ -1078,7 +1076,6 @@ fn export_attachments(
                         &mut digest_state,
                         &mut total,
                     )?;
-                    plain.zeroize();
                     index += 1;
                 }
             }

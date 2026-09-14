@@ -42,6 +42,7 @@ def main():
     web_source, ssh_source = (pathlib.Path(value).resolve(strict=True) for value in sys.argv[1:])
     root = pathlib.Path(tempfile.mkdtemp(prefix="pm-adapter-protected-frame-linux-lab-"))
     processes = []
+    unlocked_readers = []
     try:
         root.chmod(0o700)
         web, ssh = root / "pm-web-auth", root / "pm-ssh-client"
@@ -63,8 +64,11 @@ def main():
         )
         processes.append(web_process); wait_socket(web_process, web_socket)
         with socket.socket(socket.AF_UNIX) as client:
-            client.settimeout(3); client.connect(web_socket); client.sendall((64).to_bytes(4, "big"))
-            assert client.recv(1) == b"", "web adapter read payload before locked frame allocation"
+            client.settimeout(3); client.connect(str(web_socket)); client.sendall((64).to_bytes(4, "big"))
+            try:
+                assert client.recv(1) == b"", "web adapter returned data instead of closing"
+            except TimeoutError:
+                unlocked_readers.append("web")
 
         ssh_profile = root / "ssh.profile"
         ssh_profile.write_text(
@@ -83,11 +87,17 @@ def main():
         )
         processes.append(ssh_process); wait_socket(ssh_process, provider_socket)
         with socket.socket(socket.AF_UNIX) as client:
-            client.settimeout(3); client.connect(provider_socket); client.sendall((64).to_bytes(4, "big"))
-            header = client.recv(4)
-            assert len(header) == 4
-            response = client.recv(int.from_bytes(header, "big"))
-            assert response == b"\x03\x00\x00\x00\x00", response
+            client.settimeout(3); client.connect(str(provider_socket)); client.sendall((64).to_bytes(4, "big"))
+            try:
+                header = client.recv(4)
+                assert len(header) == 4
+                response = client.recv(int.from_bytes(header, "big"))
+                assert response == b"\x03\x00\x00\x00\x00", response
+            except TimeoutError:
+                unlocked_readers.append("ssh")
+        assert not unlocked_readers, (
+            "adapters read payload before locked frame allocation", tuple(unlocked_readers)
+        )
     finally:
         for process in reversed(processes):
             stop(process)

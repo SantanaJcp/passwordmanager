@@ -140,7 +140,13 @@ impl ProtectedBytes {
         self.len = len;
     }
 
-    fn copy_from_slice(value: &[u8]) -> Result<Self, CryptoError> {
+    /// Copies borrowed plaintext directly into a newly locked owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::ResourceUnavailable`] if locked storage cannot
+    /// be allocated. No ordinary heap intermediary is created.
+    pub fn copy_from_slice(value: &[u8]) -> Result<Self, CryptoError> {
         let protected = Self::allocate(value.len())?;
         if !value.is_empty() {
             // SAFETY: both regions are valid for `value.len()` initialized
@@ -1230,9 +1236,8 @@ impl UnlockedRoot {
             return Err(CryptoError::Authentication);
         }
         let human_plaintext = open(&content_key, &package.human_ciphertext)?;
-        let mut manifest_plaintext = open(&content_key, &package.manifest_ciphertext)?;
+        let manifest_plaintext = open(&content_key, &package.manifest_ciphertext)?;
         let decoded_manifest = decode_manifest(&manifest_plaintext);
-        wipe_vec(&mut manifest_plaintext);
         let manifest = decoded_manifest?;
 
         let auth_plaintext = match (&package.auth_ciphertext, &package.auth_key_envelope) {
@@ -1989,7 +1994,7 @@ impl AuditDeviceKeyPair {
         device: [u8; ID_BYTES],
         generation: u64,
         attempt: [u8; ID_BYTES],
-    ) -> Result<Vec<u8>, CryptoError> {
+    ) -> Result<ProtectedBytes, CryptoError> {
         let (_, _, envelope, key_box, _) =
             self.verify_attempt_package(bytes, vault, device, generation, attempt)?;
         let key = self.open_attempt_key(&envelope, &key_box, device, generation)?;
@@ -2089,7 +2094,7 @@ impl AuditDeviceKeyPair {
         expected_generation: u64,
         expected_object: [u8; 16],
         expected_revision: [u8; 16],
-    ) -> Result<Vec<u8>, CryptoError> {
+    ) -> Result<ProtectedBytes, CryptoError> {
         let package = decode_control_package(bytes)?;
         if expected_generation == 0
             || package.recipient != expected_recipient
@@ -2105,7 +2110,7 @@ impl AuditDeviceKeyPair {
         if package.key_box.len() < 48 {
             return Err(CryptoError::InvalidFormat);
         }
-        let mut plaintext = vec![0_u8; package.key_box.len() - 48];
+        let mut plaintext = ProtectedBytes::zeroed(package.key_box.len() - 48)?;
         if unsafe {
             // SAFETY: all box buffers and device keys have documented sizes.
             libsodium_sys::crypto_box_seal_open(
@@ -2117,11 +2122,9 @@ impl AuditDeviceKeyPair {
             )
         } != 0
         {
-            wipe_vec(&mut plaintext);
             return Err(CryptoError::Authentication);
         }
         let decoded = decode_sealed_audit_key(&plaintext);
-        wipe_vec(&mut plaintext);
         let (key, target, recipient, generation) = decoded?;
         if recipient != expected_recipient
             || generation != expected_generation
@@ -2224,7 +2227,7 @@ impl AuditKey {
         &self,
         event_id: [u8; ID_BYTES],
         bytes: &[u8],
-    ) -> Result<Vec<u8>, CryptoError> {
+    ) -> Result<ProtectedBytes, CryptoError> {
         let envelope = decode_envelope(bytes)?;
         if encode_envelope(&envelope) != bytes
             || envelope.header.vault != self.vault
@@ -2266,7 +2269,7 @@ impl AuditKey {
         &self,
         manifest_id: [u8; ID_BYTES],
         bytes: &[u8],
-    ) -> Result<Vec<u8>, CryptoError> {
+    ) -> Result<ProtectedBytes, CryptoError> {
         let envelope = decode_envelope(bytes)?;
         if encode_envelope(&envelope) != bytes
             || envelope.header.vault != self.vault
@@ -2435,8 +2438,8 @@ pub struct OpenedRevisionPackage {
     issuer_device: [u8; ID_BYTES],
     modified_at: i64,
     kind: ItemKind,
-    human_plaintext: Vec<u8>,
-    auth_plaintext: Option<Vec<u8>>,
+    human_plaintext: ProtectedBytes,
+    auth_plaintext: Option<ProtectedBytes>,
 }
 
 impl OpenedRevisionPackage {
@@ -2906,7 +2909,11 @@ impl BackupOpener {
     ///
     /// # Errors
     /// Rejects corruption, reordering, truncation indicators and wrong final tags.
-    pub fn open_chunk(&mut self, frame: &[u8], final_chunk: bool) -> Result<Vec<u8>, CryptoError> {
+    pub fn open_chunk(
+        &mut self,
+        frame: &[u8],
+        final_chunk: bool,
+    ) -> Result<ProtectedBytes, CryptoError> {
         self.stream.open_chunk(frame, final_chunk)
     }
 
@@ -3049,13 +3056,17 @@ impl FileOpener {
     ///
     /// # Errors
     /// Returns an error for malformed, reordered, truncated, or unauthenticated frames.
-    pub fn open_chunk(&mut self, frame: &[u8], final_chunk: bool) -> Result<Vec<u8>, CryptoError> {
+    pub fn open_chunk(
+        &mut self,
+        frame: &[u8],
+        final_chunk: bool,
+    ) -> Result<ProtectedBytes, CryptoError> {
         if self.finished || frame_length(frame)? != frame.len() {
             return Err(CryptoError::InvalidFormat);
         }
         let ciphertext = &frame[4..];
         let aad = encode_file_aad(&self.target, &self.stream_header, self.index);
-        let mut plain = vec![0; ciphertext.len() - 17];
+        let mut plain = ProtectedBytes::zeroed(ciphertext.len() - 17)?;
         let mut len = 0;
         let mut tag = 0;
         if unsafe {
@@ -3071,7 +3082,6 @@ impl FileOpener {
             )
         } != 0
         {
-            plain.fill(0);
             return Err(CryptoError::Authentication);
         }
         let expected = u8::try_from(if final_chunk {
@@ -3080,8 +3090,7 @@ impl FileOpener {
             libsodium_sys::crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
         })
         .map_err(invalid)?;
-        if tag != expected {
-            plain.fill(0);
+        if tag != expected || usize::try_from(len).ok() != Some(plain.len()) {
             return Err(CryptoError::InvalidFormat);
         }
         self.index += 1;
@@ -3125,15 +3134,6 @@ fn frame_length(bytes: &[u8]) -> Result<usize, CryptoError> {
         return Err(CryptoError::InvalidFormat);
     }
     Ok(4 + n)
-}
-
-impl Drop for OpenedRevisionPackage {
-    fn drop(&mut self) {
-        wipe_vec(&mut self.human_plaintext);
-        if let Some(auth) = &mut self.auth_plaintext {
-            wipe_vec(auth);
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3726,7 +3726,7 @@ fn seal(key: &Secret, header: Header, plaintext: &[u8]) -> Result<Envelope, Cryp
     })
 }
 
-fn open(key: &Secret, envelope: &Envelope) -> Result<Vec<u8>, CryptoError> {
+fn open(key: &Secret, envelope: &Envelope) -> Result<ProtectedBytes, CryptoError> {
     sodium()?;
     if envelope.ciphertext.len() < TAG_BYTES || envelope.ciphertext.len() > MAX_OBJECT_BYTES {
         return Err(CryptoError::InvalidFormat);
@@ -3735,7 +3735,7 @@ fn open(key: &Secret, envelope: &Envelope) -> Result<Vec<u8>, CryptoError> {
     if aad.len() > MAX_HEADER_BYTES {
         return Err(CryptoError::InvalidFormat);
     }
-    let mut plaintext = vec![0_u8; envelope.ciphertext.len() - TAG_BYTES];
+    let mut plaintext = ProtectedBytes::zeroed(envelope.ciphertext.len() - TAG_BYTES)?;
     let mut plaintext_len = 0_u64;
     // SAFETY: every pointer references a valid buffer for its supplied length.
     let result = unsafe {
@@ -3752,7 +3752,6 @@ fn open(key: &Secret, envelope: &Envelope) -> Result<Vec<u8>, CryptoError> {
         )
     };
     if result != 0 || usize::try_from(plaintext_len).ok() != Some(plaintext.len()) {
-        wipe_vec(&mut plaintext);
         return Err(CryptoError::Authentication);
     }
     Ok(plaintext)

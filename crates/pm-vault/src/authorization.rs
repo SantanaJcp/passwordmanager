@@ -10,10 +10,10 @@ use std::{
 
 use minicbor::{Decoder, Encoder, data::Type};
 use pm_crypto::{
-    TrustedRoot, digest, verify_audit_key_package, verify_device_event, verify_human_event,
+    CryptoError, ProtectedBytes, TrustedRoot, digest, verify_audit_key_package,
+    verify_device_event, verify_human_event,
 };
 use rusqlite::{Connection, OptionalExtension};
-use zeroize::Zeroizing;
 
 use crate::audit;
 use crate::{AuditDeviceCustody, RecordKind, VaultError, load_and_validate_bundle};
@@ -277,7 +277,7 @@ impl AgentIdentity {
 
 pub(crate) struct OperationalCredential {
     pub descriptor: DelegatedCredential,
-    pub auth: Zeroizing<Vec<u8>>,
+    pub auth: ProtectedBytes,
 }
 
 impl DelegatedVault {
@@ -623,7 +623,12 @@ impl DelegatedVault {
                 item,
                 revision,
             )
-            .map_err(|_| AuthorizationError::Integrity)?;
+            .map_err(|error| match error {
+                crate::HumanCommitError::Crypto(CryptoError::ResourceUnavailable) => {
+                    AuthorizationError::Vault(VaultError::Crypto(CryptoError::ResourceUnavailable))
+                }
+                _ => AuthorizationError::Integrity,
+            })?;
         let credential = decode_operational_credential(&plaintext)?;
         if credential.descriptor.item_id != item || credential.descriptor.revision_id != revision {
             return Err(AuthorizationError::Integrity);
@@ -780,11 +785,7 @@ fn decode_operational_credential(
     expect_key(&mut d, "account")?;
     let account = optional_string_decode(&mut d)?;
     expect_key(&mut d, "auth")?;
-    let auth = Zeroizing::new(
-        d.bytes()
-            .map_err(|_| AuthorizationError::Integrity)?
-            .to_vec(),
-    );
+    let auth = d.bytes().map_err(|_| AuthorizationError::Integrity)?;
     if d.position() != bytes.len() {
         return Err(AuthorizationError::Integrity);
     }
@@ -796,9 +797,11 @@ fn decode_operational_credential(
         destination,
         account,
     };
-    if encode_credential(&descriptor, &auth) != bytes {
+    if encode_credential(&descriptor, auth) != bytes {
         return Err(AuthorizationError::Integrity);
     }
+    let auth = ProtectedBytes::copy_from_slice(auth)
+        .map_err(|error| AuthorizationError::Vault(VaultError::Crypto(error)))?;
     Ok(OperationalCredential { descriptor, auth })
 }
 

@@ -38,11 +38,20 @@ fn attempt_lease_rejects_unlocked_plaintext_owners() {
         .env_clear()
         .output()
         .expect("start isolated locked-budget helper");
-    assert!(
-        output.status.success(),
-        "attempt lease did not fail before unlocked secret owners (status={:?})",
-        output.status.code()
-    );
+    if !output.status.success() {
+        const MARKER: &[u8] = b"PM28_RED:attempt_lease_memlock_helper:UNLOCKED_OUTPUT_ACCEPTED";
+        if output
+            .stderr
+            .windows(MARKER.len())
+            .any(|bytes| bytes == MARKER)
+        {
+            panic!("attempt lease key path passed and unlocked secret owners were accepted");
+        }
+        panic!(
+            "attempt lease helper failed before delivery (status={:?})",
+            output.status.code()
+        );
+    }
 }
 
 #[test]
@@ -107,9 +116,7 @@ fn keycloak_lease_fixture(deny_locked_output: bool) {
     drop(human);
 
     let peer = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
-    let locked_budget = deny_locked_output.then(reserve_all_but_128_kib);
-    let attempts =
-        AttemptVault::open(DelegatedVault::open(&path, DEVICE, custody).unwrap()).unwrap();
+    let attempts = open_attempts(&path, Arc::clone(&custody));
     let now = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -131,9 +138,13 @@ fn keycloak_lease_fixture(deny_locked_output: bool) {
         attempts.start(&peer, &request).unwrap().state(),
         AttemptState::Created
     );
+    drop(attempts);
+    let locked_budget = deny_locked_output.then(reserve_all_but_128_kib);
+    let attempts = open_attempts(&path, custody);
     let lease_result = attempts.claim_next();
     if deny_locked_output {
         let Err(error) = lease_result else {
+            eprintln!("PM28_RED:attempt_lease_memlock_helper:UNLOCKED_OUTPUT_ACCEPTED");
             panic!("lease used unlocked secret owners");
         };
         assert_eq!(error.to_string(), "CUSTODY_UNAVAILABLE");
@@ -151,6 +162,10 @@ fn keycloak_lease_fixture(deny_locked_output: bool) {
     assert_eq!(totp.digits(), 6);
     assert_eq!(totp.period(), 30);
     assert_eq!(totp.t0(), 0);
+}
+
+fn open_attempts(path: &Path, custody: Arc<AuditDeviceCustody>) -> AttemptVault {
+    AttemptVault::open(DelegatedVault::open(path, DEVICE, custody).unwrap()).unwrap()
 }
 
 fn reserve_all_but_128_kib() -> Vec<ProtectedBytes> {

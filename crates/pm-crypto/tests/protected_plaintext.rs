@@ -29,11 +29,20 @@ fn run_helper(name: &str) {
         .env_clear()
         .output()
         .expect("start isolated memlock helper");
-    assert!(
-        output.status.success(),
-        "{name} did not reject plaintext before unlocked output (status={:?})",
-        output.status.code()
-    );
+    if !output.status.success() {
+        let marker = format!("PM28_RED:{name}:UNLOCKED_OUTPUT_ACCEPTED");
+        if output
+            .stderr
+            .windows(marker.len())
+            .any(|bytes| bytes == marker.as_bytes())
+        {
+            panic!("{name} reached the plaintext destination and accepted unlocked output");
+        }
+        panic!(
+            "{name} failed before the plaintext destination (status={:?})",
+            output.status.code()
+        );
+    }
 }
 
 #[test]
@@ -75,10 +84,14 @@ fn revision_plaintext_memlock_helper() {
     assert_eq!(small_opened.human_plaintext(), HUMAN);
     assert_eq!(small_opened.auth_plaintext(), Some(AUTH));
     drop(small_opened);
-    assert!(matches!(
-        unlocked.open_revision_package(&large),
-        Err(CryptoError::ResourceUnavailable)
-    ));
+    match unlocked.open_revision_package(&large) {
+        Err(CryptoError::ResourceUnavailable) => {}
+        Ok(_) => {
+            eprintln!("PM28_RED:revision_plaintext_memlock_helper:UNLOCKED_OUTPUT_ACCEPTED");
+            panic!("large revision opened without a protected plaintext owner");
+        }
+        Err(error) => panic!("unexpected large revision error: {error}"),
+    }
     drop(pressure);
 }
 
@@ -99,10 +112,14 @@ fn streamed_plaintext_memlock_helper() {
     )
     .unwrap();
     deny_future_locks();
-    assert!(matches!(
-        opener.open_chunk(&ciphertext, true),
-        Err(CryptoError::ResourceUnavailable)
-    ));
+    match opener.open_chunk(&ciphertext, true) {
+        Err(CryptoError::ResourceUnavailable) => {}
+        Ok(_) => {
+            eprintln!("PM28_RED:streamed_plaintext_memlock_helper:UNLOCKED_OUTPUT_ACCEPTED");
+            panic!("stream chunk opened without a protected plaintext owner");
+        }
+        Err(error) => panic!("unexpected stream open error: {error}"),
+    }
 }
 
 fn deny_future_locks() {
