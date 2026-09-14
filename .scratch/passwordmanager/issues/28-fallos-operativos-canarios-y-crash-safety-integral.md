@@ -1,8 +1,8 @@
 # 28 — Fallos operativos, canarios y crash safety integral
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol_integrator (gpt-5.6-sol, medium)
 Blocked by: 09,10,11,12,14,15,17,18,19,20,21,22,25
 Spec: ../spec.md
 Requirements: R09,R10,R13,R15,R18
@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-14 — Astra: dependencias 09–25 requeridas verificadas como resueltas e integradas; ticket reclamado para Sol medium en worktree aislado. Preparación estática en paralelo; toda ejecución Cargo/build/labs espera ventana Linux exclusiva explícita.

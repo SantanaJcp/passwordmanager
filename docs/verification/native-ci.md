@@ -350,3 +350,60 @@ Windows [corrida8, 34802741744](https://github.com/SantanaJcp/passwordmanager/ac
 - Windows [corrida9, 34804746619](https://github.com/SantanaJcp/passwordmanager/actions/runs/34804746619), `8e22acd`: alta SCM y configuración de SID del servicio PASS al omitir el argumento de password de la cuenta virtual. Build sin LNK4098 observado tras alinear CRT estático de Rust/C. El nuevo bloqueo es de preparación del fixture: sella ACL a SYSTEM y al rol antes de generar claves/bóveda, impidiendo el acceso posterior del instalador; falla explícitamente con AccessDenied. Se corrige el orden de aprovisionamiento manteniendo privacidad desde creación y sellado antes del arranque. La inspección PE/CRT automatizada del candidato `0cacb51` todavía no se ha ejecutado nativamente. No hay aceptación del servicio completo.
 - macOS [corrida10, 34804041166](https://github.com/SantanaJcp/passwordmanager/actions/runs/34804041166), `cf71815`: Intel vuelve a pasar el laboratorio diagnóstico. ARM alcanza `server-human-unlock-frame` y falla en `client-human-unlock`. Esto acota la fase, no demuestra timeout, fallo de contraseña ni insuficiencia de CPU. Se mantienen los plazos y parámetros criptográficos. Continúan pendientes diagnóstico causal, limpieza verificable, binario normal y composición TUI.
 - Windows [corrida10, 34806610284](https://github.com/SantanaJcp/passwordmanager/actions/runs/34806610284), `6daece1`: 4 tests nativos y contrato de pipes PASS; compilación, comprobaciones obligatorias PE ARM64/ausencia de dependencias CRT dinámicas y alta SCM PASS. Con staging privado previo al sellado, keygen/bootstrap/perfiles avanzan; `vault create` devuelve I/O Access denied (os error 5), antes del sellado final. Todavía no demuestra arranque de custodia ni canal humano. El cleanup nuevo terminó sin reportar un error adicional; el harness propagó el fallo original y no imprimió PASS. Causa de la creación pendiente de aislar, sin rebajar ACL ni sustituir identidad del servicio.
+
+### Estado consolidado posterior — 2026-09-14
+
+Esta continuación actualiza los pendientes históricos anteriores sin borrar los
+fallos observados. El usuario autorizó explícitamente propagar los errores de
+limpieza reportados (harness macOS, token exchange, Drop TUI y persist_new) y
+estabilizar el escaneo canario pausando solo el custodio propio del laboratorio,
+sin omitir SQLite WAL/SHM. No autoriza cambios generales de timeout o KDF.
+
+#### macOS
+
+- La corrida11 `34807572032` confirmó timeout del cliente ARM a 15002 ms dentro
+  del unlock, sin reinicio del servicio. La corrida12 `34810076591` falló en un
+  glob ambiguo de metadata de compilación; se vinculó después el `out_dir`
+  exacto emitido por Cargo, sin escoger el primer archivo disponible.
+- [Corrida13](https://github.com/SantanaJcp/passwordmanager/actions/runs/34810631226),
+  `902018b`: CFLAGS de libsodium sin optimizar en ambas CPU; Intel completó
+  KDF en 4156 ms, ARM llegó a KDF y agotó 15003 ms sin evento final. No se
+  redujeron parámetros criptográficos ni ampliaron deadlines.
+- [Corrida14](https://github.com/SantanaJcp/passwordmanager/actions/runs/34811375717),
+  `634ac8a`: perfil dev dirigido exclusivamente a `libsodium-sys-stable:1.24.0`
+  con `opt-level=2`, sin `-march=native`. CFLAGS optimizadas verificadas;
+  laboratorios diagnósticos PASS en ambas CPU, KDF ARM 605 ms / Intel 1362 ms.
+- [Corrida15](https://github.com/SantanaJcp/passwordmanager/actions/runs/34836722393),
+  `81ffa4c`: el cleanup estricto propagó el fallo de mkdir del fixture, sin
+  imprimir PASS. La eliminación de `mkdir -p` había dejado sin provisión
+  explícita el padre; el exit1 por sí solo no probaba ausencia del padre.
+- [Corrida16](https://github.com/SantanaJcp/passwordmanager/actions/runs/34837550960),
+  `c7f6fb6`: PASS Intel y Apple Silicon tras provisión explícita validada del
+  padre y ledger de recursos propios. Se intenta toda limpieza, se propagan
+  errores de consulta/eliminación y se comprueba ausencia antes de PASS.
+  Se conserva el padre preexistente; uno propio solo se elimina con rmdir
+  vacío. Se verificaron launchd, canal peer/RPK, suspensión persistente,
+  restart, TTY y AppKit. Siguen pendientes el binario normal sin diagnóstico,
+  composición TUI, reboot/FileVault y firma/notarización. **No cierra 26/31.**
+
+#### Windows ARM64
+
+- [Probe diagnóstico](https://github.com/SantanaJcp/passwordmanager/actions/runs/34807853352),
+  `b5788c3`: FlushFileBuffers falla con acceso readonly tanto en archivo como
+  directorio; funciona con handles writable y BACKUP_SEMANTICS en directorio.
+  Es evidencia del seam, no aceptación del producto.
+- [Corrida11](https://github.com/SantanaJcp/passwordmanager/actions/runs/34809788057),
+  `e2fdc21`: flush nativo corregido, creación de bóveda PASS; el servicio
+  alcanza RUNNING transitorio y se detiene. Se preservan flush, publicación
+  hardlink y flush del padre; ninguna operación sustituida por no-op.
+- [Corrida12](https://github.com/SantanaJcp/passwordmanager/actions/runs/34810534527),
+  `762a60c`: diagnóstico confirma salida no exitosa 243 ms después de RUNNING,
+  no START_PENDING lento; no se amplió la espera.
+- [Corrida13](https://github.com/SantanaJcp/passwordmanager/actions/runs/34837323516),
+  `deaa746`: args/bootstrap/audit/TLS de ambos roles PASS; fallo antes de
+  `agent-pipe-ok`. La investigación se concentra en flags de CreateNamedPipeW;
+  aún no hay corrección nativa verificada ni aceptación de custodia/TUI.
+
+El estado unificado es 25/35 tickets integrados. Las ramas nativas siguen
+candidatas aisladas; ninguna corrida parcial equivale a la revisión final
+Astra, al gate humano 34 ni a soporte completo de seis targets.
