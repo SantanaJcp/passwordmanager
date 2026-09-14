@@ -60,6 +60,27 @@ function Write-ServiceDiagnostic([string]$Phase, [string]$Name) {
     Write-Host "SCM_DIAG phase=$Phase state=$stateCategory pid=$pidCategory"
 }
 
+function Write-ServiceSubphaseDiagnostics([string]$Path) {
+    if (-not $ServiceDiagnostics) { return }
+    Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) 'service diagnostic file is absent'
+    $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop)
+    Assert-True ($lines.Count -gt 0) 'service diagnostic file is empty'
+    $allowed = @(
+        'phase=args-ok'
+        'phase=bootstrap-ok'
+        'phase=audit-ok'
+        'phase=agent-tls-ok'
+        'phase=agent-pipe-ok'
+        'phase=human-tls-ok'
+        'phase=human-pipe-ok'
+        'phase=service-failed'
+    )
+    foreach ($line in $lines) {
+        Assert-True ($allowed -contains [string]$line) 'unexpected service diagnostic phase'
+        Write-Host "SERVICE_PHASE $line"
+    }
+}
+
 function Get-Sid([string]$Name) {
     return ([Security.Principal.NTAccount]$Name).Translate([Security.Principal.SecurityIdentifier]).Value
 }
@@ -214,6 +235,8 @@ $serviceDir = Join-Path $root 'service'
 $agentDir = Join-Path $root 'agent'
 $humanDir = Join-Path $root 'human'
 $harnessDir = Join-Path $root 'harness'
+$diagnosticDir = Join-Path $root 'service-diagnostics'
+$diagnosticPath = Join-Path $diagnosticDir 'startup.phases'
 $agentName = 'pm27agent'
 $humanName = 'pm27human'
 $serviceName = 'PasswordManager'
@@ -264,6 +287,11 @@ try {
     Set-ExactTreeAcl $agentDir @('SYSTEM', $installerName)
     Set-ExactTreeAcl $humanDir @('SYSTEM', $installerName)
     Set-ExactTreeAcl $harnessDir @('SYSTEM', $installerName)
+    if ($ServiceDiagnostics) {
+        New-Item -ItemType Directory -Path $diagnosticDir | Out-Null
+        Add-OwnedPath $ownedPaths $diagnosticDir
+        Set-ExactTreeAcl $diagnosticDir @('SYSTEM', $installerName)
+    }
 
     Invoke-Checked 'cargo' @('test', '-p', 'pm-native-channel', '--all-targets', '--locked', '--offline')
     Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
@@ -282,6 +310,13 @@ try {
     $serviceOwned = $true
     Invoke-Checked 'sc.exe' @('sidtype', $serviceName, 'unrestricted')
     $serviceSid = Get-Sid "NT SERVICE\$serviceName"
+    if ($ServiceDiagnostics) {
+        Add-OwnedPath $ownedPaths $diagnosticPath
+        [IO.File]::WriteAllText($diagnosticPath, [string]::Empty)
+        Set-ExactTreeAcl $diagnosticDir @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
+        Assert-ExactNodeAcl $diagnosticDir @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
+        Assert-ExactNodeAcl $diagnosticPath @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
+    }
 
     $serverPrivate = Join-Path $serviceDir 'server.key'
     $serverPublic = Join-Path $serviceDir 'server.rpk'
@@ -353,12 +388,16 @@ try {
     $vaultId = '27aa27aa27aa27aa27aa27aa27aa27aa'
     $device = '27272727272727272727272727272727'
     $binPath = "`"$custody`" service --bootstrap `"$bootstrap`" --vault-id $vaultId --vault `"$vault`" --device $device"
+    if ($ServiceDiagnostics) {
+        $binPath += " --service-diagnostics `"$diagnosticPath`""
+    }
     Invoke-Checked 'sc.exe' @('config', $serviceName, 'binPath=', $binPath)
     Write-ServiceDiagnostic 'before-start' $serviceName
     Invoke-Checked 'sc.exe' @('start', $serviceName)
     Write-ServiceDiagnostic 'after-start' $serviceName
     Start-Sleep -Seconds 2
     Write-ServiceDiagnostic 'after-settle' $serviceName
+    Write-ServiceSubphaseDiagnostics $diagnosticPath
     Assert-True ((Get-Service $serviceName).Status -eq 'Running') 'custody service did not reach RUNNING'
 
     $p = Start-AsUser $agentCredential $custody @('probe', '--profile', $agentProfile, '--private', $agentPrivate, '--vault-id', $vaultId) $emptyInput $agentOut $agentErr

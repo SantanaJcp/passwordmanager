@@ -10,11 +10,12 @@ storage_diagnostics="$root/scripts/test-windows-storage-diagnostics.ps1"
 verifier="$root/crates/pm-build-input-verifier/src/main.rs"
 attributes="$root/.gitattributes"
 cargo_config="$root/.cargo/config.toml"
+windows_service="$root/crates/pm-custody/src/windows.rs"
 native_fs="$root/crates/pm-vault/src/native_fs.rs"
 vault_lib="$root/crates/pm-vault/src/lib.rs"
 vault_tests="$root/crates/pm-vault/src/onepux.rs"
 
-for file in "$workflow" "$prepare" "$lab" "$storage_diagnostics" "$verifier" "$attributes" "$cargo_config" "$native_fs" "$vault_lib" "$vault_tests"; do
+for file in "$workflow" "$prepare" "$lab" "$storage_diagnostics" "$verifier" "$attributes" "$cargo_config" "$windows_service" "$native_fs" "$vault_lib" "$vault_tests"; do
     test -f "$file" || {
         echo "required Windows source-build file is absent: $file" >&2
         exit 1
@@ -165,6 +166,75 @@ printf '%s\n' "$service_diagnostics_input_block" | grep -Fq 'default: false' || 
 }
 printf '%s\n' "$service_diagnostics_input_block" | grep -Fq 'type: boolean' || {
     echo 'service diagnostics workflow input must be an explicit boolean' >&2
+    exit 1
+}
+
+# Service subphase diagnostics are opt-in and write only fixed literals to a
+# pre-created, owned fixture file. Keep this contract textual because Linux
+# cannot compile the Windows module or exercise its ACL provider.
+require_literal 'enum ServiceDiagnosticPhase' "$windows_service"
+require_literal 'struct ServiceDiagnostics' "$windows_service"
+require_literal 'Arc<Mutex<File>>' "$windows_service"
+require_literal 'fn take_optional_path' "$windows_service"
+require_literal '--service-diagnostics' "$windows_service"
+require_literal 'ServiceDiagnostics::open' "$windows_service"
+require_literal '.create(false)' "$windows_service"
+require_literal 'options.read(true).write(true).create(false)' "$windows_service"
+require_literal 'FILE_FLAG_OPEN_REPARSE_POINT' "$windows_service"
+require_literal 'GetFileInformationByHandle' "$windows_service"
+require_literal 'SeekFrom::End(0)' "$windows_service"
+require_literal 'ServiceDiagnosticPhase::ServiceFailed' "$windows_service"
+for phase in args-ok bootstrap-ok audit-ok agent-tls-ok agent-pipe-ok human-tls-ok human-pipe-ok service-failed; do
+    require_literal "b\"phase=$phase\\n\"" "$windows_service"
+done
+require_literal 'ServiceDiagnosticPhase::ArgsOk' "$windows_service"
+require_literal 'ServiceDiagnosticPhase::BootstrapOk' "$windows_service"
+require_literal 'ServiceDiagnosticPhase::AuditOk' "$windows_service"
+require_literal 'ServiceDiagnosticPhase::AgentTlsOk' "$windows_service"
+require_literal 'ServiceDiagnosticPhase::AgentPipeOk' "$windows_service"
+require_literal 'ServiceDiagnosticPhase::HumanTlsOk' "$windows_service"
+require_literal 'ServiceDiagnosticPhase::HumanPipeOk' "$windows_service"
+require_literal 'diagnostics.as_ref()' "$windows_service"
+require_literal 'record(ServiceDiagnosticPhase::ServiceFailed)' "$windows_service"
+
+require_literal '$diagnosticDir = Join-Path $root' "$lab"
+require_literal '$diagnosticPath = Join-Path $diagnosticDir' "$lab"
+require_literal 'Add-OwnedPath $ownedPaths $diagnosticDir' "$lab"
+require_literal 'Add-OwnedPath $ownedPaths $diagnosticPath' "$lab"
+require_literal 'function Write-ServiceSubphaseDiagnostics' "$lab"
+require_literal 'SERVICE_PHASE' "$lab"
+require_literal 'Assert-ExactNodeAcl $diagnosticDir' "$lab"
+require_literal 'Assert-ExactNodeAcl $diagnosticPath' "$lab"
+require_literal 'Set-ExactTreeAcl $diagnosticDir @(' "$lab"
+require_literal 'if ($ServiceDiagnostics)' "$lab"
+require_literal '--service-diagnostics' "$lab"
+require_literal '$binPath += " --service-diagnostics' "$lab"
+require_literal 'Write-ServiceSubphaseDiagnostics $diagnosticPath' "$lab"
+for phase in args-ok bootstrap-ok audit-ok agent-tls-ok agent-pipe-ok human-tls-ok human-pipe-ok service-failed; do
+    require_literal "'phase=$phase'" "$lab"
+done
+
+diagnostic_dir_line=$(grep -nF 'New-Item -ItemType Directory -Path $diagnosticDir' "$lab" | cut -d: -f1)
+diagnostic_dir_owned_line=$(grep -nF 'Add-OwnedPath $ownedPaths $diagnosticDir' "$lab" | cut -d: -f1)
+diagnostic_file_owned_line=$(grep -nF 'Add-OwnedPath $ownedPaths $diagnosticPath' "$lab" | cut -d: -f1)
+diagnostic_file_write_line=$(grep -nF '[IO.File]::WriteAllText($diagnosticPath' "$lab" | cut -d: -f1)
+diagnostic_final_acl_line=$(grep -nF 'Set-ExactTreeAcl $diagnosticDir @(' "$lab" | tail -n1 | cut -d: -f1)
+diagnostic_read_line=$(grep -nF 'Write-ServiceSubphaseDiagnostics $diagnosticPath' "$lab" | cut -d: -f1)
+service_assert_line=$(grep -nF "Assert-True ((Get-Service \$serviceName).Status -eq 'Running')" "$lab" | head -n1 | cut -d: -f1)
+test -n "$diagnostic_dir_line" && test -n "$diagnostic_dir_owned_line" &&
+    test -n "$diagnostic_file_owned_line" && test -n "$diagnostic_file_write_line" &&
+    test -n "$diagnostic_final_acl_line" && test -n "$diagnostic_read_line" &&
+    test -n "$service_assert_line" || {
+    echo 'Windows service diagnostics fixture markers are incomplete' >&2
+    exit 1
+}
+test "$diagnostic_dir_line" -lt "$diagnostic_dir_owned_line" &&
+    test "$diagnostic_dir_owned_line" -lt "$diagnostic_file_owned_line" &&
+    test "$diagnostic_file_owned_line" -lt "$diagnostic_file_write_line" &&
+    test "$diagnostic_file_write_line" -lt "$diagnostic_final_acl_line" &&
+    test "$diagnostic_final_acl_line" -lt "$diagnostic_read_line" &&
+    test "$diagnostic_read_line" -lt "$service_assert_line" || {
+    echo 'Windows service diagnostics fixture order must be create -> own -> seal -> read' >&2
     exit 1
 }
 

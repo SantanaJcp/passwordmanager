@@ -734,3 +734,73 @@ la inspección estructural YAML pasaron. El host Linux no tiene `pwsh`; todavía
 falta ejecutar el mismo lab en Windows con el input manual
 `service_diagnostics=true` para observar las categorías reales. Esa corrida no
 debe sustituir la posterior corrida normal con el input en `false`.
+
+## Diagnóstico acotado de subfases del servicio (método antes del código)
+
+La corrida nativa 12 (`34810534527`, sobre `762a60c`) confirma que no basta con
+muestrear el estado de SCM: `sc start` informó temporalmente `RUNNING`, código de
+salida cero y PID 1776; 243 ms después y de nuevo tras los 2 s ya vigentes el
+servicio figuraba `stopped-exit-nonzero`, sin PID. La fase `before-start` no se
+trata como causal porque el campo de salida de un servicio que todavía no ha
+arrancado puede ser histórico. En el código actual, `service_main` publica
+`SERVICE_RUNNING` antes de llamar a `serve_vault`; después todos los errores de
+argumentos, DPAPI/bootstrap, audit custody, TLS o la primera named pipe se
+reducen a `Failure::Unavailable` y un único exit code no cero. `serve_vault`
+además espera primero al hilo agente, de modo que el error inicial del rol no
+identifica la subfase.
+
+Antes de instrumentar se fija este discriminante mínimo, reversible y solo de
+observación:
+
+1. El laboratorio recibe `-ServiceDiagnostics` únicamente cuando el input
+   manual booleano `service_diagnostics` es explícitamente `true`; el default
+   sigue siendo `false` y la invocación del producto normal permanece idéntica.
+   En modo diagnóstico se precrea un archivo vacío y de propiedad registrada
+   bajo una carpeta descartable separada. Su DACL protegida contiene solo
+   `SYSTEM`, el instalador elevado y `NT SERVICE\PasswordManager`; no se
+   concede acceso a `Everyone`, `Users`, agente ni humano. La carpeta, archivo
+   y ruta se registran en el ledger de recursos propios y siguen las mismas
+   guardias de colisión, no-reparse y cleanup propagador del fixture.
+2. El servicio acepta el argumento opt-in `--service-diagnostics <path>` solo
+   para esa corrida. Abre el archivo ya existente con lectura y escritura
+   explícitas, `FILE_FLAG_OPEN_REPARSE_POINT`, `GetFileInformationByHandle` y
+   una identidad de archivo regular/no-reparse válida; no lo crea ni imprime la
+   ruta. Un `Arc<Mutex<File>>` serializa las escrituras concurrentes de ambos
+   roles; cada escritura busca el final bajo el mutex y hace `sync_all`, y un
+   error de la ruta no se ignora ni crea una ruta alternativa.
+3. Solo se escriben líneas literales, sin tiempos, rutas, SIDs, códigos Win32,
+   excepciones, argumentos, secretos ni datos de bóveda: `phase=args-ok`,
+   `phase=bootstrap-ok`, `phase=audit-ok`, `phase=agent-tls-ok`,
+   `phase=agent-pipe-ok`, `phase=human-tls-ok`, `phase=human-pipe-ok` y
+   `phase=service-failed`. `args-ok` se emite después de validar todos los
+   argumentos y nombres de pipe; los siguientes marcadores se emiten solo tras
+   completar cada fase. `service-failed` se emite una sola vez cuando la
+   inicialización devuelve error. La ausencia del último marcador permite
+   ubicar el siguiente substage sin afirmar una causa que la evidencia no
+   contiene.
+4. El lab lee únicamente esas literales desde el archivo protegido, rechaza
+   cualquier otra línea y las muestra como diagnóstico fijo. Conserva la
+   aserción actual de `Running`, el `Start-Sleep -Seconds 2`, los roles, el
+   restart, los plazos, la salida pública `CUSTODY_UNAVAILABLE` y el cleanup.
+   El modo diagnóstico no reintenta `sc start`, no convierte una detención en
+   éxito, no cambia el estado de aceptación y no se activa por defecto. Una
+   corrida con estos marcadores sigue siendo evidencia diagnóstica, no cierre
+   de ningún gate nativo.
+
+La regresión se escribe antes del seam de Rust en el verificador existente:
+debe fallar contra `762a60c` si faltan el argumento `--service-diagnostics`, los
+ocho literales de fase, el handle `Arc<Mutex<File>>`, el `create(false)` y la
+propagación de `service-failed`; también debe fallar si el lab no crea y
+registra el archivo protegido, no valida su DACL exacta o pasa el argumento
+cuando el switch está apagado. Después de la implementación, el mismo checker
+y `git diff --check` deben pasar. El host Linux no tiene `pwsh`, así que no se
+simula parsing PowerShell ni se reclama que el servicio Windows compile. La
+corrida manual con `service_diagnostics=true` observará las subfases reales; la
+posterior corrida normal con `false` sigue siendo obligatoria.
+
+La regresión estática se ejecutó primero contra `762a60c` y falló con exit 1 por
+la ausencia de `enum ServiceDiagnosticPhase`. Tras añadir el seam, el mismo
+checker volvió a pasar, junto con `git diff --check` y `sh -n` del checker. No
+se ejecutaron Cargo, compilación, laboratorios ni PowerShell en este host por la
+ventana Linux compartida; la sintaxis y ACL reales de Windows siguen pendientes
+de la corrida hospedada autorizada.

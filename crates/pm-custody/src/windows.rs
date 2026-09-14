@@ -5,10 +5,10 @@
 
 use std::{
     ffi::{OsStr, OsString},
-    fs::{self, OpenOptions},
-    io::{Read, Write},
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use aws_lc_rs::{
@@ -119,11 +119,91 @@ struct Profile {
     server_spki: Vec<u8>,
 }
 
+#[derive(Clone, Copy)]
+enum ServiceDiagnosticPhase {
+    ArgsOk,
+    BootstrapOk,
+    AuditOk,
+    AgentTlsOk,
+    AgentPipeOk,
+    HumanTlsOk,
+    HumanPipeOk,
+    ServiceFailed,
+}
+
+impl ServiceDiagnosticPhase {
+    const fn line(self) -> &'static [u8] {
+        match self {
+            Self::ArgsOk => b"phase=args-ok\n",
+            Self::BootstrapOk => b"phase=bootstrap-ok\n",
+            Self::AuditOk => b"phase=audit-ok\n",
+            Self::AgentTlsOk => b"phase=agent-tls-ok\n",
+            Self::AgentPipeOk => b"phase=agent-pipe-ok\n",
+            Self::HumanTlsOk => b"phase=human-tls-ok\n",
+            Self::HumanPipeOk => b"phase=human-pipe-ok\n",
+            Self::ServiceFailed => b"phase=service-failed\n",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ServiceDiagnostics {
+    file: Arc<Mutex<File>>,
+}
+
+impl ServiceDiagnostics {
+    fn open(path: &Path) -> Result<Self, Failure> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(false);
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(path).map_err(|_| Failure::Unavailable)?;
+        validate_diagnostic_file(&file)?;
+        Ok(Self {
+            file: Arc::new(Mutex::new(file)),
+        })
+    }
+
+    fn record(&self, phase: ServiceDiagnosticPhase) -> Result<(), Failure> {
+        let mut file = self.file.lock().map_err(|_| Failure::Unavailable)?;
+        file.seek(SeekFrom::End(0))
+            .map_err(|_| Failure::Unavailable)?;
+        file.write_all(phase.line())
+            .map_err(|_| Failure::Unavailable)?;
+        file.sync_all().map_err(|_| Failure::Unavailable)
+    }
+}
+
+fn validate_diagnostic_file(file: &File) -> Result<(), Failure> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        GetFileInformationByHandle,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a valid handle for the duration of this call and
+    // `information` is writable storage of the documented type.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut information) };
+    let file_index = (u64::from(information.nFileIndexHigh) << 32)
+        | u64::from(information.nFileIndexLow);
+    if ok == 0
+        || information.dwFileAttributes
+            & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            != 0
+        || file_index == 0
+    {
+        return Err(Failure::Unavailable);
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct VaultService {
     path: PathBuf,
     device: [u8; 16],
     audit_custody: Arc<AuditDeviceCustody>,
+    diagnostics: Option<ServiceDiagnostics>,
 }
 
 pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
@@ -291,33 +371,58 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
     let vault_id = take_text(arguments, "--vault-id")?;
     let vault_path = take_path(arguments, "--vault")?;
     let device = decode_hex_16(&take_path(arguments, "--device")?)?;
+    let diagnostics_path = take_optional_path(arguments, "--service-diagnostics")?;
     finish_arguments(arguments)?;
-    // Validate before spawning either endpoint so a malformed identifier cannot
-    // leave a partially available role.
-    WindowsEndpoint::Agent
-        .pipe_name(&vault_id)
-        .map_err(|_| Failure::Unavailable)?;
-    WindowsEndpoint::Human
-        .pipe_name(&vault_id)
-        .map_err(|_| Failure::Unavailable)?;
-    let bootstrap = Arc::new(read_bootstrap(&bootstrap_path)?);
-    let audit_path = PathBuf::from(format!("{}.audit-custody", vault_path.display()));
-    let service = Arc::new(VaultService {
-        path: vault_path,
-        device,
-        audit_custody: Arc::new(load_or_create_audit_custody(&audit_path)?),
-    });
-    let agent = {
-        let bootstrap = Arc::clone(&bootstrap);
-        let service = Arc::clone(&service);
-        let vault_id = vault_id.clone();
-        std::thread::spawn(move || serve_role(Role::Agent, &vault_id, &bootstrap, &service))
-    };
-    let human =
-        std::thread::spawn(move || serve_role(Role::Human, &vault_id, &bootstrap, &service));
-    agent.join().map_err(|_| Failure::Unavailable)??;
-    human.join().map_err(|_| Failure::Unavailable)??;
-    Err(Failure::Unavailable)
+    let diagnostics = diagnostics_path
+        .as_deref()
+        .map(ServiceDiagnostics::open)
+        .transpose()?;
+    let result = (|| {
+        // Validate before spawning either endpoint so a malformed identifier
+        // cannot leave a partially available role.
+        WindowsEndpoint::Agent
+            .pipe_name(&vault_id)
+            .map_err(|_| Failure::Unavailable)?;
+        WindowsEndpoint::Human
+            .pipe_name(&vault_id)
+            .map_err(|_| Failure::Unavailable)?;
+        if let Some(diagnostics) = diagnostics.as_ref() {
+            diagnostics.record(ServiceDiagnosticPhase::ArgsOk)?;
+        }
+        let bootstrap = Arc::new(read_bootstrap(&bootstrap_path)?);
+        if let Some(diagnostics) = diagnostics.as_ref() {
+            diagnostics.record(ServiceDiagnosticPhase::BootstrapOk)?;
+        }
+        let audit_path = PathBuf::from(format!("{}.audit-custody", vault_path.display()));
+        let audit_custody = Arc::new(load_or_create_audit_custody(&audit_path)?);
+        if let Some(diagnostics) = diagnostics.as_ref() {
+            diagnostics.record(ServiceDiagnosticPhase::AuditOk)?;
+        }
+        let service = Arc::new(VaultService {
+            path: vault_path,
+            device,
+            audit_custody,
+            diagnostics: diagnostics.clone(),
+        });
+        let agent = {
+            let bootstrap = Arc::clone(&bootstrap);
+            let service = Arc::clone(&service);
+            let vault_id = vault_id.clone();
+            std::thread::spawn(move || serve_role(Role::Agent, &vault_id, &bootstrap, &service))
+        };
+        let human = std::thread::spawn(move || {
+            serve_role(Role::Human, &vault_id, &bootstrap, &service)
+        });
+        agent.join().map_err(|_| Failure::Unavailable)??;
+        human.join().map_err(|_| Failure::Unavailable)??;
+        Err(Failure::Unavailable)
+    })();
+    if result.is_err() {
+        if let Some(diagnostics) = diagnostics.as_ref() {
+            diagnostics.record(ServiceDiagnosticPhase::ServiceFailed)?;
+        }
+    }
+    result
 }
 
 fn serve_role(
@@ -331,6 +436,13 @@ fn serve_role(
         Role::Human => (&bootstrap.human_sid, &bootstrap.human_spki),
     };
     let config = server_config(certified_key(&bootstrap.server)?, client_spki, role)?;
+    if let Some(diagnostics) = service.diagnostics.as_ref() {
+        diagnostics.record(match role {
+            Role::Agent => ServiceDiagnosticPhase::AgentTlsOk,
+            Role::Human => ServiceDiagnosticPhase::HumanTlsOk,
+        })?;
+    }
+    let mut pipe_reported = false;
     loop {
         let pipe = WindowsServerPipe::create(
             role.endpoint(),
@@ -339,6 +451,15 @@ fn serve_role(
             client_sid,
         )
         .map_err(|_| Failure::Unavailable)?;
+        if !pipe_reported {
+            if let Some(diagnostics) = service.diagnostics.as_ref() {
+                diagnostics.record(match role {
+                    Role::Agent => ServiceDiagnosticPhase::AgentPipeOk,
+                    Role::Human => ServiceDiagnosticPhase::HumanPipeOk,
+                })?;
+            }
+            pipe_reported = true;
+        }
         let _ = handle_server_connection(pipe, role, &config, service, client_spki);
     }
 }
@@ -942,6 +1063,19 @@ fn finish_arguments(arguments: &mut impl Iterator<Item = OsString>) -> Result<()
         Ok(())
     } else {
         Err(Failure::Usage)
+    }
+}
+
+fn take_optional_path(
+    arguments: &mut impl Iterator<Item = OsString>,
+    flag: &str,
+) -> Result<Option<PathBuf>, Failure> {
+    match arguments.next() {
+        None => Ok(None),
+        Some(actual) if actual == flag => Ok(Some(PathBuf::from(
+            arguments.next().ok_or(Failure::Usage)?,
+        ))),
+        Some(_) => Err(Failure::Usage),
     }
 }
 
