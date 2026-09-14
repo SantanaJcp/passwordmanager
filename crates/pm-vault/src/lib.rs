@@ -17,7 +17,7 @@ mod reducer;
 
 pub use attempts::{
     AttemptError, AttemptLease, AttemptOutcome, AttemptSnapshot, AttemptState, AttemptVault,
-    IdempotencyKey, SshLease, StartAttempt, TotpLease,
+    HumanPendingAttempt, IdempotencyKey, SshLease, StartAttempt, TotpLease,
 };
 pub use audit::{
     AuditAction, AuditActorKind, AuditDeviceCustody, AuditDiscontinuity, AuditEvent, AuditOutcome,
@@ -35,7 +35,8 @@ pub use content::{
 };
 pub use history::{HistoryEntry, ItemHistory, ItemPurgeScope, PreparedItemPurge};
 pub use human::{
-    AttachmentReader, HumanChannel, HumanCommitError, HumanReceipt, HumanVault, PasswordRecord,
+    AttachmentReader, HumanAccessOverview, HumanAgentAccess, HumanCatalogEntry, HumanChannel,
+    HumanCommitError, HumanCredentialAccess, HumanReceipt, HumanVault, PasswordRecord,
     PendingRecoveryChange, PreparedHumanCommand,
 };
 pub use migration::{
@@ -81,6 +82,37 @@ pub enum VaultError {
     InvalidFormat,
     Io(std::io::Error),
     Storage(rusqlite::Error),
+    Cleanup(PersistCleanupError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PersistPublication {
+    NotPublished,
+    Published,
+}
+
+#[derive(Debug)]
+pub struct PersistCleanupError {
+    operation: Option<Box<VaultError>>,
+    cleanup: Vec<std::io::Error>,
+    publication: PersistPublication,
+}
+
+impl PersistCleanupError {
+    #[must_use]
+    pub const fn publication(&self) -> PersistPublication {
+        self.publication
+    }
+
+    #[must_use]
+    pub fn failure_count(&self) -> usize {
+        self.cleanup.len()
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> Option<&VaultError> {
+        self.operation.as_deref()
+    }
 }
 
 impl fmt::Display for VaultError {
@@ -91,11 +123,29 @@ impl fmt::Display for VaultError {
             Self::InvalidFormat => f.write_str("invalid or incompatible vault storage"),
             Self::Io(error) => write!(f, "vault I/O failed: {error}"),
             Self::Storage(error) => write!(f, "vault storage failed: {error}"),
+            Self::Cleanup(cleanup) => match cleanup.publication {
+                PersistPublication::NotPublished => {
+                    f.write_str("vault creation failed and temporary artifact cleanup also failed")
+                }
+                PersistPublication::Published => {
+                    f.write_str("vault was published but temporary artifact cleanup failed")
+                }
+            },
         }
     }
 }
 
-impl std::error::Error for VaultError {}
+impl std::error::Error for VaultError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cleanup(cleanup) => cleanup
+                .operation
+                .as_deref()
+                .map(|error| error as &(dyn std::error::Error + 'static)),
+            _ => None,
+        }
+    }
+}
 
 impl From<CryptoError> for VaultError {
     fn from(value: CryptoError) -> Self {
@@ -192,6 +242,20 @@ pub fn open_vault(path: &Path, password: &[u8]) -> Result<OpenedVault, VaultErro
     {
         return Err(VaultError::InvalidFormat);
     }
+    Ok(OpenedVault { trusted_root })
+}
+
+/// Opens and validates only the public vault identity, without opening a human
+/// root or running the password KDF.
+///
+/// # Errors
+///
+/// Returns an error for incompatible, incomplete or altered public metadata
+/// and root envelopes.
+pub fn open_vault_identity(path: &Path) -> Result<OpenedVault, VaultError> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
+    let (_, trusted_root) = load_and_validate_bundle(&connection)?;
     Ok(OpenedVault { trusted_root })
 }
 
@@ -318,8 +382,16 @@ fn configure_apple_durability(connection: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
+    persist_new_with_cleanup(path, bundle, |artifact| fs::remove_file(artifact))
+}
+
+#[allow(clippy::too_many_lines)]
+fn persist_new_with_cleanup(
+    path: &Path,
+    bundle: &RootBundle,
+    mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(), VaultError> {
     if path.exists() {
         return Err(VaultError::AlreadyExists);
     }
@@ -328,8 +400,8 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
         .filter(|value| !value.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let (temporary_path, temporary_file) = create_temporary(parent, path)?;
-    let wal_path = PathBuf::from(format!("{}-wal", temporary_path.display()));
-    let shm_path = PathBuf::from(format!("{}-shm", temporary_path.display()));
+    let artifacts = PersistArtifacts::new(temporary_path.clone());
+    let mut publication = PersistPublication::NotPublished;
     let result = (|| {
         drop(temporary_file);
         let mut connection =
@@ -437,7 +509,7 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              CREATE TABLE human_staging (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
                operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'history_restore', 'item_purge', 'audit_purge', 'availability_change', 'identity_change', 'import_commit', 'backup_restore', 'root_rotation')),
-               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'restore', 'purge-item', 'purge-revisions', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'import-batch', 'backup-restore', 'root-password-rotate', 'root-recovery-rotate')),
+               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'restore', 'purge-item', 'purge-revisions', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'device-retire', 'import-batch', 'backup-restore', 'root-password-rotate', 'root-recovery-rotate')),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB CHECK (revision_id IS NULL OR length(revision_id) = 16),
                body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144),
@@ -740,14 +812,70 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                 VaultError::Io(error)
             }
         })?;
+        publication = PersistPublication::Published;
         File::open(parent)?.sync_all()?;
         Ok(())
     })();
 
-    let _ = fs::remove_file(&temporary_path);
-    let _ = fs::remove_file(wal_path);
-    let _ = fs::remove_file(shm_path);
-    result
+    let cleanup = cleanup_persist_artifacts(&artifacts, &mut remove);
+    combine_persist_result(result, publication, cleanup)
+}
+
+struct PersistArtifacts {
+    temporary: PathBuf,
+    wal: PathBuf,
+    shm: PathBuf,
+}
+
+impl PersistArtifacts {
+    fn new(temporary: PathBuf) -> Self {
+        let wal = PathBuf::from(format!("{}-wal", temporary.display()));
+        let shm = PathBuf::from(format!("{}-shm", temporary.display()));
+        Self {
+            temporary,
+            wal,
+            shm,
+        }
+    }
+
+    #[cfg(test)]
+    fn synthetic(temporary: &str) -> Self {
+        Self::new(PathBuf::from(temporary))
+    }
+}
+
+fn cleanup_persist_artifacts(
+    artifacts: &PersistArtifacts,
+    mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Vec<std::io::Error> {
+    let mut errors = Vec::new();
+    for (path, optional) in [
+        (&artifacts.temporary, false),
+        (&artifacts.wal, true),
+        (&artifacts.shm, true),
+    ] {
+        if let Err(error) = remove(path)
+            && (!optional || error.kind() != std::io::ErrorKind::NotFound)
+        {
+            errors.push(error);
+        }
+    }
+    errors
+}
+
+fn combine_persist_result(
+    result: Result<(), VaultError>,
+    publication: PersistPublication,
+    cleanup: Vec<std::io::Error>,
+) -> Result<(), VaultError> {
+    if cleanup.is_empty() {
+        return result;
+    }
+    Err(VaultError::Cleanup(PersistCleanupError {
+        operation: result.err().map(Box::new),
+        cleanup,
+        publication,
+    }))
 }
 
 fn create_temporary(parent: &Path, target: &Path) -> Result<(PathBuf, File), VaultError> {
@@ -786,6 +914,122 @@ mod macos_tests {
         for pragma in ["PRAGMA fullfsync", "PRAGMA checkpoint_fullfsync"] {
             let enabled: i64 = connection.query_row(pragma, [], |row| row.get(0)).unwrap();
             assert_eq!(enabled, 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod cleanup_error_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_distinguishes_optional_absence_and_attempts_every_artifact() {
+        let paths = PersistArtifacts::synthetic("/synthetic/temp");
+        let mut attempted = Vec::new();
+        let errors = cleanup_persist_artifacts(&paths, |path| {
+            attempted.push(path.to_owned());
+            if path == paths.temporary {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "synthetic",
+                ))
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "synthetic",
+                ))
+            }
+        });
+        assert_eq!(attempted.len(), 3);
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn published_cleanup_failure_retains_operation_and_publication_state() {
+        let original = VaultError::InvalidFormat;
+        let error = combine_persist_result(
+            Err(original),
+            PersistPublication::Published,
+            vec![std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "synthetic",
+            )],
+        )
+        .unwrap_err();
+        let VaultError::Cleanup(cleanup) = error else {
+            panic!("cleanup failure was discarded")
+        };
+        assert_eq!(cleanup.publication(), PersistPublication::Published);
+        assert_eq!(cleanup.failure_count(), 1);
+        assert!(matches!(
+            cleanup.operation(),
+            Some(VaultError::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn published_target_remains_openable_when_temporary_cleanup_fails() {
+        let password = b"synthetic cleanup publication password";
+        let created = create_human_root(password, KdfProfile::confirmed(64, 3).unwrap()).unwrap();
+        let target = std::env::temp_dir().join(format!(
+            "pm-cleanup-published-{}-{}",
+            std::process::id(),
+            NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed),
+        ));
+        let attempted = std::cell::RefCell::new(Vec::new());
+        let error = persist_new_with_cleanup(&target, created.bundle(), |path| {
+            attempted.borrow_mut().push(path.to_owned());
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "synthetic",
+            ))
+        })
+        .unwrap_err();
+        let VaultError::Cleanup(cleanup) = error else {
+            panic!("published cleanup error was discarded")
+        };
+        assert_eq!(cleanup.publication(), PersistPublication::Published);
+        assert_eq!(cleanup.failure_count(), 3);
+        assert!(cleanup.operation().is_none());
+        {
+            let opened = open_vault(&target, password).unwrap();
+            assert_eq!(opened.trusted_root(), created.bundle().trusted_root());
+        }
+        let attempted = attempted.into_inner();
+        assert_eq!(attempted.len(), 3);
+        let temporary = PersistArtifacts::new(attempted[0].clone());
+        assert_eq!(attempted[1], temporary.wal);
+        assert_eq!(attempted[2], temporary.shm);
+        let target_artifacts = PersistArtifacts::new(target.clone());
+        for path in [&target_artifacts.wal, &target_artifacts.shm] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("test-owned cleanup failed: {error}"),
+            }
+        }
+        std::fs::remove_file(&target).expect("published test target disappeared");
+        std::fs::remove_file(&temporary.temporary).expect("temporary test file cleanup failed");
+        for path in [&temporary.wal, &temporary.shm] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("test-owned cleanup failed: {error}"),
+            }
+        }
+        for path in [
+            &target_artifacts.temporary,
+            &target_artifacts.wal,
+            &target_artifacts.shm,
+            &temporary.temporary,
+            &temporary.wal,
+            &temporary.shm,
+        ] {
+            assert!(
+                !path.exists(),
+                "test-owned artifact remains: {}",
+                path.display()
+            );
         }
     }
 }

@@ -220,6 +220,68 @@ pub struct AttemptSnapshot {
     reason: Option<String>,
     result: Option<Vec<u8>>,
 }
+
+/// Secret-free attempt context shown only on an authenticated human surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanPendingAttempt {
+    attempt_id: [u8; 16],
+    credential_id: [u8; 16],
+    owner_subject: [u8; 16],
+    owner_generation: u64,
+    agent_status: String,
+    title: String,
+    integration_id: String,
+    state: AttemptState,
+    expires_at_us: i64,
+    reason: Option<String>,
+    passkey_request: Option<[u8; 16]>,
+}
+
+type HumanPendingRow = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    String,
+    Vec<u8>,
+    Option<Vec<u8>>,
+);
+
+impl HumanPendingAttempt {
+    pub const fn attempt_id(&self) -> &[u8; 16] {
+        &self.attempt_id
+    }
+    pub const fn credential_id(&self) -> &[u8; 16] {
+        &self.credential_id
+    }
+    pub const fn owner_subject(&self) -> &[u8; 16] {
+        &self.owner_subject
+    }
+    pub const fn owner_generation(&self) -> u64 {
+        self.owner_generation
+    }
+    pub fn agent_status(&self) -> &str {
+        &self.agent_status
+    }
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    pub fn integration_id(&self) -> &str {
+        &self.integration_id
+    }
+    pub const fn state(&self) -> AttemptState {
+        self.state
+    }
+    pub const fn expires_at_us(&self) -> i64 {
+        self.expires_at_us
+    }
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+    pub const fn passkey_request(&self) -> Option<&[u8; 16]> {
+        self.passkey_request.as_ref()
+    }
+}
 impl AttemptSnapshot {
     pub const fn attempt_id(&self) -> &[u8; 16] {
         &self.attempt_id
@@ -875,6 +937,198 @@ impl AttemptVault {
         }
         tx.commit()?;
         Ok(snap)
+    }
+
+    /// Lists attempt state for an authenticated human without result or execution context.
+    ///
+    /// # Errors
+    /// Fails closed if custody, ownership metadata, or encrypted state is inconsistent.
+    pub fn human_pending(
+        &self,
+        human: &HumanVault,
+    ) -> Result<Vec<HumanPendingAttempt>, AttemptError> {
+        human.verify_attempt_access(
+            self.delegated.path(),
+            self.trusted.vault_id(),
+            &self.device,
+        )?;
+        let now = now_us()?;
+        let mut connection = open(self.delegated.path())?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let rows = {
+            let mut statement = transaction.prepare(
+                "SELECT a.attempt_id,a.item_id,a.owner_subject,a.owner_generation,a.state,
+                        a.state_package,(SELECT request_id FROM passkey_requests p
+                         WHERE p.attempt_id=a.attempt_id ORDER BY request_id LIMIT 1)
+                 FROM authentication_attempts a WHERE a.state_package IS NOT NULL
+                 ORDER BY a.created_at_us,a.attempt_id",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                })?
+                .collect::<Result<Vec<HumanPendingRow>, _>>()?
+        };
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            result.push(self.human_pending_row(human, &transaction, now, row)?);
+        }
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    fn human_pending_row(
+        &self,
+        human: &HumanVault,
+        transaction: &Transaction<'_>,
+        now: i64,
+        row: HumanPendingRow,
+    ) -> Result<HumanPendingAttempt, AttemptError> {
+        let (attempt, item, subject, generation, stored_state, package, passkey) = row;
+        let attempt = fixed::<16>(&attempt)?;
+        let item = fixed::<16>(&item)?;
+        let subject = fixed::<16>(&subject)?;
+        let generation = u64::try_from(generation).map_err(|_| AttemptError::Integrity)?;
+        let mut snapshot = decode_snapshot(&self.custody.open_attempt_state(
+            &package,
+            *self.trusted.vault_id(),
+            self.device,
+            self.generation,
+            attempt,
+        )?)?;
+        if snapshot.attempt_id != attempt
+            || snapshot.credential_id != item
+            || snapshot.state.name() != stored_state
+        {
+            return Err(AttemptError::Integrity);
+        }
+        if matches!(
+            snapshot.state,
+            AttemptState::Created | AttemptState::Running | AttemptState::WaitingForHuman
+        ) && now >= snapshot.expires_at_us
+        {
+            snapshot.state = AttemptState::Expired;
+            snapshot.reason = Some("ATTEMPT_EXPIRED".into());
+            update_snapshot(
+                transaction,
+                &self.custody,
+                *self.trusted.vault_id(),
+                self.device,
+                self.generation,
+                &snapshot,
+                None,
+                now,
+            )?;
+            append_audit(
+                transaction,
+                &self.trusted,
+                self.device,
+                &self.custody,
+                &snapshot,
+                AuditAction::AuthState,
+                AuditOutcome::Failed,
+                now,
+            )?;
+        }
+        let agent_status: String = transaction
+            .query_row(
+                "SELECT status FROM agent_authorizations
+                 WHERE subject_id=?1 AND generation=?2",
+                params![
+                    subject.as_slice(),
+                    i64::try_from(generation).map_err(|_| AttemptError::Integrity)?
+                ],
+                |stored| stored.get(0),
+            )
+            .optional()?
+            .ok_or(AttemptError::Integrity)?;
+        if !matches!(agent_status.as_str(), "active" | "revoked" | "superseded") {
+            return Err(AttemptError::Integrity);
+        }
+        Ok(HumanPendingAttempt {
+            attempt_id: attempt,
+            credential_id: item,
+            owner_subject: subject,
+            owner_generation: generation,
+            agent_status,
+            title: human.attempt_title(item)?,
+            integration_id: snapshot.integration_id.clone(),
+            state: snapshot.state,
+            expires_at_us: snapshot.expires_at_us,
+            reason: snapshot.reason.clone(),
+            passkey_request: passkey.map(|value| fixed::<16>(&value)).transpose()?,
+        })
+    }
+
+    /// Cancels one non-terminal attempt from an authenticated human surface.
+    ///
+    /// # Errors
+    /// Fails closed for an unknown attempt or mismatched human session.
+    pub fn human_cancel(
+        &self,
+        human: &HumanVault,
+        attempt: [u8; 16],
+    ) -> Result<AttemptSnapshot, AttemptError> {
+        human.verify_attempt_access(
+            self.delegated.path(),
+            self.trusted.vault_id(),
+            &self.device,
+        )?;
+        let now = now_us()?;
+        let mut connection = open(self.delegated.path())?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let package: Vec<u8> = transaction
+            .query_row(
+                "SELECT state_package FROM authentication_attempts WHERE attempt_id=?1",
+                [attempt.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(AttemptError::NotFound)?;
+        let mut snapshot = decode_snapshot(&self.custody.open_attempt_state(
+            &package,
+            *self.trusted.vault_id(),
+            self.device,
+            self.generation,
+            attempt,
+        )?)?;
+        if matches!(
+            snapshot.state,
+            AttemptState::Created | AttemptState::Running | AttemptState::WaitingForHuman
+        ) {
+            snapshot.state = AttemptState::Cancelled;
+            snapshot.reason = Some("ATTEMPT_CANCELLED".into());
+            update_snapshot(
+                &transaction,
+                &self.custody,
+                *self.trusted.vault_id(),
+                self.device,
+                self.generation,
+                &snapshot,
+                None,
+                now,
+            )?;
+            append_audit(
+                &transaction,
+                &self.trusted,
+                self.device,
+                &self.custody,
+                &snapshot,
+                AuditAction::AuthState,
+                AuditOutcome::Succeeded,
+                now,
+            )?;
+        }
+        transaction.commit()?;
+        Ok(snapshot)
     }
 
     pub fn claim_next(&self) -> Result<Option<AttemptLease>, AttemptError> {

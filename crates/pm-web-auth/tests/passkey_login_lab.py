@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Real Keycloak WebAuthn registration -> same vault key assertion -> OIDC lab."""
 import base64, fcntl, hashlib, json, os, pathlib, pty, select, shutil, signal
-import socket, sqlite3, ssl, stat, subprocess, sys, tempfile, termios, threading, time, urllib.parse, urllib.request
+import socket, sqlite3, ssl, stat, struct, subprocess, sys, tempfile, termios, threading, time, urllib.parse, urllib.request
 
 CUSTODIAN,HUMAN,BRIDGE,UNTRUSTED,DESTINATION=1,2,3,4,5
 MASTER=b"synthetic ticket 14 master"
@@ -78,6 +78,37 @@ def tty_confirm(uid,cmd,approval,password=MASTER,expected=0):
  out,err=p.communicate(timeout=15);os.close(master)
  assert p.returncode==expected,(p.returncode,out,err,seen)
  return out,err
+
+def tui_confirm(uid,custody,profile,key,sock,request_id,password=MASTER):
+ tmux="/usr/bin/tmux";tmux_socket=key.parent/"ticket24-tmux.sock"
+ env={"HOME":str(key.parent),"TERM":"xterm-256color"}
+ def call(*args,check=True):
+  return run_uid(uid,[tmux,"-S",tmux_socket,*args],check=check,env=env)
+ def capture():return call("capture-pane","-p").stdout
+ def wait_for(value,timeout=10):
+  deadline=time.monotonic()+timeout
+  while time.monotonic()<deadline:
+   page=capture()
+   if value in page:return page
+   time.sleep(.05)
+  raise AssertionError((value,capture()))
+ def literal(value):call("send-keys","-l",value)
+ call("kill-server",check=False)
+ command=[custody,"tui","--profile",profile,"--private",key,"--socket",sock,
+          "--idle-seconds","30","--reveal-seconds","1","--copy-seconds","2"]
+ call("new-session","-d","-x","320","-y","30","--",*command)
+ wait_for(b"Password required");literal(password.decode());call("send-keys","Enter")
+ page=wait_for(b"Unlocked: selection never reveals secrets");assert password not in page
+ literal("w");wait_for(b"Attempts (safe context only)")
+ literal("j");wait_for(b"passkey-confirmation")
+ literal("v");wait_for(b"type APPROVE")
+ literal("APPROVE "+request_id);call("send-keys","Enter")
+ wait_for(b"fresh reauthentication");literal(password.decode());call("send-keys","Enter")
+ page=wait_for(b"Passkey confirmed with fresh UP+UV",20);assert password not in page
+ call("send-keys","Escape");wait_for(b"Content view");literal("l")
+ deadline=time.monotonic()+5
+ while time.monotonic()<deadline and call("has-session",check=False).returncode==0:time.sleep(.05)
+ assert call("has-session",check=False).returncode!=0
 
 def native_call(bridge,message):
  raw=json.dumps(message,separators=(",",":")).encode();r=run_uid(BRIDGE,[bridge,EXTENSION_ORIGIN],input=len(raw).to_bytes(4,sys.byteorder)+raw,check=False)
@@ -191,13 +222,17 @@ def cli(uid,binary,env,args,check=True):
  if check:assert r.returncode==0,(r.stdout,r.stderr)
  return r
 
-def attempt_status(uid,binary,env,attempt,terminal=False,timeout=35):
+def attempt_status(uid,binary,env,attempt,terminal=False,timeout=35,allowed_intermediates=None):
  end=time.monotonic()+timeout;value=None
  while time.monotonic()<end:
   result=cli(uid,binary,env,["--json","auth","status","--attempt",attempt],check=False)
   if result.returncode!=0:return None,result
   value=json.loads(result.stdout)["result"]
+  assert value["attempt_id"]==attempt,(attempt,value)
   if (terminal and value["state"] in ("SUCCEEDED","FAILED","INDETERMINATE")) or (not terminal and value["state"]=="WAITING_FOR_HUMAN"):return value,result
+  if allowed_intermediates is not None:
+   observed=(value["state"],value.get("reason") or "")
+   if observed not in allowed_intermediates:raise AssertionError((attempt,value))
   time.sleep(.05)
  raise AssertionError((attempt,value))
 
@@ -292,7 +327,7 @@ def main():
    time.sleep(.05)
   assert request_id,(plog.read_text(errors="replace"),klog.read_text(errors="replace"))
   tty_confirm(HUMAN,[custody,"human-passkey-confirm","--profile",hprof,"--private",hk,"--socket",run/"human.sock","--request",request_id,"--verification","presence"],"APPROVE "+request_id,expected=4)
-  tty_confirm(HUMAN,[custody,"human-passkey-confirm","--profile",hprof,"--private",hk,"--socket",run/"human.sock","--request",request_id,"--verification","verified"],"APPROVE "+request_id)
+  tui_confirm(HUMAN,custody,hprof,hk,run/"human.sock",request_id)
   finished,_=attempt_status(BRIDGE,cli_bin,env,attempt,terminal=True)
   assert finished["state"]=="SUCCEEDED",(finished,plog.read_text(errors="replace"),klog.read_text(errors="replace"));tokens=finished["result"]
   assert tokens["kind"]=="oidc_tokens" and tokens["subject"]==ALICE_ID and tokens["issuer"]==origin+"/realms/pm" and tokens["audience"]=="pm-passkey"
@@ -325,7 +360,7 @@ def main():
   assert expired_request
   db=sqlite3.connect(vault);db.execute("update passkey_requests set created_at_us=-2,expires_at_us=-1 where request_id=?",(bytes.fromhex(expired_request),));db.commit();db.close()
   tty_confirm(HUMAN,[custody,"human-passkey-confirm","--profile",hprof,"--private",hk,"--socket",run/"human.sock","--request",expired_request,"--verification","verified"],"APPROVE "+expired_request,expected=4)
-  expired_observed=json.loads(cli(BRIDGE,cli_bin,env,["--json","auth","status","--attempt",expired]).stdout)["result"]
+  expired_observed,_=attempt_status(BRIDGE,cli_bin,env,expired,allowed_intermediates={("RUNNING","PASSKEY_HUMAN_CONFIRMATION")})
   assert expired_observed["state"]=="WAITING_FOR_HUMAN" and expired_observed["result"] is None,expired_observed
   cancelled=json.loads(cli(BRIDGE,cli_bin,env,["--json","auth","cancel","--attempt",expired]).stdout)["result"]
   assert cancelled["state"]=="CANCELLED" and cancelled["result"] is None,cancelled
@@ -360,7 +395,7 @@ def main():
   revoked_status=cli(BRIDGE,cli_bin,env,["--json","auth","status","--attempt",revoked_attempt],check=False);assert revoked_status.returncode!=0 and b"AGENT_REVOKED" in revoked_status.stdout
   denied=run_uid(UNTRUSTED,["cat",conf],check=False);assert denied.returncode!=0 and denied.stdout==b""
   print("PASS passkey-login keycloak=26.7.3 registration=real assertion=same-vault-key oidc=code+PKCE-S256 result=oidc_tokens")
-  print("PASS passkey-login-human outer=WAITING_FOR_HUMAN UP=TTY UV=fresh-reauth presence-only=denied extension=MV3-native real")
+  print("PASS passkey-login-human outer=WAITING_FOR_HUMAN UP=TUI-keyboard UV=fresh-second-human-channel presence-only=denied extension=MV3-native real")
   print("PASS passkey-login-binding challenge+credential+account+origin=bound passwordless-flow=username+webauthn wrong-origin+account=denied secrets=absent")
   print("PASS passkey-login-negative challenge-expired=denied provider-restart=integrity-failure revoke-before-UPUV=denied os-authenticator=unused")
   print("LIMIT cft=laboratory-instrument product-browser=ticket33-NOT_RUN six-native-targets=NOT_RUN")

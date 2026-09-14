@@ -1,12 +1,9 @@
 # Método CI nativo efímero
 
-Estado: método adicional autorizado; primera ejecución real de preparación
-**fallida en los cinco targets** y remediación autorizada preparada (evidencia
-al final). Este documento no acredita
-soporte de producto, no resuelve los tickets 26--32 y no sustituye sus laboratorios
-humanos, de reboot/FDE o de firma real. La instalación explícita y obligatoria
-del toolchain Rust exacto es la única instalación ahora autorizada; toda
-autoinstalación implícita continúa prohibida.
+Estado: método adicional autorizado. La primera corrida falló en cinco targets;
+la remediación autorizada se integró y la segunda corrida pasó los cinco
+preflights nativos de entorno. **No es aceptación del producto**, no resuelve
+26--32 ni sustituye laboratorios humanos, reboot/FDE o firma real.
 
 ## Alcance y fuente de verdad
 
@@ -270,3 +267,167 @@ una ejecución PowerShell local: su sintaxis y comportamiento corregido deben
 observarse en la nueva corrida Windows ARM64. El tag v7.0.1 se resolvió en el
 remoto oficial al SHA fijado y su `action.yml` observado declara
 `runs.using: node24`.
+
+## Segunda ejecución observada — 2026-09-13
+
+[Run 34763094631](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631)
+ejecutó `ef81db72e8c2f6aec20511f14fa59a16bdfe3446` y terminó **success 5/5**.
+El merger separado verificó config/YAML/shell, `check.sh`, clean offline y los
+17 labs Linux antes de publicar. El bootstrap mínimo de tres archivos quedó
+en `master` como `a583678`; el PR de producto no fue fusionado.
+
+| Target | Job | OS e imagen observados | Resultado |
+| --- | --- | --- | --- |
+| Linux x86-64 | [103739225302](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631/job/103739225302) | Ubuntu 24.04, kernel 6.17.0-1022-azure, glibc 2.39, systemd 255; ubuntu24 20260907.300.1 | PASS |
+| Linux AArch64 | [103739225310](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631/job/103739225310) | Mismas versiones base Linux; ubuntu24-arm64 20260907.118.1 | PASS |
+| macOS Intel | [103739225256](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631/job/103739225256) | macOS 15.7.9, kernel 24.6.0; macos15 20260824.0482.1 | PASS |
+| macOS Apple silicon | [103739225318](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631/job/103739225318) | macOS 15.7.9, kernel 24.6.0; macos15 20260907.0337.1 | PASS |
+| Windows ARM64 | [103739225200](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763094631/job/103739225200) | Windows 11 Enterprise 10.0.26200; win11-vs2026-arm64 20260907.151.1 | PASS |
+
+Cada job instaló Rust/Cargo 1.98.1 explícitamente, comprobó el host exacto,
+compiló/inspeccionó/ejecutó el canario de su CPU y emitió
+`scope=environment-only product-validation=NOT_RUN`. Las descargas registradas
+pertenecen a la etapa explícita de instalación; no se observaron descargas en
+la etapa de verificación ni sustitución Node 20 -> 24. PowerShell real ejecutó
+la consulta de arrays sin el error `Count` anterior.
+
+Windows reportó `uac_enable_lua=1`, aunque la documentación genérica hospedada
+mencionada arriba describe UAC desactivado. Prima el hecho observado: el token
+pasó la comprobación administrativa, pero ningún laboratorio debe asumir UAC
+desactivado. No se ejecutó custodia, clipboard de producto, reboot/FDE ni
+firma; los gates nativos y Windows 11 x64 continúan pendientes.
+
+## Laboratorio macOS de candidato — evidencia parcial
+
+El workflow manual `macOS custody acceptance` se habilitó mediante bootstrap
+`c4e8779` en `master`; el código de producto se publicó únicamente en
+`codex/pm-26`, sin integrarlo en la rama unificada ni fusionar el PR.
+
+| Corrida | Commit candidato | Resultado observado |
+| --- | --- | --- |
+| [34763192705](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763192705) | `3409f5b` | Falló compilación de 1PUX en ambas CPU por anchuras distintas de tipos Darwin. |
+| [34763755579](https://github.com/SantanaJcp/passwordmanager/actions/runs/34763755579) | `7f63429` | 1PUX compiló; falló el canal ancillary por campos Darwin `u32` frente a `usize`. |
+| [34764564812](https://github.com/SantanaJcp/passwordmanager/actions/runs/34764564812) | `45af206` | Ambas CPU compilaron y ejecutaron nueve tests nativos; binarios Mach-O correctos. Falló la preparación multi-UID: raíz temporal privada del runner impedía `keygen` del agente. |
+| [34765246514](https://github.com/SantanaJcp/passwordmanager/actions/runs/34765246514) | `8b54d20` | Ambas CPU compilaron. ARM rechazó explícitamente el prerrequisito de traversal de `/Users/runner/work/_temp` para el custodio; no se modificaron permisos ajenos. Intel llegó a launchd y falló el primer probe del agente con `CUSTODY_UNAVAILABLE`; causa aún no aislada. |
+
+Los nueve tests por CPU no representan toda la suite: varios tests conservan
+`cfg` Linux y ejecutaron cero casos. Ninguna corrida pasó la aceptación de
+custodia completa; no acreditan TUI compuesta, reboot/FDE, firma ni los gates
+26/31. Los ajustes de anchuras y preparación siguen en el candidato aislado.
+Después de esta evidencia, el usuario autorizó una raíz efímera única
+`/private/var/tmp/passwordmanager-ticket26`, con padre root `01777`, colisiones
+rechazadas, raíz propia `0711` y privados `0700`, sin fallback ni cambios en
+homes ajenos. El candidato `aa19385` documenta y aplica ese método; su corrida
+[34795572781](https://github.com/SantanaJcp/passwordmanager/actions/runs/34795572781)
+falló en el guard de modo del padre: `%Lp` de BSD stat descarta el sticky bit. La autorización consta en
+[execution.md](../../.scratch/passwordmanager/execution.md).
+
+
+### Continuación macOS — 2026-09-13
+
+- [Corrida6, 34796307975](https://github.com/SantanaJcp/passwordmanager/actions/runs/34796307975), candidato `f6be582`: el modo se lee completo con `%p` y `stat.S_IMODE`; metadata, traversal entre UIDs y UID de launchd pasan. Sigue fallando el primer probe en ambas CPU.
+- [Corrida7, 34797022111](https://github.com/SantanaJcp/passwordmanager/actions/runs/34797022111), candidato `678319b`: diagnóstico limitado a feature `macos-ticket26-diagnostics`, apagada por defecto y con opt-in del fixture. Perfil/clave/conexión/peer y configuración TLS pasan; la primera I/O posterior falla. Nueve tests nativos por CPU no sustituyen aceptación integral.
+- Hipótesis concreta: Darwin hereda el modo nonblocking del listener al socket aceptado, mientras el camino rustls usa I/O blocking. [Apple accept(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/accept.2.html) y [Linux accept(2)](https://man7.org/linux/man-pages/man2/accept.2.html) documentan la diferencia. Se prepara normalización explícita y regresión, sin cambiar políticas TLS ni plazos. No se considera causa confirmada hasta nueva evidencia nativa. La aceptación deberá repetirse con binario normal, no solo diagnóstico.
+
+### Windows ARM64 — evidencia parcial, 2026-09-13
+
+El bootstrap de workflow manual quedó en `master` como `5f099f8`, sin fusionar el producto. El candidato continúa aislado en `codex/pm-27`.
+
+- [Corrida1, 34796411705](https://github.com/SantanaJcp/passwordmanager/actions/runs/34796411705), `1f9a383`: la conversión de finales de línea del checkout cambió la firma; hash falló antes de compilar. `9b32e58` fija `-text` para los dos inputs, sin cambiar hashes ni normalizar como alternativa.
+- [Corrida2, 34796755222](https://github.com/SantanaJcp/passwordmanager/actions/runs/34796755222), `9b32e58`: hashes/Minisign pasan; falló el nombre supuesto del metadata MSVC. `f45ce78` usa el archivo estándar `Microsoft.VCToolsVersion.default.txt`, exige 14.5x y fija la versión efectiva.
+- [Corrida3, 34797085446](https://github.com/SantanaJcp/passwordmanager/actions/runs/34797085446), `f45ce78`: fuente 1.0.22 autenticada, compilación nativa ReleaseLIB ARM64 `/MT` con v145/14.51.36231, inspección ARM64 y test de versión enlazada PASS. La custodia no arrancó por conversión PowerShell array a booleano en guard administrativo.
+- [Corrida4, 34797595176](https://github.com/SantanaJcp/passwordmanager/actions/runs/34797595176), `49ec89ad`: guard `WindowsPrincipal.IsInRole` PASS; etapa MSVC PASS otra vez; DPAPI y ConPTY pasan (2 tests). `clipboard_sequence_never_clears_a_newer_owner` falla en `second.clear_if_owned()` (2/3 tests). No se ejecutó aún la custodia completa; el diagnóstico del clipboard continúa sin relajar ownership ni omitir la aserción.
+
+Nada de esta evidencia cierra 26/27 ni los gates integrales 30–34. Los fallos previos se conservan; no se presenta solo la última corrida como validación global.
+
+
+### Nuevos discriminantes nativos — 2026-09-13
+
+- macOS [corrida8, 34798902550](https://github.com/SantanaJcp/passwordmanager/actions/runs/34798902550), `87dc908`: ambas CPU observaron socket aceptado `nonblocking-before=1` y `after=0`; el cliente llegó a READY y servidor a request/ALPN/READY. Esto confirma la causa del fallo anterior y la corrección del modo de I/O. El lab no pasó completo: la negativa de servidor impostor agotó cinco segundos esperando `accept`. Se investiga el fixture sin convertir timeout en éxito; sigue pendiente aceptación normal sin diagnóstico.
+- Windows [corrida5, 34798532966](https://github.com/SantanaJcp/passwordmanager/actions/runs/34798532966), `40b8ec9`: diagnóstico test-only confirmó que la secuencia guardada antes de CloseClipboard quedaba obsoleta (2→5 y7→10), con owner HWND nulo. No se cambió comportamiento en esa corrida.
+- Windows [corrida6, 34799143030](https://github.com/SantanaJcp/passwordmanager/actions/runs/34799143030), `7829c12`: HWND propio por lease y captura final verificada con owner bajo lock corrigen la regresión original, que pasa; DPAPI/ConPTY también pasan. La nueva negativa de pérdida entre publicación/captura falla al crear el escritor concurrente (3/4 tests). Se investiga interferencia entre casos que comparten clipboard, preservando la carrera intencional dentro de la prueba. Ninguna corrida acredita custodia completa.
+
+
+### Estado al continuar24/25 — 2026-09-13
+
+- Windows [corrida7, 34799533393](https://github.com/SantanaJcp/passwordmanager/actions/runs/34799533393), `6bef3bc`: 4/4 unit tests nativos (dos clipboard, DPAPI y ConPTY) y contrato de pipes PASS. Mutex exclusivamente test-only separa los dos casos que comparten clipboard y conserva la carrera interna. El build siguiente falla en19 errores de portabilidad de archivos en `pm-vault` (`onepux.rs`/`reducer.rs`), actualmente dependientes de APIs Unix. Se prepara equivalencia Windows sin desactivar importación/reductor ni sustituir garantías.
+- macOS [corrida9, 34799626677](https://github.com/SantanaJcp/passwordmanager/actions/runs/34799626677), `249cbd8`: el fixture impostor ahora permite conexión real para comprobar rechazo por UID antes de TLS y cero bytes. Intel termina el lab diagnóstico: launchd, peer/RPK, ACL, suspensión/restart, TTY/AppKit. ARM termina tests/probe pero falla `human-authorization --action setup` con exit4; causa pendiente.
+- Limitación detectada del harness Mac: `finally` usa `check=False` en limpieza y anuncia PASS antes de ella. Esto no demuestra que la limpieza haya fallado, pero tampoco propaga un error si sucede. Root informó al usuario y solicitó autorización explícita para hacerlo visible preservando recursos propios; pendiente de respuesta, comportamiento no cambiado. El resultado Intel no acredita por sí solo limpieza satisfactoria, binario normal, TUI compuesta, reboot/FDE o firma.
+
+
+Windows [corrida8, 34802741744](https://github.com/SantanaJcp/passwordmanager/actions/runs/34802741744), candidato `6434449`: el seam de archivos nativo elimina los19errores; `pm-vault`, `pm-custody` y `pm` compilan en ARM64. Permanecen verdes4unit tests y contrato de pipes. El lab falla ahora al crear servicio, `SC CreateService1057`, antes de arrancar custodia. El harness suministra password vacío a una cuenta virtual, mientras [CreateService](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-createservicea) exige NULL para ese tipo de cuenta. Además apareció LNK4098 por conflicto de CRT; no se suprimirá el warning sin alinear runtimes y verificar el binario. Estos dos hallazgos siguen pendientes; compilar no equivale a aceptar servicio/TUI/aislamiento.
+
+### Continuación nativa — 2026-09-14
+
+- Windows [corrida9, 34804746619](https://github.com/SantanaJcp/passwordmanager/actions/runs/34804746619), `8e22acd`: alta SCM y configuración de SID del servicio PASS al omitir el argumento de password de la cuenta virtual. Build sin LNK4098 observado tras alinear CRT estático de Rust/C. El nuevo bloqueo es de preparación del fixture: sella ACL a SYSTEM y al rol antes de generar claves/bóveda, impidiendo el acceso posterior del instalador; falla explícitamente con AccessDenied. Se corrige el orden de aprovisionamiento manteniendo privacidad desde creación y sellado antes del arranque. La inspección PE/CRT automatizada del candidato `0cacb51` todavía no se ha ejecutado nativamente. No hay aceptación del servicio completo.
+- macOS [corrida10, 34804041166](https://github.com/SantanaJcp/passwordmanager/actions/runs/34804041166), `cf71815`: Intel vuelve a pasar el laboratorio diagnóstico. ARM alcanza `server-human-unlock-frame` y falla en `client-human-unlock`. Esto acota la fase, no demuestra timeout, fallo de contraseña ni insuficiencia de CPU. Se mantienen los plazos y parámetros criptográficos. Continúan pendientes diagnóstico causal, limpieza verificable, binario normal y composición TUI.
+- Windows [corrida10, 34806610284](https://github.com/SantanaJcp/passwordmanager/actions/runs/34806610284), `6daece1`: 4 tests nativos y contrato de pipes PASS; compilación, comprobaciones obligatorias PE ARM64/ausencia de dependencias CRT dinámicas y alta SCM PASS. Con staging privado previo al sellado, keygen/bootstrap/perfiles avanzan; `vault create` devuelve I/O Access denied (os error 5), antes del sellado final. Todavía no demuestra arranque de custodia ni canal humano. El cleanup nuevo terminó sin reportar un error adicional; el harness propagó el fallo original y no imprimió PASS. Causa de la creación pendiente de aislar, sin rebajar ACL ni sustituir identidad del servicio.
+
+### Estado consolidado posterior — 2026-09-14
+
+Esta continuación actualiza los pendientes históricos anteriores sin borrar los
+fallos observados. El usuario autorizó explícitamente propagar los errores de
+limpieza reportados (harness macOS, token exchange, Drop TUI y persist_new) y
+estabilizar el escaneo canario pausando solo el custodio propio del laboratorio,
+sin omitir SQLite WAL/SHM. No autoriza cambios generales de timeout o KDF.
+
+#### macOS
+
+- La corrida11 `34807572032` confirmó timeout del cliente ARM a 15002 ms dentro
+  del unlock, sin reinicio del servicio. La corrida12 `34810076591` falló en un
+  glob ambiguo de metadata de compilación; se vinculó después el `out_dir`
+  exacto emitido por Cargo, sin escoger el primer archivo disponible.
+- [Corrida13](https://github.com/SantanaJcp/passwordmanager/actions/runs/34810631226),
+  `902018b`: CFLAGS de libsodium sin optimizar en ambas CPU; Intel completó
+  KDF en 4156 ms, ARM llegó a KDF y agotó 15003 ms sin evento final. No se
+  redujeron parámetros criptográficos ni ampliaron deadlines.
+- [Corrida14](https://github.com/SantanaJcp/passwordmanager/actions/runs/34811375717),
+  `634ac8a`: perfil dev dirigido exclusivamente a `libsodium-sys-stable:1.24.0`
+  con `opt-level=2`, sin `-march=native`. CFLAGS optimizadas verificadas;
+  laboratorios diagnósticos PASS en ambas CPU, KDF ARM 605 ms / Intel 1362 ms.
+- [Corrida15](https://github.com/SantanaJcp/passwordmanager/actions/runs/34836722393),
+  `81ffa4c`: el cleanup estricto propagó el fallo de mkdir del fixture, sin
+  imprimir PASS. La eliminación de `mkdir -p` había dejado sin provisión
+  explícita el padre; el exit1 por sí solo no probaba ausencia del padre.
+- [Corrida16](https://github.com/SantanaJcp/passwordmanager/actions/runs/34837550960),
+  `c7f6fb6`: PASS Intel y Apple Silicon tras provisión explícita validada del
+  padre y ledger de recursos propios. Se intenta toda limpieza, se propagan
+  errores de consulta/eliminación y se comprueba ausencia antes de PASS.
+  Se conserva el padre preexistente; uno propio solo se elimina con rmdir
+  vacío. Se verificaron launchd, canal peer/RPK, suspensión persistente,
+  restart, TTY y AppKit. Siguen pendientes el binario normal sin diagnóstico,
+  composición TUI, reboot/FileVault y firma/notarización. **No cierra 26/31.**
+
+#### Windows ARM64
+
+- [Probe diagnóstico](https://github.com/SantanaJcp/passwordmanager/actions/runs/34807853352),
+  `b5788c3`: FlushFileBuffers falla con acceso readonly tanto en archivo como
+  directorio; funciona con handles writable y BACKUP_SEMANTICS en directorio.
+  Es evidencia del seam, no aceptación del producto.
+- [Corrida11](https://github.com/SantanaJcp/passwordmanager/actions/runs/34809788057),
+  `e2fdc21`: flush nativo corregido, creación de bóveda PASS; el servicio
+  alcanza RUNNING transitorio y se detiene. Se preservan flush, publicación
+  hardlink y flush del padre; ninguna operación sustituida por no-op.
+- [Corrida12](https://github.com/SantanaJcp/passwordmanager/actions/runs/34810534527),
+  `762a60c`: diagnóstico confirma salida no exitosa 243 ms después de RUNNING,
+  no START_PENDING lento; no se amplió la espera.
+- [Corrida13](https://github.com/SantanaJcp/passwordmanager/actions/runs/34837323516),
+  `deaa746`: args/bootstrap/audit/TLS de ambos roles PASS; fallo antes de
+  `agent-pipe-ok`. La investigación se concentra en flags de CreateNamedPipeW;
+  aún no hay corrección nativa verificada ni aceptación de custodia/TUI.
+
+El estado unificado es 25/35 tickets integrados. Las ramas nativas siguen
+candidatas aisladas; ninguna corrida parcial equivale a la revisión final
+Astra, al gate humano 34 ni a soporte completo de seis targets.
+
+#### Windows — regresión nativa de creación de pipe
+
+La [corrida14](https://github.com/SantanaJcp/passwordmanager/actions/runs/34838861714),
+`23bc5e6`, compila la corrección acotada que retira SQOS del modo servidor y
+lo mantiene en CreateFile cliente. Cuatro tests previos pasan; el nuevo test
+nativo falla en la primera creación (error opaco), por lo que el servicio no
+se ejecutó en esta corrida. No se presenta el cambio como corrección causal
+validada. El fixture usa un propietario SID de servicio sintético ausente del
+token del runner: posible error de owner, todavía sin código Win32 observado.
+Se investiga esa condición sin relajar la DACL del producto ni omitir la
+regresión. Un warning de import test-only fuera de cfg también quedó visible.

@@ -353,7 +353,315 @@ pub struct HumanVault {
     audit_custody: Arc<AuditDeviceCustody>,
 }
 
+/// Secret-free metadata used by the interactive human catalog.
+#[derive(Debug, Eq, PartialEq)]
+pub struct HumanCatalogEntry {
+    item_id: [u8; 16],
+    kind: RecordKind,
+    title: String,
+    tags: Vec<String>,
+    favorite: bool,
+    lifecycle: ItemLifecycle,
+}
+
+/// Secret-free materialized authority state for the human access screen.
+#[derive(Debug, Eq, PartialEq)]
+pub struct HumanAccessOverview {
+    suspended: bool,
+    agents: Vec<HumanAgentAccess>,
+    credentials: Vec<HumanCredentialAccess>,
+}
+
+impl HumanAccessOverview {
+    #[must_use]
+    pub const fn suspended(&self) -> bool {
+        self.suspended
+    }
+    #[must_use]
+    pub fn agents(&self) -> &[HumanAgentAccess] {
+        &self.agents
+    }
+    #[must_use]
+    pub fn credentials(&self) -> &[HumanCredentialAccess] {
+        &self.credentials
+    }
+}
+
+/// One RPK-bound agent generation, without private or credential material.
+#[derive(Debug, Eq, PartialEq)]
+pub struct HumanAgentAccess {
+    subject: [u8; 16],
+    generation: u64,
+    label: String,
+    environment: String,
+    status: String,
+}
+
+impl HumanAgentAccess {
+    #[must_use]
+    pub const fn subject(&self) -> &[u8; 16] {
+        &self.subject
+    }
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    #[must_use]
+    pub fn environment(&self) -> &str {
+        &self.environment
+    }
+    #[must_use]
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+}
+
+/// One content item and whether it belongs to the common delegated set.
+#[derive(Debug, Eq, PartialEq)]
+pub struct HumanCredentialAccess {
+    item: [u8; 16],
+    title: String,
+    enabled: bool,
+}
+
+impl HumanCredentialAccess {
+    #[must_use]
+    pub const fn item(&self) -> &[u8; 16] {
+        &self.item
+    }
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+impl HumanCatalogEntry {
+    #[must_use]
+    pub const fn item_id(&self) -> &[u8; 16] {
+        &self.item_id
+    }
+    #[must_use]
+    pub const fn kind(&self) -> RecordKind {
+        self.kind
+    }
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    #[must_use]
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+    #[must_use]
+    pub const fn favorite(&self) -> bool {
+        self.favorite
+    }
+    #[must_use]
+    pub const fn lifecycle(&self) -> ItemLifecycle {
+        self.lifecycle
+    }
+}
+
 impl HumanVault {
+    /// Returns the materialized, secret-free human view of delegated authority.
+    ///
+    /// # Errors
+    /// Fails closed for a malformed status, identifier, or generation.
+    pub fn access_overview(&self) -> Result<HumanAccessOverview, HumanCommitError> {
+        self.channel.verify()?;
+        let connection = open_connection(&self.path)?;
+        let global: Option<String> = connection
+            .query_row(
+                "SELECT status FROM delegated_state WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let suspended = match global.as_deref() {
+            None | Some("suspended") => true,
+            Some("resumed") => false,
+            Some(_) => return Err(HumanCommitError::Integrity),
+        };
+        let mut statement = connection.prepare(
+            "SELECT subject_id,generation,label,environment_binding,status
+             FROM agent_authorizations ORDER BY subject_id,generation",
+        )?;
+        let agents = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .map(|row| {
+                let (subject, generation, label, environment, status) = row?;
+                if !matches!(status.as_str(), "active" | "revoked" | "superseded") {
+                    return Err(HumanCommitError::Integrity);
+                }
+                Ok(HumanAgentAccess {
+                    subject: bytes::<16>(&subject)?,
+                    generation: u64::try_from(generation)
+                        .map_err(|_| HumanCommitError::Integrity)?,
+                    label,
+                    environment,
+                    status,
+                })
+            })
+            .collect::<Result<Vec<_>, HumanCommitError>>()?;
+        drop(statement);
+        let mut statement = connection.prepare(
+            "SELECT item_id,visible_revision,kind FROM vault_items
+             WHERE status='active' ORDER BY item_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut credentials = Vec::new();
+        for (item, revision, kind) in rows {
+            let item = bytes::<16>(&item)?;
+            let record =
+                self.read_revision_from(&connection, item, bytes::<16>(&revision)?, Some(&kind))?;
+            if record.auth().is_empty() {
+                continue;
+            }
+            let enabled: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM credential_authorizations
+                 WHERE item_id=?1 AND status='enabled')",
+                [item.as_slice()],
+                |row| row.get(0),
+            )?;
+            credentials.push(HumanCredentialAccess {
+                item,
+                title: record.human().title.clone(),
+                enabled,
+            });
+        }
+        Ok(HumanAccessOverview {
+            suspended,
+            agents,
+            credentials,
+        })
+    }
+
+    pub(crate) fn verify_attempt_access(
+        &self,
+        path: &Path,
+        vault: &[u8; 16],
+        device: &[u8; 16],
+    ) -> Result<(), crate::AttemptError> {
+        self.channel
+            .verify()
+            .map_err(|_| crate::AttemptError::Integrity)?;
+        if self.path != path || self.root.vault_id() != vault || &self.device != device {
+            return Err(crate::AttemptError::Integrity);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn attempt_title(&self, item: [u8; 16]) -> Result<String, crate::AttemptError> {
+        self.read_record(item)
+            .map(|record| record.human().title.clone())
+            .map_err(|_| crate::AttemptError::Integrity)
+    }
+    /// Lists authenticated, secret-free human metadata for active and trashed items.
+    ///
+    /// # Errors
+    /// Fails closed if any visible revision or lifecycle row is inconsistent.
+    pub fn human_catalog(&self) -> Result<Vec<HumanCatalogEntry>, HumanCommitError> {
+        self.channel.verify()?;
+        let connection = open_connection(&self.path)?;
+        let mut statement = connection.prepare(
+            "SELECT item_id,visible_revision,kind,status FROM vault_items ORDER BY item_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut entries = Vec::with_capacity(rows.len());
+        for (item, revision, expected_kind, status) in rows {
+            let item_id = bytes::<16>(&item)?;
+            let revision_id = bytes::<16>(&revision)?;
+            let lifecycle = match status.as_str() {
+                "active" => ItemLifecycle::Active,
+                "trash" => ItemLifecycle::Trash,
+                _ => return Err(HumanCommitError::InvalidCommand),
+            };
+            let record =
+                self.read_revision_from(&connection, item_id, revision_id, Some(&expected_kind))?;
+            entries.push(HumanCatalogEntry {
+                item_id,
+                kind: record.kind(),
+                title: record.human().title.clone(),
+                tags: record.human().tags.clone(),
+                favorite: record.human().favorite,
+                lifecycle,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Appends a human-session audit fact without exposing audit storage internals.
+    ///
+    /// # Errors
+    /// Rejects non-interactive audit actions and fails atomically on storage error.
+    pub fn record_human_interaction(
+        &self,
+        action: AuditAction,
+        item: Option<[u8; 16]>,
+    ) -> Result<(), HumanCommitError> {
+        self.channel.verify()?;
+        if !matches!(
+            action,
+            AuditAction::HumanUnlock | AuditAction::Reveal | AuditAction::Copy
+        ) {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let authority = current_head(&transaction)?.unwrap_or([0; 32]);
+        let mut event =
+            AuditEvent::new(AuditActorKind::Human, None, action, AuditOutcome::Succeeded);
+        if let Some(item) = item {
+            event = event.with_item(item, None);
+        }
+        audit::append_event(
+            &transaction,
+            &self.trusted_root,
+            Some(&self.root),
+            self.device,
+            &self.audit_custody,
+            &event,
+            now_us()?,
+            authority,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
     /// Writes a complete logical PMB1 snapshot through bounded PMF1 frames.
     ///
     /// # Errors
@@ -738,6 +1046,97 @@ impl HumanVault {
         self.channel.verify()?;
         Ok(self.root.create_sync_pairing(server_pin)?)
     }
+
+    /// Reopens human-custodied pairing material only when its root signature
+    /// belongs to this vault and the authenticated human channel is live.
+    ///
+    /// # Errors
+    /// Rejects an unauthenticated channel, malformed material, a foreign root,
+    /// a changed server pin or an invalid human signature.
+    pub fn open_sync_pairing(
+        &self,
+        protected: &[u8],
+    ) -> Result<pm_crypto::SyncPairing, HumanCommitError> {
+        self.channel.verify()?;
+        pm_crypto::SyncPairing::from_protected_bytes(protected, &self.trusted_root)
+            .map_err(HumanCommitError::Crypto)
+    }
+
+    /// Stages retirement of one exact device at every prefix already observed
+    /// by this vault. Events not included in the displayed/committed prefixes
+    /// remain outside the accepted history.
+    ///
+    /// # Errors
+    /// Rejects the current device, an unknown device, malformed persisted
+    /// prefixes, unavailable custody or failure to stage the signed command.
+    pub fn prepare_device_retirement(
+        &mut self,
+        device: [u8; 16],
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        self.channel.verify()?;
+        if device == self.device {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let connection = open_connection(&self.path)?;
+        let mut statement = connection.prepare(
+            "SELECT issuer_generation,seq,event_digest FROM authority_events WHERE issuer_device=?1 ORDER BY issuer_generation,seq",
+        )?;
+        let rows = statement.query_map([device.as_slice()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        let mut prefixes: BTreeMap<u64, (u64, [u8; 32])> = BTreeMap::new();
+        for row in rows {
+            let (generation, seq, digest) = row?;
+            let generation = u64::try_from(generation).map_err(|_| HumanCommitError::Integrity)?;
+            let seq = u64::try_from(seq).map_err(|_| HumanCommitError::Integrity)?;
+            prefixes.insert(generation, (seq, bytes(&digest)?));
+        }
+        if prefixes.is_empty() {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        drop(statement);
+        drop(connection);
+        let mut body = Encoder::new(Vec::new());
+        body.map(2)
+            .map_err(|_| HumanCommitError::InvalidCommand)?
+            .str("reason_code")
+            .map_err(|_| HumanCommitError::InvalidCommand)?
+            .str("owner_request")
+            .map_err(|_| HumanCommitError::InvalidCommand)?
+            .str("accepted_prefix")
+            .map_err(|_| HumanCommitError::InvalidCommand)?
+            .array(u64::try_from(prefixes.len()).map_err(|_| HumanCommitError::InvalidCommand)?)
+            .map_err(|_| HumanCommitError::InvalidCommand)?;
+        for (generation, (seq, tip)) in prefixes {
+            body.map(3)
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .str("generation")
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .u64(generation)
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .str("seq")
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .u64(seq)
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .str("tip_digest")
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .bytes(&tip)
+                .map_err(|_| HumanCommitError::InvalidCommand)?;
+        }
+        self.prepare_authority(
+            "identity_change",
+            "device-retire",
+            device,
+            1,
+            &body.into_writer(),
+            None,
+            None,
+        )
+    }
     /// Signs a canonical causal event with device provenance and, for authority
     /// events, the human root. This does not publish the event.
     ///
@@ -1091,6 +1490,37 @@ impl HumanVault {
         .map_err(AuthorizationError::from)
     }
 
+    /// Stages removal of one credential from the common delegated set.
+    ///
+    /// # Errors
+    /// Rejects an item that is not currently enabled or unavailable storage.
+    pub fn prepare_disable(
+        &mut self,
+        item: [u8; 16],
+    ) -> Result<PreparedHumanCommand, AuthorizationError> {
+        let connection = open_connection(&self.path).map_err(AuthorizationError::from)?;
+        let enabled: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM credential_authorizations
+             WHERE item_id=?1 AND status='enabled')",
+            [item.as_slice()],
+            |row| row.get(0),
+        )?;
+        if !enabled {
+            return Err(AuthorizationError::CredentialUnavailable);
+        }
+        drop(connection);
+        self.prepare_authority(
+            "availability_change",
+            "disable",
+            item,
+            1,
+            &encode_reason_body(AuthorizationReason::OwnerRequest),
+            None,
+            None,
+        )
+        .map_err(AuthorizationError::from)
+    }
+
     /// Stages a new encrypted revision of an active password item.
     ///
     /// # Errors
@@ -1333,7 +1763,7 @@ impl HumanVault {
             );
         }
         let event_id = random_id()?;
-        let previous = current_head(&transaction)?;
+        let previous = current_device_head(&transaction, self.device, 1)?;
         let seq = next_authority_seq(&transaction, self.device, 1)?;
         let mut parents = authority_specific_parents(&transaction, &staged)?;
         if let Some(previous) = previous {
@@ -4537,7 +4967,7 @@ fn apply_staged(
         "purge-item" => {
             apply_item_purge(transaction, staged, event_digest)?;
         }
-        "audit-purge" => {}
+        "audit-purge" | "device-retire" => {}
         "agent-grant" => {
             let body = decode_agent_grant_body(
                 staged
@@ -4994,6 +5424,21 @@ fn validate_staged(
                 && staged.authority_body.is_none()
                 && staged.staged_grant.is_none()
         }
+        "device-retire" => {
+            staged.operation == "identity_change"
+                && staged.revision_id.is_none()
+                && staged.package.is_none()
+                && staged.item_kind.is_none()
+                && staged.attachments.is_none()
+                && staged.audit_generation.is_none()
+                && staged.audit_through_seq.is_none()
+                && staged.subject_generation == Some(1)
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .is_some_and(valid_device_retire_body)
+                && staged.staged_grant.is_none()
+        }
         "agent-grant" => {
             staged.operation == "identity_change"
                 && staged.subject_generation.is_some()
@@ -5043,6 +5488,16 @@ fn validate_staged(
                     .is_some_and(|value| decode_enable_body(value).is_ok())
                 && staged.package.is_some()
                 && staged.staged_grant.is_some()
+        }
+        "disable" => {
+            staged.operation == "availability_change"
+                && staged.subject_generation == Some(1)
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .is_some_and(|value| decode_reason_body(value).is_ok())
+                && staged.package.is_none()
+                && staged.staged_grant.is_none()
         }
         _ => false,
     };
@@ -5515,6 +5970,46 @@ fn purge_scope(
         encrypted_bytes,
         terminal,
     })
+}
+
+fn device_retire_tips(value: &[u8]) -> Option<Vec<[u8; 32]>> {
+    let mut decoder = Decoder::new(value);
+    (|| {
+        if decoder.map().ok()? != Some(2)
+            || decoder.str().ok()? != "reason_code"
+            || decoder.str().ok()? != "owner_request"
+            || decoder.str().ok()? != "accepted_prefix"
+        {
+            return None;
+        }
+        let count = usize::try_from(decoder.array().ok()??).ok()?;
+        if count == 0 || count > 4096 {
+            return None;
+        }
+        let mut previous = 0_u64;
+        let mut tips = Vec::with_capacity(count);
+        for _ in 0..count {
+            if decoder.map().ok()? != Some(3) || decoder.str().ok()? != "generation" {
+                return None;
+            }
+            let generation = decoder.u64().ok()?;
+            if generation <= previous
+                || decoder.str().ok()? != "seq"
+                || decoder.u64().ok()? == 0
+                || decoder.str().ok()? != "tip_digest"
+            {
+                return None;
+            }
+            let tip: [u8; 32] = decoder.bytes().ok()?.try_into().ok()?;
+            tips.push(tip);
+            previous = generation;
+        }
+        (decoder.position() == value.len()).then_some(tips)
+    })()
+}
+
+fn valid_device_retire_body(value: &[u8]) -> bool {
+    device_retire_tips(value).is_some()
 }
 
 fn encode_reason_body(reason: AuthorizationReason) -> Vec<u8> {
@@ -6223,10 +6718,17 @@ fn authority_specific_parents(
     connection: &Connection,
     staged: &Staged,
 ) -> Result<Vec<[u8; 32]>, HumanCommitError> {
+    if staged.event_kind == "device-retire" {
+        return staged
+            .authority_body
+            .as_deref()
+            .and_then(device_retire_tips)
+            .ok_or(HumanCommitError::BodyChanged);
+    }
     let kinds: &[&str] = match staged.event_kind.as_str() {
         "agent-grant" => &["agent-grant", "agent-revoke"],
         "resume" => &["suspend"],
-        "enable" => &[
+        "enable" | "disable" => &[
             "enable",
             "disable",
             "trash",
@@ -6283,6 +6785,22 @@ fn current_head(connection: &Connection) -> Result<Option<[u8; 32]>, HumanCommit
         .query_row(
             "SELECT event_digest FROM authority_events ORDER BY rowid DESC LIMIT 1",
             [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    value.map(|bytes_value| bytes(&bytes_value)).transpose()
+}
+
+fn current_device_head(
+    connection: &Connection,
+    device: [u8; 16],
+    generation: u64,
+) -> Result<Option<[u8; 32]>, HumanCommitError> {
+    let generation = i64::try_from(generation).map_err(|_| HumanCommitError::InvalidInput)?;
+    let value: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT event_digest FROM authority_events WHERE issuer_device=?1 AND issuer_generation=?2 ORDER BY seq DESC LIMIT 1",
+            params![device.as_slice(), generation],
             |row| row.get(0),
         )
         .optional()?;

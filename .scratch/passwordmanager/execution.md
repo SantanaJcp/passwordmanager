@@ -61,3 +61,198 @@ Rust instalado de forma local en `.toolchain/`, sin modificar PATH/configuració
 Verificado en este host: `rustc 1.98.1 (48a229cea 2026-09-01)`, `cargo 1.98.1 (797e8a9bc 2026-08-05)`; rustfmt/clippy instalados para el mismo toolchain. Bootstrap oficial rustup-init validado SHA-256 `dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71`. [Manifest oficial del toolchain](https://static.rust-lang.org/dist/channel-rust-1.98.1.toml), [bootstrap checksum](https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256). Esta comprobación inicial de versiones no acreditaba build del proyecto. Posteriormente, 01 entregó workspace/lockfile y runner; el merger verificó clean offline build y 9 tests en Linux x86_64. Evidencia en [ticket 01](issues/01-build-reproducible-y-runner-de-procesos.md); no acredita todavía bóveda funcional, seguridad ni otros targets.
 
 Astra entregó [propuesta de DAG de 35 tickets](implementation-plan.md), comprobada con IDs consecutivos/dependencias previas/sin ciclos y criterios/punteros presentes. El usuario aprobó granularidad/orden con «autorizado»; [35 tickets publicados](issues/README.md) conforme `to-tickets`. La frontera inicial es 01; no se puede ejecutar tickets descendientes en paralelo antes de integrar sus dependencias.
+
+## Cuatro ajustes de desbloqueo autorizados
+
+El usuario confirmó conjuntamente estos cuatro ajustes después del informe de
+preflight 5/5 y aceptación macOS todavía fallida:
+
+1. TUI 23: seleccionar explícitamente el campo a revelar/copiar, sin sustituir
+   una contraseña ausente por notas; conservar todos los campos accesibles.
+2. Windows 27: compilar libsodium 1.0.22 desde la fuente fijada mediante MSVC,
+   de forma explícita, sin recurrir al fallback de binarios precompilados.
+3. macOS 26: raíz efímera única `/private/var/tmp/passwordmanager-ticket26`,
+   padre root con modo `01777`, colisiones rechazadas, raíz propia `0711` y
+   subdirectorios privados `0700`; no cambiar permisos del home del runner ni
+   seleccionar otra ruta si falta un requisito.
+4. Verificación: observar el estado contractual estable admitiendo únicamente
+   estados intermedios documentados, sin repetir autenticaciones ni ampliar
+   los plazos existentes; conservar código de salida y diagnósticos seguros
+   para fallos antes indeterminados. Documentar el método concreto antes de
+   ejecutar las pruebas modificadas; no convertir errores en éxito.
+
+La autorización no elimina gates, no cambia el modelo de seguridad y no
+adelanta la revisión formal de Astra: continúa al final de todos los tickets.
+
+## Método concreto de observación asíncrona autorizado
+
+El 2026-09-13 el usuario autorizó ajustar únicamente el método de observación y
+los tres laboratorios que tenían carreras de asentamiento; no se autoriza tocar
+el motor productivo, reautenticar, repetir una operación del proveedor ni
+ampliar sus plazos. Primero se conserva la corrida base roja y su diagnóstico;
+después cada laboratorio debe ejecutar la misma operación sobre el mismo
+`attempt_id` hasta observar el estado contractual final. La espera se hace por
+la consulta pública de estado ya existente, con los límites ya definidos por
+cada laboratorio, y no por un `sleep` fijo que anuncie éxito. Un estado o razón
+fuera de la lista permitida falla inmediatamente; tampoco se convierte un
+error de proceso en éxito.
+
+Las únicas transiciones intermedias admitidas son:
+
+* **Intentos (ticket 08):** el mismo `get` puede observar `RUNNING` sin razón
+  mientras el worker ejecuta una solicitud nueva, o `RUNNING` con razón
+  `provider-challenge-ref` mientras asienta un desafío. Después de reiniciar el
+  custodio, también puede observar `RUNNING` con razón `INDETERMINATE` mientras
+  el worker reclama la reconciliación; solo el estado terminal esperado
+  satisface cada comprobación (`WAITING_FOR_HUMAN`, `SUCCEEDED`, `FAILED` o
+  `INDETERMINATE`, según la operación). La consulta no vuelve a enviar
+  credenciales y el journal debe conservar una única llamada del proveedor.
+* **Passkey expirada (ticket 14):** después de que la confirmación TTY
+  rechazada devuelve el código existente, el mismo estado puede observar
+  `RUNNING` con razón `PASSKEY_HUMAN_CONFIRMATION` mientras se asienta en
+  `WAITING_FOR_HUMAN`; el resultado debe seguir siendo nulo y no se envía otra
+  confirmación ni reautenticación. La cancelación se mantiene como operación
+  posterior separada y terminal.
+* **Token exchange (ticket 11):** se conserva la aserción final de audiencia
+  no autorizada (`FAILED`, sin resultado). Si el `auth start` inicial retorna
+  error antes de publicar el intento, el laboratorio conserva su código,
+  `stdout` y `stderr` en un diagnóstico acotado y sintético, sustituyendo el
+  token de sujeto, secreto de requester y contraseña maestra por
+  `<REDACTED>` antes de mostrarlo. No se reintenta el `start` ni el POST.
+
+El diagnóstico base anterior a la extracción del worker registró, en el
+laboratorio de intentos, una lectura `RUNNING/INDETERMINATE` en 1 de 8 corridas
+después del restart; la variante actual con el worker extraído terminó verde en
+8 de 8 corridas; en passkey la ventana
+`RUNNING/PASSKEY_HUMAN_CONFIRMATION` fue legítima y no reprodujo un fallo
+adicional; en token exchange la negativa de audiencia original retornó un
+código distinto de cero sin `stdout`/`stderr`, sin reproducción en nueve
+corridas posteriores. Los tickets 08, 11 y 14 ya estaban resueltos con su
+evidencia de producto y este ajuste de método no los reabre ni sustituye esa
+evidencia. Tampoco cierra las puertas nativas todavía pendientes de 26--32: la
+corrida modificada debe conservar la evidencia roja, demostrar la espera
+contractual y volver a terminar con las aserciones finales intactas.
+
+
+## Integración del método asíncrono — 2026-09-13
+
+Merger Sol distinto integró el candidato Luna `2f92f69` como `d1d8b1f` y corrigió atribución del baseline/estados documentales en `9af3770` y `461058c`. No cambió el motor ni reabrió 08/11/14. Config, Python AST de los tres labs, diff, `scripts/check.sh` y clean locked/offline (41.641 s) pasaron.
+
+La primera barrida tuvo un fallo de `passkey-login` al iniciar el intento de cuenta (`CUSTODY_UNAVAILABLE`), no una lectura de estado intermedio. El loop de esa primera barrida no propagó el fallo; su exit 0 **no se acepta como suite verde**. Una repetición enfocada pasó y una nueva barrida completa con acumulación explícita de errores terminó `count=17 failures=0`. Esta última es la evidencia de integración, sin ocultar la falla intermitente anterior ni atribuirle una causa todavía no demostrada. No se repitió autenticación dentro de una misma aserción ni se aumentaron deadlines.
+
+23 quedó integrado sin conflictos textuales como `c74aba0` y resuelto tras
+verificación independiente del merger: check, clean locked/offline y 18/18 labs
+Linux con propagación explícita de fallos. La selección de campo 51–53 es la
+única exposición; 47/48 se rechazan y `primary_human_secret` no existe. Esto
+habilita recalcular la frontera de 24/25, pero no los implementa ni convierte
+sus flujos CLI en TUI; tampoco cierra la UX streaming pendiente para attachments
+mayores que el frame humano. La evidencia nativa reciente está en
+[native-ci.md](../../docs/verification/native-ci.md); la revisión formal
+permanece al final de los 35 tickets.
+
+
+## TUI23 integrada — frontera24/25
+
+Candidato `f1c375e` integrado sin conflictos como `c74aba0`, resolución23 en `0b897c1`. Merger distinto verificó `check.sh`, clean locked/offline (43.067 s) y barrida robusta de18labs, `count=18 failures=0`, sin reintentos. 47/48 y `primary_human_secret` retirados; exposición por catálogo51 e índice52/53, con negativas reales. Estado:23/35.24 y25 ahora tienen sus dependencias integradas;24 se asigna a Sol medium,25 espera slot libre. El flujo TUI streaming de adjuntos grandes se conserva como pendiente explícito de composición25, no queda validado por enumerar su descriptor.
+
+25 asignado a Sol medium en worktree propio, en paralelo con24. Sol23 deja candidato Windows27 `6bef3bc` congelado; corrida nativa34799533393 pendiente. Luna mantiene26; root coordina nuevas corridas sin editar candidatos activos.
+
+
+## Composición25: sync observable sin ampliar plazos
+
+La implementación encontró read-timeout humano de15s frente al backoff idempotente ya aprobado de sync. No se autorizó el timeout propuesto de75s: no cubre request30s por intento ni múltiples hashes/páginas, y puede dejar UI fallida con publicación todavía activa.25 debe separar inicio autorizado de trabajo cifrado observable por ID/estado/progreso en el motor único, preservando outbox/backoff y lock/idle sin retener HumanVault/KH tras bloqueo. Consultar estado no repite autenticaciones ni operaciones. Este ajuste de implementación satisface los contratos existentes; no reabre el backoff de [G5](../../docs/design/synchronization.md) ni crea gestión de sesiones de negocio. Exige método y pruebas de indisponibilidad durante sync, estado final y bloqueo/reinicio sin éxito inventado antes de aceptar25.
+
+## TUI24 — RED de cleanup en integración
+
+El merger separado integró `36934b3` sin conflicto como `77a5198` y obtuvo PASS
+en `git diff --check`, `scripts/check.sh`, clean locked/offline (44.43 s) y los
+19 cuerpos funcionales Linux en una única barrida. El gate no se acepta: el
+nuevo `tui_access_lab.py` usa `shutil.rmtree(root, ignore_errors=True)` y ocultó
+un fallo real, dejando `/tmp/pm-tui-access-linux-lab-c4d1o_6i` con fixtures
+sintéticos de UIDs mapeados aunque devolvió 0. La resolución provisional se
+revirtió en `3205ae9`; 24 permanece claimed hasta corregir el lab y volver a
+verificar sin convertir cleanup fallido en éxito. No se repitió la barrida ni
+se atribuye este hallazgo al motor productivo.
+
+
+## Ventana local coordinada de verificación
+
+Los worktrees comparten `.toolchain/`, artefactos y CPU. Antes de ejecutar
+`scripts/check.sh`, clean builds o barridas de labs pesadas, root concede una
+única ventana Linux local; otros worktrees detienen esas ejecuciones hasta el
+handback. Native CI en runners separados puede continuar. No se cambian el
+producto ni sus plazos para ocultar contención del host.
+
+## TUI24 — cleanup corregido e integración aceptada
+
+El RED de `ignore_errors=True` se corrigió en raíz sin tocar producto: limpieza
+cerrada por ruta/owner y UID mapeado, propagación de todos los errores y PASS
+solo después de verificar ausencia de la raíz propia. La primera variante
+estricta rechazó correctamente el `terminal.raw` todavía no inventariado; tras
+registrarlo, la regresión enfocada pasó sin añadir residuos y sin tocar el RED
+original. En ventana local exclusiva, `git diff --check`, `scripts/check.sh`,
+clean locked/offline (1m 01s; 11,644 archivos/4.0 GiB) y una única barrida final
+pasaron con `count=19 failures=0 ticket24-cleanup-set-changed=0`. No quedaron
+procesos o residuos propios nuevos. 24 queda resuelto; no acredita nativos,
+Chromium de producto, ticket25 ni revisión formal Astra.
+
+## TUI25 — integración y fixture SQLite quiescente
+
+El candidato `2a01905` se compuso sobre 24 por merger distinto. Una barrida
+exclusiva preservó RED `count=20 failures=1`: token exchange intentó leer
+`vault.sqlite3-shm` después de que el custodio lo eliminara; los otros 19 labs
+pasaron. Con autorización explícita se estabilizó sólo el fixture: `SIGSTOP` y
+`SIGCONT` al PID custodial propio con reconocimiento `waitpid` no bloqueante y
+límite monotónico existente de 20 s, escaneo completo quiescente sin ignorar
+`ENOENT`, reanudación garantizada y cleanup estricto/agregado antes de `PASS`.
+
+En la ventana final sin otro Cargo/lab local activo pasaron el token enfocado,
+`scripts/check.sh` (75 s), clean locked/offline (44 s; 11,754 archivos/4.1 GiB)
+y una única barrida secuencial `count=20 failures=0` (617 s), con logs
+`/tmp/pm25-final4-test-linux-*-lab.log`. No hubo skips, retries de producto ni
+cambios de deadline. 25 queda integrado y resuelto para Linux x86_64; no
+acredita nativos ni la revisión formal final.
+
+## Propagación de errores de cleanup — integración distinta
+
+El candidato `4400ffb6af241dcb03e806abb594359a71e49762` se integró sobre la
+raíz limpia `9db150c` por un merger distinto. Hubo un único conflicto textual
+en `crates/pm-custody/src/linux/tui.rs`; la resolución conservó el flujo de
+acceso/pendientes y reautenticación de 24 junto con los guardas de cleanup del
+candidato. No se tocaron otros worktrees, gates nativos, `master` ni la
+revisión formal.
+
+La honestidad TDD queda explícita: `cd320084951b3a8e1328c7367c8882a43eafe456`
+era un checkpoint de especificación que no compilaba por helpers ausentes,
+no un RED conductual. Los fallos posteriores de compilación/Clippy fueron
+defectos del harness o del código en desarrollo; no prueban una regresión
+conductual previa. Las comprobaciones finales de inyección de fallos sí
+quedaron verdes, pero no se inventa una transición red→green de comportamiento.
+
+En la única ventana Linux exclusiva, después de dos filtros enfocados, pasaron
+`scripts/check.sh` (rc 0), `scripts/clean-offline-build.sh` (rc 0) y una sola
+barrida secuencial de los 20 laboratorios con los artefactos absolutos fijados:
+
+```text
+PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3
+PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64
+SUMMARY count=20 failures=0
+```
+
+Los logs son `/tmp/pm-cleanup-check-final.log`,
+`/tmp/pm-cleanup-clean-final.log` y
+`/tmp/pm-cleanup-final-test-linux-*-lab.log`. El filtro enfocado de cleanup
+quedó en 3 tests de `pm-vault` y 4 de `pm-custody`; la corrección adicional
+del test de publicación enumera y verifica sus seis rutas propias (target y
+temporary, cada una con WAL/SHM), sin glob ni ignorar errores distintos de
+`NotFound`. Los ocho sidecars regulares `0600`, UID-1000, de los PIDs
+`3809446`, `3811566`, `3827457` y `3832552` se verificaron como residuos
+propios de tests/checks previos de esta ventana y se eliminaron por ruta
+exacta. Seis pares más antiguos (`3682543`, `3692174`, `3697766`, `3729529`,
+`3743420` y `3748215`) no tienen proveniencia demostrable en los logs
+disponibles y se dejaron intactos; no se afirma que el directorio temporal
+global esté vacío. El filtro final y la barrida final no dejaron nuevas rutas.
+
+La evidencia acredita sólo Linux x86_64. Las líneas `LIMIT` de los laboratorios
+siguen siendo límites de aceptación para browser de producto, targets nativos,
+cross-platform y servicios externos; no se convierten en gates cerrados.

@@ -729,6 +729,84 @@ fn two_real_peer_identities_share_one_causal_enabled_set_after_human_lock_and_re
 }
 
 #[test]
+fn human_access_overview_disable_and_pending_cancel_use_the_authority_and_attempt_engines() {
+    let directory = TestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let (mut human, _human_peer) = open_human(&path, Arc::clone(&custody));
+    let item = commit_create(&mut human, &password_record());
+    enroll(&mut human, &enrollment(AGENT_A, REQUEST_A, &RPK_A), 1);
+    let resume = human.prepare_delegated_resume().unwrap();
+    commit(&mut human, &resume);
+    let enable = human.prepare_enable(item).unwrap();
+    commit(&mut human, &enable);
+
+    let overview = human.access_overview().unwrap();
+    assert!(!overview.suspended());
+    assert_eq!(overview.agents().len(), 1);
+    assert_eq!(overview.agents()[0].subject(), &AGENT_A);
+    assert_eq!(overview.agents()[0].generation(), 1);
+    assert_eq!(overview.agents()[0].status(), "active");
+    assert_eq!(overview.credentials().len(), 1);
+    assert_eq!(overview.credentials()[0].item(), &item);
+    assert!(overview.credentials()[0].enabled());
+
+    let third_rpk = [0x35; 44];
+    enroll(
+        &mut human,
+        &enrollment([0xc3; 16], [0x24; 16], &third_rpk),
+        1,
+    );
+    let peer = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
+    let delegated = DelegatedVault::open(&path, DEVICE, Arc::clone(&custody)).unwrap();
+    assert_eq!(delegated.discover(&peer).unwrap().len(), 1);
+
+    let attempts =
+        AttemptVault::open(DelegatedVault::open(&path, DEVICE, Arc::clone(&custody)).unwrap())
+            .unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
+    )
+    .unwrap();
+    let request = StartAttempt::new(
+        item,
+        "controlled.external",
+        1,
+        "password",
+        "https://ticket-07.invalid/login",
+        b"safe-context".to_vec(),
+        IdempotencyKey::new(now, [0x91; 16]).unwrap(),
+    )
+    .unwrap();
+    let started = attempts.start(&peer, &request).unwrap();
+    let pending = attempts.human_pending(&human).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].attempt_id(), started.attempt_id());
+    assert_eq!(pending[0].integration_id(), "controlled.external");
+    assert_eq!(pending[0].state(), AttemptState::Created);
+    assert_eq!(pending[0].owner_subject(), &AGENT_A);
+    assert_eq!(pending[0].owner_generation(), 1);
+    assert_eq!(pending[0].agent_status(), "active");
+    assert_eq!(pending[0].title(), TITLE);
+
+    let cancelled = attempts
+        .human_cancel(&human, *started.attempt_id())
+        .unwrap();
+    assert_eq!(cancelled.state(), AttemptState::Cancelled);
+    let disable = human.prepare_disable(item).unwrap();
+    commit(&mut human, &disable);
+    assert!(!human.access_overview().unwrap().credentials()[0].enabled());
+    assert_eq!(
+        attempts.human_pending(&human).unwrap()[0].state(),
+        AttemptState::Cancelled
+    );
+}
+
+#[test]
 fn suspension_and_individual_revocation_are_rechecked_and_generations_are_terminal() {
     let directory = TestDir::new();
     let path = directory.vault();
