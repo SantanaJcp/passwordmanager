@@ -6,6 +6,7 @@
 import ctypes
 import errno
 import fcntl
+import hashlib
 import os
 import pathlib
 import plistlib
@@ -38,6 +39,11 @@ TUI_PASSWORD_RECORD = b"ticket05-e2e-password-canary"
 TUI_EXTERNAL_REPLACEMENT = b"ticket26-tui-external-replacement"
 DIAGNOSTIC_ENV = "PM_MACOS_TICKET26_DIAGNOSTIC"
 DIAGNOSTIC_LOG = STATE / "ticket26-diagnostic.log"
+AGENT_MANAGER_COMMAND_TIMEOUT = 10
+AGENT_PASTEBOARD_PROBE_TIMEOUT = 30
+AGENT_LAUNCH_WAIT_TIMEOUT = (
+    2 * AGENT_MANAGER_COMMAND_TIMEOUT + AGENT_PASTEBOARD_PROBE_TIMEOUT + 10
+)
 DIAGNOSTIC_LINE = re.compile(
     rb"(?:PM26_DIAGNOSTIC phase=[a-z-]+|"
     rb"PM26_DIAGNOSTIC accepted-stream-nonblocking-(?:before|after)=[01]|"
@@ -71,22 +77,22 @@ DIAGNOSTIC_LINE = re.compile(
     rb"PM26_DIAGNOSTIC pasteboard-domain-relation="
     rb"(?:same|different|indeterminate)|"
     rb"PM26_DIAGNOSTIC pasteboard-shared-control=unsupported|"
-    rb"PM26_DIAGNOSTIC pasteboard-isolated-agent-result="
-    rb"(?:zero|nonzero|timeout)|"
-    rb"PM26_DIAGNOSTIC pasteboard-isolated-agent-canary-stdout="
-    rb"(?:present|absent)|"
-    rb"PM26_DIAGNOSTIC pasteboard-isolated-agent-canary-stderr="
-    rb"(?:present|absent)|"
-    rb"PM26_DIAGNOSTIC pasteboard-isolated-agent-success-read="
-    rb"(?:yes|no|indeterminate)|"
     rb"PM26_DIAGNOSTIC pasteboard-isolated-agent-uid="
     rb"(?:expected|unexpected|unavailable|unparseable)|"
     rb"PM26_DIAGNOSTIC pasteboard-isolated-manager-uid="
-    rb"(?:same|different|unavailable|unparseable)|"
+    rb"(?:system|human|other|unavailable|unparseable)|"
     rb"PM26_DIAGNOSTIC pasteboard-isolated-manager-name="
     rb"(?:same|different|unavailable|unparseable)|"
     rb"PM26_DIAGNOSTIC pasteboard-isolated-manager-domain="
     rb"(?:same|different|indeterminate)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-result="
+    rb"(?:zero|nonzero|timeout)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-canary-stdout="
+    rb"(?:present|absent)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-canary-stderr="
+    rb"(?:present|absent)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-success-read="
+    rb"(?:yes|no|indeterminate)|"
     rb"PM26_DIAGNOSTIC unlock-phase="
     rb"(?:channel-verified|sqlite-opened|durability-configured|bundle-loaded|"
     rb"kdf-start|kdf-end|root-authenticated) elapsed-ms=[0-9]{1,6}|"
@@ -110,16 +116,20 @@ if len(sys.argv) == 3:
 
 AGENT_PASTEBOARD_LAUNCHER = r'''#!/usr/bin/python3
 import os
+import hashlib
 import pathlib
 import re
 import subprocess
 import sys
 
+COMMAND_TIMEOUT = 10
+PROBE_TIMEOUT = 30
+
 
 def command_output(command):
     try:
         result = subprocess.run(
-            command, check=False, capture_output=True, timeout=10,
+            command, check=False, capture_output=True, timeout=COMMAND_TIMEOUT,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -140,6 +150,27 @@ def fixed_name(value):
     return value
 
 
+def fixed_digest(value):
+    if value is None or not re.fullmatch(r"[0-9a-f]{64}", value):
+        return None
+    return bytes.fromhex(value)
+
+
+def fixed_length(value):
+    if value is None or not re.fullmatch(r"[1-9][0-9]*", value):
+        return None
+    return int(value, 10)
+
+
+def marker_present(payload, marker_length, marker_digest):
+    if marker_length is None or marker_digest is None or len(payload) < marker_length:
+        return False
+    return any(
+        hashlib.sha256(payload[offset:offset + marker_length]).digest() == marker_digest
+        for offset in range(len(payload) - marker_length + 1)
+    )
+
+
 def relation(actual, expected):
     if actual is None or expected is None:
         return "unavailable"
@@ -150,7 +181,10 @@ result_path = pathlib.Path(sys.argv[1])
 expected_agent_uid = int(sys.argv[2], 10)
 human_manager_uid = int(sys.argv[3], 10)
 human_manager_name = sys.argv[4].encode("ascii")
-canary = sys.argv[5].encode("ascii")
+marker_length = fixed_length(sys.argv[5])
+marker_digest = fixed_digest(sys.argv[6])
+if marker_length is None or marker_digest is None:
+    raise SystemExit(64)
 
 agent_uid = os.getuid()
 manager_uid = fixed_uid(command_output(["/bin/launchctl", "manageruid"]))
@@ -175,7 +209,7 @@ else:
 try:
     probe = subprocess.run(
         ["/usr/bin/osascript", "-e", "the clipboard as text"],
-        check=False, capture_output=True, timeout=30,
+        check=False, capture_output=True, timeout=PROBE_TIMEOUT,
     )
 except subprocess.TimeoutExpired as error:
     probe_status = "timeout"
@@ -186,8 +220,8 @@ else:
     probe_stdout = probe.stdout
     probe_stderr = probe.stderr
 
-stdout_canary = canary in probe_stdout
-stderr_canary = canary in probe_stderr
+stdout_canary = marker_present(probe_stdout, marker_length, marker_digest)
+stderr_canary = marker_present(probe_stderr, marker_length, marker_digest)
 probe_success = (
     "yes" if stdout_canary or stderr_canary
     else "indeterminate" if probe_status == "timeout" else "no"
@@ -1202,7 +1236,10 @@ def launchd_manager_context():
 
 
 def wait_for_agent_launch(label, result_path):
-    deadline = time.monotonic() + 20
+    # The job may spend both fixed 10-second metadata bounds before the exact
+    # public probe's fixed 30-second bound.  This is a fixture lifecycle bound,
+    # not a product or clipboard-lease extension.
+    deadline = time.monotonic() + AGENT_LAUNCH_WAIT_TIMEOUT
     while time.monotonic() < deadline:
         result_exists = sudo(["test", "-s", result_path], check=False).returncode == 0
         details = sudo(["launchctl", "print", f"system/{label}"], check=False)
@@ -1215,11 +1252,10 @@ def wait_for_agent_launch(label, result_path):
     raise AssertionError("isolated pasteboard launch job did not finish")
 
 
-def assert_launchd_agent_cannot_read_pasteboard(
+def prepare_launchd_agent(
     secret, scratch, agent_directory, agent_uid, owned_paths, owned_launchd_labels,
-    *, diagnostic=False,
 ):
-    """Run the exact pasteboard probe from an owned system-domain launchd job."""
+    """Load an idle system-domain job before a fresh clipboard lease starts."""
     human_manager_uid, human_manager_name = launchd_manager_context()
     assert agent_uid != os.getuid(), "isolated pasteboard job reused the human UID"
     label = f"{LABEL}.pasteboard-agent"
@@ -1250,12 +1286,15 @@ def assert_launchd_agent_cannot_read_pasteboard(
         "Label": label,
         "ProgramArguments": [
             sys.executable, str(launcher_path), str(result_path), str(agent_uid),
-            str(human_manager_uid), human_manager_name, secret.decode("ascii"),
+            str(human_manager_uid), human_manager_name, str(len(secret)),
+            hashlib.sha256(secret).hexdigest(),
         ],
         "UserName": AGENT,
         "GroupName": AGENT,
         "LimitLoadToSessionType": "System",
-        "RunAtLoad": True,
+        # Bootstrap the job before the copy lease, but trigger its one shot
+        # only after the isolated session has copied the marker.
+        "RunAtLoad": False,
         "LaunchOnlyOnce": True,
         "ProcessType": "Background",
         "WorkingDirectory": "/var/empty",
@@ -1273,6 +1312,24 @@ def assert_launchd_agent_cannot_read_pasteboard(
     require_owner_mode(plist_path, (0, 0o644))
     owned_launchd_labels.append(label)
     sudo(["launchctl", "bootstrap", "system", plist_path])
+    return {
+        "label": label,
+        "result_path": result_path,
+        "stdout_path": stdout_path,
+        "stderr_path": stderr_path,
+    }
+
+
+def assert_launchd_agent_cannot_read_pasteboard(prepared, *, diagnostic=False):
+    """Run the exact pasteboard probe from an owned system-domain launchd job."""
+    label = prepared["label"]
+    result_path = prepared["result_path"]
+    stdout_path = prepared["stdout_path"]
+    stderr_path = prepared["stderr_path"]
+    assert sudo(["test", "!", "-s", result_path], check=False).returncode == 0, (
+        "isolated pasteboard launch result was nonempty before kickstart"
+    )
+    sudo(["launchctl", "kickstart", f"system/{label}"])
     wait_for_agent_launch(label, result_path)
 
     result = sudo(["cat", result_path])
@@ -1838,6 +1895,11 @@ def run_tui_core_lab(
     agent_uid, owned_paths, owned_launchd_labels,
 ):
     seed_tui_content(binary, profile, private, endpoint)
+    pasteboard_observation = diagnostic or pasteboard_diagnostic
+    prepared_agent = prepare_launchd_agent(
+        TUI_PASSWORD_RECORD, scratch, agent_directory, agent_uid,
+        owned_paths, owned_launchd_labels,
+    )
     first = start_macos_tui(
         binary, profile, private, endpoint, idle=30, reveal=1, copy=30,
     )
@@ -1871,20 +1933,37 @@ def run_tui_core_lab(
         tui_search(first, "Password")
         copied_start = select_tui_password_for_copy(first)
         first.wait_text("Copied explicitly", since=copied_start)
-        pasteboard_observation = diagnostic or pasteboard_diagnostic
         if pasteboard_observation:
             emit_diagnostic(b"PM26_DIAGNOSTIC pasteboard-shared-control=unsupported")
             assert_agent_cannot_read_pasteboard(
                 TUI_PASSWORD_RECORD, diagnostic=True, require_denied=False
             )
+        first.send_key("l")
+        assert first.wait_exit(timeout=8) == 0
+        assert b"\x1b[6n" not in bytes(first.output), (
+            "TUI PTY exit must not require a terminal-emulator cursor response"
+        )
+    finally:
+        close_session_preserving_primary(first)
+    assert TUI_PASSWORD_RECORD not in bytes(first.output)
+    assert b"\x1b]52;" not in bytes(first.output)
+    require_agent_discovery(binary, agent_profile, agent_private, agent_endpoint)
+
+    # Use a fresh copy lease for the isolated job.  The shared-bootstrap
+    # control above is intentionally separate and may consume its own bound.
+    isolated = start_macos_tui(
+        binary, profile, private, endpoint, idle=30, reveal=1, copy=30,
+    )
+    try:
+        copied_start = select_tui_password_for_copy(isolated)
+        isolated.wait_text("Copied explicitly", since=copied_start)
         assert_human_pasteboard_canary(
             TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation, phase="before"
         )
         probe_error = None
         try:
             assert_launchd_agent_cannot_read_pasteboard(
-                TUI_PASSWORD_RECORD, scratch, agent_directory, agent_uid,
-                owned_paths, owned_launchd_labels, diagnostic=pasteboard_observation,
+                prepared_agent, diagnostic=pasteboard_observation,
             )
         except BaseException as error:
             probe_error = error
@@ -1901,17 +1980,16 @@ def run_tui_core_lab(
             raise probe_error
         if after_error is not None:
             raise after_error
-
-        first.send_key("l")
-        assert first.wait_exit(timeout=8) == 0
-        assert b"\x1b[6n" not in bytes(first.output), (
-            "TUI PTY exit must not require a terminal-emulator cursor response"
+        isolated.send_key("l")
+        assert isolated.wait_exit(timeout=8) == 0
+        assert b"\x1b[6n" not in bytes(isolated.output), (
+            "TUI PTY isolated-copy exit must not require a terminal-emulator cursor response"
         )
     finally:
-        close_session_preserving_primary(first)
-    assert TUI_PASSWORD_RECORD not in bytes(first.output)
-    assert b"\x1b]52;" not in bytes(first.output)
-    require_agent_discovery(binary, agent_profile, agent_private, agent_endpoint)
+        close_session_preserving_primary(isolated)
+    assert TUI_PASSWORD_RECORD not in bytes(isolated.output)
+    assert PASSWORD not in bytes(isolated.output)
+    assert b"\x1b]52;" not in bytes(isolated.output)
 
     second = start_macos_tui(
         binary, profile, private, endpoint, idle=2, reveal=1, copy=5,

@@ -126,11 +126,17 @@ require_literal 'return copy_start' "$harness"
 require_literal 'human-content-flow' "$harness"
 require_literal 'assert_agent_cannot_read_pasteboard' "$harness"
 require_literal 'AGENT_PASTEBOARD_LAUNCHER' "$harness"
+require_literal 'hashlib.sha256(secret).hexdigest()' "$harness"
+require_literal 'marker_present(payload, marker_length, marker_digest)' "$harness"
 require_literal 'assert_launchd_agent_cannot_read_pasteboard' "$harness"
+require_literal 'prepare_launchd_agent' "$harness"
 require_literal 'parse_agent_pasteboard_result' "$harness"
 require_literal 'LimitLoadToSessionType' "$harness"
 require_literal 'LaunchOnlyOnce' "$harness"
+require_literal 'RunAtLoad": False' "$harness"
 require_literal 'launchctl", "bootstrap", "system"' "$harness"
+require_literal 'launchctl", "kickstart"' "$harness"
+require_literal 'AGENT_LAUNCH_WAIT_TIMEOUT' "$harness"
 require_literal 'owned_launchd_labels' "$harness"
 require_literal 'assert_human_pasteboard_canary' "$harness"
 require_literal 'close_session_preserving_primary' "$harness"
@@ -378,14 +384,14 @@ for line in (
     b"PM26_DIAGNOSTIC pasteboard-agent-domain=other\n",
     b"PM26_DIAGNOSTIC pasteboard-domain-relation=different\n",
     b"PM26_DIAGNOSTIC pasteboard-shared-control=unsupported\n",
-    b"PM26_DIAGNOSTIC pasteboard-isolated-agent-result=nonzero\n",
-    b"PM26_DIAGNOSTIC pasteboard-isolated-agent-canary-stdout=absent\n",
-    b"PM26_DIAGNOSTIC pasteboard-isolated-agent-canary-stderr=absent\n",
-    b"PM26_DIAGNOSTIC pasteboard-isolated-agent-success-read=no\n",
     b"PM26_DIAGNOSTIC pasteboard-isolated-agent-uid=expected\n",
     b"PM26_DIAGNOSTIC pasteboard-isolated-manager-uid=system\n",
     b"PM26_DIAGNOSTIC pasteboard-isolated-manager-name=different\n",
     b"PM26_DIAGNOSTIC pasteboard-isolated-manager-domain=different\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-probe-result=nonzero\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-probe-canary-stdout=absent\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-probe-canary-stderr=absent\n",
+    b"PM26_DIAGNOSTIC pasteboard-isolated-probe-success-read=no\n",
 ):
     assert module.diagnostic_lines(line) == [line.rstrip(b"\n")]
 assert module.classify_launchd_domain(

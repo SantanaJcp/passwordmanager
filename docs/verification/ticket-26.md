@@ -1238,14 +1238,19 @@ The fixture therefore does the following, in order:
 
 1. Retains the shared-bootstrap control only as explicitly labelled supporting
    evidence. It never contributes to the isolation assertion or a PASS line.
-2. Creates a fresh root-owned, `0644` temporary plist and root-owned,
-   non-writable helper under the collision-guarded fixture root. It bootstraps
-   the helper in the **system** launchd domain with `UserName` and `GroupName`
-   set to `_pmagent26`, `LimitLoadToSessionType=System`, `RunAtLoad=true` and
-   `LaunchOnlyOnce=true`. The synthetic account keeps `UserShell=/usr/bin/false`
-   and `NFSHomeDirectory=/var/empty`; it has no login session. Its result,
-   stdout and stderr files are pre-created inside its own `0700` directory and
-   are tracked as owned resources.
+2. Before any copy operation, creates a fresh root-owned, `0644` temporary
+   plist and root-owned, non-writable helper under the collision-guarded
+   fixture root. It bootstraps the helper in the **system** launchd domain with
+   `UserName` and `GroupName` set to `_pmagent26`,
+   `LimitLoadToSessionType=System`, `RunAtLoad=false` and
+   `LaunchOnlyOnce=true`; an explicit `launchctl kickstart` starts the one-shot
+   only after a fresh TUI copy lease. The synthetic account keeps
+   `UserShell=/usr/bin/false` and `NFSHomeDirectory=/var/empty`; it has no
+   login session. Its result, stdout and stderr files are pre-created inside
+   its own `0700` directory and are tracked as owned resources. The plist
+   carries only the marker length and a SHA-256 digest for exact-stream
+   matching; the canary plaintext is never put in launchd arguments or the
+   `0644` plist.
 3. The helper records only fixed categories for its effective UID,
    `launchctl manageruid`, `launchctl managername`, and the parsed relation to
    the human harness manager. The manager UID category must be `system` and
@@ -1255,13 +1260,19 @@ The fixture therefore does the following, in order:
    harness requires the launched process UID and manager domain to be
    different from the human context before interpreting the probe. Missing or
    malformed manager metadata is indeterminate, never a fallback.
-4. The exact human canary is read immediately before and immediately after
-   this isolated-job probe. A completed result without the canary is a denial;
-   exact-canary stdout/stderr exposure fails; timeout, missing result, unknown
-   exit state or failed post-control remains a failure/indeterminate result.
-   No extra retry, lease extension, clipboard implementation or product
-   diagnostic feature is used. The existing 5-second expiry case remains a
-   separate scenario.
+4. The shared-bootstrap control is run only as a separately labelled
+   supporting negative. The isolated scenario then starts a fresh TUI and
+   fresh 30-second copy lease, reads the exact human canary immediately before
+   and immediately after the isolated-job probe, and kicks the already-loaded
+   system job only after the copy. A completed result without the canary is a
+   denial; exact-canary stdout/stderr exposure fails; timeout, missing result,
+   unknown exit state or failed post-control remains a failure/indeterminate
+   result. The helper allows the fixed `2*10s` manager metadata bounds plus the
+   fixed `30s` public probe bound and a bounded launch margin; this is only a
+   fixture lifecycle bound and never extends the product copy lease. No extra
+   retry, lease extension, clipboard implementation or product diagnostic
+   feature is used. The existing 5-second expiry case remains a separate
+   scenario.
 5. Cleanup first boots out the owned system-domain job, verifies no owned PID
    or label remains, then removes only the helper/plist/result files and
    directories recorded by the fixture. It propagates every bootout, close and
