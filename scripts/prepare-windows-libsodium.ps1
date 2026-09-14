@@ -42,7 +42,9 @@ Assert-True ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [R
 Assert-True ([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq [Runtime.InteropServices.Architecture]::Arm64) 'PowerShell host is not ARM64'
 Assert-True (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) 'RUNNER_TEMP is required'
 Assert-True (-not [string]::IsNullOrWhiteSpace($env:GITHUB_ENV)) 'GITHUB_ENV is required'
-Assert-True (-not [string]::IsNullOrWhiteSpace($env:CARGO_HOME)) 'CARGO_HOME is required'
+Assert-True (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_HOME)) 'RUSTUP_HOME is required'
+Assert-True (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) 'RUSTUP_TOOLCHAIN is required'
+Assert-True ($env:RUSTUP_AUTO_INSTALL -eq '0') 'RUSTUP_AUTO_INSTALL=0 is required'
 foreach ($name in @('SODIUM_LIB_DIR', 'SODIUM_SHARED', 'SODIUM_USE_PKG_CONFIG', 'SODIUM_DIST_DIR')) {
     Assert-True (-not (Test-Path "Env:$name")) "Ambient $name is forbidden"
 }
@@ -50,16 +52,25 @@ foreach ($name in @('SODIUM_LIB_DIR', 'SODIUM_SHARED', 'SODIUM_USE_PKG_CONFIG', 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $archive = Join-Path $repo 'third_party\libsodium\LATEST.tar.gz'
 $signature = Join-Path $repo 'third_party\libsodium\LATEST.tar.gz.minisig'
-$cargo = Join-Path $env:CARGO_HOME 'bin\cargo.exe'
 $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
 Assert-True (Test-Path -LiteralPath $archive -PathType Leaf) 'Pinned libsodium source archive is absent'
 Assert-True (Test-Path -LiteralPath $signature -PathType Leaf) 'Pinned libsodium signature is absent'
-Assert-True (Test-Path -LiteralPath $cargo -PathType Leaf) 'Repository-home Cargo is absent'
 Assert-True (Test-Path -LiteralPath $tar -PathType Leaf) 'System tar is absent'
-Assert-True ((Get-PeMachine $cargo) -eq 0xaa64) 'Cargo host PE is not ARM64'
 Assert-True ((Get-PeMachine $tar) -eq 0xaa64) 'System tar host PE is not ARM64'
 Assert-FileHash $archive 'b20a92e7ec25b285eafa349d721a5bb27e3a8ba94c0816630a127883f1d1b3ab'
 Assert-FileHash $signature '2162883303fb903068519916871476b192d5cf31d5e412378db8ae05a0c05895'
+
+$resolvedCargo = @(& rustup which --toolchain $env:RUSTUP_TOOLCHAIN cargo)
+Assert-True ($LASTEXITCODE -eq 0) "rustup which failed with exit code $LASTEXITCODE"
+$resolvedCargo = @($resolvedCargo | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+Assert-True ($resolvedCargo.Count -eq 1) "Expected exactly one installed Cargo path, got $($resolvedCargo.Count)"
+$cargo = $resolvedCargo[0].Trim()
+$expectedCargo = Join-Path $env:RUSTUP_HOME "toolchains\$env:RUSTUP_TOOLCHAIN\bin\cargo.exe"
+Assert-True ([IO.Path]::GetFullPath($cargo).Equals(
+    [IO.Path]::GetFullPath($expectedCargo), [StringComparison]::OrdinalIgnoreCase
+)) "rustup selected unexpected Cargo path: $cargo"
+Assert-True (Test-Path -LiteralPath $cargo -PathType Leaf) 'Exact installed Cargo is absent'
+Assert-True ((Get-PeMachine $cargo) -eq 0xaa64) 'Cargo host PE is not ARM64'
 
 Push-Location $repo
 try {
@@ -120,8 +131,10 @@ $libraries = @(Get-ChildItem -LiteralPath $source -Filter 'libsodium.lib' -File 
 Assert-True ($libraries.Count -eq 1 -and $libraries[0].FullName -eq $library) 'Source build emitted an ambiguous libsodium library set'
 $headers = @(& $dumpbin '/headers' $library)
 Assert-True ($LASTEXITCODE -eq 0) "Dumpbin failed with exit code $LASTEXITCODE"
-Assert-True (($headers | Select-String -SimpleMatch 'AA64 machine (ARM64)').Count -gt 0) 'Source-built library contains no ARM64 objects'
-Assert-True (($headers | Select-String -Pattern 'machine \((x64|x86)\)').Count -eq 0) 'Source-built library contains a non-ARM64 object'
+$armObjects = @($headers | Select-String -SimpleMatch 'AA64 machine (ARM64)')
+$foreignObjects = @($headers | Select-String -Pattern 'machine \((x64|x86)\)')
+Assert-True ($armObjects.Count -gt 0) 'Source-built library contains no ARM64 objects'
+Assert-True ($foreignObjects.Count -eq 0) 'Source-built library contains a non-ARM64 object'
 
 $env:SODIUM_LIB_DIR = $libDir
 Push-Location $repo

@@ -34,7 +34,10 @@ La preparación autorizada es un único camino explícito:
    runner Windows 11 ARM64 nativo ya validado y el tarball comprometido
    `third_party/libsodium/LATEST.tar.gz`; comprueba los SHA-256 fijados del
    archivo y su `.minisig`, y ejecuta el verificador Rust mínimo con
-   `minisign-verify 0.2.5` y la clave pública upstream fijada.
+   `minisign-verify 0.2.5` y la clave pública upstream fijada. Resuelve Cargo
+   únicamente con `rustup which --toolchain` para el toolchain exacto ya
+   instalado, exige su ruta bajo `RUSTUP_HOME` y comprueba que su PE sea ARM64;
+   no supone que `cargo.exe` exista en `CARGO_HOME/bin`.
 2. Extrae a una raíz nueva bajo `RUNNER_TEMP` con guardia de colisión y exige
    `libsodium 1.0.22`, el proyecto
    `builds/msvc/vs2026/libsodium/libsodium.vcxproj`, toolset `v145`,
@@ -124,6 +127,8 @@ Comprobaciones locales, que **no sustituyen ejecución Windows**:
 ./scripts/verify-windows-libsodium-build.sh
 # RED antes del script de preparación: required Windows source-build file is absent; exit 1
 # PASS tras conectar fetch -> fuente autenticada -> lab offline; exit 0
+# RED posterior al exigir rustup-which y cardinalidad segura: contrato ausente; exit 1
+# PASS tras fijar la ruta de Cargo y materializar ambos Select-String con @(...); exit 0
 
 ./scripts/cargo-local.sh run -p pm-build-input-verifier --locked --offline -- \
   third_party/libsodium/LATEST.tar.gz third_party/libsodium/LATEST.tar.gz.minisig
