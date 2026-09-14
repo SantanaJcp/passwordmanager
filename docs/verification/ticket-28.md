@@ -565,3 +565,15 @@ payload. El custody socketpair previo cubre el frame humano. Ninguno de estos
 RED nuevos se ejecutó ni tiene GREEN anticipado; próxima ventana requiere los
 tres filtros Rust (crypto revision, crypto stream, lease) y el lab adapters por
 separado, preservando cualquier fallo de fixture/compilación como no RED.
+
+Corrección estática previa al RED: `RLIMIT_MEMLOCK=0` en revision podía fallar
+al reabrir keys y producir un falso positivo antes del destino plaintext. El
+fixture ahora prepara paquetes pequeño y 4 MiB, ocupa memoria locked en bloques
+de 1 MiB y libera exactamente uno: el paquete pequeño debe abrir bajo la misma
+presión (control de keys+output), mientras el grande debe fallar por su owner.
+El lease usa password de 512 KiB sólo en el helper, ocupa bloques de 128 KiB y
+libera uno antes de construir `DelegatedVault`/`AttemptVault`; esas APIs deben
+abrir el key path bajo presión y sólo `claim_next` del payload grande debe fallar.
+El stream conserva opener preinicializado antes de RLIMIT0. Los parents no
+renderizan stdout/stderr con conversión lossy: reportan únicamente status fijo;
+los canarios nunca entran al diagnóstico.

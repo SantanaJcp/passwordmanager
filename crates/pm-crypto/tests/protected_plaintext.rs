@@ -5,8 +5,8 @@
 use std::process::Command;
 
 use pm_crypto::{
-    BackupOpener, CryptoError, ItemKind, KdfProfile, RevisionPackageInput, create_human_root,
-    open_human_root,
+    BackupOpener, CryptoError, ItemKind, KdfProfile, ProtectedBytes, RevisionPackageInput,
+    create_human_root, open_human_root,
 };
 
 const PASSWORD: &[u8] = b"synthetic ticket28 protected-output password";
@@ -31,9 +31,8 @@ fn run_helper(name: &str) {
         .expect("start isolated memlock helper");
     assert!(
         output.status.success(),
-        "{name} did not reject plaintext before unlocked output: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "{name} did not reject plaintext before unlocked output (status={:?})",
+        output.status.code()
     );
 }
 
@@ -42,7 +41,7 @@ fn run_helper(name: &str) {
 fn revision_plaintext_memlock_helper() {
     let created = create_human_root(PASSWORD, KdfProfile::confirmed(64, 3).unwrap()).unwrap();
     let unlocked = open_human_root(created.bundle(), PASSWORD).unwrap();
-    let package = unlocked
+    let small = unlocked
         .seal_revision_package(RevisionPackageInput {
             item: [0x28; 16],
             revision: [0x29; 16],
@@ -54,11 +53,33 @@ fn revision_plaintext_memlock_helper() {
         })
         .unwrap()
         .to_bytes();
-    deny_future_locks();
+    let mut large_plaintext = vec![0x28; 4 * 1024 * 1024];
+    let large = unlocked
+        .seal_revision_package(RevisionPackageInput {
+            item: [0x2b; 16],
+            revision: [0x2c; 16],
+            issuer_device: [0x2d; 16],
+            modified_at: 2,
+            kind: ItemKind::Note,
+            human_plaintext: &large_plaintext,
+            auth_plaintext: None,
+        })
+        .unwrap()
+        .to_bytes();
+    large_plaintext.fill(0);
+    drop(large_plaintext);
+    let pressure = reserve_all_but_one_mebibyte();
+    let small_opened = unlocked
+        .open_revision_package(&small)
+        .expect("key path and small protected outputs must fit reserved margin");
+    assert_eq!(small_opened.human_plaintext(), HUMAN);
+    assert_eq!(small_opened.auth_plaintext(), Some(AUTH));
+    drop(small_opened);
     assert!(matches!(
-        unlocked.open_revision_package(&package),
+        unlocked.open_revision_package(&large),
         Err(CryptoError::ResourceUnavailable)
     ));
+    drop(pressure);
 }
 
 #[test]
@@ -95,4 +116,18 @@ fn deny_future_locks() {
         unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const limit) },
         0
     );
+}
+
+fn reserve_all_but_one_mebibyte() -> Vec<ProtectedBytes> {
+    const CHUNK: usize = 1024 * 1024;
+    let mut owners = Vec::new();
+    while let Ok(owner) = ProtectedBytes::zeroed(CHUNK) {
+        owners.push(owner);
+    }
+    assert!(
+        owners.len() > 1,
+        "fixture could not establish bounded pressure"
+    );
+    drop(owners.pop());
+    owners
 }

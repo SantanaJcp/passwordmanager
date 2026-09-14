@@ -40,9 +40,8 @@ fn attempt_lease_rejects_unlocked_plaintext_owners() {
         .expect("start isolated locked-budget helper");
     assert!(
         output.status.success(),
-        "attempt lease did not fail before unlocked secret owners: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "attempt lease did not fail before unlocked secret owners (status={:?})",
+        output.status.code()
     );
 }
 
@@ -60,6 +59,11 @@ fn keycloak_lease_fixture(deny_locked_output: bool) {
     persist_test_vault(&path);
     let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
     let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let password = if deny_locked_output {
+        vec![0x28; 512 * 1024]
+    } else {
+        b"synthetic-keycloak-password-canary".to_vec()
+    };
     let record = LogicalRecord::new(
         RecordKind::Password,
         HumanMetadata {
@@ -77,7 +81,7 @@ fn keycloak_lease_fixture(deny_locked_output: bool) {
         vec![
             AuthRecord::Password {
                 username: "alice".to_owned(),
-                password: b"synthetic-keycloak-password-canary".to_vec(),
+                password,
                 destination_refs: vec![0],
             },
             AuthRecord::Totp {
@@ -103,6 +107,7 @@ fn keycloak_lease_fixture(deny_locked_output: bool) {
     drop(human);
 
     let peer = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
+    let locked_budget = deny_locked_output.then(reserve_all_but_128_kib);
     let attempts =
         AttemptVault::open(DelegatedVault::open(&path, DEVICE, custody).unwrap()).unwrap();
     let now = i64::try_from(
@@ -126,7 +131,6 @@ fn keycloak_lease_fixture(deny_locked_output: bool) {
         attempts.start(&peer, &request).unwrap().state(),
         AttemptState::Created
     );
-    let locked_budget = deny_locked_output.then(exhaust_locked_budget);
     let lease_result = attempts.claim_next();
     if deny_locked_output {
         let Err(error) = lease_result else {
@@ -149,19 +153,21 @@ fn keycloak_lease_fixture(deny_locked_output: bool) {
     assert_eq!(totp.t0(), 0);
 }
 
-fn exhaust_locked_budget() -> Vec<ProtectedBytes> {
+fn reserve_all_but_128_kib() -> Vec<ProtectedBytes> {
+    const CHUNK: usize = 128 * 1024;
     let mut owners = Vec::new();
-    let mut size = 1024 * 1024;
-    while size != 0 {
-        loop {
-            match ProtectedBytes::zeroed(size) {
-                Ok(owner) => owners.push(owner),
-                Err(CryptoError::ResourceUnavailable) => break,
-                Err(error) => panic!("unexpected protected allocation error: {error}"),
-            }
+    loop {
+        match ProtectedBytes::zeroed(CHUNK) {
+            Ok(owner) => owners.push(owner),
+            Err(CryptoError::ResourceUnavailable) => break,
+            Err(error) => panic!("unexpected protected allocation error: {error}"),
         }
-        size /= 2;
     }
+    assert!(
+        owners.len() > 1,
+        "fixture could not establish bounded pressure"
+    );
+    drop(owners.pop());
     owners
 }
 
