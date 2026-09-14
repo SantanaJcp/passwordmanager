@@ -742,6 +742,31 @@ AST parsing, the static macOS checker and `git diff --check` passed. No Cargo,
 build, native laboratory or product behavior was executed for this checkpoint;
 the default command must run on both native architectures before it is evidence.
 
+Native normal-mode run
+[`34840405573`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34840405573)
+on `8dcc980` is **RED** on both architectures before the build. The macOS runner's
+system Bash 3.2, with `set -u`, rejected expansion of the intentionally empty
+normal-mode `diagnostic_features` array as an unbound variable at line 50. The
+following missing libsodium metadata error was secondary because the build
+command never ran. Linux syntax and static checks did not establish that native
+shell behavior.
+
+The correction must keep `set -u` and the system Bash. Normal and diagnostic
+modes each construct complete, nonempty build, test and harness command arrays;
+only the explicit diagnostic branch appends its feature and mode arguments.
+The static regression must source the exact command constructor under `bash -u`
+and actually expand every normal and diagnostic command, checking that normal
+contains no diagnostic argument and diagnostic contains each opt-in exactly
+once. String inspection alone is insufficient. This remains script-only until
+the unchanged normal entry point succeeds natively on both architectures.
+
+The corrected command-plan regression passed under `bash -u`: every nonempty
+normal and diagnostic build, test and harness array expanded successfully;
+normal contained no diagnostic argument, while diagnostic contained each
+explicit opt-in exactly once. Shell syntax, Python AST parsing, the complete
+static macOS checker and `git diff --check` also passed. No Cargo command or
+native product behavior was executed for this checkpoint.
+
 ## Remaining acceptance work
 
 - Verify the normal non-diagnostic binary and complete keyboard TUI composition

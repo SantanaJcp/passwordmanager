@@ -91,10 +91,11 @@ require_literal '[macOS custody acceptance workflow](../../.github/workflows/mac
 require_literal 'fetch --locked' "$fetch"
 require_literal '--locked --offline' "$lab"
 require_literal 'lipo -archs' "$lab"
-require_literal 'diagnostic_features=()' "$lab"
-require_literal 'harness_mode=()' "$lab"
-require_literal 'diagnostic_features=(--features macos-ticket26-diagnostics)' "$lab"
-require_literal 'harness_mode=(--diagnostic)' "$lab"
+require_literal 'configure_ticket26_build_commands()' "$lab"
+require_literal 'configure_ticket26_harness_command()' "$lab"
+require_literal 'build_command=(' "$lab"
+require_literal 'test_command=(' "$lab"
+require_literal 'harness_command=(python3' "$lab"
 require_literal 'scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")' "$harness"
 require_literal 'require_owner_mode(scratch.parent, (0, 0o1777))' "$harness"
 require_literal 'stat.S_IMODE(full_mode)' "$harness"
@@ -160,6 +161,38 @@ if grep -Fq 'macos-ticket26-diagnostics' "$workflow" ||
     echo 'macOS ticket-26 diagnostics escaped the explicit laboratory fixture' >&2
     exit 1
 fi
+
+bash -u -s -- "$lab" <<'SH'
+source "$1"
+
+count_argument() {
+    local expected="$1"
+    shift
+    local count=0 argument
+    for argument in "$@"; do
+        if [[ "$argument" == "$expected" ]]; then
+            count=$((count + 1))
+        fi
+    done
+    [[ "$count" == 1 ]]
+}
+
+configure_ticket26_build_commands normal /synthetic-ticket26
+[[ "${build_command[*]}" != *macos-ticket26-diagnostics* ]]
+[[ "${test_command[*]}" != *macos-ticket26-diagnostics* ]]
+printf '%s\n' "${build_command[@]}" "${test_command[@]}" >/dev/null
+configure_ticket26_harness_command normal /synthetic-ticket26 /synthetic-config.log
+[[ "${harness_command[*]}" != *--diagnostic* ]]
+printf '%s\n' "${harness_command[@]}" >/dev/null
+
+configure_ticket26_build_commands diagnostic /synthetic-ticket26
+count_argument macos-ticket26-diagnostics "${build_command[@]}"
+count_argument macos-ticket26-diagnostics "${test_command[@]}"
+printf '%s\n' "${build_command[@]}" "${test_command[@]}" >/dev/null
+configure_ticket26_harness_command diagnostic /synthetic-ticket26 /synthetic-config.log
+count_argument --diagnostic "${harness_command[@]}"
+printf '%s\n' "${harness_command[@]}" >/dev/null
+SH
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$harness" <<'PY'
 import contextlib
