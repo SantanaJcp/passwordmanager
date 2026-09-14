@@ -309,37 +309,152 @@ impl App {
 struct ClipboardLease {
     child: Child,
     until: Instant,
+    cleanup_attempted: bool,
 }
 
 impl ClipboardLease {
     fn stop_if_owner(&mut self) -> Result<(), Failure> {
-        if self
-            .child
-            .try_wait()
-            .map_err(|_| Failure::Unavailable)?
-            .is_none()
-        {
-            self.child.kill().map_err(|_| Failure::Unavailable)?;
-            self.child.wait().map_err(|_| Failure::Unavailable)?;
+        if !begin_cleanup(&mut self.cleanup_attempted) {
+            return Ok(());
         }
-        Ok(())
+        stop_clipboard_with(&mut self.child)
     }
 }
 
 impl Drop for ClipboardLease {
     fn drop(&mut self) {
-        let _ = self.stop_if_owner();
+        if !self.cleanup_attempted && self.stop_if_owner().is_err() {
+            report_cleanup_failure("clipboard");
+        }
     }
 }
 
 struct TerminalGuard {
     writer: File,
+    state: TerminalState,
+    cleanup_attempted: bool,
+}
+
+#[derive(Clone, Copy)]
+struct TerminalState {
+    raw: bool,
+    alternate: bool,
+    cursor_hidden: bool,
+}
+
+impl TerminalGuard {
+    fn restore(&mut self) -> Result<(), Failure> {
+        if !begin_cleanup(&mut self.cleanup_attempted) {
+            return Ok(());
+        }
+        let mut operations = CrosstermRestore {
+            writer: &mut self.writer,
+        };
+        restore_terminal_with(self.state, &mut operations)
+    }
+}
+
+fn begin_cleanup(attempted: &mut bool) -> bool {
+    if *attempted {
+        false
+    } else {
+        *attempted = true;
+        true
+    }
 }
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(self.writer, LeaveAlternateScreen, crossterm::cursor::Show);
-        let _ = disable_raw_mode();
+        if !self.cleanup_attempted && self.restore().is_err() {
+            report_cleanup_failure("terminal");
+        }
     }
+}
+
+trait ClipboardControl {
+    fn try_exited(&mut self) -> Result<bool, ()>;
+    fn kill_process(&mut self) -> Result<(), ()>;
+    fn wait_process(&mut self) -> Result<(), ()>;
+}
+
+impl ClipboardControl for Child {
+    fn try_exited(&mut self) -> Result<bool, ()> {
+        self.try_wait()
+            .map(|status| status.is_some())
+            .map_err(|_| ())
+    }
+
+    fn kill_process(&mut self) -> Result<(), ()> {
+        self.kill().map_err(|_| ())
+    }
+
+    fn wait_process(&mut self) -> Result<(), ()> {
+        self.wait().map(|_| ()).map_err(|_| ())
+    }
+}
+
+fn stop_clipboard_with(control: &mut impl ClipboardControl) -> Result<(), Failure> {
+    let exited = control.try_exited();
+    let should_stop = !matches!(exited, Ok(true));
+    let kill = if should_stop {
+        control.kill_process()
+    } else {
+        Ok(())
+    };
+    let wait = if should_stop {
+        control.wait_process()
+    } else {
+        Ok(())
+    };
+    if exited.is_err() || kill.is_err() || wait.is_err() {
+        Err(Failure::Unavailable)
+    } else {
+        Ok(())
+    }
+}
+
+trait TerminalRestore {
+    fn leave_alternate(&mut self) -> Result<(), ()>;
+    fn show_cursor(&mut self) -> Result<(), ()>;
+    fn disable_raw(&mut self) -> Result<(), ()>;
+}
+
+struct CrosstermRestore<'a> {
+    writer: &'a mut File,
+}
+
+impl TerminalRestore for CrosstermRestore<'_> {
+    fn leave_alternate(&mut self) -> Result<(), ()> {
+        execute!(self.writer, LeaveAlternateScreen).map_err(|_| ())
+    }
+
+    fn show_cursor(&mut self) -> Result<(), ()> {
+        execute!(self.writer, crossterm::cursor::Show).map_err(|_| ())
+    }
+
+    fn disable_raw(&mut self) -> Result<(), ()> {
+        disable_raw_mode().map_err(|_| ())
+    }
+}
+
+fn restore_terminal_with(
+    state: TerminalState,
+    operations: &mut impl TerminalRestore,
+) -> Result<(), Failure> {
+    let alternate = !state.alternate || operations.leave_alternate().is_ok();
+    let cursor = !state.cursor_hidden || operations.show_cursor().is_ok();
+    let raw = !state.raw || operations.disable_raw().is_ok();
+    if alternate && cursor && raw {
+        Ok(())
+    } else {
+        Err(Failure::Unavailable)
+    }
+}
+
+fn report_cleanup_failure(component: &str) {
+    let _ = writeln!(
+        std::io::stderr(),
+        "TUI_CLEANUP_FAILED component={component}"
+    );
 }
 
 type HumanTls = StreamOwned<ClientConnection, UnixStream>;
@@ -397,62 +512,125 @@ fn run_terminal(
         .write(true)
         .open("/dev/tty")
         .map_err(|_| Failure::Unavailable)?;
-    enable_raw_mode().map_err(|_| Failure::Unavailable)?;
-    let mut guard = TerminalGuard {
-        writer: writer.try_clone().map_err(|_| Failure::Unavailable)?,
-    };
-    execute!(guard.writer, EnterAlternateScreen, crossterm::cursor::Hide)
-        .map_err(|_| Failure::Unavailable)?;
-    let backend = CrosstermBackend::new(writer);
-    let mut terminal = Terminal::new(backend).map_err(|_| Failure::Unavailable)?;
-    terminal.clear().map_err(|_| Failure::Unavailable)?;
-    let mut app = App::new(
-        Duration::from_secs(idle),
-        Duration::from_secs(reveal),
-        Duration::from_secs(copy),
-    );
-    draw(&mut terminal, &mut app)?;
-    let password = read_prompt(&mut terminal, &mut app, true)?;
-    let mut tls = connect(profile, key, socket)?;
-    tls.write_all(HUMAN_MAGIC)
-        .map_err(|_| Failure::Unavailable)?;
-    rpc_unlock(&mut tls, password.as_bytes())?;
-    app.password.extend_from_slice(password.as_bytes());
-    app.input.zeroize();
-    write_frame(&mut tls, &[46])?;
-    app.replace_catalog(decode_catalog(&read_frame(&mut tls)?)?);
-    app.mode = Mode::Browse;
-    app.status = "Unlocked: selection never reveals secrets".into();
-    app.idle_at = Instant::now();
-    loop {
-        event_loop(&mut terminal, &mut app, &mut tls)?;
-        let Some((confirmation, password)) = app.reauthentication.take() else {
-            break;
-        };
-        lock_human_channel(&mut tls)?;
-        drop(tls);
-        tls = connect(profile, key, socket)?;
-        tls.write_all(HUMAN_MAGIC)
-            .map_err(|_| Failure::Unavailable)?;
-        rpc_unlock(&mut tls, &password)?;
-        let verification = confirmation.verification;
-        confirm_passkey(&mut tls, &confirmation)?;
-        show_pending(&mut app, &mut tls)?;
-        app.status = if verification == 2 {
-            "Passkey confirmed with fresh UP+UV".into()
-        } else {
-            "Passkey confirmed with fresh UP".into()
-        };
+    if enable_raw_mode().is_err() {
+        if disable_raw_mode().is_err() {
+            report_cleanup_failure("terminal-initialization");
+        }
+        return Err(Failure::Unavailable);
     }
+    let Ok(guard_writer) = writer.try_clone() else {
+        disable_raw_mode().map_err(|_| Failure::Unavailable)?;
+        return Err(Failure::Unavailable);
+    };
+    let mut guard = TerminalGuard {
+        writer: guard_writer,
+        state: TerminalState {
+            raw: true,
+            alternate: false,
+            cursor_hidden: false,
+        },
+        cleanup_attempted: false,
+    };
+    let operation = (|| {
+        guard.state.alternate = true;
+        execute!(guard.writer, EnterAlternateScreen).map_err(|_| Failure::Unavailable)?;
+        guard.state.cursor_hidden = true;
+        execute!(guard.writer, crossterm::cursor::Hide).map_err(|_| Failure::Unavailable)?;
+        let backend = CrosstermBackend::new(writer);
+        let mut terminal = Terminal::new(backend).map_err(|_| Failure::Unavailable)?;
+        terminal.clear().map_err(|_| Failure::Unavailable)?;
+        let mut app = App::new(
+            Duration::from_secs(idle),
+            Duration::from_secs(reveal),
+            Duration::from_secs(copy),
+        );
+        run_authenticated_session(profile, key, socket, &mut terminal, &mut app)
+    })();
+    let restoration = guard.restore();
+    combine_failures([operation, restoration])
+}
+
+fn run_authenticated_session(
+    profile: &Profile,
+    key: &KeyMaterial,
+    socket: &Path,
+    terminal: &mut Terminal<CrosstermBackend<File>>,
+    app: &mut App,
+) -> Result<(), Failure> {
+    let session = (|| {
+        draw(terminal, app)?;
+        let password = read_prompt(terminal, app, true)?;
+        let mut tls = Some(connect(profile, key, socket)?);
+        let tls_ref = tls.as_mut().ok_or(Failure::Unavailable)?;
+        tls_ref
+            .write_all(HUMAN_MAGIC)
+            .map_err(|_| Failure::Unavailable)?;
+        rpc_unlock(tls_ref, password.as_bytes())?;
+        app.password.extend_from_slice(password.as_bytes());
+        app.input.zeroize();
+        write_frame(tls_ref, &[46])?;
+        app.replace_catalog(decode_catalog(&read_frame(tls_ref)?)?);
+        app.mode = Mode::Browse;
+        app.status = "Unlocked: selection never reveals secrets".into();
+        app.idle_at = Instant::now();
+        let outcome = (|| {
+            loop {
+                event_loop(terminal, app, tls.as_mut().ok_or(Failure::Unavailable)?)?;
+                let Some((confirmation, password)) = app.reauthentication.take() else {
+                    break Ok(());
+                };
+                let mut old_tls = tls.take().ok_or(Failure::Unavailable)?;
+                lock_human_channel(&mut old_tls)?;
+                drop(old_tls);
+                let mut next_tls = connect(profile, key, socket)?;
+                next_tls
+                    .write_all(HUMAN_MAGIC)
+                    .map_err(|_| Failure::Unavailable)?;
+                rpc_unlock(&mut next_tls, &password)?;
+                let verification = confirmation.verification;
+                confirm_passkey(&mut next_tls, &confirmation)?;
+                show_pending(app, &mut next_tls)?;
+                app.status = if verification == 2 {
+                    "Passkey confirmed with fresh UP+UV".into()
+                } else {
+                    "Passkey confirmed with fresh UP".into()
+                };
+                tls = Some(next_tls);
+            }
+        })();
+        app.clear_exposure();
+        let clipboard = app
+            .clipboard
+            .take()
+            .map_or(Ok(()), |mut lease| lease.stop_if_owner());
+        let lock = if outcome.is_ok() {
+            if let Some(tls) = tls.as_mut() {
+                (|| {
+                    lock_human_channel(tls)?;
+                    terminal.clear().map_err(|_| Failure::Unavailable)
+                })()
+            } else {
+                Err(Failure::Unavailable)
+            }
+        } else {
+            Ok(())
+        };
+        combine_failures([outcome, clipboard, lock])
+    })();
     app.clear_exposure();
     let clipboard = app
         .clipboard
         .take()
         .map_or(Ok(()), |mut lease| lease.stop_if_owner());
-    lock_human_channel(&mut tls)?;
-    terminal.clear().map_err(|_| Failure::Unavailable)?;
-    clipboard?;
-    Ok(())
+    combine_failures([session, clipboard])
+}
+
+fn combine_failures<const N: usize>(results: [Result<(), Failure>; N]) -> Result<(), Failure> {
+    if results.into_iter().all(|result| result.is_ok()) {
+        Ok(())
+    } else {
+        Err(Failure::Unavailable)
+    }
 }
 
 fn event_loop(
@@ -2112,13 +2290,13 @@ fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Fail
         .ok_or(Failure::Unavailable)?
         .write_all(secret);
     if result.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
+        let _cleanup = stop_clipboard_with(&mut child);
         return Err(Failure::Unavailable);
     }
     Ok(ClipboardLease {
         child,
         until: Instant::now() + duration,
+        cleanup_attempted: false,
     })
 }
 
@@ -2276,5 +2454,94 @@ mod tests {
         };
         assert_eq!(fields, ["/tmp/a|b", "chrome", "keep"]);
         assert!(split_exact::<2>(r"dangling\").is_err());
+    }
+
+    #[test]
+    fn clipboard_cleanup_attempts_kill_and_wait_once_after_failures() {
+        struct FakeClipboard(Vec<&'static str>);
+        impl ClipboardControl for FakeClipboard {
+            fn try_exited(&mut self) -> Result<bool, ()> {
+                self.0.push("try-wait");
+                Ok(false)
+            }
+            fn kill_process(&mut self) -> Result<(), ()> {
+                self.0.push("kill");
+                Err(())
+            }
+            fn wait_process(&mut self) -> Result<(), ()> {
+                self.0.push("wait");
+                Err(())
+            }
+        }
+        let mut control = FakeClipboard(Vec::new());
+        let result = stop_clipboard_with(&mut control);
+        assert!(result.is_err());
+        assert_eq!(control.0, ["try-wait", "kill", "wait"]);
+    }
+
+    #[test]
+    fn terminal_cleanup_attempts_every_active_restoration() {
+        struct FakeTerminal(Vec<&'static str>);
+        impl TerminalRestore for FakeTerminal {
+            fn leave_alternate(&mut self) -> Result<(), ()> {
+                self.0.push("alternate");
+                Err(())
+            }
+            fn show_cursor(&mut self) -> Result<(), ()> {
+                self.0.push("cursor");
+                Err(())
+            }
+            fn disable_raw(&mut self) -> Result<(), ()> {
+                self.0.push("raw");
+                Err(())
+            }
+        }
+        let mut operations = FakeTerminal(Vec::new());
+        let result = restore_terminal_with(
+            TerminalState {
+                raw: true,
+                alternate: true,
+                cursor_hidden: true,
+            },
+            &mut operations,
+        );
+        assert!(result.is_err());
+        assert_eq!(operations.0, ["alternate", "cursor", "raw"]);
+    }
+
+    #[test]
+    fn cleanup_is_not_retried_and_partial_terminal_state_only_restores_active_parts() {
+        struct PartialTerminal(Vec<&'static str>);
+        impl TerminalRestore for PartialTerminal {
+            fn leave_alternate(&mut self) -> Result<(), ()> {
+                self.0.push("alternate");
+                Ok(())
+            }
+            fn show_cursor(&mut self) -> Result<(), ()> {
+                self.0.push("cursor");
+                Ok(())
+            }
+            fn disable_raw(&mut self) -> Result<(), ()> {
+                self.0.push("raw");
+                Ok(())
+            }
+        }
+        let mut attempted = false;
+        assert!(begin_cleanup(&mut attempted));
+        assert!(!begin_cleanup(&mut attempted));
+
+        let mut operations = PartialTerminal(Vec::new());
+        assert!(
+            restore_terminal_with(
+                TerminalState {
+                    raw: true,
+                    alternate: false,
+                    cursor_hidden: false,
+                },
+                &mut operations,
+            )
+            .is_ok()
+        );
+        assert_eq!(operations.0, ["raw"]);
     }
 }
