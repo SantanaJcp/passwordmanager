@@ -1139,6 +1139,22 @@ salidas enfocadas están en `/tmp/pm27-audit-api-{audit-lifecycle-attempt1,human
 `/tmp/pm27-audit-api-pm-vault-tests-attempt2.log`. Estos resultados son Linux;
 no acreditan todavía el servicio Windows nativo.
 
+`scripts/check.sh` conservó dos intentos RED de integración antes del GREEN:
+el primero encontró `too_many_lines`/orden de items en fixtures y una closure
+redundante; el segundo encontró únicamente dos declaraciones locales colocadas
+después de la nueva custodia. Se corrigieron mecánicamente sin cambiar las
+aserciones y el tercer intento terminó 0. Los logs son
+`/tmp/pm27-audit-api-check-attempt{1,2,3}.log`.
+`scripts/clean-offline-build.sh` terminó 0 y está conservado en
+`/tmp/pm27-audit-api-clean-offline-attempt1.log`.
+
+Los tres laboratorios TUI enumerados por el método no existen en la base
+histórica de esta rama Windows (`266b088`): `crates/pm-custody/tests` aún no
+contiene `tui_content_lab.py`, `tui_access_lab.py` ni `tui_operations_lab.py`.
+No se sustituyeron por otros labs ni se copiaron desde otro worktree. Deben
+ejecutarse después de componer este cambio común sobre la rama unificada que sí
+contiene TUI 23–25; hasta entonces esa regresión observable queda pendiente.
+
 ## Déficit contractual de parada SCM (plan, no implementación)
 
 La misma corrida mostró `NOT_STOPPABLE` y el cleanup no pudo ejecutar
