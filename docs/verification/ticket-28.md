@@ -611,3 +611,12 @@ preservar los intentos de lint previos
 41.71 s (`/tmp/pm28-green-plaintext-block-clean.log`). Este checkpoint no
 acredita todavía serializers/responses sensibles ni todos los frames custody/TUI;
 ticket 28 continúa abierto.
+
+Siguiente RED estático, aún sin ejecución: el lab custody repite el seam con
+un presupuesto de 128 KiB, entrega completamente el primer password corto y
+después sólo el header público de un segundo campo de 512 KiB más un canario
+pequeño. El proceso debe fallar rc4 antes de leer ese canario. Así se distingue
+la protección del primer `NativeStdin` de los restantes `read_wire_field`; no se
+considera RED un fallo anterior al segundo header. El GREEN posterior migrará
+el inventario de campos secretos al lector protegido común sin cambiar límites,
+orden, CRLF/EOF ni los campos declaradamente públicos.
