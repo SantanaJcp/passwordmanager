@@ -1699,3 +1699,36 @@ La sincronización del directorio Windows reutiliza el contrato ya integrado en
 GENERIC_WRITE`, `BACKUP_SEMANTICS | OPEN_REPARSE_POINT`, verifica tipo e
 identidad y sólo entonces hace `sync_all`. Un handle de sólo lectura no acredita
 `FlushFileBuffers` y queda excluido.
+
+### Método de transferencia 1PUX por handle en Windows
+
+La transferencia Windows no reabre un path ni concede derechos sobre el
+servicio. Sólo después de autenticar Named Pipe + TLS-RPK y recibir el `ready`
+del opcode 31, la TUI instala durante una única transferencia un ACE no
+heredable para el SID fijo `NT SERVICE\\PasswordManager` sobre el DACL de su
+propio proceso. El ACE concede exactamente `PROCESS_DUP_HANDLE |
+PROCESS_QUERY_LIMITED_INFORMATION`; este derecho sigue siendo potente y el SID
+del custodio forma parte del TCB porque `DuplicateHandle` puede duplicar otros
+handles del proceso. Nunca se concede al agente ni al humano sobre el servicio.
+
+El servidor usa el PID observado por `GetNamedPipeClientProcessId`, revalida el
+SID/PID y abre exclusivamente ese proceso. El cliente envía por el TLS ya
+autenticado el valor de su handle abierto; el servidor lo duplica hacia sí,
+revalida el peer y comprueba sobre el mismo handle tipo regular, ausencia de
+reparse, identidad, número de links y tamaño antes de entregarlo al procesador
+1PUX común. Todos los handles tienen ownership único y cierre comprobado en
+todas las ramas.
+
+El lease conserva el descriptor original y el DACL instalado. Al terminar la
+transferencia consulta el DACL actual: sólo restaura el original si sigue siendo
+exactamente el que instaló. Si otra parte lo cambió, falla y termina la TUI sin
+sobrescribir el cambio ajeno, sin retry. Error de query, instalación,
+duplicación, validación, cierre o restauración es fallo explícito; no se copia a
+un temporal, no se reabre por nombre y no se transmite el fichero como ruta o
+como alternativa degradada.
+
+Las regresiones nativas deben cubrir DACL antes/durante/después, SID agente sin
+ACE, peer impostor, PID cambiado, pseudohandle/source inválido, reparse/link y
+cambio concurrente del DACL. El caso positivo procesa un 1PUX sintético mayor
+que un frame desde el mismo handle. Ningún test modifica el DACL de un proceso o
+sesión ajenos; el fixture usa exclusivamente el proceso TUI propio efímero.
