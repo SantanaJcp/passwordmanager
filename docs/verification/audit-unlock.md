@@ -86,8 +86,12 @@ mutaciones exitosas. No se cambió producto ni se rebajó una aserción a cero.
 
 El primer rerun enfocado de esos cuatro labs dejó 1PUX y backup verdes, y los
 dos wrappers de `linux_lab.py` fallaron sólo en el conteo final 5. La lectura
-del flujo real explica el sexto registro: queda el `HumanUnlock` del intento
-con commit inyectado fallido; el cliente CRUD exitoso registra un unlock
-inicial, reconecta y registra otro para recuperar el recibo perdido, y después
-confirma sus tres mutaciones. La expectativa exacta es por tanto `1+2+3=6`;
-no se infiere del deseo de verde ni se elimina la reconexión que el lab prueba.
+del flujo real mostró además que condicionar por conteo audit seguía abortando
+el unlock de reconexión y debilitaba la prueba original de receipt no-op. Ese
+rerun 4/4 se conserva, pero no se acepta como gate final. El trigger definitivo
+se activa sólo cuando la transacción objetivo ya insertó su `authority_event`:
+el registro `HumanUnlock` no tiene esa mutación, mientras el commit CRUD sí la
+tiene antes de append audit; el rollback elimina authority/outbox y la
+reconexión vuelve a quedar permitida. Así sobreviven dos unlocks del intento
+fallido (inicial y receipt), el cliente CRUD exitoso registra otros dos y sus
+tres mutaciones dan el total independiente `2+2+3=7`.

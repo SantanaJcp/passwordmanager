@@ -313,7 +313,7 @@ def main():
             database = sqlite3.connect(vault)
             database.execute(
                 "CREATE TRIGGER lab_reject_audit BEFORE INSERT ON encrypted_audit_records "
-                "WHEN (SELECT count(*) FROM encrypted_audit_records) > 0 "
+                "WHEN EXISTS (SELECT 1 FROM authority_events) "
                 "BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END"
             )
             database.commit()
@@ -335,7 +335,7 @@ def main():
             assert database.execute("select count(*) from audit_state").fetchone() == (1,)
             assert database.execute(
                 "select count(*) from encrypted_audit_records"
-            ).fetchone() == (1,)
+            ).fetchone() == (2,)
             assert database.execute(
                 "select count(*) from human_challenges where consumed=1"
             ).fetchone() == (0,)
@@ -356,10 +356,10 @@ def main():
             assert database.execute("select count(*) from human_receipts").fetchone() == (3,)
             assert database.execute("select count(*) from authority_events").fetchone() == (3,)
             assert database.execute("select count(*) from outbox").fetchone() == (3,)
-            # One unlock survived the injected failure. The successful CRUD
-            # client unlocks once before create and once after reconnecting for
-            # the lost-response receipt, then commits three item mutations.
-            assert database.execute("select count(*) from encrypted_audit_records").fetchone() == (6,)
+            # Both unlocks survived the injected failure: initial and receipt
+            # recovery. The successful CRUD client repeats those two unlocks,
+            # then commits three item mutations.
+            assert database.execute("select count(*) from encrypted_audit_records").fetchone() == (7,)
             assert database.execute("select count(*) from human_challenges where consumed=1").fetchone() == (3,)
             assert database.execute("select count(*) from human_challenges where consumed=0").fetchone() == (1,)
             assert database.execute("select count(*) from human_staging").fetchone() == (1,)
