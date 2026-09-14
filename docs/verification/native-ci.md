@@ -407,3 +407,15 @@ sin omitir SQLite WAL/SHM. No autoriza cambios generales de timeout o KDF.
 El estado unificado es 25/35 tickets integrados. Las ramas nativas siguen
 candidatas aisladas; ninguna corrida parcial equivale a la revisión final
 Astra, al gate humano 34 ni a soporte completo de seis targets.
+
+#### Windows — regresión nativa de creación de pipe
+
+La [corrida14](https://github.com/SantanaJcp/passwordmanager/actions/runs/34838861714),
+`23bc5e6`, compila la corrección acotada que retira SQOS del modo servidor y
+lo mantiene en CreateFile cliente. Cuatro tests previos pasan; el nuevo test
+nativo falla en la primera creación (error opaco), por lo que el servicio no
+se ejecutó en esta corrida. No se presenta el cambio como corrección causal
+validada. El fixture usa un propietario SID de servicio sintético ausente del
+token del runner: posible error de owner, todavía sin código Win32 observado.
+Se investiga esa condición sin relajar la DACL del producto ni omitir la
+regresión. Un warning de import test-only fuera de cfg también quedó visible.
