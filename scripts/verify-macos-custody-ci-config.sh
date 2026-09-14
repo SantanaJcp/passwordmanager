@@ -219,9 +219,13 @@ success_calls = []
 def successful_cleanup(command, *, check):
     assert check is False
     success_calls.append(tuple(map(str, command)))
-    absent_query = (command[:2] == ["launchctl", "print"] or
-                    (command[:3] == ["dscl", ".", "-read"]))
-    return type("Result", (), {"returncode": 1 if absent_query else 0})()
+    if command[:2] == ["launchctl", "list"]:
+        stdout = b"PID\tStatus\tLabel\n1\t0\tcom.apple.synthetic\n"
+    elif command[:3] == ["dscl", ".", "-list"]:
+        stdout = b"root\nnobody\n"
+    else:
+        stdout = b""
+    return type("Result", (), {"returncode": 0, "stdout": stdout})()
 assert module.cleanup_owned_resources(
     True, owned_paths, owned_records, successful_cleanup, lambda _path: False
 ) == []
@@ -231,9 +235,7 @@ failure_calls = []
 def failing_cleanup(command, *, check):
     assert check is False
     failure_calls.append(tuple(map(str, command)))
-    absence_query = (command[:2] == ["launchctl", "print"] or
-                     (command[:3] == ["dscl", ".", "-read"]))
-    return type("Result", (), {"returncode": 0 if absence_query else 9})()
+    return type("Result", (), {"returncode": 9, "stdout": b""})()
 cleanup_errors = module.cleanup_owned_resources(
     True, owned_paths, owned_records, failing_cleanup, lambda _path: False
 )
@@ -241,6 +243,30 @@ assert len(failure_calls) == 7 and len(cleanup_errors) == 7
 aggregate = module.OwnedCleanupError(cleanup_errors)
 assert len(aggregate.errors) == 7
 assert "launchd-bootout" in str(aggregate) and "delete-user" in str(aggregate)
+
+interrupt = KeyboardInterrupt()
+interrupt_calls = []
+def interruption_cleanup(command, *, check):
+    interrupt_calls.append(tuple(map(str, command)))
+    return type("Result", (), {"returncode": 0, "stdout": b""})()
+try:
+    module.finish_owned_resources(
+        interrupt, False, owned_paths, [], interruption_cleanup
+    )
+except KeyboardInterrupt as caught:
+    assert caught is interrupt
+else:
+    raise AssertionError("interruption was not re-raised after owned cleanup")
+assert len(interrupt_calls) == 1
+try:
+    module.finish_owned_resources(
+        interrupt, False, owned_paths, [], failing_cleanup
+    )
+except KeyboardInterrupt as caught:
+    assert caught is interrupt
+    assert isinstance(caught.__cause__, module.OwnedCleanupError)
+else:
+    raise AssertionError("cleanup failure replaced the original interruption")
 result = type("Result", (), {
     "returncode": 0, "stdout": b"state = running\n\tpid = 321\n", "stderr": b""
 })()

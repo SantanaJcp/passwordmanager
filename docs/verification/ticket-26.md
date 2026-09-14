@@ -635,8 +635,10 @@ partially configured accounts. Cleanup attempts every and only ledger entry in
 dependency-safe reverse order, records every nonzero result or exception using
 fixed non-sensitive action names, then queries absence for every owned path,
 launchd label and directory-service record. It raises one aggregate error after
-all attempts; no cleanup failure can be ignored or converted to success. The
-four PASS lines move after successful cleanup and verified absence. No glob,
+all attempts, or attaches that aggregate as the cause while re-raising the same
+pre-existing failure; no cleanup failure can be ignored or converted to
+success. The four PASS lines move after successful cleanup and verified
+absence. No glob,
 alternate root, broad account match, home-directory deletion or unrelated
 system mutation is permitted.
 
@@ -653,6 +655,25 @@ and `git diff --check` passed. No Rust gate, build or native laboratory was run
 for this scripts-and-documentation-only checkpoint. Only the unchanged native
 CI laboratory can verify real launchd, filesystem and Directory Services
 cleanup on both architectures.
+
+Before native dispatch, static review found two regressions in that first
+cleanup checkpoint. It treated every nonzero per-record query as proof of
+absence, which could conceal a permission or Directory Services/launchd
+transport failure, and `except Exception` no longer guaranteed cleanup for
+`KeyboardInterrupt` or `SystemExit` as the prior `finally` did. The corrected
+method requires successful, closed-format `launchctl list` and `dscl -list`
+inventory queries and proves the exact owned label/user/group names are absent;
+any query error or malformed listing is itself aggregated. It captures
+`BaseException`, completes cleanup, and re-raises the same interruption object
+when cleanup succeeds. Focused regressions must cover listing-query failure and
+identity-preserving interruption cleanup before native dispatch.
+
+The corrected focused checks passed: successful closed inventories were
+accepted; nonzero launchd and both Directory Services inventory queries were
+all retained in the seven-error aggregate; and both successful and failing
+cleanup re-raised the identical `KeyboardInterrupt` object after attempting the
+owned removal. Python AST parsing, the static macOS checker and
+`git diff --check` passed. No Cargo, Rust build or native laboratory was run.
 
 ## Remaining acceptance work
 

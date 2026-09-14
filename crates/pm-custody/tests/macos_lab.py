@@ -104,6 +104,39 @@ class OwnedCleanupError(AssertionError):
         super().__init__("; ".join(str(error) for error in self.errors))
 
 
+def parse_launchctl_labels(output):
+    try:
+        lines = output.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise AssertionError("launchd cleanup inventory is malformed") from error
+    assert lines and lines[0] == "PID\tStatus\tLabel", \
+        "launchd cleanup inventory is malformed"
+    labels = set()
+    for line in lines[1:]:
+        fields = line.split("\t")
+        assert len(fields) == 3, "launchd cleanup inventory is malformed"
+        pid, status, label = fields
+        assert (pid == "-" or pid.isascii() and pid.isdecimal()), \
+            "launchd cleanup inventory is malformed"
+        assert re.fullmatch(r"-?[0-9]+", status), \
+            "launchd cleanup inventory is malformed"
+        assert label and not any(ord(character) < 0x20 for character in label), \
+            "launchd cleanup inventory is malformed"
+        labels.add(label)
+    return labels
+
+
+def parse_directory_records(output):
+    try:
+        records = output.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise AssertionError("directory cleanup inventory is malformed") from error
+    assert records, "directory cleanup inventory is malformed"
+    assert all(record and not any(ord(character) < 0x20 for character in record)
+               for record in records), "directory cleanup inventory is malformed"
+    return set(records)
+
+
 def cleanup_owned_resources(
     bootstrapped, owned_paths, owned_records, invoke=sudo,
     path_exists=os.path.lexists,
@@ -117,7 +150,7 @@ def cleanup_owned_resources(
                 errors.append(AssertionError(
                     f"owned cleanup failed: action={action} returncode={result.returncode}"
                 ))
-        except Exception as error:
+        except BaseException as error:
             errors.append(AssertionError(f"owned cleanup raised: action={action}"))
             errors[-1].__cause__ = error
 
@@ -131,12 +164,12 @@ def cleanup_owned_resources(
 
     if bootstrapped:
         try:
-            result = invoke(
-                ["launchctl", "print", f"system/{LABEL}"], check=False
-            )
-            if result.returncode == 0:
+            result = invoke(["launchctl", "list"], check=False)
+            if result.returncode != 0:
+                raise AssertionError("launchd cleanup inventory query failed")
+            if LABEL in parse_launchctl_labels(result.stdout):
                 errors.append(AssertionError("owned cleanup left launchd job"))
-        except Exception as error:
+        except BaseException as error:
             wrapped = AssertionError("owned cleanup absence check raised: launchd")
             wrapped.__cause__ = error
             errors.append(wrapped)
@@ -144,21 +177,43 @@ def cleanup_owned_resources(
         try:
             if path_exists(path):
                 errors.append(AssertionError(f"owned cleanup left path: name={name}"))
-        except Exception as error:
+        except BaseException as error:
             wrapped = AssertionError("owned cleanup absence check raised: path")
             wrapped.__cause__ = error
             errors.append(wrapped)
-    for record in owned_records:
+    for kind, root in (("user", "/Users"), ("group", "/Groups")):
+        prefix = f"/{root.strip('/')}/"
+        expected = {
+            record.rsplit("/", 1)[1]
+            for record in owned_records
+            if record.startswith(prefix)
+        }
+        if not expected:
+            continue
         try:
-            result = invoke(["dscl", ".", "-read", record], check=False)
-            if result.returncode == 0:
-                kind = "user" if record.startswith("/Users/") else "group"
+            result = invoke(["dscl", ".", "-list", root], check=False)
+            if result.returncode != 0:
+                raise AssertionError("directory cleanup inventory query failed")
+            inventory = parse_directory_records(result.stdout)
+            if expected & inventory:
                 errors.append(AssertionError(f"owned cleanup left record: kind={kind}"))
-        except Exception as error:
+        except BaseException as error:
             wrapped = AssertionError("owned cleanup absence check raised: directory-record")
             wrapped.__cause__ = error
             errors.append(wrapped)
     return errors
+
+
+def finish_owned_resources(lab_error, bootstrapped, owned_paths, owned_records, invoke=sudo):
+    cleanup_errors = cleanup_owned_resources(
+        bootstrapped, owned_paths, owned_records, invoke
+    )
+    if lab_error is not None:
+        if cleanup_errors:
+            raise lab_error from OwnedCleanupError(cleanup_errors)
+        raise lab_error
+    if cleanup_errors:
+        raise OwnedCleanupError(cleanup_errors)
 
 
 def unused_ids(count):
@@ -681,16 +736,13 @@ def main():
 
         tty_clipboard = run(["script", "-q", "/dev/null", INSTALL / "pm-custody", "macos-native-probe"])
         assert b"PASS macos-native tty=real rlimit-core=0 clipboard=AppKit-changeCount" in tty_clipboard.stdout
-    except Exception as error:
+    except BaseException as error:
         lab_error = error
 
-    cleanup_errors = cleanup_owned_resources(
+    finish_owned_resources(
+        lab_error,
         bootstrapped, owned_paths, owned_records
     )
-    if cleanup_errors:
-        raise OwnedCleanupError(cleanup_errors) from lab_error
-    if lab_error is not None:
-        raise lab_error
     print("PASS macos-launchdaemon account=_passwordmanager peer=getpeereid bilateral=tls-rpk")
     print("PASS macos-acl bootstrap=0400 binary+plist=root-owned wrong-uid=rejected")
     print("PASS macos-persistence suspension=durable launchd-restart=real")
