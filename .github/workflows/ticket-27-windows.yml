@@ -8,6 +8,11 @@ on:
         required: true
         default: false
         type: boolean
+      service_diagnostics:
+        description: Emit fixed categorical SCM state diagnostics in the product lab (does not change product behavior)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -46,7 +51,13 @@ jobs:
         run: ./scripts/prepare-windows-libsodium.ps1 -EphemeralCI
       - name: Run native custody product lab
         shell: pwsh
-        run: ./scripts/test-windows-custody-lab.ps1 -EphemeralCI
+        run: |
+          if ('${{ inputs.service_diagnostics }}' -eq 'true') {
+            ./scripts/test-windows-custody-lab.ps1 -EphemeralCI -ServiceDiagnostics
+          }
+          else {
+            ./scripts/test-windows-custody-lab.ps1 -EphemeralCI
+          }
 
   windows-arm64-storage-diagnostics:
     name: Ticket 27 windows-arm64 storage diagnostics (non-acceptance)

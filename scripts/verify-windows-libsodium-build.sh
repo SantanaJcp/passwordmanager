@@ -142,6 +142,31 @@ case "$service_create_line" in
         ;;
 esac
 require_literal 'NT SERVICE\$serviceName' "$lab"
+require_literal '[switch]$ServiceDiagnostics' "$lab"
+require_literal 'function Write-ServiceDiagnostic' "$lab"
+require_literal "Write-ServiceDiagnostic 'before-start'" "$lab"
+require_literal "Write-ServiceDiagnostic 'after-start'" "$lab"
+require_literal "Write-ServiceDiagnostic 'after-settle'" "$lab"
+require_literal 'Start-Sleep -Seconds 2' "$lab"
+require_literal 'stopped-exit-zero' "$lab"
+require_literal 'stopped-exit-nonzero' "$lab"
+require_literal 'ServiceSpecificExitCode' "$lab"
+require_literal 'service_diagnostics:' "$workflow"
+require_literal "inputs.service_diagnostics" "$workflow"
+require_literal '-ServiceDiagnostics' "$workflow"
+service_diagnostics_input_block=$(awk '
+    /^      service_diagnostics:/ { inside = 1 }
+    inside && /^      [[:alnum:]_-]+:/ && $0 !~ /^      service_diagnostics:/ { exit }
+    inside { print }
+' "$workflow")
+printf '%s\n' "$service_diagnostics_input_block" | grep -Fq 'default: false' || {
+    echo 'service diagnostics workflow input must default to false' >&2
+    exit 1
+}
+printf '%s\n' "$service_diagnostics_input_block" | grep -Fq 'type: boolean' || {
+    echo 'service diagnostics workflow input must be an explicit boolean' >&2
+    exit 1
+}
 
 build_line=$(grep -nF "Invoke-Checked 'cargo' @('build', '-p', 'pm-custody'" "$lab" | cut -d: -f1)
 dumpbin_line=$(grep -nF 'Assert-NativeStaticMsvcBinary $dumpbin' "$lab" | cut -d: -f1)
@@ -239,7 +264,7 @@ done
 
 fetch_line=$(grep -nF 'cargo fetch --locked' "$workflow" | cut -d: -f1)
 prepare_line=$(grep -nF './scripts/prepare-windows-libsodium.ps1 -EphemeralCI' "$workflow" | cut -d: -f1)
-lab_line=$(grep -nF './scripts/test-windows-custody-lab.ps1 -EphemeralCI' "$workflow" | cut -d: -f1)
+lab_line=$(grep -nF './scripts/test-windows-custody-lab.ps1 -EphemeralCI' "$workflow" | head -n1 | cut -d: -f1)
 test "$fetch_line" -lt "$prepare_line" && test "$prepare_line" -lt "$lab_line" || {
     echo 'Windows phases are not ordered fetch -> authenticated source build -> offline lab' >&2
     exit 1

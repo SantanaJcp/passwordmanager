@@ -2,7 +2,8 @@
 # Native, destructive-only-to-ephemeral-fixtures Windows 11 ticket-27 lab.
 [CmdletBinding()]
 param(
-    [switch]$EphemeralCI
+    [switch]$EphemeralCI,
+    [switch]$ServiceDiagnostics
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +23,41 @@ function Assert-True([bool]$Condition, [string]$Message) {
 function Invoke-Checked([string]$File, [string[]]$Arguments) {
     & $File @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$File failed ($LASTEXITCODE)" }
+}
+
+function Write-ServiceDiagnostic([string]$Phase, [string]$Name) {
+    if (-not $ServiceDiagnostics) { return }
+    $stateCategory = 'query-error'
+    $pidCategory = 'unknown'
+    try {
+        $service = Get-CimInstance Win32_Service -Filter "Name='$Name'"
+        if ($null -eq $service) {
+            $stateCategory = 'missing'
+            $pidCategory = 'absent'
+        }
+        else {
+            $pidCategory = if ([int]$service.ProcessId -gt 0) { 'present' } else { 'absent' }
+            switch ([string]$service.State) {
+                'Running' { $stateCategory = 'running' }
+                'Start Pending' { $stateCategory = 'start-pending' }
+                'Stop Pending' { $stateCategory = 'stop-pending' }
+                'Stopped' {
+                    if ([int]$service.ExitCode -ne 0 -or [int]$service.ServiceSpecificExitCode -ne 0) {
+                        $stateCategory = 'stopped-exit-nonzero'
+                    }
+                    else {
+                        $stateCategory = 'stopped-exit-zero'
+                    }
+                }
+                default { $stateCategory = 'other' }
+            }
+        }
+    }
+    catch {
+        $stateCategory = 'query-error'
+        $pidCategory = 'unknown'
+    }
+    Write-Host "SCM_DIAG phase=$Phase state=$stateCategory pid=$pidCategory"
 }
 
 function Get-Sid([string]$Name) {
@@ -318,8 +354,11 @@ try {
     $device = '27272727272727272727272727272727'
     $binPath = "`"$custody`" service --bootstrap `"$bootstrap`" --vault-id $vaultId --vault `"$vault`" --device $device"
     Invoke-Checked 'sc.exe' @('config', $serviceName, 'binPath=', $binPath)
+    Write-ServiceDiagnostic 'before-start' $serviceName
     Invoke-Checked 'sc.exe' @('start', $serviceName)
+    Write-ServiceDiagnostic 'after-start' $serviceName
     Start-Sleep -Seconds 2
+    Write-ServiceDiagnostic 'after-settle' $serviceName
     Assert-True ((Get-Service $serviceName).Status -eq 'Running') 'custody service did not reach RUNNING'
 
     $p = Start-AsUser $agentCredential $custody @('probe', '--profile', $agentProfile, '--private', $agentPrivate, '--vault-id', $vaultId) $emptyInput $agentOut $agentErr

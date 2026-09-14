@@ -687,3 +687,50 @@ workspace offline sin error en 38,63 s. No se ejecutó PowerShell, MSVC, Dumpbin
 ni un target Windows; por tanto no se afirma que el helper compile o funcione
 en Windows hasta la corrida nativa normal con `diagnostic_only=false`. No se
 modificó el cleanup heredado de `persist_new` ni se introdujo fallback.
+
+## Diagnóstico acotado del estado SCM (método antes del código)
+
+La corrida normal nativa 11,
+[run 34809788057](https://github.com/SantanaJcp/passwordmanager/actions/runs/34809788057),
+sobre `e2fdc21`, avanzó más que el RED anterior: creó `vault.sqlite3` y
+`vault.sqlite3.audit-custody`, selló ACL y compiló el servicio. `sc.exe start`
+mostró temporalmente `STATE : 4 RUNNING`, `WIN32_EXIT_CODE : 0` y PID 8528,
+pero después del `Start-Sleep -Seconds 2` vigente el `Get-Service` del lab falló
+con `custody service did not reach RUNNING`. El log no contiene el código que
+dejó el servicio en estado detenido; ampliar ese sleep no distingue una demora
+de arranque de un proceso que se registra como RUNNING y luego devuelve
+`CUSTODY_UNAVAILABLE`.
+
+Antes de tocar el motor se fija este método mínimo y reversible:
+
+1. Añadir al lab un switch exacto `-ServiceDiagnostics`, apagado por defecto,
+   y una entrada manual booleana `service_diagnostics` cuyo default siga siendo
+   `false`. El job normal continúa ejecutando exactamente el mismo flujo cuando
+   el input es falso.
+2. En tres fases fijas (`before-start`, `after-start`, `after-settle`) consultar
+   una vez `Win32_Service` por el nombre ya colisionado. Emitir solamente
+   categorías constantes para `state` (`running`, `start-pending`,
+   `stop-pending`, `stopped-exit-zero`, `stopped-exit-nonzero`, `missing`,
+   `other`, `query-error`) y `pid` (`present`, `absent`, `unknown`). El estado
+   detenido se clasifica por `ExitCode` y `ServiceSpecificExitCode`, sin imprimir
+   valores dinámicos, rutas, excepciones, cuentas ni secretos.
+3. Conservar el `Start-Sleep -Seconds 2`, la aserción actual, las cuentas y el
+   cleanup. El diagnóstico no reintenta `sc start`, no extiende el plazo, no
+   cambia el estado de éxito/fallo y no puede convertir una detención en PASS.
+   Si el modo está apagado, no consulta ni imprime nada adicional.
+
+Este discriminante separa un servicio aún pendiente de un servicio propio que
+se detuvo con código no cero, sin asumir cuál fase interna falló. Si el modo
+opcional observa `stopped-exit-nonzero`, la siguiente corrección deberá añadir
+una fase interna categórica solamente con nueva evidencia; no se inventa un
+fallback ni se relaja el contrato del servicio. La corrida diagnóstica tampoco
+cerrará ningún criterio de aceptación: sigue siendo necesaria la corrida normal
+con `service_diagnostics=false` y el resto de gates nativos.
+
+La regresión estática se ejecutó primero contra `e2fdc21` y dio RED porque faltaba
+`[switch]$ServiceDiagnostics` (checker exit 1). Después de implementar el
+checkpoint, `verify-windows-libsodium-build.sh`, `sh -n`, `git diff --check` y
+la inspección estructural YAML pasaron. El host Linux no tiene `pwsh`; todavía
+falta ejecutar el mismo lab en Windows con el input manual
+`service_diagnostics=true` para observar las categorías reales. Esa corrida no
+debe sustituir la posterior corrida normal con el input en `false`.
