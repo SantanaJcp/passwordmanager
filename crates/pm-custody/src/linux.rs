@@ -105,6 +105,12 @@ enum Ticket26DiagnosticPhase {
     ServerReady,
 }
 
+#[derive(Clone, Copy)]
+enum Ticket26DiagnosticStreamStage {
+    Before,
+    After,
+}
+
 impl Ticket26DiagnosticPhase {
     const fn name(self) -> &'static str {
         match self {
@@ -136,6 +142,31 @@ fn ticket26_diagnostic(phase: Ticket26DiagnosticPhase) {
 
 #[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
 const fn ticket26_diagnostic(_phase: Ticket26DiagnosticPhase) {}
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic_accepted_nonblocking(
+    stage: Ticket26DiagnosticStreamStage,
+    nonblocking: bool,
+) {
+    if std::env::var_os("PM_MACOS_TICKET26_DIAGNOSTIC").as_deref() == Some(OsStr::new("1")) {
+        let value = u8::from(nonblocking);
+        match stage {
+            Ticket26DiagnosticStreamStage::Before => {
+                eprintln!("PM26_DIAGNOSTIC accepted-stream-nonblocking-before={value}");
+            }
+            Ticket26DiagnosticStreamStage::After => {
+                eprintln!("PM26_DIAGNOSTIC accepted-stream-nonblocking-after={value}");
+            }
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic_accepted_nonblocking(
+    _stage: Ticket26DiagnosticStreamStage,
+    _nonblocking: bool,
+) {
+}
 
 impl Role {
     const fn byte(self) -> u8 {
@@ -631,7 +662,7 @@ fn serve_loop(
             &agent_config,
             vault,
             Some(&bootstrap.agent_spki),
-        );
+        )?;
         accept_one(
             &human_listener,
             bootstrap.human_uid,
@@ -639,7 +670,7 @@ fn serve_loop(
             &human_config,
             vault,
             None,
-        );
+        )?;
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -4810,15 +4841,44 @@ fn accept_one(
     config: &Arc<ServerConfig>,
     vault: Option<&VaultService>,
     peer_rpk: Option<&[u8]>,
-) {
+) -> Result<(), Failure> {
     let Ok((stream, _)) = listener.accept() else {
-        return;
+        return Ok(());
     };
+    normalize_accepted_stream(&stream)?;
     if configure_unix_stream(&stream).is_err() {
-        return;
+        return Ok(());
     }
     ticket26_diagnostic(Ticket26DiagnosticPhase::ServerStreamConfigured);
     let _ = handle_connection(stream, expected_uid, role, config, vault, peer_rpk);
+    Ok(())
+}
+
+fn accepted_stream_flags(stream: &UnixStream) -> Result<libc::c_int, Failure> {
+    let flags = unsafe {
+        // SAFETY: stream owns a live Unix socket and F_GETFL only reads its
+        // descriptor status flags.
+        libc::fcntl(stream.as_raw_fd(), libc::F_GETFL)
+    };
+    (flags >= 0).then_some(flags).ok_or(Failure::Unavailable)
+}
+
+fn normalize_accepted_stream(stream: &UnixStream) -> Result<(), Failure> {
+    let before = accepted_stream_flags(stream)?;
+    ticket26_diagnostic_accepted_nonblocking(
+        Ticket26DiagnosticStreamStage::Before,
+        before & libc::O_NONBLOCK != 0,
+    );
+    stream
+        .set_nonblocking(false)
+        .map_err(|_| Failure::Unavailable)?;
+    let after = accepted_stream_flags(stream)?;
+    let nonblocking = after & libc::O_NONBLOCK != 0;
+    ticket26_diagnostic_accepted_nonblocking(Ticket26DiagnosticStreamStage::After, nonblocking);
+    if nonblocking {
+        return Err(Failure::Unavailable);
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -5596,5 +5656,65 @@ mod tests {
         assert!(ancillary_payload_size(15_u32, 16_u32, 24).is_err());
         assert!(ancillary_payload_size(25_u32, 16_u32, 24).is_err());
         assert!(ancillary_field::<u8>(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn accepted_stream_is_blocking_after_preparation() {
+        let mut suffix = 0_u32;
+        let (listener, path) = loop {
+            let path = std::env::temp_dir().join(format!(
+                "passwordmanager-accepted-stream-{}-{suffix}.sock",
+                std::process::id()
+            ));
+            match UnixListener::bind(&path) {
+                Ok(listener) => break (listener, path),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::AlreadyExists
+                    ) =>
+                {
+                    suffix += 1;
+                }
+                Err(error) => panic!("bind test Unix listener at {path:?}: {error}"),
+            }
+        };
+        listener
+            .set_nonblocking(true)
+            .expect("set test listener nonblocking");
+        let client = UnixStream::connect(&path).expect("connect test Unix listener");
+        let (accepted, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("accept test Unix listener: {error}"),
+            }
+        };
+
+        accepted
+            .set_nonblocking(true)
+            .expect("set accepted stream nonblocking");
+        assert!(
+            normalize_accepted_stream(&accepted).is_ok(),
+            "normalize accepted stream"
+        );
+        let flags = unsafe {
+            // SAFETY: accepted owns a live Unix socket and F_GETFL does not
+            // mutate the descriptor.
+            libc::fcntl(accepted.as_raw_fd(), libc::F_GETFL)
+        };
+        assert!(flags >= 0, "F_GETFL failed: {flags}");
+        assert_eq!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "accepted stream stayed nonblocking"
+        );
+
+        drop(client);
+        drop(accepted);
+        drop(listener);
+        fs::remove_file(path).expect("remove test Unix socket");
     }
 }

@@ -27,7 +27,10 @@ PLIST = pathlib.Path(f"/Library/LaunchDaemons/{LABEL}.plist")
 PASSWORD = b"synthetic ticket 26 master password"
 DIAGNOSTIC_ENV = "PM_MACOS_TICKET26_DIAGNOSTIC"
 DIAGNOSTIC_LOG = STATE / "ticket26-diagnostic.log"
-DIAGNOSTIC_LINE = re.compile(rb"PM26_DIAGNOSTIC phase=[a-z-]+$")
+DIAGNOSTIC_LINE = re.compile(
+    rb"(?:PM26_DIAGNOSTIC phase=[a-z-]+|"
+    rb"PM26_DIAGNOSTIC accepted-stream-nonblocking-(?:before|after)=[01])$"
+)
 PEER_UID_SCRIPT = """
 import ctypes, socket, sys
 stream = socket.socket(socket.AF_UNIX)
@@ -284,6 +287,8 @@ def probe(binary, user, profile, private, endpoint, *, allowed=True, diagnostic=
         client = diagnostic_lines(diagnostic_stderr)
         service = sudo(["cat", DIAGNOSTIC_LOG]).stdout
         server = diagnostic_lines(service)[-32:]
+        assert b"PM26_DIAGNOSTIC accepted-stream-nonblocking-before=1" in server
+        assert b"PM26_DIAGNOSTIC accepted-stream-nonblocking-after=0" in server
         print("PM26_DIAGNOSTIC client=" + ",".join(line.decode() for line in client))
         print("PM26_DIAGNOSTIC server=" + ",".join(line.decode() for line in server))
     if allowed:

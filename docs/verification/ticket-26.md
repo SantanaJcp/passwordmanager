@@ -205,13 +205,71 @@ the explicit `macos-ticket26-diagnostics` laboratory-only feature. That feature
 is inert unless the fixture supplies the exact
 `PM_MACOS_TICKET26_DIAGNOSTIC=1` opt-in. It may emit only fixed phase codes for
 process hardening, profile/key parsing, Unix connect/configuration, bilateral
-peer UID, TLS 1.3 handshake, pinned RPK, ALPN and READY; it must not emit key or
-profile bytes, dynamic paths, credentials or expanded public errors. The
-fixture captures the service phases in its owned protected state, validates
+peer UID, TLS 1.3 handshake, pinned RPK and ALPN/READY, plus fixed `0|1`
+accepted-stream `O_NONBLOCK` observations; it must not emit key or profile
+bytes, dynamic paths, credentials or expanded public errors. The fixture
+captures the service diagnostics in its owned protected state, validates
 the fixed grammar and reports only a bounded suffix if the probe remains red.
 The checker must require both compile-time and fixture opt-ins and reject
 activation in the workflow or ordinary builds. This is diagnosis, not native
 acceptance and not permission to weaken any guard.
+
+### Accepted-stream blocking checkpoint
+
+The seventh native custody run
+[`34797022111`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34797022111)
+on checkpoint `678319b` is an observed **RED** on both macOS targets after the
+safe fixture and identity gates passed. The client and service each reached
+their fixed `*-tls-configured` diagnostic phase, but neither reached its next
+handshake phase; the public probe result remained exactly
+`CUSTODY_UNAVAILABLE`. This bounds the failure to the I/O boundary immediately
+after TLS configuration, but does not by itself prove the cause.
+
+The next checkable hypothesis is that the accepted Darwin Unix stream retains
+the listener's nonblocking state. `serve_loop` deliberately makes both
+listeners nonblocking so that its polling loop can handle `WouldBlock`.
+Darwin's [`accept(2)` contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/accept.2.html)
+says the new socket has the listening socket's properties, while Linux's
+[`accept(2)` documentation](https://www.man7.org/linux/man-pages/man2/accept.2.html)
+explicitly warns that Linux does not inherit `O_NONBLOCK`. This makes inherited
+`O_NONBLOCK` a Darwin-specific hypothesis, not a cross-platform assumption.
+The rustls [`StreamOwned` wrapper](https://docs.rs/rustls/latest/rustls/struct.StreamOwned.html)
+delegates handshake I/O to `ConnectionCommon::complete_io` through the
+underlying stream, so a nonblocking accepted descriptor can explain a
+handshake that stops before the first request/flush; that sentence is an
+inference until the next native run observes the flags.
+
+The authorized correction is deliberately narrow: immediately after
+`accept(2)`, normalize the accepted stream to blocking mode before constructing
+the rustls stream, read back `F_GETFL`, and return the existing visible
+`CUSTODY_UNAVAILABLE` failure if the setter or readback fails. It does not add a
+retry, alternate transport, relaxed TLS check, or longer deadline, and it does
+not alter `IO_TIMEOUT`. The regression test accepts a real Unix-listener
+connection and independently asserts that `F_GETFL` has no `O_NONBLOCK` bit
+after preparation. With only the laboratory `macos-ticket26-diagnostics`
+feature **and** the exact `PM_MACOS_TICKET26_DIAGNOSTIC=1` opt-in, the native
+harness may additionally observe fixed, data-free
+`PM26_DIAGNOSTIC accepted-stream-nonblocking-before=0|1` and
+`PM26_DIAGNOSTIC accepted-stream-nonblocking-after=0|1` lines; ordinary builds
+emit no such diagnostic. The feature remains absent from Cargo defaults.
+
+Verification must proceed in this order: record the regression test RED against
+this checkpoint, implement the normalization, rerun that test GREEN, then run
+the existing Linux custody lab with the normal feature set. A subsequent
+ephemeral Mac run must observe `before=1` and `after=0` on each target before
+the hypothesis is considered confirmed. Full Ticket 26 acceptance still must
+execute the normal binary/laboratory entry point without the diagnostic feature;
+the diagnostic run is evidence for this boundary only and is not an acceptance
+gate.
+
+For this candidate, the focused local TDD record is:
+
+```text
+./scripts/cargo-local.sh test -p pm-custody --lib \
+  accepted_stream_is_blocking_after_preparation --locked --offline
+# RED before the implementation: cannot find function `normalize_accepted_stream`
+# GREEN after the implementation: 1 test passed
+```
 
 The acceptance-workflow checker was written before the workflow existed:
 

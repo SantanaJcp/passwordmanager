@@ -95,6 +95,10 @@ require_literal 'macos-ticket26-diagnostics = []' "$custody_manifest"
 require_literal '--features macos-ticket26-diagnostics' "$lab"
 require_literal 'PM_MACOS_TICKET26_DIAGNOSTIC' "$harness"
 require_literal 'feature = "macos-ticket26-diagnostics"' "$custody_source"
+require_literal 'libc::F_GETFL' "$custody_source"
+require_literal 'set_nonblocking(false)' "$custody_source"
+require_literal 'accepted-stream-nonblocking-before=' "$custody_source"
+require_literal 'accepted-stream-nonblocking-after=' "$custody_source"
 require_literal 'require_readable_regular(AGENT, agent_profile' "$harness"
 require_literal 'require_readable_regular(AGENT, agent_key' "$harness"
 if grep -Fq 'RUNNER_TEMP' "$harness"; then
@@ -138,6 +142,9 @@ else:
 assert module.diagnostic_lines(b"PM26_DIAGNOSTIC phase=client-profile\n") == [
     b"PM26_DIAGNOSTIC phase=client-profile"
 ]
+assert module.diagnostic_lines(
+    b"PM26_DIAGNOSTIC accepted-stream-nonblocking-before=1\n"
+) == [b"PM26_DIAGNOSTIC accepted-stream-nonblocking-before=1"]
 try:
     module.diagnostic_lines(b"PM26_DIAGNOSTIC phase=client-profile path=/secret\n")
 except AssertionError:
