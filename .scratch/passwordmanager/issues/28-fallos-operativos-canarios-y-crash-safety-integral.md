@@ -121,6 +121,11 @@ y fallo explícito de surrogates inválidos. La futura prueba nativa cubrirá es
 casos, CRLF, handle nulo/inválido, pipe y conservación del handle prestado; un
 PASS Linux no los acredita.
 
+2026-09-14 — GREEN stdin nativo Linux: pm-crypto, pm-cli y fault-safety lab
+terminaron rc0; el lab observó `stdin=native-unbuffered` y cleanup verificado.
+El primer check posterior falló únicamente en formato de un import Windows y
+se conserva; Windows/macOS todavía no están probados.
+
 2026-09-14 — Usuario autorizó de forma explícita sólo los cuatro cleanups antes
 pendientes: `TemporaryDirectory::drop/remove_dir_all` y los unlink de privada
 tras keygen, `.partial` de download y archivo incompleto de `write_new`. Se

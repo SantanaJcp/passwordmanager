@@ -276,6 +276,18 @@ debe confirmar el proceso completo. La API de líneas inyectable sigue usando
 GREEN, y un PASS Linux no acreditará terminales macOS/Windows ni sus builds
 nativos.
 
+El GREEN Linux enfocado terminó rc0 en los tres seams: `pm-crypto` completo
+(`/tmp/pm28-native-stdin-green-pm-crypto.log`), `pm-cli` completo
+(`/tmp/pm28-native-stdin-green-pm-cli.log`) y el lab real
+(`/tmp/pm28-native-stdin-green-fault-safety.log`). Este último observó
+`stdin=native-unbuffered`, memlock antes de bytes, canario restante en kernel y
+cleanup verificado. El primer `scripts/check.sh` posterior llegó sólo a
+`rustfmt --check` y terminó rc1 por el wrapping de un import Windows
+(`/tmp/pm28-native-stdin-green-check.log`); se conserva como fallo de formato,
+no conductual, y se corrigió sin tocar comportamiento. Check y clean finales
+quedan registrados por separado cuando terminen. Esta evidencia sigue siendo
+Linux x86_64: los casos Windows enumerados y macOS no se infieren de ella.
+
 La comparación de compatibilidad queda fijada contra el código fuente de
 `std` 1.98.1, no contra una inferencia de `ReadFile`. El caller de create/open
 es el único lector humano durante esa invocación; `NativeStdin` toma prestado el

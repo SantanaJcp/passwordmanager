@@ -135,10 +135,7 @@ fn read_windows_raw(
     handle: windows_sys::Win32::Foundation::HANDLE,
     buffer: &mut [u8],
 ) -> io::Result<usize> {
-    use windows_sys::Win32::{
-        Foundation::ERROR_BROKEN_PIPE,
-        Storage::FileSystem::ReadFile,
-    };
+    use windows_sys::Win32::{Foundation::ERROR_BROKEN_PIPE, Storage::FileSystem::ReadFile};
 
     let requested = u32::try_from(buffer.len()).map_err(|_| {
         io::Error::new(
