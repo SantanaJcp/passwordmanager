@@ -129,8 +129,8 @@ def main():
         ]
         for path, uid, mode in (
             (runtime, CUSTODIAN, 0o755),
-            (human_home, HUMAN, 0o700),
-            (agent_home, AGENT, 0o700),
+            (human_home, HUMAN, 0o755),
+            (agent_home, AGENT, 0o755),
             (profiles, 0, 0o755),
         ):
             path.mkdir(mode=mode)

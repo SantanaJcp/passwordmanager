@@ -453,3 +453,12 @@ pública incorrecta, falta de `ENOSPC` real o imposibilidad de recuperar el mism
 vault. Un fallo de mount, build, UID map, deadline de fixture o detector WAL no
 es RED de producto. El test queda preparado sin ejecución ni GREEN hasta la
 siguiente ventana Linux exclusiva.
+
+La primera ejecución, `/tmp/pm28-red-storage-enospc.log`, no alcanzó el seam:
+los homes sintéticos se crearon `0700`, por lo que el UID custodio no pudo leer
+las claves públicas del fixture durante `provision-bootstrap`. Se corrigió sólo
+esa precondición a `0755`, preservando ownership y contenido. La ejecución
+válida `/tmp/pm28-red-storage-enospc-attempt2.log` terminó rc0 y observó ENOSPC
+real, rollback integral, canario ausente, `integrity_check=ok`, delta único de
+`HumanUnlock`, restart del mismo vault y cleanup verificado. Es cobertura GREEN
+de comportamiento existente, no un RED y no motivó cambios de producto.

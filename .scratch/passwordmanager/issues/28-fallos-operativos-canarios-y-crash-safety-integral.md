@@ -159,3 +159,9 @@ llena hasta ENOSPC un tmpfs privado del namespace y exige rc4, rollback integral
 canario ausente, `integrity_check=ok` y restart sin reintentar la mutación. El
 método fija delta separado de HumanUnlock y cleanup resume/unmount/path exactos.
 No se escribió GREEN ni se ejecutó Cargo/build/lab.
+
+2026-09-14 — El caso ENOSPC válido pasó sobre el producto existente, por lo que
+se registra como cobertura GREEN y no se fabricó un RED. El primer intento no
+alcanzó producto por permisos `0700` del home fixture; tras corregir sólo esa
+precondición, `/tmp/pm28-red-storage-enospc-attempt2.log` terminó rc0 con ENOSPC
+real, rollback integral, canario ausente, integridad/restart y cleanup verificados.
