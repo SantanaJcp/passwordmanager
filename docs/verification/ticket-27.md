@@ -1661,3 +1661,16 @@ pares down/up completos; en modo inactivo emite el UTF-8 normal. No hay
 fallthrough tras un error de codificación o mapeo. Los tests verifican
 activación/desactivación, pantalla inalterada, campos de tecla y que otros modos
 privados continúen rechazados.
+
+La corrida
+[`34864402493`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34864402493)
+sobre `a6ddb893235204d05518525c958ca2aa8274f995` pasó 8/8, 1/1, 6/6 y
+1/1 en esos mismos grupos. El writer W32IM ya no fue el bloqueo: el siguiente
+rechazo cerrado identificó `modes=[1004] count=1 final=0x68`. El producto no
+se alcanzó aún. El cleanup/ausencia terminó sin un error independiente; log
+completo en `/tmp/pm-windows-conpty-w32im-run24-failed.log`.
+
+Microsoft Terminal clasifica en el mismo parser primario `CSI ? 1004 h` como
+`DECSET_FOCUS`. El observer modela de forma separada `1004 h/l` como el estado
+que habilita reportes Focus In/Out; no altera la pantalla ni inventa eventos de
+foco para esta sesión estable. Cualquier otro modo privado sigue fallando.

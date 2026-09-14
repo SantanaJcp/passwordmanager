@@ -71,6 +71,7 @@ mod windows_fixture {
         saved_row: usize,
         saved_column: usize,
         win32_input: bool,
+        focus_reporting: bool,
         parse: ParseState,
         csi: Vec<u8>,
         utf8: Vec<u8>,
@@ -95,6 +96,7 @@ mod windows_fixture {
                 saved_row: 0,
                 saved_column: 0,
                 win32_input: false,
+                focus_reporting: false,
                 parse: ParseState::Ground,
                 csi: Vec::new(),
                 utf8: Vec::new(),
@@ -233,7 +235,7 @@ mod windows_fixture {
                     || parameters.is_empty()
                     || parameters
                         .iter()
-                        .any(|value| !matches!(value, 25 | 1049 | 2026 | 9001))
+                        .any(|value| !matches!(value, 25 | 1004 | 1049 | 2026 | 9001))
                 {
                     self.fail(format!(
                         "unsupported private ConPTY CSI modes={parameters:?} count={} final=0x{command:02x}",
@@ -246,6 +248,9 @@ mod windows_fixture {
                 }
                 if parameters.contains(&9001) {
                     self.win32_input = command == b'h';
+                }
+                if parameters.contains(&1004) {
+                    self.focus_reporting = command == b'h';
                 }
                 return;
             }
@@ -1193,6 +1198,17 @@ mod windows_fixture {
             observer.feed(b"\x1b[?9001l").unwrap();
             let state = observer.state.lock().unwrap();
             assert!(!state.win32_input);
+            assert!(state.contains("visible"));
+        }
+
+        #[test]
+        fn observer_tracks_focus_reporting_without_inventing_focus_events() {
+            let observer = TerminalObserver::new();
+            observer.feed(b"visible\x1b[?1004h").unwrap();
+            assert!(observer.state.lock().unwrap().focus_reporting);
+            observer.feed(b"\x1b[?1004l").unwrap();
+            let state = observer.state.lock().unwrap();
+            assert!(!state.focus_reporting);
             assert!(state.contains("visible"));
         }
 
