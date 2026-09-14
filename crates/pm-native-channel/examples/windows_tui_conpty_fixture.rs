@@ -10,13 +10,15 @@ fn main() {
 mod windows_fixture {
     use std::{
         ffi::c_void,
-        io, ptr, thread,
+        io, ptr,
+        sync::mpsc::{self, Receiver, RecvTimeoutError},
+        thread,
         time::{Duration, Instant},
     };
     use windows_sys::Win32::{
         Foundation::{
-            CloseHandle, ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE, WAIT_FAILED,
-            WAIT_OBJECT_0, WAIT_TIMEOUT,
+            CloseHandle, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_DATA, GetLastError,
+            HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
             Authorization::{
@@ -26,7 +28,7 @@ mod windows_fixture {
         },
         System::{
             Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole},
-            Pipes::{CreatePipe, PeekNamedPipe},
+            Pipes::CreatePipe,
             StationsAndDesktops::{
                 CloseDesktop, CloseWindowStation, CreateDesktopW, CreateWindowStationW,
                 GetProcessWindowStation, GetUserObjectInformationW, SetProcessWindowStation,
@@ -34,7 +36,7 @@ mod windows_fixture {
             },
             Threading::{
                 CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-                GetExitCodeProcess, InitializeProcThreadAttributeList,
+                GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTUPINFOEXW,
                 UpdateProcThreadAttribute, WaitForSingleObject,
             },
@@ -43,7 +45,6 @@ mod windows_fixture {
     };
 
     const DESKTOP_ALL_ACCESS: u32 = 0x000f_01ff;
-    const MARKER: &[u8] = b"Password Manager \xE2\x80\x94 human TLS-RPK content";
     const UI_DEADLINE: Duration = Duration::from_secs(15);
 
     fn wide(value: &str) -> Vec<u16> {
@@ -69,6 +70,74 @@ mod windows_fixture {
         *handle = ptr::null_mut();
     }
 
+    struct OwnedOutput(HANDLE);
+
+    // SAFETY: the read handle has one owner and moves once to the dedicated drainer.
+    unsafe impl Send for OwnedOutput {}
+
+    struct OutputDrain {
+        receiver: Receiver<Vec<u8>>,
+        join: thread::JoinHandle<Result<(), String>>,
+    }
+
+    impl OutputDrain {
+        fn start(handle: HANDLE) -> Self {
+            let (sender, receiver) = mpsc::channel();
+            let join = thread::spawn(move || {
+                let mut owned = OwnedOutput(handle);
+                let operation = loop {
+                    let mut chunk = vec![0_u8; 4096];
+                    let mut read = 0;
+                    if unsafe {
+                        windows_sys::Win32::Storage::FileSystem::ReadFile(
+                            owned.0,
+                            chunk.as_mut_ptr().cast(),
+                            4096,
+                            &raw mut read,
+                            ptr::null_mut(),
+                        )
+                    } == 0
+                    {
+                        let code = unsafe { GetLastError() };
+                        if code == ERROR_BROKEN_PIPE || code == ERROR_NO_DATA {
+                            break Ok(());
+                        }
+                        break Err(format!("ReadFile(ConPTY output): GetLastError={code}"));
+                    }
+                    if read == 0 {
+                        break Ok(());
+                    }
+                    let read = match usize::try_from(read) {
+                        Ok(read) => read,
+                        Err(_) => break Err("ConPTY read count overflow".to_owned()),
+                    };
+                    chunk.truncate(read);
+                    if sender.send(chunk).is_err() {
+                        break Err("ConPTY screen receiver closed before the drainer".to_owned());
+                    }
+                };
+                let mut cleanup = Vec::new();
+                close_handle(&mut owned.0, "CloseHandle output reader", &mut cleanup);
+                match (operation, cleanup.is_empty()) {
+                    (Ok(()), true) => Ok(()),
+                    (Err(primary), true) => Err(primary),
+                    (Ok(()), false) => Err(cleanup.join("; ")),
+                    (Err(primary), false) => Err(format!(
+                        "{primary}; output-reader cleanup failed: {}",
+                        cleanup.join("; ")
+                    )),
+                }
+            });
+            Self { receiver, join }
+        }
+
+        fn finish(self) -> Result<(), String> {
+            self.join
+                .join()
+                .map_err(|_| "ConPTY output drainer panicked".to_owned())?
+        }
+    }
+
     struct Fixture {
         input_read: HANDLE,
         input_write: HANDLE,
@@ -83,6 +152,7 @@ mod windows_fixture {
         attribute_words: Vec<usize>,
         attributes_initialized: bool,
         station_selected: bool,
+        drain: Option<OutputDrain>,
     }
 
     impl Fixture {
@@ -101,34 +171,52 @@ mod windows_fixture {
                 attribute_words: Vec::new(),
                 attributes_initialized: false,
                 station_selected: false,
+                drain: None,
             }
         }
 
         fn cleanup(&mut self) -> Result<(), String> {
             let mut failures = Vec::new();
             close_handle(&mut self.thread, "CloseHandle thread", &mut failures);
-            close_handle(&mut self.process, "CloseHandle process", &mut failures);
             if self.attributes_initialized {
                 unsafe { DeleteProcThreadAttributeList(self.attribute_words.as_mut_ptr().cast()) };
                 self.attributes_initialized = false;
             }
-            if self.pseudo_console != 0 {
-                unsafe { ClosePseudoConsole(self.pseudo_console) };
-                self.pseudo_console = 0;
-            }
-            close_handle(
-                &mut self.input_read,
-                "CloseHandle ConPTY input",
-                &mut failures,
-            );
             close_handle(
                 &mut self.input_write,
                 "CloseHandle input writer",
                 &mut failures,
             );
+            if self.drain.is_none() {
+                close_handle(
+                    &mut self.output_read,
+                    "CloseHandle output reader",
+                    &mut failures,
+                );
+            }
+            if self.pseudo_console != 0 {
+                unsafe { ClosePseudoConsole(self.pseudo_console) };
+                self.pseudo_console = 0;
+            }
+            if !self.process.is_null() {
+                let wait = unsafe { WaitForSingleObject(self.process, INFINITE) };
+                if wait != WAIT_OBJECT_0 {
+                    failures.push(if wait == WAIT_FAILED {
+                        win32("WaitForSingleObject during ConPTY teardown").to_string()
+                    } else {
+                        format!("unexpected process teardown wait result: {wait}")
+                    });
+                }
+            }
+            if let Some(drain) = self.drain.take()
+                && let Err(error) = drain.finish()
+            {
+                failures.push(error);
+            }
+            close_handle(&mut self.process, "CloseHandle process", &mut failures);
             close_handle(
-                &mut self.output_read,
-                "CloseHandle output reader",
+                &mut self.input_read,
+                "CloseHandle ConPTY input",
                 &mut failures,
             );
             close_handle(
@@ -316,9 +404,8 @@ mod windows_fixture {
 
     fn setup_attributes(fixture: &mut Fixture) -> io::Result<()> {
         let mut bytes = 0;
-        let first = unsafe {
-            InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &raw mut bytes);
-        };
+        let first =
+            unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &raw mut bytes) };
         if first != 0 || bytes == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
             return Err(win32("size process attribute list"));
         }
@@ -333,7 +420,7 @@ mod windows_fixture {
                 attributes,
                 0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-                (&raw const fixture.pseudo_console).cast(),
+                fixture.pseudo_console as *const c_void,
                 std::mem::size_of_val(&fixture.pseudo_console),
                 ptr::null_mut(),
                 ptr::null(),
@@ -391,70 +478,311 @@ mod windows_fixture {
         Ok(())
     }
 
-    fn read_until_marker(fixture: &Fixture) -> io::Result<()> {
+    fn start_drain_and_release_conpty_ends(fixture: &mut Fixture) -> io::Result<()> {
+        if fixture.output_read.is_null() {
+            return Err(io::Error::other("ConPTY output reader is absent"));
+        }
+        fixture.drain = Some(OutputDrain::start(fixture.output_read));
+        fixture.output_read = ptr::null_mut();
+        let mut failures = Vec::new();
+        close_handle(
+            &mut fixture.input_read,
+            "CloseHandle ceded ConPTY input",
+            &mut failures,
+        );
+        close_handle(
+            &mut fixture.output_write,
+            "CloseHandle ceded ConPTY output",
+            &mut failures,
+        );
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(failures.join("; ")))
+        }
+    }
+
+    enum ParserState {
+        Ground,
+        Escape,
+        Csi(Vec<u8>),
+        Osc { escaped: bool },
+        Utf8 { bytes: Vec<u8>, remaining: u8 },
+    }
+
+    struct VtScreen {
+        width: usize,
+        height: usize,
+        row: usize,
+        column: usize,
+        cells: Vec<Vec<u8>>,
+        parser: ParserState,
+    }
+
+    impl VtScreen {
+        fn new(width: usize, height: usize) -> Self {
+            Self {
+                width,
+                height,
+                row: 0,
+                column: 0,
+                cells: vec![vec![b' '; width]; height],
+                parser: ParserState::Ground,
+            }
+        }
+
+        fn resize(&mut self, width: usize, height: usize) {
+            *self = Self::new(width, height);
+        }
+
+        fn feed(&mut self, bytes: &[u8]) -> io::Result<()> {
+            for byte in bytes {
+                let state = std::mem::replace(&mut self.parser, ParserState::Ground);
+                self.parser = match state {
+                    ParserState::Ground => self.ground(*byte)?,
+                    ParserState::Escape => match *byte {
+                        b'[' => ParserState::Csi(Vec::new()),
+                        b']' => ParserState::Osc { escaped: false },
+                        _ => ParserState::Ground,
+                    },
+                    ParserState::Csi(mut parameters) => {
+                        if (0x40..=0x7e).contains(byte) {
+                            self.apply_csi(&parameters, *byte);
+                            ParserState::Ground
+                        } else if parameters.len() < 64 {
+                            parameters.push(*byte);
+                            ParserState::Csi(parameters)
+                        } else {
+                            ParserState::Ground
+                        }
+                    }
+                    ParserState::Osc { escaped } => {
+                        if *byte == 0x07 || (escaped && *byte == b'\\') {
+                            ParserState::Ground
+                        } else {
+                            ParserState::Osc {
+                                escaped: *byte == 0x1b,
+                            }
+                        }
+                    }
+                    ParserState::Utf8 {
+                        mut bytes,
+                        remaining,
+                    } => {
+                        if !byte.is_ascii() && (byte & 0xc0) == 0x80 {
+                            bytes.push(*byte);
+                            if remaining == 1 {
+                                std::str::from_utf8(&bytes).map_err(|_| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "ConPTY emitted invalid UTF-8",
+                                    )
+                                })?;
+                                self.put_visible(b'?');
+                                ParserState::Ground
+                            } else {
+                                ParserState::Utf8 {
+                                    bytes,
+                                    remaining: remaining - 1,
+                                }
+                            }
+                        } else {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "ConPTY emitted invalid UTF-8 continuation",
+                            ));
+                        }
+                    }
+                };
+            }
+            Ok(())
+        }
+
+        fn put_visible(&mut self, byte: u8) {
+            if self.row < self.height && self.column < self.width {
+                self.cells[self.row][self.column] = byte;
+                self.column += 1;
+            }
+        }
+
+        fn ground(&mut self, byte: u8) -> io::Result<ParserState> {
+            Ok(match byte {
+                0x1b => ParserState::Escape,
+                b'\r' => {
+                    self.column = 0;
+                    ParserState::Ground
+                }
+                b'\n' => {
+                    self.row = (self.row + 1).min(self.height.saturating_sub(1));
+                    ParserState::Ground
+                }
+                0x08 => {
+                    self.column = self.column.saturating_sub(1);
+                    ParserState::Ground
+                }
+                b'\t' => {
+                    self.column = ((self.column / 8 + 1) * 8).min(self.width.saturating_sub(1));
+                    ParserState::Ground
+                }
+                0x20..=0x7e => {
+                    self.put_visible(byte);
+                    ParserState::Ground
+                }
+                0xc2..=0xdf => ParserState::Utf8 {
+                    bytes: vec![byte],
+                    remaining: 1,
+                },
+                0xe0..=0xef => ParserState::Utf8 {
+                    bytes: vec![byte],
+                    remaining: 2,
+                },
+                0xf0..=0xf4 => ParserState::Utf8 {
+                    bytes: vec![byte],
+                    remaining: 3,
+                },
+                0x00..=0x1f | 0x7f => ParserState::Ground,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "ConPTY emitted invalid UTF-8 lead byte",
+                    ));
+                }
+            })
+        }
+
+        fn apply_csi(&mut self, raw: &[u8], command: u8) {
+            let raw = raw
+                .iter()
+                .copied()
+                .filter(|byte| byte.is_ascii_digit() || *byte == b';')
+                .collect::<Vec<_>>();
+            let parameters = raw
+                .split(|byte| *byte == b';')
+                .map(|value| {
+                    std::str::from_utf8(value)
+                        .ok()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(0)
+                })
+                .collect::<Vec<_>>();
+            let first = parameters.first().copied().unwrap_or(0);
+            let movement = first.max(1);
+            match command {
+                b'A' => self.row = self.row.saturating_sub(movement),
+                b'B' => self.row = (self.row + movement).min(self.height.saturating_sub(1)),
+                b'C' => {
+                    self.column = (self.column + movement).min(self.width.saturating_sub(1));
+                }
+                b'D' => self.column = self.column.saturating_sub(movement),
+                b'G' => {
+                    self.column = first
+                        .max(1)
+                        .saturating_sub(1)
+                        .min(self.width.saturating_sub(1))
+                }
+                b'd' => {
+                    self.row = first
+                        .max(1)
+                        .saturating_sub(1)
+                        .min(self.height.saturating_sub(1))
+                }
+                b'H' | b'f' => {
+                    self.row = first
+                        .max(1)
+                        .saturating_sub(1)
+                        .min(self.height.saturating_sub(1));
+                    self.column = parameters
+                        .get(1)
+                        .copied()
+                        .unwrap_or(1)
+                        .max(1)
+                        .saturating_sub(1)
+                        .min(self.width.saturating_sub(1));
+                }
+                b'J' if first == 2 || first == 3 => {
+                    for row in &mut self.cells {
+                        row.fill(b' ');
+                    }
+                }
+                b'K' if first == 2 => self.cells[self.row].fill(b' '),
+                b'K' => self.cells[self.row][self.column..].fill(b' '),
+                _ => {}
+            }
+        }
+
+        fn has_title(&self, full_title: bool) -> bool {
+            self.cells.iter().any(|row| {
+                let has_name = row
+                    .windows(b"Password Manager".len())
+                    .any(|window| window == b"Password Manager");
+                let has_channel = row
+                    .windows(b"human TLS-RPK content".len())
+                    .any(|window| window == b"human TLS-RPK content");
+                has_name && (!full_title || has_channel)
+            })
+        }
+    }
+
+    fn exited_before_screen(process: HANDLE, phase: &str) -> io::Result<Option<io::Error>> {
+        let state = unsafe { WaitForSingleObject(process, 0) };
+        if state == WAIT_FAILED {
+            return Err(win32("WaitForSingleObject(pm-custody.exe tui)"));
+        }
+        if state != WAIT_OBJECT_0 {
+            return Ok(None);
+        }
+        let mut exit_code = 0;
+        if unsafe { GetExitCodeProcess(process, &raw mut exit_code) } == 0 {
+            return Err(win32("GetExitCodeProcess"));
+        }
+        Ok(Some(io::Error::other(format!(
+            "pm-custody.exe tui exited {exit_code} before {phase} screen"
+        ))))
+    }
+
+    fn wait_for_screen(
+        fixture: &Fixture,
+        screen: &mut VtScreen,
+        phase: &str,
+        full_title: bool,
+    ) -> io::Result<()> {
+        let drain = fixture
+            .drain
+            .as_ref()
+            .ok_or_else(|| io::Error::other("ConPTY output drainer is absent"))?;
         let deadline = Instant::now() + UI_DEADLINE;
-        let mut capture = Vec::new();
         loop {
-            let process_state = unsafe { WaitForSingleObject(fixture.process, 0) };
-            if process_state == WAIT_FAILED {
-                return Err(win32("WaitForSingleObject(pm-custody.exe tui)"));
+            if let Some(error) = exited_before_screen(fixture.process, phase)? {
+                return Err(error);
             }
-            if process_state == WAIT_OBJECT_0 {
-                let mut exit_code = 0;
-                if unsafe { GetExitCodeProcess(fixture.process, &raw mut exit_code) } == 0 {
-                    return Err(win32("GetExitCodeProcess"));
-                }
-                return Err(io::Error::other(format!(
-                    "pm-custody.exe tui exited {exit_code} before locked-screen marker"
-                )));
-            }
-            let mut available = 0;
-            if unsafe {
-                PeekNamedPipe(
-                    fixture.output_read,
-                    ptr::null_mut(),
-                    0,
-                    ptr::null_mut(),
-                    &raw mut available,
-                    ptr::null_mut(),
-                )
-            } == 0
-            {
-                return Err(win32("PeekNamedPipe(ConPTY output)"));
-            }
-            if available > 0 {
-                let chunk_length = usize::try_from(available.min(4096))
-                    .map_err(|_| io::Error::other("ConPTY available-byte count overflow"))?;
-                let mut chunk = vec![0_u8; chunk_length];
-                let requested = u32::try_from(chunk.len())
-                    .map_err(|_| io::Error::other("ConPTY read length overflow"))?;
-                let mut read = 0;
-                if unsafe {
-                    windows_sys::Win32::Storage::FileSystem::ReadFile(
-                        fixture.output_read,
-                        chunk.as_mut_ptr().cast(),
-                        requested,
-                        &raw mut read,
-                        ptr::null_mut(),
-                    )
-                } == 0
-                {
-                    return Err(win32("ReadFile(ConPTY output)"));
-                }
-                let read = usize::try_from(read)
-                    .map_err(|_| io::Error::other("ConPTY read count overflow"))?;
-                capture.extend_from_slice(&chunk[..read]);
-                if capture.windows(MARKER.len()).any(|window| window == MARKER) {
-                    return Ok(());
-                }
-            }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "pm-custody.exe tui did not display locked-screen marker within 15 seconds",
+                    format!("pm-custody.exe tui did not draw {phase} screen within 15 seconds"),
                 ));
             }
-            thread::sleep(Duration::from_millis(20));
+            let remaining = deadline.saturating_duration_since(now);
+            match drain
+                .receiver
+                .recv_timeout(remaining.min(Duration::from_millis(50)))
+            {
+                Ok(chunk) => {
+                    screen.feed(&chunk)?;
+                    if screen.has_title(full_title) {
+                        return Ok(());
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    if let Some(error) = exited_before_screen(fixture.process, phase)? {
+                        return Err(error);
+                    }
+                    return Err(io::Error::other(format!(
+                        "ConPTY output closed before {phase} screen"
+                    )));
+                }
+            }
         }
     }
 
@@ -490,17 +818,23 @@ mod windows_fixture {
             setup_conpty(&mut fixture)?;
             setup_attributes(&mut fixture)?;
             spawn_tui(&mut fixture, &args[2], &desktop, &args[3..])?;
-            read_until_marker(&fixture)?;
+            start_drain_and_release_conpty_ends(&mut fixture)?;
+            let mut screen = VtScreen::new(80, 24);
+            wait_for_screen(&fixture, &mut screen, "initial 80x24", true)?;
             let small =
                 unsafe { ResizePseudoConsole(fixture.pseudo_console, COORD { X: 42, Y: 12 }) };
             if small < 0 {
                 return Err(failed_hresult("ResizePseudoConsole(42x12)", small));
             }
+            screen.resize(42, 12);
+            wait_for_screen(&fixture, &mut screen, "resized 42x12", false)?;
             let large =
                 unsafe { ResizePseudoConsole(fixture.pseudo_console, COORD { X: 100, Y: 30 }) };
             if large < 0 {
                 return Err(failed_hresult("ResizePseudoConsole(100x30)", large));
             }
+            screen.resize(100, 30);
+            wait_for_screen(&fixture, &mut screen, "resized 100x30", true)?;
             write_key(fixture.input_write, b'q')?;
             let exit_wait = unsafe { WaitForSingleObject(fixture.process, 15_000) };
             if exit_wait == WAIT_FAILED {

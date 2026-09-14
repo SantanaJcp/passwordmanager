@@ -1495,15 +1495,27 @@ la cuenta humana sintética; no es un segundo binario de producto. El launcher:
    humano, y falla ante colisión o si no puede recuperar/validar su nombre;
 3. lanza el `pm-custody.exe` normal mediante `CreateProcessW`,
    `STARTUPINFOEXW`, `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` y el desktop propio;
-4. captura VT por el pipe de salida sin imprimirlo, exige el marcador fijo de
-   la pantalla bloqueada antes de enviar una tecla, redimensiona a `42x12` y
-   `100x30`, envía `q` y exige salida normal;
-5. cierra de forma comprobada proceso/thread/pipes/desktop/window station; no
-   mata el proceso, no lo vuelve a lanzar y no sustituye ConPTY por redirección.
+4. cierra inmediatamente los extremos host cedidos a ConPTY tras crear el
+   proceso y drena el output en un hilo dedicado hasta EOF; el hilo principal
+   aplica las secuencias VT a una pantalla `80x24`, sin imprimir captura, y
+   exige el título en celdas visibles antes de enviar una tecla;
+5. redimensiona a `42x12` y `100x30`, reinicia el modelo a cada tamaño y exige
+   un redraw posterior con el mismo título visible, no sólo el HRESULT de
+   `ResizePseudoConsole`; después envía `q` y exige salida normal;
+6. ante cualquier salida, cierra el input propio y llama una sola vez a
+   `ClosePseudoConsole` mientras el hilo sigue drenando. Conserva el handle del
+   proceso hasta comprobar su terminación, une el drainer y sólo entonces
+   cierra process/thread/pipes/desktop/window station. `ClosePseudoConsole` es
+   el teardown primario documentado, no se añade `TerminateProcess`, relaunch ni
+   sustitución de ConPTY por redirección.
 
 Microsoft documenta que los atributos extendidos de proceso requieren
 `STARTUPINFOEX` y `EXTENDED_STARTUPINFO_PRESENT`, y que una pseudoconsola debe
-publicarse mediante `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`. También documenta
+publicarse pasando el valor `HPCON` directamente como `lpValue` de
+`PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, no la dirección de una variable que lo
+contiene. La guía exige cerrar los extremos cedidos tras `CreateProcess` y
+mantener el output drenado concurrentemente durante `ClosePseudoConsole` para
+no bloquear el teardown. También documenta
 que una window station creada sin descriptor concede acceso amplio; por eso el
 fixture no admite descriptor nulo ni reutiliza `winsta0`:
 <https://learn.microsoft.com/windows/console/creating-a-pseudoconsole-session>,
