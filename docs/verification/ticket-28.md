@@ -484,3 +484,12 @@ límite y antes de `read_exact`; `/tmp/pm28-green-custody-protected-input.log`
 terminó rc0 en 1 s, con rc4 exacto y cleanup verificado. Esta evidencia cubre
 sólo el primer password de `human-password-crud`; el resto del inventario
 custodia/vault/adaptadores continúa abierto.
+
+Gate del checkpoint parcial: `pm-custody` enfocado pasó 23/23 unidades/doc/integración
+en 1 s (`/tmp/pm28-custody-buffer-focused.log`); `scripts/check.sh` rc0 en
+102 s (`/tmp/pm28-custody-buffer-check.log`) y clean locked/offline rc0 en 41 s
+(`/tmp/pm28-custody-buffer-clean.log`). La barrida única posterior terminó
+`SUMMARY count=25 failures=0 elapsed=619s` en
+`/tmp/pm28-custody-buffer-labs-summary.log`, con logs individuales prefijados
+`/tmp/pm28-custody-buffer-test-linux-`. No hubo retries dentro de aserciones.
+Este gate congela un checkpoint parcial integrable; ticket 28 permanece claimed.
