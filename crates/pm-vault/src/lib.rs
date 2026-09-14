@@ -10,6 +10,7 @@ mod content;
 mod history;
 mod human;
 mod migration;
+mod native_fs;
 mod onepux;
 mod passkey;
 
@@ -57,7 +58,7 @@ pub use reducer::{
 
 use std::{
     fmt,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -704,14 +705,7 @@ fn create_temporary(parent: &Path, target: &Path) -> Result<(PathBuf, File), Vau
     for _ in 0..128 {
         let counter = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(format!(".{name}.tmp-{}-{counter}", std::process::id()));
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        match options.open(&candidate) {
+        match native_fs::create_private(&candidate, true, true) {
             Ok(file) => return Ok((candidate, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(VaultError::Io(error)),

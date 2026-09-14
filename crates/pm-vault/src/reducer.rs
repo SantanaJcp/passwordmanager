@@ -6,7 +6,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt, fs,
     io::{Read, Write},
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -806,12 +805,9 @@ pub enum ReductionError {
 }
 
 fn staged_file(path: &Path, max: usize) -> Result<Vec<u8>, ReductionError> {
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|_| ReductionError::Integrity)?;
+    let mut file = crate::native_fs::open_read(path).map_err(|_| ReductionError::Integrity)?;
     let metadata = file.metadata().map_err(|_| ReductionError::Integrity)?;
+    crate::native_fs::file_identity(&file, &metadata).map_err(|_| ReductionError::Integrity)?;
     if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > max as u64 {
         return Err(ReductionError::ResourceLimit);
     }
@@ -826,11 +822,7 @@ fn staged_file(path: &Path, max: usize) -> Result<Vec<u8>, ReductionError> {
 }
 fn write_stage(directory: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, ReductionError> {
     let path = directory.join(name);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
+    let mut file = crate::native_fs::create_private(&path, false, true)
         .map_err(|_| ReductionError::Integrity)?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())

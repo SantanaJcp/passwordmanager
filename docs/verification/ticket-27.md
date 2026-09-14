@@ -4,6 +4,55 @@ Fecha: 2026-09-13. Estado: **implementación sin acreditar, no candidato
 aceptado**. Este documento no acredita Windows ni resuelve el ticket. No se
 ejecutó Windows, no se instaló servicio y no se modificó el host Linux.
 
+## Método del checkpoint `pm-vault` Windows (escrito antes de implementar)
+
+La corrida nativa `34799533393` dejó el canal/laboratorio Windows anterior en
+verde y falló al compilar `pm-vault` con 19 usos de APIs Unix en
+`crates/pm-vault/src/onepux.rs` y `crates/pm-vault/src/reducer.rs`. Este
+checkpoint se limita a esos seams de filesystem; no cambia el motor, la TUI,
+libsodium ni los contratos G7. Antes de modificar código se fija el siguiente
+método:
+
+1. El comportamiento Unix existente se conserva: apertura sin seguir enlaces,
+   descriptor no heredable, rechazo de enlaces duros, identidad estable,
+   preflight de capacidad, staging privado y publicación atómica. En Windows
+   cada requisito se implementa mediante su API nativa, no mediante `cfg` que
+   retire la validación, `Unavailable`, un stub o una ruta alternativa.
+2. La apertura Windows usa un handle con `FILE_FLAG_OPEN_REPARSE_POINT` y
+   rechaza el atributo de reparse observado en ese handle. La identidad y el
+   conteo de enlaces se obtienen con `GetFileInformationByHandle`: volumen más
+   índice de archivo y `nNumberOfLinks`, respectivamente. La capacidad usa
+   `GetDiskFreeSpaceExW` y la ruta UTF-16 terminada en NUL. Los modos ZIP son
+   constantes del formato POSIX con tipo `u32`, no constantes `libc` cuyo tipo
+   cambia por plataforma. La persistencia continúa usando el hard-link
+   atómico común y deberá probarse de nuevo en Windows; no se sustituye por
+   copia ni por renombrado. La creación de cada stage usa `CreateFileW` con un
+   descriptor de seguridad explícito para que su DACL privada se aplique en la
+   misma operación que `CREATE_NEW`, sin una ventana intermedia de permisos
+   heredados. `FILE_FLAG_OPEN_REPARSE_POINT` protege el
+   componente final; el método conserva como precondición el directorio padre
+   privado y su DACL/propietario confiables del contrato G7, y no presenta el
+   flag como una validación de todos los ancestros.
+3. La regresión se escribe y ejecuta primero en Linux contra los seams públicos
+   existentes (lector 1PUX, staging de reductor y publicación), con archivos y
+   bytes sintéticos. Se comprueba que una fuente normal se identifica y se
+   relee, que un hard-link no pasa, que el lector rechaza una entrada ZIP con
+   tipo no regular/directorio, que el preflight conserva sus límites y que el
+   export/reduce no acepta un stage que cambió o es un enlace. Después se
+   ejecutan `check.sh`, el lab 1PUX y los labs Linux de sync/reducer. La
+   ejecución Windows ARM64/x64 posterior debe compilar el mismo código y
+   repetir esas negativas con reparse points y hard-links reales, además de
+   persistencia por reinicio; la falta del target Windows en este host no se
+   suplirá con `RUSTFLAGS`, cross-compilation ni mocks.
+4. Cualquier fallo de API nativa, metadato ausente, ACL/integridad, capacidad,
+   hard-link o cleanup conserva el estado fallido y detiene la prueba. No se
+   amplían plazos, no se silencian errores y no se declara evidencia Windows a
+   partir de los checks Linux.
+
+Este método es la evidencia de alcance y no una aceptación del ticket: la
+corrida Windows nativa, incluida la compilación del producto y las pruebas de
+custodia, sigue pendiente.
+
 ## Método nativo que deberá ejecutarse
 
 Este método extiende el [método CI nativo autorizado](native-ci.md). El futuro
@@ -298,3 +347,42 @@ reintento. No se estableció causa para esos tres resultados, no se ocultan y no
 se afirma estabilidad integral. `./scripts/clean-offline-build.sh` pasó después
 de los cambios en 35.50 s. Lo observado cubre regresión funcional Linux, no
 aporta evidencia Windows.
+
+## Resultado verificable del checkpoint de filesystem
+
+El checkpoint partió de `6bef3bc6dcba2367bc460c8aa0011b6ac9335ced`, con el
+worktree limpio. La prueba TDD RED añadió primero el uso de
+`native_fs::file_identity` sin crear el módulo y falló con `E0583` (módulo
+ausente). Después se implementaron únicamente los seams de `pm-vault` en
+`native_fs.rs`, sus llamadas en `onepux.rs`/`reducer.rs`, la dependencia
+Windows fijada y esta nota de verificación. La creación Windows usa
+`CreateFileW(CREATE_NEW)` con el descriptor DACL privado desde la propia
+creación; no existe una ventana de ACL heredada ni una ruta de copia/rename.
+
+Evidencia Linux posterior, siempre con bytes sintéticos y `--locked --offline`:
+
+```text
+./scripts/cargo-local.sh fmt --all -- --check                         # PASS
+./scripts/cargo-local.sh clippy -p pm-vault --lib --locked --offline -- -D warnings  # PASS
+./scripts/cargo-local.sh test -p pm-vault --lib native_file_identity_is_read_from_the_open_file --locked --offline  # 1 PASS
+./scripts/cargo-local.sh test -p pm-vault --test onepux_import --locked --offline      # 4 PASS
+./scripts/cargo-local.sh test -p pm-vault --test causal_reducer --locked --offline    # 7 PASS
+./scripts/cargo-local.sh test -p pm-vault --test history_lifecycle --locked --offline  # 3 PASS
+./scripts/cargo-local.sh test -p pm-vault --test local_vault --locked --offline       # 3 PASS
+./scripts/test-linux-1pux-import-lab.sh                                      # PASS
+./scripts/test-linux-history-lab.sh                                          # PASS
+./scripts/test-linux-sync-lab.sh                                             # PASS (public/production limits unchanged)
+git diff --check                                                             # PASS
+./scripts/check.sh                                                           # PASS
+./scripts/clean-offline-build.sh                                             # PASS
+```
+
+Se inspeccionó además la metadata de Cargo filtrada para
+`aarch64-pc-windows-msvc`: `windows-sys 0.61.2` queda como dependencia solo
+para Windows con las features Foundation, Security, Authorization y
+Storage/FileSystem. El intento honesto de `cargo check --target
+aarch64-pc-windows-msvc --locked --offline` no puede encontrar `core` porque
+este host solo tiene el target Linux. No se usó `RUSTFLAGS`, `cfg` manual,
+cross-compilation ni mocks para convertirlo en evidencia. Por tanto el
+compilado/ejecución nativos Windows ARM64/x64 siguen siendo prerrequisito del
+runner y este checkpoint no marca aceptación del ticket.

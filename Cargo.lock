@@ -1376,6 +1376,7 @@ dependencies = [
  "pm-crypto",
  "pm-native-channel",
  "rusqlite",
+ "windows-sys 0.61.2",
  "zeroize",
  "zip",
 ]

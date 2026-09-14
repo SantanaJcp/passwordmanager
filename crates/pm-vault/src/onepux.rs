@@ -5,10 +5,8 @@
 use pm_crypto::{DigestState, random_id};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::CString,
-    fs::{File, OpenOptions},
+    fs::File,
     io::{Read, Seek, SeekFrom},
-    os::unix::{ffi::OsStrExt, fs::MetadataExt, fs::OpenOptionsExt},
     path::{Component, Path, PathBuf},
 };
 use zeroize::Zeroizing;
@@ -28,6 +26,9 @@ const MAX_FILES: usize = 100_000;
 const MAX_JSON_STRING: usize = 1024 * 1024;
 const MAX_JSON_VALUES: usize = 1_000_000;
 const MAX_FILE: u64 = 16 * 1024 * 1024 * 1024;
+const ZIP_UNIX_FILE_TYPE_MASK: u32 = 0o170_000;
+const ZIP_UNIX_REGULAR: u32 = 0o100_000;
+const ZIP_UNIX_DIRECTORY: u32 = 0o040_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SourceIdentity {
@@ -61,11 +62,9 @@ pub(crate) enum Source {
 impl Source {
     fn open(&self) -> Result<File, HumanCommitError> {
         match self {
-            Self::Path(path) => OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-                .open(path)
-                .map_err(|_| HumanCommitError::InvalidInput),
+            Self::Path(path) => {
+                crate::native_fs::open_read(path).map_err(|_| HumanCommitError::InvalidInput)
+            }
             Self::Descriptor(file) => file.try_clone().map_err(HumanCommitError::Io),
         }
     }
@@ -280,16 +279,7 @@ pub(crate) fn ensure_staging_capacity(
     file_count: usize,
 ) -> Result<(), HumanCommitError> {
     let required = required_capacity(logical_bytes, file_count)?;
-    let path = CString::new(vault_path.as_os_str().as_bytes())
-        .map_err(|_| HumanCommitError::InvalidInput)?;
-    // SAFETY: `path` is NUL-terminated and `status` is valid writable storage.
-    let available = unsafe {
-        let mut status: libc::statvfs = std::mem::zeroed();
-        if libc::statvfs(path.as_ptr(), &raw mut status) != 0 {
-            return Err(HumanCommitError::Io(std::io::Error::last_os_error()));
-        }
-        status.f_bavail.saturating_mul(status.f_frsize)
-    };
+    let available = crate::native_fs::available_capacity(vault_path)?;
     if available < required {
         return Err(HumanCommitError::InvalidInput);
     }
@@ -357,8 +347,15 @@ fn open_source(source: &Source) -> Result<(File, SourceIdentity), HumanCommitErr
     let mut file = source.open()?;
     file.seek(SeekFrom::Start(0))?;
     let metadata = file.metadata()?;
+    let file_identity = crate::native_fs::file_identity(&file, &metadata).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidInput {
+            HumanCommitError::InvalidInput
+        } else {
+            HumanCommitError::Io(error)
+        }
+    })?;
     if !metadata.file_type().is_file()
-        || metadata.nlink() != 1
+        || file_identity.links != 1
         || metadata.len() == 0
         || metadata.len() > MAX_ARCHIVE_BYTES
     {
@@ -377,8 +374,8 @@ fn open_source(source: &Source) -> Result<(File, SourceIdentity), HumanCommitErr
     Ok((
         file,
         SourceIdentity {
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            device: file_identity.device,
+            inode: file_identity.inode,
             length: metadata.len(),
             digest: state.finish(),
         },
@@ -556,8 +553,8 @@ fn validate_entry(entry: &zip::read::ZipFile<'_, File>) -> Result<String, HumanC
         return Err(HumanCommitError::InvalidInput);
     }
     if let Some(mode) = entry.unix_mode() {
-        let kind = mode & libc::S_IFMT;
-        if kind != 0 && kind != libc::S_IFREG && kind != libc::S_IFDIR {
+        let kind = mode & ZIP_UNIX_FILE_TYPE_MASK;
+        if kind != 0 && kind != ZIP_UNIX_REGULAR && kind != ZIP_UNIX_DIRECTORY {
             return Err(HumanCommitError::InvalidInput);
         }
     }
@@ -1326,5 +1323,29 @@ mod tests {
         assert!(JsonParser::parse(beyond.as_bytes()).is_err());
         assert!(JsonParser::parse(b"9223372036854775807").is_ok());
         assert!(JsonParser::parse(b"9223372036854775808").is_err());
+    }
+
+    #[test]
+    fn native_file_identity_is_read_from_the_open_file() {
+        use std::{
+            io::Write,
+            sync::atomic::{AtomicU64, Ordering},
+        };
+
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "pm-vault-native-fs-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = crate::native_fs::create_private(&path, true, true).unwrap();
+        file.write_all(b"synthetic native identity").unwrap();
+        let metadata = file.metadata().unwrap();
+        let identity = crate::native_fs::file_identity(&file, &metadata).unwrap();
+        assert_eq!(identity.links, 1);
+        assert_ne!(identity.device, 0);
+        assert_ne!(identity.inode, 0);
+        drop(file);
+        std::fs::remove_file(path).unwrap();
     }
 }
