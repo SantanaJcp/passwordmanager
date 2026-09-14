@@ -132,7 +132,11 @@ require_literal 'assert_launchd_agent_cannot_read_pasteboard' "$harness"
 require_literal 'prepare_launchd_agent' "$harness"
 require_literal 'parse_agent_pasteboard_result' "$harness"
 require_literal 'LimitLoadToSessionType' "$harness"
-require_literal 'LaunchOnlyOnce' "$harness"
+require_literal 'KeepAlive": False' "$harness"
+if grep -Fq 'LaunchOnlyOnce' "$harness"; then
+    echo 'isolated pasteboard job must remain loaded for exit observation' >&2
+    exit 1
+fi
 require_literal 'RunAtLoad": False' "$harness"
 require_literal 'launchctl", "bootstrap", "system"' "$harness"
 require_literal 'launchctl", "kickstart"' "$harness"

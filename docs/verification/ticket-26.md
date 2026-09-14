@@ -1242,9 +1242,12 @@ The fixture therefore does the following, in order:
    plist and root-owned, non-writable helper under the collision-guarded
    fixture root. It bootstraps the helper in the **system** launchd domain with
    `UserName` and `GroupName` set to `_pmagent26`,
-   `LimitLoadToSessionType=System`, `RunAtLoad=false` and
-   `LaunchOnlyOnce=true`; an explicit `launchctl kickstart` starts the one-shot
-   only after a fresh TUI copy lease. The synthetic account keeps
+   `LimitLoadToSessionType=System`, `RunAtLoad=false` and explicit
+   `KeepAlive=false`; an explicit `launchctl kickstart` starts the on-demand
+   job only after a fresh TUI copy lease. `LaunchOnlyOnce` is intentionally not
+   set: launchd must retain this non-respawning job long enough for the harness
+   to observe its result and last exit status before the owned bootout. The
+   synthetic account keeps
    `UserShell=/usr/bin/false` and `NFSHomeDirectory=/var/empty`; it has no
    login session. Its result, stdout and stderr files are pre-created inside
    its own `0700` directory and are tracked as owned resources. The plist
@@ -1377,6 +1380,135 @@ rerun was executed. The next native run must show the categorized
 `natural-zero returncode=0` result on both architectures before the shared
 control can be considered clean; it still cannot count as Ticket 26
 acceptance.
+
+### Native run 28 ARM one-shot launchd lifecycle RED and bounded correction
+
+Run [`34872038731`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34872038731)
+on `3aac714` reached the isolated pasteboard stage on Apple silicon after the
+ordinary build, native tests and supporting shared-control flow. The shared
+control now reported `pasteboard-shared-control-exit=natural-zero returncode=0`,
+so the normal keyboard teardown correction was exercised successfully. The
+isolated helper then failed with the fixed assertion `isolated pasteboard
+launch job disappeared`; its cleanup also reported the owned launchd bootout
+return code `3`. The fixed ARM log is
+`/tmp/pm-macos-run28-arm-full.log`. This is a fixture lifecycle RED, not a
+pasteboard isolation result; no isolated result schema or canary status was
+available to interpret. The Intel log is
+`/tmp/pm-macos-run28-intel-full.log`; its supporting control classified its
+natural exit as `natural-nonzero returncode=4` and therefore failed before the
+isolated stage. That is not an owned SIGTERM result, and it is not accepted as
+cleanup or isolation evidence.
+
+Static inspection confirms the lifecycle cause. Apple's
+[launchd.plist.5](https://raw.githubusercontent.com/apple-oss-distributions/launchd/main/man/launchd.plist.5)
+defines `LaunchOnlyOnce` as a job that can run only once, and the corresponding
+[launchd source](https://raw.githubusercontent.com/apple-oss-distributions/launchd/main/src/core.c)
+marks a job with `only_once` and a nonzero start time as useless and removes it
+after exit. The harness was asking `launchctl print system/<label>` to remain
+available while using that exact one-shot setting, so a completed helper could
+write its result and be removed before the next observation. The bootout return
+code `3` is consistent with the same already-removed owned label, but does not
+by itself establish the exact race timing.
+
+The bounded fixture correction removes `LaunchOnlyOnce` and sets
+`KeepAlive=false` explicitly while retaining `RunAtLoad=false`. The helper is
+still launched exactly once by the existing explicit `kickstart`, does not
+respawn, and remains loaded with no PID after exit so `wait_for_agent_launch`
+can require both the fixed result file and the persisted job record. A missing
+label remains an explicit failure; cleanup must still boot out the owned label
+and report errors. No result, timeout, canary, UID/domain, isolation, product,
+or deadline assertion is weakened, and no fallback treats disappearance as a
+pass.
+
+The Intel result also exposed a separate fixture-drain risk. The supporting
+control invokes a synchronous external pasteboard probe while its real TUI
+continues drawing, but the old harness drained that PTY only from wait loops.
+A full PTY can therefore stop the TUI's draw/heartbeat path while the probe is
+blocked, yielding a generic natural nonzero result; the run does not expose
+enough data to call that inference proven. The bounded fixture correction uses
+one selector loop to drain the active TUI PTY while each owned external helper
+(`osascript`, `launchctl`, `cat`, and metadata commands) runs. It captures
+stdout/stderr exactly for the existing categorical canary classifier, keeps
+the existing 10/30-second helper bounds, gives each helper an owned process
+group, and performs one bounded group teardown on timeout or parser failure.
+It does not alter the product, lease/idle deadlines, parser strictness,
+pasteboard assertion, or isolation profile.
+
+Before executing the local regression, the following method was written and
+approved for the short Linux-only verification window. It does not start a
+Password Manager binary, Cargo, a system lab, or a native runner:
+
+1. Allocate a real PTY with `pty.fork()` and run a synthetic child that emits
+   cursor-addressed heartbeat bytes while a helper command writes fixed,
+   non-secret stdout/stderr. Assert that the helper returns zero with both
+   streams intact and that the PTY bytes were consumed.
+2. Run a helper that emits a synthetic canary and exits zero. Pass its captured
+   streams through the existing `classify_pasteboard_output` contract without
+   printing them; assert exact canary detection remains categorical.
+3. Run a helper whose leader exits while a forked descendant holds the helper
+   pipes open. With the existing bounded timeout, require `TimeoutExpired`,
+   capture only fixed empty streams, and verify the owned descendant cannot
+   create its marker after group teardown.
+4. Emit a real unsupported terminal-query sequence from the PTY while a
+   helper is alive. Require the strict `UnsupportedVtSequence` category and
+   verify the owned helper cannot create its marker; the same parser bytes are
+   not fed again during cleanup.
+
+Each case closes its own PTY and removes only its own synthetic marker. The
+method treats a timeout, parser error, nonzero status, unknown status, helper
+leak, or cleanup error as failure; it never turns one into a pass. The next
+native run must still reach and parse the isolated fixed-schema result on both
+architectures, retain supporting `natural-zero returncode=0`, and prove the
+separate UID/domain and pasteboard-negative requirements before any isolation
+evidence is considered.
+
+The granted Linux-only focused run executed that method exactly once, with
+`PYTHONDONTWRITEBYTECODE=1`, and passed in 4.3 seconds:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+import importlib.util
+from pathlib import Path
+path = Path('crates/pm-custody/tests/macos_lab.py').resolve()
+spec = importlib.util.spec_from_file_location('pm26_macos_lab', path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.assert_pty_helper_drain_regression()
+print('synthetic PTY helper/drain/canary/timeout/parser cleanup: PASS')
+PY
+# synthetic PTY helper/drain/canary/timeout/parser cleanup: PASS
+# focused-helper-rc=0
+```
+
+The run's sole log is `/tmp/pm26-helper-focused-20260914.log`. Its cleanup
+check found no `pm26-helper-descendant-*` or `pm26-helper-parser-*` marker and
+no owned helper process. This verifies only the Python fixture helper and its
+synthetic PTY cases on Linux; it is not a macOS product, Cargo, system-lab or
+Ticket 26 acceptance result. The native corrected fixture remains pending.
+
+### Static native TUI coverage matrix (not yet executed on macOS)
+
+The current macOS `run_tui_core_lab` exercises real PTY startup, three sizes,
+searches for the eight seeded titles, exact `auth[0].password` selection,
+copy/expiry, explicit lock, idle lock, AppKit ownership and delegated-agent
+discovery. It does not yet drive the following concrete keyboard contracts
+already implemented by Tickets 23--25; these are the bounded matrix to add to
+the same normal binary/service fixture, not substitutes or mocks:
+
+| Contract | Real keys and observable checks still required |
+| --- | --- |
+| Ticket 23 content | From the catalog, select each of the seven kinds and each field descriptor (notes, custom/source, every auth member and attachment descriptor), assert selection/reveal boundaries, then exercise `t` tag replacement, `f` favorite, `g` generator, `h` history, `d` trash, `u` restore, `p` revision purge and `P` item purge. Retain search, Unicode/control sanitization, replacement-owner clipboard race, reveal expiry and idle lock. |
+| Ticket 24 access | `a` → `n` with the closed subject/request/SPKI/label/environment input, verify the real agent view; use `e` for enable/disable, `s` for suspend/resume and `x` for revoke, then verify the next agent operation. Exercise `w` pending, `x` terminal cancellation and `v` passkey context plus the fresh human approval/password path; `Esc` must leave state unchanged. |
+| Ticket 25 migration | `m` → `1` CSV preview for each mapping/duplicate choice and `2` 1PUX preview; verify hidden-value summaries, cancel/incorrect confirmation, then exact `IMPORT` commit and source immutability. |
+| Ticket 25 backup/recovery | `b` → `1` native backup, `2` warning then `EXPORT` plaintext, `3` `|RESTORE`, `4` `|ROTATE`, and `5` recovery-code re-entry; verify destination collision rejection, durable results, historical-copy warning and both rotation outcomes. |
+| Ticket 25 devices/sync | `y` → `1` pinned `|PAIR`, `2` real `|SYNC`, `4` status for the same job ID, and `3` exact `|RETIRE`; observe offline/failure, restart recovery and causal second-device retirement without retry or alternate endpoint. |
+| Ticket 25 audit/attachment | `z` → `1` audit query and `2` exact `generation:through:PURGE AUDIT`, then `D` with a selected attachment and a new 0600 destination; verify the >16 MiB stream's digest/length, no full-frame secret and source preservation. |
+
+The native matrix must run through the same human TLS/RPK channel and service
+as the core flow, with real keyboard/PTY observations and engine/file checks
+after each commit point. This table records missing native coverage only; the
+existing Linux 23--25 evidence remains separate, no macOS acceptance is
+claimed, and no product code or deadline is changed by this preparation.
 
 ## Remaining acceptance work
 

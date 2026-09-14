@@ -21,6 +21,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 import unicodedata
@@ -862,6 +863,151 @@ class MacPtySession:
                 self.wait_text(f"Input: {value}", since=start)
             self.send_key("enter")
 
+    def run_while_draining(self, command, *, check=True, timeout=30):
+        """Run a fixture helper while continuously consuming this PTY."""
+        argv = [str(value) for value in command]
+        process = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        stdout_fd = process.stdout.fileno()
+        stderr_fd = process.stderr.fileno()
+        streams = {
+            stdout_fd: process.stdout,
+            stderr_fd: process.stderr,
+        }
+        captured = {fd: bytearray() for fd in streams}
+
+        def pump(deadline, *, read_pty=True):
+            while streams or process.poll() is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                read_fds = list(streams)
+                if read_pty and not self.eof:
+                    read_fds.insert(0, self.master)
+                if not read_fds:
+                    time.sleep(min(0.05, remaining))
+                    continue
+                ready, _, _ = select.select(
+                    read_fds, [], [], min(0.05, remaining),
+                )
+                if read_pty and self.master in ready:
+                    self._read_once(0)
+                for fd, stream in list(streams.items()):
+                    if fd not in ready:
+                        continue
+                    value = os.read(fd, 64 * 1024)
+                    if value:
+                        captured[fd].extend(value)
+                    else:
+                        streams.pop(fd)
+                        stream.close()
+            return True
+
+        termination_sent = False
+
+        def terminate_owned_group():
+            nonlocal termination_sent
+            if termination_sent:
+                return
+            termination_sent = True
+            try:
+                # start_new_session gives this fixture helper an owned process
+                # group.  Kill the group even if the Popen leader has already
+                # exited: a descendant may still hold a pipe open.
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        primary = None
+        try:
+            complete = pump(time.monotonic() + timeout)
+        except BaseException as error:
+            primary = error
+        if primary is None and not complete:
+            primary = subprocess.TimeoutExpired(
+                argv, timeout,
+                output=bytes(captured[stdout_fd]),
+                stderr=bytes(captured[stderr_fd]),
+            )
+        cleanup_errors = []
+        if primary is not None:
+            try:
+                terminate_owned_group()
+            except BaseException as error:
+                cleanup_errors.append(error)
+
+        teardown_deadline = time.monotonic() + 5
+        try:
+            teardown_complete = pump(
+                teardown_deadline,
+                read_pty=not isinstance(primary, UnsupportedVtSequence),
+            )
+            if not teardown_complete:
+                cleanup_errors.append(
+                    AssertionError("fixture helper streams did not close during cleanup")
+                )
+        except BaseException as error:
+            cleanup_errors.append(error)
+        if process.poll() is None:
+            try:
+                process.wait(timeout=max(0, teardown_deadline - time.monotonic()))
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if process.poll() is None:
+            cleanup_errors.append(
+                AssertionError("fixture helper did not exit during cleanup")
+            )
+        for fd, stream in list(streams.items()):
+            try:
+                stream.close()
+            except BaseException as error:
+                cleanup_errors.append(error)
+            streams.pop(fd)
+        # A VT parser failure is already the primary error.  Re-running drain
+        # would feed the same unsupported bytes a second time and obscure the
+        # original category; the enclosing session cleanup will close the PTY.
+        if not isinstance(primary, UnsupportedVtSequence):
+            try:
+                self.drain()
+            except BaseException as error:
+                if primary is None:
+                    primary = error
+                else:
+                    cleanup_errors.append(error)
+
+        stdout = bytes(captured[stdout_fd])
+        stderr = bytes(captured[stderr_fd])
+        if isinstance(primary, subprocess.TimeoutExpired):
+            primary.output = stdout
+            primary.stderr = stderr
+        if primary is not None:
+            if cleanup_errors:
+                primary.__cause__ = BaseExceptionGroup(
+                    "fixture helper cleanup failed", cleanup_errors,
+                )
+            raise primary
+        if cleanup_errors:
+            raise BaseExceptionGroup("fixture helper cleanup failed", cleanup_errors)
+        returncode = process.wait()
+        result = subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+        if check and returncode:
+            raise subprocess.CalledProcessError(
+                returncode, argv, output=stdout, stderr=stderr,
+            )
+        return result
+
+    def run_sudo_while_draining(self, command, *, user=None, check=True, timeout=30):
+        prefix = ["sudo", "-n"]
+        if user is not None:
+            prefix += ["-u", user]
+        return self.run_while_draining(
+            prefix + list(command), check=check, timeout=timeout,
+        )
+
     @staticmethod
     def _exit_code(status):
         if os.WIFEXITED(status):
@@ -1068,19 +1214,174 @@ def assert_screen_observer_regression():
             "cursor-positioned screen regression: stale selected-row history satisfied wait"
         )
     assert_pasteboard_diagnostic_regression()
+    assert_pty_helper_drain_regression()
 
 
-def read_appkit_pasteboard():
-    result = run(["osascript", "-e", "the clipboard as text"], check=False, timeout=10)
+def assert_pty_helper_drain_regression():
+    """Exercise helper drainage and owned teardown without product processes."""
+    def start_fixture_pty(payload, *, repeat=False, initial_delay=0):
+        pid, master = pty.fork()
+        if pid == 0:
+            try:
+                if initial_delay:
+                    time.sleep(initial_delay)
+                if repeat:
+                    for _ in range(200):
+                        os.write(1, payload)
+                        time.sleep(0.005)
+                else:
+                    os.write(1, payload)
+                time.sleep(30)
+            finally:
+                os._exit(0)
+        return MacPtySession(pid, master)
+
+    def helper_script(body):
+        return [sys.executable, "-c", body]
+
+    def wait_for_absence(path, timeout=2):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            assert not path.exists(), "owned helper descendant survived group cleanup"
+            time.sleep(0.05)
+        assert not path.exists(), "owned helper descendant survived group cleanup"
+
+    def wait_for_presence(path, timeout=2):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                return
+            time.sleep(0.05)
+        assert path.exists(), "owned helper descendant did not start"
+
+    session = start_fixture_pty(b"\x1b[1;1Hsynthetic PTY heartbeat ", repeat=True)
+    try:
+        result = session.run_while_draining(
+            helper_script(
+                "import sys; sys.stdout.write('helper-stdout\\n'); "
+                "sys.stderr.write('helper-stderr\\n')"
+            ),
+            timeout=2,
+        )
+        assert result.returncode == 0
+        assert result.stdout == b"helper-stdout\n"
+        assert result.stderr == b"helper-stderr\n"
+        assert b"synthetic PTY heartbeat" in session.output
+
+        canary = b"synthetic-hidden-canary"
+        result = session.run_while_draining(
+            helper_script(
+                "import sys; sys.stdout.buffer.write(%r); "
+                "sys.stderr.buffer.write(b'helper-diagnostic')"
+                % (canary + b"\\n",)
+            ),
+            check=False,
+            timeout=2,
+        )
+        assert classify_pasteboard_output(
+            canary, result.stdout, result.stderr, result.returncode,
+        ) == (b"zero", True, False, b"yes")
+    finally:
+        close_session_preserving_primary(session)
+
+    started_fd, started_name = tempfile.mkstemp(prefix="pm26-helper-descendant-started-")
+    os.close(started_fd)
+    started = pathlib.Path(started_name)
+    started.unlink()
+    marker_fd, marker_name = tempfile.mkstemp(prefix="pm26-helper-descendant-survived-")
+    os.close(marker_fd)
+    marker = pathlib.Path(marker_name)
+    marker.unlink()
+    session = start_fixture_pty(b"\x1b[1;1Hsynthetic timeout stream ", repeat=True)
+    try:
+        try:
+            session.run_while_draining(
+                helper_script(
+                    "import os, pathlib, sys, time\n"
+                    "read_fd, write_fd = os.pipe()\n"
+                    "child = os.fork()\n"
+                    "if child == 0:\n"
+                    "    os.close(read_fd)\n"
+                    "    pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+                    "    os.write(write_fd, b'x')\n"
+                    "    os.close(write_fd)\n"
+                    "    time.sleep(0.5)\n"
+                    "    pathlib.Path(sys.argv[2]).write_text('survived')\n"
+                    "    os._exit(0)\n"
+                    "os.close(write_fd)\n"
+                    "os.read(read_fd, 1)\n"
+                    "os.close(read_fd)\n"
+                    "os._exit(0)\n"
+                ) + [str(started), str(marker)],
+                timeout=0.1,
+            )
+        except subprocess.TimeoutExpired as error:
+            assert error.output == b""
+            assert error.stderr == b""
+        else:
+            raise AssertionError("helper timeout regression did not time out")
+        wait_for_presence(started)
+        wait_for_absence(marker)
+    finally:
+        close_session_preserving_primary(session)
+        started.unlink(missing_ok=True)
+        marker.unlink(missing_ok=True)
+
+    parser_started_fd, parser_started_name = tempfile.mkstemp(
+        prefix="pm26-helper-parser-started-",
+    )
+    os.close(parser_started_fd)
+    parser_started = pathlib.Path(parser_started_name)
+    parser_started.unlink()
+    parser_marker_fd, parser_marker_name = tempfile.mkstemp(prefix="pm26-helper-parser-")
+    os.close(parser_marker_fd)
+    parser_marker = pathlib.Path(parser_marker_name)
+    parser_marker.unlink()
+    session = start_fixture_pty(b"\x1b[6n", initial_delay=0.1)
+    try:
+        try:
+            session.run_while_draining(
+                helper_script(
+                    "import pathlib, sys, time; "
+                    "pathlib.Path(sys.argv[1]).write_text('started'); "
+                    "time.sleep(0.5); "
+                    "pathlib.Path(sys.argv[2]).write_text('survived')"
+                ) + [str(parser_started), str(parser_marker)],
+                timeout=2,
+            )
+        except UnsupportedVtSequence as error:
+            assert error.category == "terminal-query"
+        else:
+            raise AssertionError("parser error regression was accepted")
+        wait_for_presence(parser_started)
+        wait_for_absence(parser_marker)
+    finally:
+        close_session_preserving_primary(session)
+        parser_started.unlink(missing_ok=True)
+        parser_marker.unlink(missing_ok=True)
+
+
+def read_appkit_pasteboard(session=None):
+    command = ["osascript", "-e", "the clipboard as text"]
+    result = (
+        run(command, check=False, timeout=10)
+        if session is None
+        else session.run_while_draining(command, check=False, timeout=10)
+    )
     assert result.returncode == 0 and result.stderr == b"", (
         "AppKit pasteboard observer failed", result.returncode, result.stderr[:1024],
     )
     return result.stdout.rstrip(b"\r\n")
 
 
-def write_appkit_pasteboard(value):
+def write_appkit_pasteboard(value, session=None):
     expression = f'set the clipboard to "{value.decode("ascii")}"'
-    result = run(["osascript", "-e", expression], check=False, timeout=10)
+    command = ["osascript", "-e", expression]
+    result = (
+        run(command, check=False, timeout=10)
+        if session is None
+        else session.run_while_draining(command, check=False, timeout=10)
+    )
     assert result.returncode == 0 and result.stderr == b"", (
         "AppKit pasteboard replacement failed", result.returncode, result.stderr[:1024],
     )
@@ -1170,8 +1471,8 @@ def assert_pasteboard_diagnostic_regression():
     assert classify_shared_control_exit(None, False) == (b"unknown", b"unknown")
 
 
-def assert_human_pasteboard_canary(secret, *, diagnostic=False, phase=None):
-    value = read_appkit_pasteboard()
+def assert_human_pasteboard_canary(secret, *, diagnostic=False, phase=None, session=None):
+    value = read_appkit_pasteboard(session=session)
     canary_read = value == secret
     if diagnostic:
         emit_diagnostic(
@@ -1191,22 +1492,26 @@ def assert_human_pasteboard_canary(secret, *, diagnostic=False, phase=None):
     assert canary_read, "human AppKit pasteboard control did not read the exact canary"
 
 
-def assert_agent_cannot_read_pasteboard(secret, *, diagnostic=False, require_denied=True):
+def assert_agent_cannot_read_pasteboard(
+    secret, *, diagnostic=False, require_denied=True, session=None,
+):
+    run_command = run if session is None else session.run_while_draining
+    sudo_command = sudo if session is None else session.run_sudo_while_draining
     if diagnostic:
         human_uid = os.getuid()
         agent_uid = pwd.getpwnam(AGENT).pw_uid
-        human_identity = classify_identity(run(["id", "-u"], check=False), human_uid)
+        human_identity = classify_identity(run_command(["id", "-u"], check=False), human_uid)
         agent_identity = classify_identity(
-            sudo(["id", "-u"], user=AGENT, check=False), agent_uid
+            sudo_command(["id", "-u"], user=AGENT, check=False), agent_uid
         )
         human_domain = classify_launchd_domain(
-            run(["launchctl", "manageruid"], check=False), human_uid
+            run_command(["launchctl", "manageruid"], check=False), human_uid
         )
         agent_domain = classify_launchd_domain(
-            sudo(["launchctl", "manageruid"], user=AGENT, check=False), human_uid
+            sudo_command(["launchctl", "manageruid"], user=AGENT, check=False), human_uid
         )
     try:
-        result = sudo(
+        result = sudo_command(
             ["osascript", "-e", "the clipboard as text"],
             user=AGENT, check=False,
         )
@@ -1280,20 +1585,24 @@ def launchd_manager_context():
     return int(uid, 10), name.decode("ascii")
 
 
-def wait_for_agent_launch(label, result_path):
+def wait_for_agent_launch(label, result_path, *, session=None):
     # The job may spend both fixed 10-second metadata bounds before the exact
     # public probe's fixed 30-second bound.  This is a fixture lifecycle bound,
     # not a product or clipboard-lease extension.
+    sudo_command = sudo if session is None else session.run_sudo_while_draining
     deadline = time.monotonic() + AGENT_LAUNCH_WAIT_TIMEOUT
     while time.monotonic() < deadline:
-        result_exists = sudo(["test", "-s", result_path], check=False).returncode == 0
-        details = sudo(["launchctl", "print", f"system/{label}"], check=False)
+        result_exists = sudo_command(["test", "-s", result_path], check=False).returncode == 0
+        details = sudo_command(["launchctl", "print", f"system/{label}"], check=False)
         if details.returncode != 0:
             raise AssertionError("isolated pasteboard launch job disappeared")
         running = re.search(rb"\bpid = [0-9]+\b", details.stdout) is not None
         if result_exists and not running:
             return
-        time.sleep(0.1)
+        if session is None:
+            time.sleep(0.1)
+        else:
+            session._read_once(0.1)
     raise AssertionError("isolated pasteboard launch job did not finish")
 
 
@@ -1340,7 +1649,12 @@ def prepare_launchd_agent(
         # Bootstrap the job before the copy lease, but trigger its one shot
         # only after the isolated session has copied the marker.
         "RunAtLoad": False,
-        "LaunchOnlyOnce": True,
+        # Keep this on-demand job loaded after its one kickstart so the
+        # harness can observe the result and last exit status before the
+        # owned bootout.  The one-shot-only setting makes launchd
+        # garbage-collect the job as soon as it exits, which races that
+        # observation.
+        "KeepAlive": False,
         "ProcessType": "Background",
         "WorkingDirectory": "/var/empty",
         "Umask": 63,
@@ -1365,22 +1679,25 @@ def prepare_launchd_agent(
     }
 
 
-def assert_launchd_agent_cannot_read_pasteboard(prepared, *, diagnostic=False):
+def assert_launchd_agent_cannot_read_pasteboard(
+    prepared, *, diagnostic=False, session=None,
+):
     """Run the exact pasteboard probe from an owned system-domain launchd job."""
+    sudo_command = sudo if session is None else session.run_sudo_while_draining
     label = prepared["label"]
     result_path = prepared["result_path"]
     stdout_path = prepared["stdout_path"]
     stderr_path = prepared["stderr_path"]
-    assert sudo(["test", "!", "-s", result_path], check=False).returncode == 0, (
+    assert sudo_command(["test", "!", "-s", result_path], check=False).returncode == 0, (
         "isolated pasteboard launch result was nonempty before kickstart"
     )
-    sudo(["launchctl", "kickstart", f"system/{label}"])
-    wait_for_agent_launch(label, result_path)
+    sudo_command(["launchctl", "kickstart", f"system/{label}"])
+    wait_for_agent_launch(label, result_path, session=session)
 
-    result = sudo(["cat", result_path])
+    result = sudo_command(["cat", result_path])
     fields = parse_agent_pasteboard_result(result.stdout)
     for path in (stdout_path, stderr_path):
-        output = sudo(["cat", path])
+        output = sudo_command(["cat", path])
         assert output.returncode == 0 and output.stdout == b"" and output.stderr == b"", (
             "isolated pasteboard launch emitted unclassified output"
         )
@@ -1959,7 +2276,8 @@ def run_shared_pasteboard_control(
         if pasteboard_observation:
             emit_diagnostic(b"PM26_DIAGNOSTIC pasteboard-shared-control=unsupported")
             assert_agent_cannot_read_pasteboard(
-                TUI_PASSWORD_RECORD, diagnostic=True, require_denied=False
+                TUI_PASSWORD_RECORD, diagnostic=True, require_denied=False,
+                session=shared,
             )
         # Close a still-running supporting TUI through the same human keyboard
         # path as the normal flow.  This keeps the PTY stream complete before
@@ -2068,19 +2386,21 @@ def run_tui_core_lab(
         copied_start = select_tui_password_for_copy(isolated)
         isolated.wait_text("Copied explicitly", since=copied_start)
         assert_human_pasteboard_canary(
-            TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation, phase="before"
+            TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation, phase="before",
+            session=isolated,
         )
         probe_error = None
         try:
             assert_launchd_agent_cannot_read_pasteboard(
-                prepared_agent, diagnostic=pasteboard_observation,
+                prepared_agent, diagnostic=pasteboard_observation, session=isolated,
             )
         except BaseException as error:
             probe_error = error
         after_error = None
         try:
             assert_human_pasteboard_canary(
-                TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation, phase="after"
+                TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation, phase="after",
+                session=isolated,
             )
         except BaseException as error:
             after_error = error
@@ -2127,11 +2447,11 @@ def run_tui_core_lab(
     try:
         copied_start = select_tui_password_for_copy(expiry)
         expiry.wait_text("Copied explicitly", since=copied_start)
-        assert_human_pasteboard_canary(TUI_PASSWORD_RECORD)
-        write_appkit_pasteboard(TUI_EXTERNAL_REPLACEMENT)
+        assert_human_pasteboard_canary(TUI_PASSWORD_RECORD, session=expiry)
+        write_appkit_pasteboard(TUI_EXTERNAL_REPLACEMENT, session=expiry)
         expiry_start = expiry.mark()
         expiry.wait_text("Clipboard custody expired", since=expiry_start)
-        assert read_appkit_pasteboard() == TUI_EXTERNAL_REPLACEMENT
+        assert read_appkit_pasteboard(session=expiry) == TUI_EXTERNAL_REPLACEMENT
         expiry.send_key("l")
         assert expiry.wait_exit(timeout=8) == 0
     finally:
