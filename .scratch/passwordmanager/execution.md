@@ -288,3 +288,15 @@ por merger o la revisión global final.
 Los cuatro errores de cleanup heredados adicionales ya señalados y el cambio
 público de custodia de auditoría permanecen pendientes de aprobación. No se
 alteran por deducir permiso de autorizaciones anteriores con otro alcance.
+
+### Autorización posterior del checkpoint
+
+2026-09-14 — El usuario respondió «autorizado» a la pregunta explícita sobre
+ambos cambios pendientes: `HumanVault::unlock` recibirá custodia de auditoría
+estable explícita, adaptando sus consumidores sin reducir los flujos CLI/TUI;
+y se propagarán los cuatro errores de limpieza ya identificados en
+`TemporaryDirectory::drop`, keygen de clave privada parcial,
+`rpc_download_atomic` y `write_new`. Se preservan el error primario, los
+fallos de cleanup y la propiedad de recursos; no autoriza fallbacks, borrar
+recursos ajenos ni modificar otras omisiones heredadas. Las menciones de
+«pendiente» en el checkpoint anterior son históricas desde esta aprobación.
