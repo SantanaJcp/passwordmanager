@@ -96,7 +96,8 @@ $cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $passMessage = $null
 
 try {
-    Assert-True ((whoami /groups) -match 'S-1-5-32-544') 'lab requires an elevated ephemeral runner'
+    $runnerPrincipal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+    Assert-True ($runnerPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 'lab requires an elevated ephemeral runner'
 
     # Refuse every collision before creating or changing a fixture. The fixed
     # names are deliberate so the test also exercises the installed names.

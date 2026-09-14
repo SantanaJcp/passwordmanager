@@ -198,6 +198,19 @@ estándar no está disponible. Reboot/FDE, Windows Terminal humano real y firma
 permanecen en 32/34. Por ello el ticket conserva `Status: claimed` y ningún
 criterio de aceptación se marca completo.
 
+La tercera ejecución nativa del producto,
+[run 34797085446](https://github.com/SantanaJcp/passwordmanager/actions/runs/34797085446),
+volvió a quedar en **failure** antes de crear fixtures o ejecutar el producto.
+La compilación fuente autenticada de libsodium y `linked_version` ya habían
+pasado; el laboratorio se detuvo en su guardia administrativa porque
+`(whoami /groups) -match ...` produjo un `Object[]` que PowerShell no pudo
+convertir al parámetro `[bool]` de `Assert-True`. La corrección mantiene la
+guardia `EphemeralCI`, `GITHUB_ACTIONS=true`/`CI=true` y la comprobación de
+administrador, pero usa `WindowsPrincipal.IsInRole(Administrator)`, el mismo
+token administrativo que ya comprueba el preflight. Este fallo no es evidencia
+de producto y exige una nueva corrida Windows nativa; no se marca ningún
+criterio como completo.
+
 ## Regresión Linux del checkpoint
 
 Después de extraer el motor wire compartido, `./scripts/check.sh` terminó con
