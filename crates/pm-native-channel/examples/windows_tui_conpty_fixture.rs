@@ -230,7 +230,10 @@ mod windows_fixture {
                         .iter()
                         .any(|value| !matches!(value, 25 | 1049 | 2026))
                 {
-                    self.fail("unsupported private ConPTY CSI sequence");
+                    self.fail(format!(
+                        "unsupported private ConPTY CSI modes={parameters:?} count={} final=0x{command:02x}",
+                        parameters.len()
+                    ));
                 } else if command == b'h' && parameters.contains(&1049) {
                     self.cells.fill(' ');
                     self.row = 0;
@@ -1107,6 +1110,19 @@ mod windows_fixture {
             let observer = TerminalObserver::new();
             let error = observer.feed(b"visible\x1b]0;concealed\x07").unwrap_err();
             assert!(error.contains("unsupported ConPTY escape"));
+        }
+
+        #[test]
+        fn observer_classifies_private_csi_without_screen_content() {
+            let observer = TerminalObserver::new();
+            let error = observer
+                .feed(b"secret-not-reported\x1b[?9001;1004h")
+                .unwrap_err();
+            assert_eq!(
+                error,
+                "unsupported private ConPTY CSI modes=[9001, 1004] count=2 final=0x68"
+            );
+            assert!(!error.contains("secret-not-reported"));
         }
 
         #[test]

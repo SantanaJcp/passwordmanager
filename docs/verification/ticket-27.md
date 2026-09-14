@@ -1622,3 +1622,21 @@ reparse y que un output sólo se publica después de flush+rename; cualquier
 imposibilidad de consultar la seguridad o identidad es error, no una apertura
 menos protegida. Después se repiten los tests nativos y el lab completo; sólo
 entonces el observer puede producir el RED de producto esperado.
+
+La corrida
+[`34862625148`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34862625148)
+sobre `7f5aeece266368d98c7343b03871cd56cbf48d8e` cerró esa precondición:
+compilaron `pm-sync` y `pm-custody` en Windows, y pasaron 8 tests nativos más
+los grupos 1/1 y 3/3 de ejemplos. El observer alcanzó el proceso normal pero
+rechazó una secuencia CSI privada que su gramática cerrada aún no reconoce.
+Por tanto tampoco es un RED de pantalla del producto. El cleanup del fixture y
+el cleanup/chequeo de ausencia del lab se ejecutaron; el error agregado del
+fixture repite el fallo del observer, no identifica un recurso residual. El log
+completo está en `/tmp/pm-windows-portfs-observer-run22-failed.log`.
+
+Para obtener el discriminante sin exponer pantalla, input ni bytes crudos, el
+rechazo de CSI privada informará solamente la lista numérica de modos, su
+cardinalidad y el byte final ASCII. El parser seguirá rechazando el opcode: el
+diagnóstico no lo ignora ni lo incorpora a la pantalla. Una regresión fija debe
+comprobar esa gramática pública cerrada. La siguiente corrida clasificará el
+modo concreto antes de decidir si su semántica debe implementarse.
