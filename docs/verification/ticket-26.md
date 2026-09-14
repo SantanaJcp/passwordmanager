@@ -1029,9 +1029,10 @@ resize, alternate-screen exit snapshot, and rejection of incomplete UTF-8 and
 `CSI 6n`. The native TUI waits use the same observer over the actual captured
 PTY stream; raw bytes remain available only for the existing secret, OSC52 and
 DSR checks. Error messages do not include screen rows or raw bytes. The
-parser-only GREEN and the next normal two-architecture native result remain
-pending; this observer is not complete Ticket 23--25 acceptance, which still
-requires the separately documented full matrix.
+parser-only GREEN is recorded in checkpoint `44160b1`; the next normal
+two-architecture native result remains pending. This observer is not complete
+Ticket 23--25 acceptance, which still requires the separately documented full
+matrix.
 
 The test-first chronology is recorded explicitly. Before the observer was
 implemented, the new parser regression was run against the old
@@ -1055,9 +1056,45 @@ was held; it was not a granted Cargo/Linux/native/system-lab gate and carries
 no acceptance evidence. The import created only the test module's own
 `crates/pm-custody/tests/__pycache__/`, which was removed by exact-path file
 deletion and directory removal. No retry or fabricated pass followed. After
-that RED, checkpoint `1820b8b` added `VtScreen`; only AST parsing and
-`git diff --check` were run, so parser GREEN and all native evidence remain
-pending a separately granted brief parser-only execution.
+that RED, checkpoint `1820b8b` added `VtScreen`; checkpoint `44160b1` then
+made wide-cell, `CSI 1J`, and zero-parameter movement cases explicit and the
+parser-only regression passed. The parser result is not native evidence.
+
+### Native run 23 event-boundary RED and bounded fixture correction
+
+Run [`34853427359`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34853427359)
+on `44160b1` compiled the ordinary binaries and applicable native tests on
+Intel and Apple silicon, and both jobs passed native preflight, the exact
+toolchain, dependency fetch, unit-test and architecture checks. Both then
+failed inside the test-only TUI fixture before any `PASS macos-tui-core` line.
+
+The Apple-silicon job timed out in `tui_search` while waiting for the
+`Search (engine-decrypted):` screen. The captured log contains no screen dump,
+secret, or internal product phase, so this is an unclassified fixture
+observation RED rather than evidence of a product search failure. The Intel
+job reached field selection and reported `selected password field was not
+rendered` after the fixture sent fourteen `j` bytes. The old helper could stop
+on any historical frame containing the field label before the current frame's
+highlight marker had rendered; this is also an observer synchronization RED,
+not product acceptance evidence.
+
+The bounded test-only correction keeps the same `forkpty`, product binary,
+live service and fixed deadlines. `MacPtySession.mark()` drains bytes already
+queued by the PTY and records an event-count boundary instead of using a raw
+byte offset. `wait_text()` and the new `wait_selected()` inspect only the
+current screen after that boundary; the latter requires the exact highlighted
+row. A local resize changes decoder geometry but no longer creates a
+synthetic screen event. Search explicitly marks the post-prompt transition
+before submitting the query. Timeout diagnostics expose only fixed categories:
+`mode` (primary/alternate), `render` (known screen class/other), `event`
+(`post-mark`/`none`), parser state and child state; they never print rows, raw
+bytes, paths or secrets. The regression preserves event history for terminal
+exit while proving stale history cannot satisfy a current-screen wait.
+
+This correction has only static AST and diff checks so far; no local Cargo,
+system lab, native rerun or complete Ticket 23--25 acceptance is claimed. The
+next native run must still prove the normal two-architecture TUI core and the
+separately documented full keyboard matrix.
 
 ## Remaining acceptance work
 

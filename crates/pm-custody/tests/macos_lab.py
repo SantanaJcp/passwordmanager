@@ -528,13 +528,17 @@ class MacPtySession:
         return session
 
     def mark(self):
-        return len(self.output)
+        # Drain bytes already queued by the PTY before defining the action
+        # boundary.  A raw-output offset alone can classify a frame emitted
+        # before the key as post-action when that frame was still unread.
+        self.drain()
+        return len(self._screen_events)
 
     def resize(self, columns, rows):
         dimensions = struct.pack("HHHH", rows, columns, 0, 0)
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, dimensions)
         self.screen.resize(columns, rows)
-        self._record_screen_event()
+        self._screen_revision = self.screen.revision
 
     def _consume_output(self, *, final=False):
         if self._screen_finalized:
@@ -579,19 +583,70 @@ class MacPtySession:
             pass
 
     def text(self, since=0):
-        return "\n".join(
-            rendered for raw_end, rendered in self._screen_events if raw_end > since
-        )
+        return "\n".join(rendered for _, rendered in self._screen_events[since:])
+
+    def _current_text_after(self, since):
+        if len(self._screen_events) <= since:
+            return None
+        return self.screen.application_text()
+
+    def _screen_diagnostic(self, since):
+        rendered = self.screen.application_text()
+        render = "other"
+        for category, marker in (
+            ("password-prompt", "Password required"),
+            ("unlocked-catalog", "Unlocked: selection never reveals secrets"),
+            ("search-prompt", "Search (engine-decrypted):"),
+            ("search-result", "Search returned"),
+            ("catalog", "Items (selection is metadata only)"),
+            ("field-list", "Fields (explicit selection; values hidden)"),
+            ("copy-status", "Copied explicitly"),
+            ("clipboard-expired", "Clipboard custody expired"),
+            ("idle-lock", "Locked after"),
+        ):
+            if marker in rendered:
+                render = category
+                break
+        mode = "alternate" if self.screen._primary is not None else "primary"
+        if self.screen._utf8:
+            parser = "pending-utf8"
+        elif self.screen._state == "ground":
+            parser = "ground"
+        else:
+            parser = "pending-control"
+        frame = "post-mark" if len(self._screen_events) > since else "none"
+        child = "eof" if self.eof else "alive"
+        return f"mode={mode} render={render} event={frame} parser={parser} child={child}"
 
     def wait_text(self, expected, *, timeout=8, since=0):
         deadline = time.monotonic() + timeout
         while True:
-            rendered = self.text(since)
-            if expected in rendered:
+            rendered = self._current_text_after(since)
+            if rendered is not None and expected in rendered:
                 return rendered
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise AssertionError("TUI PTY screen observation timed out")
+                raise AssertionError(
+                    "TUI PTY screen observation timed out "
+                    + self._screen_diagnostic(since)
+                )
+            self._read_once(min(0.1, remaining))
+
+    def wait_selected(self, label, *, timeout=8, since=0):
+        pattern = re.compile(rf"›\s+{re.escape(label)}(?:\s|\(|$)")
+        deadline = time.monotonic() + timeout
+        while True:
+            rendered = self._current_text_after(since)
+            if rendered is not None and any(
+                pattern.search(line) for line in rendered.splitlines()
+            ):
+                return rendered
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(
+                    "TUI PTY selected-row observation timed out "
+                    + self._screen_diagnostic(since)
+                )
             self._read_once(min(0.1, remaining))
 
     def write(self, value):
@@ -733,6 +788,52 @@ def assert_screen_observer_regression():
         assert error.category == "incomplete-utf8"
     else:
         raise AssertionError("cursor-positioned screen regression: incomplete UTF-8 was accepted")
+
+    marker = object.__new__(MacPtySession)
+    marker._screen_events = []
+    marker.drain = lambda: marker._screen_events.append((0, "fresh frame"))
+    assert marker.mark() == 1, (
+        "cursor-positioned screen regression: action mark did not drain queued output"
+    )
+
+    boundary = object.__new__(MacPtySession)
+    boundary.screen = VtScreen(40, 4)
+    boundary.screen.feed(b"Items (selection is metadata only)", final=True)
+    boundary._screen_events = [
+        (16, "Search (engine-decrypted):"),
+        (32, "Items (selection is metadata only)"),
+    ]
+    boundary.eof = False
+    assert "Search (engine-decrypted):" in boundary.text(), (
+        "cursor-positioned screen regression: event history was discarded"
+    )
+    assert "Search (engine-decrypted):" not in boundary._current_text_after(0), (
+        "cursor-positioned screen regression: current screen used stale event history"
+    )
+    try:
+        boundary.wait_text("Search (engine-decrypted):", timeout=0)
+    except AssertionError as error:
+        assert str(error).endswith(
+            "mode=primary render=catalog event=post-mark parser=ground child=alive"
+        ), str(error)
+    else:
+        raise AssertionError(
+            "cursor-positioned screen regression: stale screen history satisfied wait"
+        )
+
+    selection = object.__new__(MacPtySession)
+    selection.screen = VtScreen(40, 4)
+    selection.screen.feed(b"auth[0].username", final=True)
+    selection._screen_events = [(24, "› auth[0].password (32 bytes)")]
+    selection.eof = False
+    try:
+        selection.wait_selected("auth[0].password", timeout=0)
+    except AssertionError as error:
+        assert str(error).startswith("TUI PTY selected-row observation timed out "), str(error)
+    else:
+        raise AssertionError(
+            "cursor-positioned screen regression: stale selected-row history satisfied wait"
+        )
 
 
 def read_appkit_pasteboard():
@@ -1250,8 +1351,9 @@ def tui_search(session, value):
     start = session.mark()
     session.send_key("/")
     session.wait_text("Search (engine-decrypted):", since=start)
+    search_start = session.mark()
     session.send_text(value, enter=True)
-    return session.wait_text("Search returned 1 active items", since=start)
+    return session.wait_text("Search returned 1 active items", since=search_start)
 
 
 def select_tui_password_for_copy(session):
@@ -1260,10 +1362,7 @@ def select_tui_password_for_copy(session):
     session.wait_text("Fields (explicit selection; values hidden)", since=start)
     start = session.mark()
     session.send_text("j" * 14)
-    page = session.wait_text("auth[0].password", since=start)
-    assert any("›" in line and "auth[0].password" in line for line in page.splitlines()), (
-        "selected password field was not rendered"
-    )
+    session.wait_selected("auth[0].password", since=start)
     copy_start = session.mark()
     session.send_key("enter")
     return copy_start
