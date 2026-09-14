@@ -402,7 +402,8 @@ def main():
                 )
                 assert content.stdout == (
                     b"PASS content-e2e types=7 unicode-attachment=exact source-fields=preserved "
-                    b"search=1 organize=tag+favorite generator=configured passkey=storage-only\n"
+                    b"search=1 organize=tag+favorite generator=configured passkey=storage-only "
+                    b"legacy-exposure=rejected\n"
                 )
                 assert content.stderr == b""
                 streamed = as_uid(
