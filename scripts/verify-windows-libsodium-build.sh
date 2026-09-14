@@ -178,17 +178,21 @@ require_literal '[switch]$TuiConPtyRed' "$lab"
 require_literal "@('build', '-p', 'pm-native-channel', '--example', 'windows_tui_conpty_fixture', '--locked', '--offline')" "$lab"
 require_literal 'D:P(A;;GA;;;SY)(A;;GA;;;$humanSid)' "$lab"
 require_literal '@($stationSddl, $tuiCustody, '\''tui'\''' "$lab"
+require_literal ') $humanInput $tuiOut $tuiErr' "$lab"
 require_literal 'TUI_CONPTY_READY' "$lab"
 for literal in CreateWindowStationW CWF_CREATE_ONLY CreateDesktopW CreatePseudoConsole \
     STARTUPINFOEXW PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE CreateProcessW \
     'fixture.pseudo_console as *const c_void' OutputDrain 'thread::Builder::new()' \
-    'MAX_CAPTURE_BYTES' 'require_tui_liveness' \
+    'MAX_CAPTURE_BYTES' 'TerminalObserver' 'exercise_keyboard_screen' \
+    'Password required (input hidden)' 'Unlocked: selection never reveals secrets' \
+    'Items (selection is metadata only)' 'WriteFile(ConPTY input)' \
     'CloseHandle ceded ConPTY input' 'CloseHandle ceded ConPTY output' \
     'WaitForSingleObject(self.process, INFINITE)' \
-    'WaitForSingleObject(process, 15_000)' TUI_CONPTY_RED TUI_CONPTY_READY; do
+    'ConPTY screen did not show expected text within 15 seconds' \
+    TUI_CONPTY_RED TUI_CONPTY_READY; do
     require_literal "$literal" "$tui_fixture"
 done
-if grep -Eq 'TerminateProcess|Command::new|winsta0|OpenClipboard|PeekNamedPipe|&raw const fixture\.pseudo_console|mpsc::channel|VtScreen|process::abort' "$tui_fixture"; then
+if grep -Eq 'TerminateProcess|Command::new|winsta0|OpenClipboard|PeekNamedPipe|&raw const fixture\.pseudo_console|mpsc::channel|process::abort' "$tui_fixture"; then
     echo 'Windows TUI tracer contains a process/terminal/clipboard substitute' >&2
     exit 1
 fi

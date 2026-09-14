@@ -10,17 +10,19 @@ fn main() {
 mod windows_fixture {
     use std::{
         ffi::c_void,
-        io, ptr,
+        io::{self, Read},
+        ptr,
         sync::{
-            Arc,
+            Arc, Condvar, Mutex,
             atomic::{AtomicU64, Ordering},
         },
         thread,
+        time::{Duration, Instant},
     };
     use windows_sys::Win32::{
         Foundation::{
             CloseHandle, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_DATA, GetLastError,
-            HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
         },
         Security::{
             Authorization::{
@@ -38,9 +40,9 @@ mod windows_fixture {
             },
             Threading::{
                 CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-                GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
-                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTUPINFOEXW,
-                UpdateProcThreadAttribute, WaitForSingleObject,
+                INFINITE, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                PROCESS_INFORMATION, STARTUPINFOEXW, UpdateProcThreadAttribute,
+                WaitForSingleObject,
             },
         },
         UI::WindowsAndMessaging::{CWF_CREATE_ONLY, WINSTA_ALL_ACCESS},
@@ -48,6 +50,358 @@ mod windows_fixture {
 
     const DESKTOP_ALL_ACCESS: u32 = 0x000f_01ff;
     const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+    const SCREEN_COLUMNS: usize = 80;
+    const SCREEN_ROWS: usize = 24;
+    const SCREEN_WAIT: Duration = Duration::from_secs(15);
+
+    #[derive(Clone, Copy)]
+    enum ParseState {
+        Ground,
+        Escape,
+        Csi,
+    }
+
+    struct ScreenState {
+        cells: Vec<char>,
+        row: usize,
+        column: usize,
+        saved_row: usize,
+        saved_column: usize,
+        parse: ParseState,
+        csi: Vec<u8>,
+        utf8: Vec<u8>,
+        error: Option<String>,
+        closed: bool,
+    }
+
+    impl Drop for ScreenState {
+        fn drop(&mut self) {
+            self.cells.fill('\0');
+            self.csi.fill(0);
+            self.utf8.fill(0);
+        }
+    }
+
+    impl ScreenState {
+        fn new() -> Self {
+            Self {
+                cells: vec![' '; SCREEN_COLUMNS * SCREEN_ROWS],
+                row: 0,
+                column: 0,
+                saved_row: 0,
+                saved_column: 0,
+                parse: ParseState::Ground,
+                csi: Vec::new(),
+                utf8: Vec::new(),
+                error: None,
+                closed: false,
+            }
+        }
+
+        fn contains(&self, expected: &str) -> bool {
+            self.cells
+                .chunks(SCREEN_COLUMNS)
+                .any(|row| row.iter().collect::<String>().contains(expected))
+        }
+
+        fn fail(&mut self, message: impl Into<String>) {
+            if self.error.is_none() {
+                self.error = Some(message.into());
+            }
+        }
+
+        fn feed(&mut self, bytes: &[u8]) {
+            if self.error.is_some() {
+                return;
+            }
+            for byte in bytes {
+                if self.error.is_some() {
+                    return;
+                }
+                match self.parse {
+                    ParseState::Ground => self.feed_ground(*byte),
+                    ParseState::Escape => match *byte {
+                        b'[' => {
+                            self.csi.clear();
+                            self.parse = ParseState::Csi;
+                        }
+                        b'7' => {
+                            self.saved_row = self.row;
+                            self.saved_column = self.column;
+                            self.parse = ParseState::Ground;
+                        }
+                        b'8' => {
+                            self.row = self.saved_row;
+                            self.column = self.saved_column;
+                            self.parse = ParseState::Ground;
+                        }
+                        value => self.fail(format!(
+                            "unsupported ConPTY escape after ESC: 0x{value:02x}"
+                        )),
+                    },
+                    ParseState::Csi => {
+                        if (0x40..=0x7e).contains(byte) {
+                            let parameters = self.csi.clone();
+                            self.apply_csi(&parameters, *byte);
+                            self.csi.clear();
+                            self.parse = ParseState::Ground;
+                        } else if (0x20..=0x3f).contains(byte) && self.csi.len() < 64 {
+                            self.csi.push(*byte);
+                        } else {
+                            self.fail("invalid or overlong ConPTY CSI sequence");
+                        }
+                    }
+                }
+            }
+        }
+
+        fn feed_ground(&mut self, byte: u8) {
+            if !self.utf8.is_empty() || byte >= 0x80 {
+                self.utf8.push(byte);
+                match std::str::from_utf8(&self.utf8) {
+                    Ok(value) => {
+                        let characters = value.chars().collect::<Vec<_>>();
+                        self.utf8.clear();
+                        for character in characters {
+                            self.put(character);
+                        }
+                    }
+                    Err(error) if error.error_len().is_none() && self.utf8.len() < 4 => {}
+                    Err(_) => self.fail("invalid UTF-8 in ConPTY product output"),
+                }
+                return;
+            }
+            match byte {
+                0x1b => self.parse = ParseState::Escape,
+                b'\r' => self.column = 0,
+                b'\n' => self.row = (self.row + 1).min(SCREEN_ROWS - 1),
+                0x08 => self.column = self.column.saturating_sub(1),
+                0x20..=0x7e => self.put(char::from(byte)),
+                value => self.fail(format!("unsupported ConPTY control byte: 0x{value:02x}")),
+            }
+        }
+
+        fn put(&mut self, character: char) {
+            if character.is_control() || self.row >= SCREEN_ROWS || self.column >= SCREEN_COLUMNS {
+                self.fail("ConPTY character was outside the observable screen");
+                return;
+            }
+            self.cells[self.row * SCREEN_COLUMNS + self.column] = character;
+            self.column += 1;
+        }
+
+        fn apply_csi(&mut self, bytes: &[u8], command: u8) {
+            let (private, bytes) = match bytes.first() {
+                Some(b'?') => (true, &bytes[1..]),
+                _ => (false, bytes),
+            };
+            if bytes
+                .iter()
+                .any(|byte| !byte.is_ascii_digit() && *byte != b';')
+            {
+                self.fail("unsupported ConPTY CSI intermediate byte");
+                return;
+            }
+            let parameters = if bytes.is_empty() {
+                Vec::new()
+            } else {
+                let mut parsed = Vec::new();
+                for field in bytes.split(|byte| *byte == b';') {
+                    if field.is_empty() {
+                        self.fail("ambiguous empty ConPTY CSI parameter");
+                        return;
+                    }
+                    let Ok(text) = std::str::from_utf8(field) else {
+                        self.fail("non-ASCII ConPTY CSI parameter");
+                        return;
+                    };
+                    let Ok(value) = text.parse::<usize>() else {
+                        self.fail("overflowing ConPTY CSI parameter");
+                        return;
+                    };
+                    parsed.push(value);
+                }
+                parsed
+            };
+            if private {
+                if !matches!(command, b'h' | b'l')
+                    || parameters.is_empty()
+                    || parameters
+                        .iter()
+                        .any(|value| !matches!(value, 25 | 1049 | 2026))
+                {
+                    self.fail("unsupported private ConPTY CSI sequence");
+                } else if command == b'h' && parameters.contains(&1049) {
+                    self.cells.fill(' ');
+                    self.row = 0;
+                    self.column = 0;
+                }
+                return;
+            }
+            let first = parameters.first().copied().unwrap_or(0);
+            let distance = || if first == 0 { 1 } else { first };
+            match command {
+                b'm' => {}
+                b'H' | b'f' if parameters.len() <= 2 => {
+                    let row = parameters.first().copied().unwrap_or(1).max(1) - 1;
+                    let column = parameters.get(1).copied().unwrap_or(1).max(1) - 1;
+                    if row >= SCREEN_ROWS || column >= SCREEN_COLUMNS {
+                        self.fail("ConPTY absolute cursor position outside screen");
+                    } else {
+                        self.row = row;
+                        self.column = column;
+                    }
+                }
+                b'A' if parameters.len() <= 1 => self.row = self.row.saturating_sub(distance()),
+                b'B' if parameters.len() <= 1 => {
+                    self.row = (self.row + distance()).min(SCREEN_ROWS - 1);
+                }
+                b'C' if parameters.len() <= 1 => {
+                    self.column = (self.column + distance()).min(SCREEN_COLUMNS - 1);
+                }
+                b'D' if parameters.len() <= 1 => {
+                    self.column = self.column.saturating_sub(distance());
+                }
+                b'G' if parameters.len() <= 1 => {
+                    let column = distance() - 1;
+                    if column >= SCREEN_COLUMNS {
+                        self.fail("ConPTY horizontal cursor position outside screen");
+                    } else {
+                        self.column = column;
+                    }
+                }
+                b'd' if parameters.len() <= 1 => {
+                    let row = distance() - 1;
+                    if row >= SCREEN_ROWS {
+                        self.fail("ConPTY vertical cursor position outside screen");
+                    } else {
+                        self.row = row;
+                    }
+                }
+                b'J' if parameters.len() <= 1 && matches!(first, 0 | 2 | 3) => {
+                    if first == 2 || first == 3 {
+                        self.cells.fill(' ');
+                    } else {
+                        for cell in &mut self.cells[self.row * SCREEN_COLUMNS + self.column..] {
+                            *cell = ' ';
+                        }
+                    }
+                }
+                b'K' if parameters.len() <= 1 && matches!(first, 0 | 1 | 2) => {
+                    let start = self.row * SCREEN_COLUMNS;
+                    let (from, through) = match first {
+                        0 => (start + self.column, start + SCREEN_COLUMNS),
+                        1 => (start, start + self.column + 1),
+                        2 => (start, start + SCREEN_COLUMNS),
+                        _ => unreachable!(),
+                    };
+                    self.cells[from..through].fill(' ');
+                }
+                b's' if parameters.is_empty() => {
+                    self.saved_row = self.row;
+                    self.saved_column = self.column;
+                }
+                b'u' if parameters.is_empty() => {
+                    self.row = self.saved_row;
+                    self.column = self.saved_column;
+                }
+                _ => self.fail(format!("unsupported ConPTY CSI command: 0x{command:02x}")),
+            }
+        }
+
+        fn finish(&mut self) {
+            if !matches!(self.parse, ParseState::Ground) || !self.utf8.is_empty() {
+                self.fail("truncated ConPTY terminal sequence at EOF");
+            }
+            self.closed = true;
+        }
+    }
+
+    struct TerminalObserver {
+        state: Mutex<ScreenState>,
+        changed: Condvar,
+    }
+
+    impl TerminalObserver {
+        fn new() -> Self {
+            Self {
+                state: Mutex::new(ScreenState::new()),
+                changed: Condvar::new(),
+            }
+        }
+
+        fn feed(&self, bytes: &[u8]) -> Result<(), String> {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "ConPTY screen observer lock poisoned".to_owned())?;
+            state.feed(bytes);
+            self.changed.notify_all();
+            Ok(())
+        }
+
+        fn finish(&self) -> Result<(), String> {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "ConPTY screen observer lock poisoned".to_owned())?;
+            state.finish();
+            self.changed.notify_all();
+            Ok(())
+        }
+
+        fn wait_for(&self, expected: &str) -> Result<(), String> {
+            let deadline = Instant::now() + SCREEN_WAIT;
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "ConPTY screen observer lock poisoned".to_owned())?;
+            loop {
+                if let Some(error) = state.error.as_ref() {
+                    return Err(error.clone());
+                }
+                if state.contains(expected) {
+                    return Ok(());
+                }
+                if state.closed {
+                    return Err(format!(
+                        "ConPTY output closed before observable text: {expected}"
+                    ));
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(format!(
+                        "ConPTY screen did not show expected text within 15 seconds: {expected}"
+                    ));
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                let (next, wait) = self
+                    .changed
+                    .wait_timeout(state, remaining)
+                    .map_err(|_| "ConPTY screen observer wait poisoned".to_owned())?;
+                state = next;
+                if wait.timed_out() && !state.contains(expected) {
+                    return Err(format!(
+                        "ConPTY screen did not show expected text within 15 seconds: {expected}"
+                    ));
+                }
+            }
+        }
+
+        fn rejects(&self, forbidden: &[u8]) -> Result<(), String> {
+            let forbidden = std::str::from_utf8(forbidden)
+                .map_err(|_| "synthetic forbidden value is not UTF-8".to_owned())?;
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "ConPTY screen observer lock poisoned".to_owned())?;
+            if state.contains(forbidden) {
+                Err("ConPTY screen exposed the synthetic password".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(Some(0)).collect()
@@ -75,6 +429,7 @@ mod windows_fixture {
     struct OwnedOutput {
         handle: HANDLE,
         drop_error: Arc<AtomicU64>,
+        observer: Arc<TerminalObserver>,
     }
 
     // SAFETY: the read handle has one owner and moves once to the dedicated drainer.
@@ -100,6 +455,7 @@ mod windows_fixture {
         fn drain(mut self) -> Result<DrainReport, String> {
             let mut captured_bytes = 0_usize;
             let mut overflow = false;
+            let mut observer_error = None;
             let operation = loop {
                 let mut chunk = [0_u8; 4096];
                 let mut read = 0;
@@ -127,23 +483,39 @@ mod windows_fixture {
                     Err(_) => break Err("ConPTY read count overflow".to_owned()),
                 };
                 match captured_bytes.checked_add(read) {
-                    Some(total) if total <= MAX_CAPTURE_BYTES => captured_bytes = total,
+                    Some(total) if total <= MAX_CAPTURE_BYTES => {
+                        captured_bytes = total;
+                        if observer_error.is_none()
+                            && let Err(error) = self.observer.feed(&chunk[..read])
+                        {
+                            observer_error = Some(error);
+                        }
+                    }
                     Some(_) | None => overflow = true,
                 }
             };
+            if observer_error.is_none()
+                && let Err(error) = self.observer.finish()
+            {
+                observer_error = Some(error);
+            }
             let mut cleanup = Vec::new();
             close_handle(&mut self.handle, "CloseHandle output reader", &mut cleanup);
-            match (operation, cleanup.is_empty()) {
-                (Ok(()), true) => Ok(DrainReport {
+            let mut failures = Vec::new();
+            if let Err(error) = operation {
+                failures.push(error);
+            }
+            if let Some(error) = observer_error {
+                failures.push(format!("screen observer failed: {error}"));
+            }
+            failures.extend(cleanup);
+            if failures.is_empty() {
+                Ok(DrainReport {
                     captured_bytes,
                     overflow,
-                }),
-                (Err(primary), true) => Err(primary),
-                (Ok(()), false) => Err(cleanup.join("; ")),
-                (Err(primary), false) => Err(format!(
-                    "{primary}; output-reader cleanup failed: {}",
-                    cleanup.join("; ")
-                )),
+                })
+            } else {
+                Err(failures.join("; "))
             }
         }
     }
@@ -153,11 +525,12 @@ mod windows_fixture {
     }
 
     impl OutputDrain {
-        fn start(handle: HANDLE) -> io::Result<Self> {
+        fn start(handle: HANDLE, observer: Arc<TerminalObserver>) -> io::Result<Self> {
             let drop_error = Arc::new(AtomicU64::new(0));
             let owner = OwnedOutput {
                 handle,
                 drop_error: Arc::clone(&drop_error),
+                observer,
             };
             let spawn = thread::Builder::new()
                 .name("pm27-conpty-drain".to_owned())
@@ -200,6 +573,7 @@ mod windows_fixture {
         attributes_initialized: bool,
         station_selected: bool,
         drain: Option<OutputDrain>,
+        observer: Arc<TerminalObserver>,
     }
 
     impl Fixture {
@@ -219,6 +593,7 @@ mod windows_fixture {
                 attributes_initialized: false,
                 station_selected: false,
                 drain: None,
+                observer: Arc::new(TerminalObserver::new()),
             }
         }
 
@@ -449,7 +824,10 @@ mod windows_fixture {
             return Err(failed_hresult("CreatePseudoConsole(80x24)", status));
         }
         let output_read = std::mem::replace(&mut fixture.output_read, ptr::null_mut());
-        fixture.drain = Some(OutputDrain::start(output_read)?);
+        fixture.drain = Some(OutputDrain::start(
+            output_read,
+            Arc::clone(&fixture.observer),
+        )?);
         Ok(())
     }
 
@@ -551,24 +929,69 @@ mod windows_fixture {
         }
     }
 
-    fn require_tui_liveness(process: HANDLE) -> io::Result<()> {
-        let wait = unsafe { WaitForSingleObject(process, 15_000) };
-        if wait == WAIT_FAILED {
-            return Err(win32("WaitForSingleObject(pm-custody.exe tui)"));
+    fn write_conpty_input(handle: HANDLE, bytes: &[u8]) -> io::Result<()> {
+        let mut written = 0;
+        if unsafe {
+            windows_sys::Win32::Storage::FileSystem::WriteFile(
+                handle,
+                bytes.as_ptr().cast(),
+                u32::try_from(bytes.len())
+                    .map_err(|_| io::Error::other("ConPTY input length overflow"))?,
+                &raw mut written,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(win32("WriteFile(ConPTY input)"));
         }
-        if wait == WAIT_TIMEOUT {
-            return Ok(());
+        if usize::try_from(written).ok() != Some(bytes.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "short ConPTY input write",
+            ));
         }
-        if wait != WAIT_OBJECT_0 {
-            return Err(io::Error::other("unexpected TUI process wait result"));
+        Ok(())
+    }
+
+    fn read_synthetic_password() -> io::Result<zeroize::Zeroizing<Vec<u8>>> {
+        let mut password = zeroize::Zeroizing::new(Vec::new());
+        std::io::stdin().take(1025).read_to_end(&mut password)?;
+        while password
+            .last()
+            .is_some_and(|byte| matches!(byte, b'\r' | b'\n'))
+        {
+            password.pop();
         }
-        let mut exit_code = 0;
-        if unsafe { GetExitCodeProcess(process, &raw mut exit_code) } == 0 {
-            return Err(win32("GetExitCodeProcess before TUI liveness interval"));
+        if password.is_empty() || password.len() > 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "synthetic TUI password must contain 1..=1024 bytes",
+            ));
         }
-        Err(io::Error::other(format!(
-            "pm-custody.exe tui exited {exit_code} before 15-second liveness interval"
-        )))
+        Ok(password)
+    }
+
+    fn exercise_keyboard_screen(fixture: &Fixture, password: &[u8]) -> io::Result<()> {
+        fixture
+            .observer
+            .wait_for("Password required (input hidden)")
+            .map_err(io::Error::other)?;
+        let mut input = zeroize::Zeroizing::new(password.to_vec());
+        input.push(b'\r');
+        write_conpty_input(fixture.input_write, &input)?;
+        fixture
+            .observer
+            .wait_for("Unlocked: selection never reveals secrets")
+            .map_err(io::Error::other)?;
+        fixture
+            .observer
+            .wait_for("Items (selection is metadata only)")
+            .map_err(io::Error::other)?;
+        fixture
+            .observer
+            .rejects(password)
+            .map_err(io::Error::other)?;
+        write_conpty_input(fixture.input_write, b"q")
     }
 
     fn exercise(args: &[String]) -> io::Result<()> {
@@ -578,6 +1001,7 @@ mod windows_fixture {
                 "usage: fixture <protected-sddl> <pm-custody.exe> <tui args...>",
             ));
         }
+        let password = read_synthetic_password()?;
         let mut fixture = Fixture::new();
         let operation = (|| {
             let desktop = create_private_desktop(&mut fixture, &args[1])?;
@@ -585,7 +1009,7 @@ mod windows_fixture {
             setup_attributes(&mut fixture)?;
             spawn_tui(&mut fixture, &args[2], &desktop, &args[3..])?;
             start_drain_and_release_conpty_ends(&mut fixture)?;
-            require_tui_liveness(fixture.process)
+            exercise_keyboard_screen(&fixture, &password)
         })();
         let cleanup = fixture.cleanup();
         match (operation, cleanup) {
@@ -615,6 +1039,44 @@ mod windows_fixture {
             std::process::exit(1);
         }
         println!("TUI_CONPTY_READY");
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn observer_reconstructs_positioned_unicode_screen() {
+            let observer = TerminalObserver::new();
+            observer
+                .feed(b"\x1b[?1049h\x1b[2J\x1b[1;1HPassword Manager \xe2")
+                .unwrap();
+            observer
+                .feed(b"\x80\x94 human TLS-RPK\x1b[4;1HPassword required (input hidden)")
+                .unwrap();
+            observer
+                .wait_for("Password Manager \u{2014} human TLS-RPK")
+                .unwrap();
+            observer
+                .wait_for("Password required (input hidden)")
+                .unwrap();
+        }
+
+        #[test]
+        fn observer_rejects_unsupported_sequences_instead_of_stripping_them() {
+            let observer = TerminalObserver::new();
+            observer.feed(b"visible\x1b]0;concealed\x07").unwrap();
+            let error = observer.wait_for("concealed").unwrap_err();
+            assert!(error.contains("unsupported ConPTY escape"));
+        }
+
+        #[test]
+        fn observer_rejects_invalid_utf8_instead_of_replacing_it() {
+            let observer = TerminalObserver::new();
+            observer.feed(&[0xff]).unwrap();
+            let error = observer.wait_for("replacement").unwrap_err();
+            assert_eq!(error, "invalid UTF-8 in ConPTY product output");
+        }
     }
 }
 
