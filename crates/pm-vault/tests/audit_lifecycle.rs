@@ -91,7 +91,7 @@ fn empty_vault_unlock_initializes_audit_once_and_enables_autonomous_lock() {
     let actions: Vec<_> = query
         .records()
         .iter()
-        .map(|record| record.action())
+        .map(pm_vault::AuditRecordView::action)
         .collect();
     assert_eq!(
         actions,
