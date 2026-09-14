@@ -307,5 +307,23 @@ Después de esta evidencia, el usuario autorizó una raíz efímera única
 rechazadas, raíz propia `0711` y privados `0700`, sin fallback ni cambios en
 homes ajenos. El candidato `aa19385` documenta y aplica ese método; su corrida
 [34795572781](https://github.com/SantanaJcp/passwordmanager/actions/runs/34795572781)
-está pendiente de resultado. La autorización consta en
+falló en el guard de modo del padre: `%Lp` de BSD stat descarta el sticky bit. La autorización consta en
 [execution.md](../../.scratch/passwordmanager/execution.md).
+
+
+### Continuación macOS — 2026-09-13
+
+- [Corrida6, 34796307975](https://github.com/SantanaJcp/passwordmanager/actions/runs/34796307975), candidato `f6be582`: el modo se lee completo con `%p` y `stat.S_IMODE`; metadata, traversal entre UIDs y UID de launchd pasan. Sigue fallando el primer probe en ambas CPU.
+- [Corrida7, 34797022111](https://github.com/SantanaJcp/passwordmanager/actions/runs/34797022111), candidato `678319b`: diagnóstico limitado a feature `macos-ticket26-diagnostics`, apagada por defecto y con opt-in del fixture. Perfil/clave/conexión/peer y configuración TLS pasan; la primera I/O posterior falla. Nueve tests nativos por CPU no sustituyen aceptación integral.
+- Hipótesis concreta: Darwin hereda el modo nonblocking del listener al socket aceptado, mientras el camino rustls usa I/O blocking. [Apple accept(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/accept.2.html) y [Linux accept(2)](https://man7.org/linux/man-pages/man2/accept.2.html) documentan la diferencia. Se prepara normalización explícita y regresión, sin cambiar políticas TLS ni plazos. No se considera causa confirmada hasta nueva evidencia nativa. La aceptación deberá repetirse con binario normal, no solo diagnóstico.
+
+### Windows ARM64 — evidencia parcial, 2026-09-13
+
+El bootstrap de workflow manual quedó en `master` como `5f099f8`, sin fusionar el producto. El candidato continúa aislado en `codex/pm-27`.
+
+- [Corrida1, 34796411705](https://github.com/SantanaJcp/passwordmanager/actions/runs/34796411705), `1f9a383`: la conversión de finales de línea del checkout cambió la firma; hash falló antes de compilar. `9b32e58` fija `-text` para los dos inputs, sin cambiar hashes ni normalizar como alternativa.
+- [Corrida2, 34796755222](https://github.com/SantanaJcp/passwordmanager/actions/runs/34796755222), `9b32e58`: hashes/Minisign pasan; falló el nombre supuesto del metadata MSVC. `f45ce78` usa el archivo estándar `Microsoft.VCToolsVersion.default.txt`, exige 14.5x y fija la versión efectiva.
+- [Corrida3, 34797085446](https://github.com/SantanaJcp/passwordmanager/actions/runs/34797085446), `f45ce78`: fuente 1.0.22 autenticada, compilación nativa ReleaseLIB ARM64 `/MT` con v145/14.51.36231, inspección ARM64 y test de versión enlazada PASS. La custodia no arrancó por conversión PowerShell array a booleano en guard administrativo.
+- [Corrida4, 34797595176](https://github.com/SantanaJcp/passwordmanager/actions/runs/34797595176), `49ec89ad`: guard `WindowsPrincipal.IsInRole` PASS; etapa MSVC PASS otra vez; DPAPI y ConPTY pasan (2 tests). `clipboard_sequence_never_clears_a_newer_owner` falla en `second.clear_if_owned()` (2/3 tests). No se ejecutó aún la custodia completa; el diagnóstico del clipboard continúa sin relajar ownership ni omitir la aserción.
+
+Nada de esta evidencia cierra 26/27 ni los gates integrales 30–34. Los fallos previos se conservan; no se presenta solo la última corrida como validación global.

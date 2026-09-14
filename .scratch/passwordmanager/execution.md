@@ -123,3 +123,12 @@ evidencia de producto y este ajuste de método no los reabre ni sustituye esa
 evidencia. Tampoco cierra las puertas nativas todavía pendientes de 26--32: la
 corrida modificada debe conservar la evidencia roja, demostrar la espera
 contractual y volver a terminar con las aserciones finales intactas.
+
+
+## Integración del método asíncrono — 2026-09-13
+
+Merger Sol distinto integró el candidato Luna `2f92f69` como `d1d8b1f` y corrigió atribución del baseline/estados documentales en `9af3770` y `461058c`. No cambió el motor ni reabrió 08/11/14. Config, Python AST de los tres labs, diff, `scripts/check.sh` y clean locked/offline (41.641 s) pasaron.
+
+La primera barrida tuvo un fallo de `passkey-login` al iniciar el intento de cuenta (`CUSTODY_UNAVAILABLE`), no una lectura de estado intermedio. El loop de esa primera barrida no propagó el fallo; su exit 0 **no se acepta como suite verde**. Una repetición enfocada pasó y una nueva barrida completa con acumulación explícita de errores terminó `count=17 failures=0`. Esta última es la evidencia de integración, sin ocultar la falla intermitente anterior ni atribuirle una causa todavía no demostrada. No se repitió autenticación dentro de una misma aserción ni se aumentaron deadlines.
+
+23 entregó candidato `f1c375e` con 18 labs de autor; está pendiente de integración separada y no habilita todavía 24/25. La evidencia nativa reciente está en [native-ci.md](../../docs/verification/native-ci.md); la revisión formal permanece al final de los 35 tickets.
