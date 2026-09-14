@@ -1006,6 +1006,71 @@ comprobó simultáneamente rol humano, ALPN y el MAGIC humano exacto, por lo que
 el marcador no puede afirmar un MAGIC inválido. El checker y
 `git diff --check` permanecieron verdes; no se ejecutó Cargo ni Windows.
 
+### Bóveda vacía y primer paquete de auditoría (método antes del arreglo)
+
+La corrida diagnóstica Windows 16
+[`34841947088`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34841947088)
+sobre `9878bc6` observó, en orden, `human-accepted`, `human-magic-alpn`,
+`human-unlock-request`, `human-unlock-ok`, `human-unlock-ack` y
+`human-lock-request`, pero no `human-audit-open`. Por tanto el canal, MAGIC y
+ALPN humanos, la contraseña/KDF y el root ya habían sido aceptados; el fallo
+está después de recibir lock y antes de abrir la auditoría autónoma. Esto no es
+evidencia de un fallo de I/O o KDF.
+
+La causa común está en el motor, no en Named Pipe. Una bóveda recién persistida
+no contiene fila en `audit_keys`. `HumanVault::unlock_with_audit_custody`
+verifica el canal, abre SQLite y KH, pero no provisiona KAUD ni registra
+`human_unlock`. Al soltar esa sesión, tanto Windows como Linux llaman
+`AutonomousAuditVault::open`; esta exige una fila coincidente mediante
+`load_matching_package` y devuelve `AuditKeyUnavailable` si falta. La primera
+operación humana que usa `append_event` sí crearía el paquete porque conserva
+KH, pero fabricar contenido antes de lock sólo ocultaría el defecto y no es
+parte del laboratorio.
+
+La regresión pública y portable parte de una bóveda realmente vacía. Con la
+misma `AuditDeviceCustody` estable debe comprobar:
+
+1. contraseña incorrecta: unlock falla y `audit_keys`, `audit_state`,
+   `audit_segments` y `encrypted_audit_records` siguen vacías;
+2. contraseña correcta: antes de devolver la sesión se publica atómicamente un
+   único paquete y un registro `human_unlock/succeeded` para el dispositivo;
+3. tras soltar KH, `AutonomousAuditVault::open` puede registrar
+   `human_lock/succeeded`; un desbloqueo posterior permite consultar la
+   secuencia `human_unlock`, `human_lock`, `human_unlock`;
+4. un fallo sintético de inserción del primer registro hace fallar unlock y
+   revierte también paquete, estado y segmento. No se permite una sesión
+   desbloqueada sin su evento ni una fila KAUD parcial;
+5. después de crear la generación inicial, intentar unlock con otra custodia
+   falla sin crear generación 2 ni cambiar los registros existentes.
+
+El arreglo mínimo pertenece a `HumanVault::unlock_with_audit_custody`, que es
+el seam compartido por Linux, macOS y Windows. Después de abrir KH y revalidar
+el canal humano, inicia una transacción SQLite `IMMEDIATE`, obtiene la frontera
+de autoridad y llama una sola vez a `append_event` con el root humano,
+`HumanUnlock/Succeeded` y la custodia estable entregada por el servicio.
+La transacción distingue ausencia real de una custodia incompatible: si no hay
+ningún `audit_keys` para el dispositivo permite que `ensure_package` cree la
+generación inicial; si existe cualquier fila, exige que
+`load_matching_package` valide la custodia actual antes de append. Una pérdida
+o cambio de custodia falla cerrado y nunca se convierte implícitamente en una
+generación nueva. La misma transacción confirma paquete, evento, estado,
+segmento y manifiesto antes de construir la sesión. Cualquier error revierte y
+mantiene el fallo cerrado. La contraseña incorrecta no llega a esa transacción
+y no produce un evento; tampoco se genera una custodia nueva, se reintenta el
+commit ni se usa otra clave.
+
+Primero se añade el test de estas observaciones a la superficie pública de
+`pm-vault`; queda preparado para observar su RED contra el comportamiento
+previo cuando se conceda la ventana de ejecución. Sólo
+después se implementará el cambio común y se actualizarán las expectativas de
+secuencia existentes que ahora empiezan con la primera apertura humana. Los
+gates enfocados deberán incluir auditoría, transacciones humanas y el lock
+compartido Linux; los gates completos y otra corrida Windows normal siguen
+siendo obligatorios. En este checkpoint de método/test estático no se ejecuta
+Cargo ni se presenta un GREEN de producto. Los casos nuevos usan una raíz de
+fixture propia cuya eliminación se comprueba; no reutilizan ni cambian el
+`TestDir::drop` heredado que suprime errores de cleanup.
+
 ## Déficit contractual de parada SCM (plan, no implementación)
 
 La misma corrida mostró `NOT_STOPPABLE` y el cleanup no pudo ejecutar

@@ -28,6 +28,132 @@ const ATTEMPT: [u8; 16] = [0x16; 16];
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn empty_vault_unlock_initializes_audit_once_and_enables_autonomous_lock() {
+    let directory = StrictAuditTestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+
+    let (wrong_server, wrong_peer) = UnixStream::pair().unwrap();
+    let uid = unsafe { libc::geteuid() };
+    let wrong_channel = HumanChannel::authenticate(wrong_server, uid).unwrap();
+    assert!(
+        HumanVault::unlock_with_audit_custody(
+            &path,
+            b"synthetic definitely wrong",
+            DEVICE,
+            wrong_channel,
+            Arc::clone(&custody),
+        )
+        .is_err()
+    );
+    drop(wrong_peer);
+    for table in [
+        "audit_keys",
+        "audit_state",
+        "audit_segments",
+        "audit_manifests",
+        "encrypted_audit_records",
+    ] {
+        assert_eq!(count(&path, table), 0, "wrong password wrote {table}");
+    }
+
+    let (human, peer) = open_human(&path, Arc::clone(&custody));
+    let query = human.query_audit(DEVICE, 1, 1, 16).unwrap();
+    assert_eq!(query.records().len(), 1);
+    assert_eq!(query.records()[0].actor_kind(), AuditActorKind::Human);
+    assert_eq!(query.records()[0].action(), AuditAction::HumanUnlock);
+    assert_eq!(query.records()[0].outcome(), AuditOutcome::Succeeded);
+    assert_eq!(count(&path, "audit_keys"), 1);
+
+    let replacement_custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let (replacement_server, replacement_peer) = UnixStream::pair().unwrap();
+    let replacement_channel = HumanChannel::authenticate(replacement_server, uid).unwrap();
+    assert!(
+        HumanVault::unlock_with_audit_custody(
+            &path,
+            PASSWORD,
+            DEVICE,
+            replacement_channel,
+            replacement_custody,
+        )
+        .is_err(),
+        "custody mismatch rotated the audit key during unlock"
+    );
+    drop(replacement_peer);
+    assert_eq!(count(&path, "audit_keys"), 1);
+
+    drop(human);
+    drop(peer);
+    let mut autonomous = AutonomousAuditVault::open(&path, DEVICE, Arc::clone(&custody)).unwrap();
+    autonomous
+        .append(&AuditEvent::new(
+            AuditActorKind::System,
+            None,
+            AuditAction::HumanLock,
+            AuditOutcome::Succeeded,
+        ))
+        .unwrap();
+    drop(autonomous);
+
+    let (human, _peer) = open_human(&path, custody);
+    let query = human.query_audit(DEVICE, 1, 1, 16).unwrap();
+    let actions: Vec<_> = query
+        .records()
+        .iter()
+        .map(|record| record.action())
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            AuditAction::HumanUnlock,
+            AuditAction::HumanLock,
+            AuditAction::HumanUnlock,
+        ]
+    );
+    assert!(
+        query
+            .records()
+            .iter()
+            .all(|record| record.outcome() == AuditOutcome::Succeeded)
+    );
+}
+
+#[test]
+fn first_unlock_audit_failure_rolls_back_initial_package_and_session() {
+    let directory = StrictAuditTestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_first_unlock_audit BEFORE INSERT ON encrypted_audit_records
+             BEGIN SELECT RAISE(ABORT, 'synthetic first unlock audit failure'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let (server, peer) = UnixStream::pair().unwrap();
+    let uid = unsafe { libc::geteuid() };
+    let channel = HumanChannel::authenticate(server, uid).unwrap();
+    assert!(
+        HumanVault::unlock_with_audit_custody(&path, PASSWORD, DEVICE, channel, custody).is_err(),
+        "unlock returned a session without its required audit record"
+    );
+    drop(peer);
+    for table in [
+        "audit_keys",
+        "audit_state",
+        "audit_segments",
+        "audit_manifests",
+        "encrypted_audit_records",
+    ] {
+        assert_eq!(count(&path, table), 0, "failed unlock left {table}");
+    }
+}
+
+#[test]
 fn device_custody_writes_signed_encrypted_audit_without_human_root() {
     let directory = TestDir::new();
     let path = directory.vault();
@@ -402,6 +528,36 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 struct TestDir(PathBuf);
+
+struct StrictAuditTestDir(PathBuf);
+
+impl StrictAuditTestDir {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "pm-ticket-27-audit-{}-{}",
+            process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+
+    fn vault(&self) -> PathBuf {
+        self.0.join("vault.sqlite3")
+    }
+}
+
+impl Drop for StrictAuditTestDir {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            eprintln!("STRICT_TEST_CLEANUP_FAILED component=ticket27-audit-root error={error}");
+            if std::thread::panicking() {
+                process::abort();
+            }
+            panic!("ticket 27 audit fixture cleanup failed: {error}");
+        }
+    }
+}
 
 impl TestDir {
     fn new() -> Self {
