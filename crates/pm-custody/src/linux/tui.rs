@@ -8,10 +8,7 @@ use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::Write,
-    os::{
-        fd::AsRawFd,
-        unix::fs::OpenOptionsExt,
-    },
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -2527,9 +2524,8 @@ mod tests {
     fn appkit_clipboard_lease_preserves_newer_owner_and_single_exit_cleanup() {
         let mut first = copy_secret(b"ticket26-tui-first-owner", Duration::from_secs(1))
             .expect("first AppKit owner");
-        let mut replacement =
-            copy_secret(b"ticket26-tui-new-owner", Duration::from_secs(1))
-                .expect("replacement AppKit owner");
+        let mut replacement = copy_secret(b"ticket26-tui-new-owner", Duration::from_secs(1))
+            .expect("replacement AppKit owner");
 
         // The old lease must not clear a newer pasteboard owner.  The
         // replacement remains independently cleanable on session exit.

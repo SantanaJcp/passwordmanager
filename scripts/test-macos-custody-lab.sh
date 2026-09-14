@@ -11,7 +11,7 @@ configure_ticket26_build_commands() {
   )
   test_command=(
     "$root/scripts/cargo-local.sh" test
-    -p pm-native-channel -p pm-vault -p pm-crypto --locked --offline
+    -p pm-native-channel -p pm-vault -p pm-crypto -p pm-custody --locked --offline
   )
   if [[ "$mode" == diagnostic ]]; then
     build_command+=(--features macos-ticket26-diagnostics)
@@ -64,7 +64,7 @@ main() {
     echo "ticket 26 laboratory requires a non-root user with passwordless sudo" >&2
     exit 1
   fi
-  for command in ar cargo cc cmp dscl file id lipo launchctl plutil python3 script security stat sudo; do
+  for command in ar cargo cc cmp dscl file id lipo launchctl osascript plutil python3 script security stat sudo; do
     command -v "$command" >/dev/null || {
       echo "ticket 26 laboratory requires $command" >&2
       exit 1

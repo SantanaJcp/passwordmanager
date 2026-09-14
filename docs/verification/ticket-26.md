@@ -872,6 +872,62 @@ expires, then perform strict owned cleanup before PASS. This checkpoint was
 prepared without Cargo, a local build, or a native runner; it makes no
 RED/green or macOS TUI acceptance claim.
 
+### Native PTY fixture implementation checkpoint
+
+The normal macOS laboratory now includes a bounded core TUI fixture in the
+same collision-checked harness. Before launching the TUI it seeds the seven
+record kinds and the token-exchange relationship through the existing
+`human-content-flow` command over the live human TLS/RPK endpoint; this is
+fixture setup, not a second vault engine. The child is started with Python's
+`forkpty`, receives the installed `pm-custody tui` binary and the real human
+profile/key/socket, and opens the product's `/dev/tty` itself. The parent sends
+keyboard bytes only, waits for each visible prompt to render before sending
+Enter, and applies `TIOCSWINSZ` at 80x24, 42x12 and 100x30. It does not use
+tmux, a fake terminal, `wl-copy`, `pbcopy`, OSC52 or a clipboard fallback.
+
+The core assertions are deliberately observable and narrow: the unlocked
+catalog contains the seeded metadata without secret values; engine-backed
+search selects the Password record; exact field selection reaches
+`auth[0].password` and copies its synthetic UTF-8 value through the existing
+macOS `OwnedClipboard`/AppKit lease; a separate logged-in-user observer reads
+the pasteboard, publishes a synthetic replacement, and proves the lease expiry
+does not clear that newer owner. The `_pmagent26` observer cannot read the
+copied value. A keyboard `l` exits the first session and a subsequent session
+must show the master-password prompt again. A fresh session with no further
+keys exits through the existing idle deadline; the lab then checks delegated
+agent discovery while authorization remains enabled. Child exit status, PTY
+bytes, hidden-input secrecy, the real launchd service/socket and the strict
+owned cleanup are all required. The observer uses `osascript` only as a test
+observer; it is not a product execution path.
+
+The fixture does not add field validation or byte conversion: the existing
+human-field catalog remains length-delimited and the existing renderer keeps
+its binary-value branch for non-UTF-8 bytes and its control-character
+sanitization. The synthetic seed exercises the established seven-kind
+content path; empty or binary field behavior is not changed or accepted by a
+new fixture-specific rule.
+
+This checkpoint is intentionally named `tui-core`: it proves the native PTY,
+service/channel, AppKit ownership race, explicit lock and idle lock seams
+without claiming the complete Ticket 23--25 keyboard operation matrix. The
+full acceptance method above still requires every record field, access/pending,
+import/backup/sync/audit flow and both purge ceremonies. The normal command
+must print the core evidence only after the PTY child has exited successfully;
+failure or cleanup errors remain failures. The script also includes package
+`pm-custody` in its native test command so the cfg-gated AppKit clipboard lease
+regression is actually compiled and executed instead of being omitted by the
+previous package list.
+
+Static verification for this implementation is closed before native execution:
+the Python AST parses; the shell command plan still has normal and explicit
+diagnostic modes with no implicit feature; the PTY implementation contains
+`forkpty`/`TIOCSWINSZ`, prompt-render synchronization, bounded child wait and
+one cleanup path; the macOS fixture contains neither a shell clipboard command
+nor an alternate/fallback branch; and the existing nine native tests and
+wrong-UID/negative assertions remain in the same harness. No Linux run or
+local macOS result is substituted for the required normal Intel+Apple-silicon
+run. Until that run succeeds, this is an implementation checkpoint only.
+
 Before native dispatch, static verification must establish that the new
 harness parses, its command/fixture inventory is closed, its PTY driver waits
 for visible input before Enter, and the workflow still invokes only the normal

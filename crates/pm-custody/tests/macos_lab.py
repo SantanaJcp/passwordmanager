@@ -4,18 +4,25 @@
 """Destructive-only-inside-ephemeral-CI native macOS custody laboratory."""
 
 import ctypes
+import errno
+import fcntl
 import os
 import pathlib
 import plistlib
 import pwd
 import re
+import select
 import shlex
 import shutil
+import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
+import termios
 import time
+import pty
 
 LABEL = "com.santanajcp.passwordmanager"
 CUSTODIAN = "_passwordmanager"
@@ -26,8 +33,13 @@ STATE = pathlib.Path("/Library/Application Support/PasswordManager")
 RUNTIME = pathlib.Path("/var/run/passwordmanager")
 PLIST = pathlib.Path(f"/Library/LaunchDaemons/{LABEL}.plist")
 PASSWORD = b"synthetic ticket 26 master password"
+TUI_PASSWORD_RECORD = b"ticket05-e2e-password-canary"
+TUI_EXTERNAL_REPLACEMENT = b"ticket26-tui-external-replacement"
 DIAGNOSTIC_ENV = "PM_MACOS_TICKET26_DIAGNOSTIC"
 DIAGNOSTIC_LOG = STATE / "ticket26-diagnostic.log"
+ANSI_SEQUENCE = re.compile(
+    rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))"
+)
 DIAGNOSTIC_LINE = re.compile(
     rb"(?:PM26_DIAGNOSTIC phase=[a-z-]+|"
     rb"PM26_DIAGNOSTIC accepted-stream-nonblocking-(?:before|after)=[01]|"
@@ -79,6 +91,181 @@ def wire_fields(values):
     for value in values:
         result += len(value).to_bytes(4, "big") + value
     return bytes(result)
+
+
+class MacPtySession:
+    """Drive the real macOS TUI through a controlling pseudo-terminal."""
+
+    def __init__(self, pid, master):
+        self.pid = pid
+        self.master = master
+        self.output = bytearray()
+        self.returncode = None
+        self.eof = False
+
+    @classmethod
+    def start(cls, binary, profile, private, endpoint, *, idle, reveal, copy):
+        command = [
+            str(binary), "tui", "--profile", str(profile), "--private", str(private),
+            "--socket", str(endpoint), "--idle-seconds", str(idle),
+            "--reveal-seconds", str(reveal), "--copy-seconds", str(copy),
+        ]
+        pid, master = pty.fork()
+        if pid == 0:
+            environment = os.environ.copy()
+            environment["TERM"] = "xterm-256color"
+            try:
+                os.execve(command[0], command, environment)
+            except BaseException:
+                os._exit(127)
+        session = cls(pid, master)
+        try:
+            session.resize(80, 24)
+        except BaseException:
+            session.close()
+            raise
+        return session
+
+    def mark(self):
+        return len(self.output)
+
+    def resize(self, columns, rows):
+        dimensions = struct.pack("HHHH", rows, columns, 0, 0)
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, dimensions)
+
+    def _read_once(self, timeout):
+        if self.eof:
+            return False
+        ready, _, _ = select.select([self.master], [], [], timeout)
+        if not ready:
+            return False
+        try:
+            value = os.read(self.master, 64 * 1024)
+        except OSError as error:
+            if error.errno in (errno.EIO, errno.EBADF):
+                self.eof = True
+                return False
+            raise
+        if not value:
+            self.eof = True
+            return False
+        self.output.extend(value)
+        return True
+
+    def drain(self):
+        while self._read_once(0):
+            pass
+
+    def text(self, since=0):
+        cleaned = ANSI_SEQUENCE.sub(b"", bytes(self.output[since:]))
+        return cleaned.decode("utf-8", "replace")
+
+    def wait_text(self, expected, *, timeout=8, since=0):
+        deadline = time.monotonic() + timeout
+        while True:
+            rendered = self.text(since)
+            if expected in rendered:
+                return rendered
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError((expected, self.text(since)[-4096:]))
+            self._read_once(min(0.1, remaining))
+
+    def write(self, value):
+        remaining = memoryview(value)
+        while remaining:
+            try:
+                count = os.write(self.master, remaining)
+            except OSError as error:
+                raise AssertionError("TUI PTY write failed") from error
+            if count <= 0:
+                raise AssertionError("TUI PTY write made no progress")
+            remaining = remaining[count:]
+
+    def send_key(self, value):
+        keys = {"enter": b"\r", "escape": b"\x1b"}
+        self.write(keys.get(value, value.encode("utf-8")))
+
+    def send_text(self, value, *, enter=False, hidden=False):
+        start = self.mark()
+        self.write(value.encode("utf-8"))
+        if enter:
+            if not hidden:
+                self.wait_text(f"Input: {value}", since=start)
+            self.send_key("enter")
+
+    @staticmethod
+    def _exit_code(status):
+        if os.WIFEXITED(status):
+            return os.WEXITSTATUS(status)
+        if os.WIFSIGNALED(status):
+            return 128 + os.WTERMSIG(status)
+        return 1
+
+    def wait_exit(self, *, timeout=8):
+        if self.returncode is not None:
+            return self.returncode
+        deadline = time.monotonic() + timeout
+        while True:
+            child, status = os.waitpid(self.pid, os.WNOHANG)
+            if child == self.pid:
+                self.returncode = self._exit_code(status)
+                self.drain()
+                return self.returncode
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError("TUI PTY child did not exit within the existing bound")
+            self._read_once(min(0.1, remaining))
+
+    def close(self):
+        errors = []
+        if self.returncode is None:
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                self.wait_exit(timeout=5)
+            except BaseException as error:
+                errors.append(error)
+                try:
+                    os.kill(self.pid, signal.SIGKILL)
+                    self.wait_exit(timeout=5)
+                except BaseException as kill_error:
+                    errors.append(kill_error)
+        try:
+            os.close(self.master)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                errors.append(error)
+        if errors:
+            raise AssertionError("TUI PTY cleanup failed") from errors[0]
+
+
+def read_appkit_pasteboard():
+    result = run(["osascript", "-e", "the clipboard as text"], check=False, timeout=10)
+    assert result.returncode == 0 and result.stderr == b"", (
+        "AppKit pasteboard observer failed", result.returncode, result.stderr[:1024],
+    )
+    return result.stdout.rstrip(b"\r\n")
+
+
+def write_appkit_pasteboard(value):
+    expression = f'set the clipboard to "{value.decode("ascii")}"'
+    result = run(["osascript", "-e", expression], check=False, timeout=10)
+    assert result.returncode == 0 and result.stderr == b"", (
+        "AppKit pasteboard replacement failed", result.returncode, result.stderr[:1024],
+    )
+
+
+def assert_agent_cannot_read_pasteboard(secret):
+    result = sudo(
+        ["osascript", "-e", "the clipboard as text"],
+        user=AGENT, check=False,
+    )
+    assert result.returncode != 0 and secret not in result.stdout and secret not in result.stderr, (
+        "agent obtained the copied AppKit value", result.returncode,
+    )
 
 
 def create_account(name, uid, owned_records):
@@ -523,6 +710,132 @@ def human_authorization_setup(
     )
 
 
+def seed_tui_content(binary, profile, private, endpoint):
+    result = run(
+        [binary, "human-content-flow", "--profile", profile, "--private", private,
+         "--socket", endpoint],
+        check=False, input=wire_fields([PASSWORD]),
+    )
+    assert result.returncode == 0 and result.stdout.startswith(b"PASS content-e2e types=7") \
+        and result.stderr == b"", (
+            "TUI content seed failed", result.returncode, result.stdout[:1024],
+            result.stderr[:1024],
+        )
+
+
+def require_agent_discovery(binary, profile, private, endpoint):
+    result = sudo(
+        [binary, "agent-discover", "--profile", profile, "--private", private,
+         "--socket", endpoint],
+        user=AGENT, check=False,
+    )
+    assert result.returncode == 0 and result.stdout.startswith(b"PASS delegated-discovery") \
+        and result.stderr == b"", (
+            "agent discovery failed after TUI lock", result.returncode,
+            result.stdout[:1024], result.stderr[:1024],
+        )
+
+
+def start_macos_tui(binary, profile, private, endpoint, *, idle, reveal, copy):
+    session = MacPtySession.start(
+        binary, profile, private, endpoint, idle=idle, reveal=reveal, copy=copy,
+    )
+    try:
+        session.wait_text("Password required")
+        session.send_text(PASSWORD.decode("ascii"), enter=True, hidden=True)
+        session.wait_text("Unlocked: selection never reveals secrets")
+        return session
+    except BaseException:
+        session.close()
+        raise
+
+
+def tui_search(session, value):
+    start = session.mark()
+    session.send_key("/")
+    session.wait_text("Search (engine-decrypted):", since=start)
+    session.send_text(value, enter=True)
+    return session.wait_text("Search returned 1 active items", since=start)
+
+
+def select_tui_password_for_copy(session):
+    start = session.mark()
+    session.send_key("c")
+    session.wait_text("Fields (explicit selection; values hidden)", since=start)
+    start = session.mark()
+    session.send_text("j" * 14)
+    page = session.wait_text("auth[0].password", since=start)
+    assert any("›" in line and "auth[0].password" in line for line in page.splitlines()), page
+    session.send_key("enter")
+
+
+def run_tui_core_lab(
+    binary, profile, private, endpoint, agent_profile, agent_private, agent_endpoint,
+):
+    seed_tui_content(binary, profile, private, endpoint)
+    first = start_macos_tui(
+        binary, profile, private, endpoint, idle=30, reveal=1, copy=5,
+    )
+    try:
+        initial = first.text()
+        assert "Items (selection is metadata only)" in initial
+        for forbidden in (
+            TUI_PASSWORD_RECORD,
+            b"ticket05-e2e-totp-canary",
+            b"ticket05-e2e-token-canary",
+            b"ticket11-e2e-subject-token-canary",
+            b"ticket11-e2e-requester-secret-canary",
+        ):
+            assert forbidden not in bytes(first.output), forbidden
+
+        for columns, rows, expected in (
+            (42, 12, "Password Manager"),
+            (100, 30, "selection is metadata only"),
+        ):
+            start = first.mark()
+            first.resize(columns, rows)
+            first.wait_text(expected, since=start)
+
+        for title in (
+            "Password", "TOTP", "Passkey", "SSH", "Token",
+            "ticket05-e2e-search-canary", "File", "Exchange Relationship",
+        ):
+            tui_search(first, title)
+        tui_search(first, "Password")
+        select_tui_password_for_copy(first)
+        copied_start = first.mark()
+        first.wait_text("Copied explicitly", since=copied_start)
+        assert read_appkit_pasteboard() == TUI_PASSWORD_RECORD
+        assert_agent_cannot_read_pasteboard(TUI_PASSWORD_RECORD)
+        write_appkit_pasteboard(TUI_EXTERNAL_REPLACEMENT)
+        expiry_start = first.mark()
+        first.wait_text("Clipboard custody expired", since=expiry_start)
+        assert read_appkit_pasteboard() == TUI_EXTERNAL_REPLACEMENT
+
+        first.send_key("l")
+        assert first.wait_exit(timeout=8) == 0
+    finally:
+        first.close()
+    assert TUI_PASSWORD_RECORD not in bytes(first.output)
+    assert b"\x1b]52;" not in bytes(first.output)
+    require_agent_discovery(binary, agent_profile, agent_private, agent_endpoint)
+
+    second = start_macos_tui(
+        binary, profile, private, endpoint, idle=2, reveal=1, copy=5,
+    )
+    try:
+        idle_start = second.mark()
+        assert second.wait_exit(timeout=8) == 0
+        idle_text = second.text(idle_start)
+        assert "Locked after 5 minutes without human input" in idle_text, idle_text[-4096:]
+    finally:
+        second.close()
+    assert PASSWORD not in bytes(second.output)
+    assert TUI_PASSWORD_RECORD not in bytes(second.output)
+    assert b"\x1b]52;" not in bytes(second.output)
+    require_agent_discovery(binary, agent_profile, agent_private, agent_endpoint)
+
+
 def probe(binary, user, profile, private, endpoint, *, allowed=True, diagnostic=False):
     command = [binary, "probe", "--profile", profile, "--private", private,
                "--socket", endpoint]
@@ -610,6 +923,7 @@ def main():
     owned_empty_directories = []
     bootstrapped = False
     lab_error = None
+    tui_core_verified = False
     scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")
     require_owner_mode(scratch.parent, (0, 0o1777))
     assert not scratch.exists(), f"refusing to replace pre-existing scratch path: {scratch}"
@@ -788,6 +1102,11 @@ def main():
             published_agent_pub.read_bytes(), published_other_pub.read_bytes(), pid,
             diagnostic,
         )
+        run_tui_core_lab(
+            INSTALL / "pm-custody", human_profile, human_key, RUNTIME / "human.sock",
+            agent_profile, agent_key, RUNTIME / "agent.sock",
+        )
+        tui_core_verified = True
         suspend = run([INSTALL / "pm-custody", "human-authorization", "--profile", human_profile,
                        "--private", human_key, "--socket", RUNTIME / "human.sock", "--action", "suspend"],
                       input=wire_fields([PASSWORD]))
@@ -818,6 +1137,10 @@ def main():
     print("PASS macos-acl bootstrap=0400 binary+plist=root-owned wrong-uid=rejected")
     print("PASS macos-persistence suspension=durable launchd-restart=real")
     print("PASS macos-native tty=/dev/tty clipboard=AppKit-changeCount fullfsync=queried-tests")
+    if tui_core_verified:
+        print("PASS macos-tui-core keyboard=1 pty=1 tty=/dev/tty service=launchd human-tls-rpk=1 "
+              "search=1 copy=AppKit-changeCount clipboard-race=preserved hostile-agent=denied "
+              "explicit-lock=1 idle-lock=1 resize=80x24+42x12+100x30")
     print("LIMIT reboot=NOT_RUN intel+arm64=handled-by-ticket31 signing+notarization=NOT_RUN")
 
 

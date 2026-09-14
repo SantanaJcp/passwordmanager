@@ -95,6 +95,7 @@ require_literal 'configure_ticket26_build_commands()' "$lab"
 require_literal 'configure_ticket26_harness_command()' "$lab"
 require_literal 'build_command=(' "$lab"
 require_literal 'test_command=(' "$lab"
+require_literal '-p pm-native-channel -p pm-vault -p pm-crypto -p pm-custody --locked --offline' "$lab"
 require_literal 'harness_command=(python3' "$lab"
 require_literal 'scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")' "$harness"
 require_literal 'require_owner_mode(scratch.parent, (0, 0o1777))' "$harness"
@@ -103,6 +104,15 @@ require_literal 'scratch.mkdir(mode=0o711)' "$harness"
 require_literal 'synthetic keygen failed' "$harness"
 require_literal 'cross_uid_peer_diagnostic(agent_uid, scratch)' "$harness"
 require_literal 'assert launchd_peer_uid(AGENT, RUNTIME / "agent.sock") == custodian_uid' "$harness"
+require_literal 'pid, master = pty.fork()' "$harness"
+require_literal 'termios.TIOCSWINSZ' "$harness"
+require_literal 'self.wait_text(f"Input: {value}", since=start)' "$harness"
+require_literal 'wait_exit(timeout=8)' "$harness"
+require_literal 'human-content-flow' "$harness"
+require_literal 'assert_agent_cannot_read_pasteboard' "$harness"
+require_literal 'osascript' "$harness"
+require_literal 'run_tui_core_lab(' "$harness"
+require_literal 'tui_core_verified = True' "$harness"
 require_literal 'macos-ticket26-diagnostics = ["pm-vault/macos-ticket26-diagnostics"]' "$custody_manifest"
 require_literal 'macos-ticket26-diagnostics = ["pm-crypto/macos-ticket26-diagnostics"]' "$vault_manifest"
 require_literal 'macos-ticket26-diagnostics = []' "$crypto_manifest"
@@ -153,6 +163,10 @@ require_literal 'assert DIAGNOSTIC_ENV not in os.environ' "$harness"
 require_literal '"normal mode created a diagnostic log"' "$harness"
 if grep -Fq 'RUNNER_TEMP' "$harness"; then
     echo 'macOS custody laboratory still depends on the private runner temp root' >&2
+    exit 1
+fi
+if grep -Eq 'wl-copy|pbcopy|OSC52|tmux' "$harness"; then
+    echo 'macOS TUI laboratory contains a non-AppKit clipboard or simulated-terminal path' >&2
     exit 1
 fi
 if grep -Fq 'macos-ticket26-diagnostics' "$workflow" ||
