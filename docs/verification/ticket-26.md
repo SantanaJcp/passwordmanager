@@ -1516,6 +1516,30 @@ checkpoint. The follow-up static commands all exited zero: `ast.parse` for
 updated checker, and `git diff --check`. The native corrected fixture remains
 pending.
 
+### Native run 31 expiry observation RED and bounded screen correction
+
+The Ticket 23 candidate `af1f1d8` reached the catalog and reveal cases on
+both macOS architectures. The fixed logs are
+`/tmp/pm-macos-run31-arm-full.log` and
+`/tmp/pm-macos-run31-intel-full.log`. The ARM run reported the synthetic
+Password value still visible when the expiry assertion ran; the Intel run
+reported the same observation for the synthetic TOTP value. This is a real
+observer failure record, but it does not yet prove an expiry bug in the
+product: the status and footer can be repainted before the prior exposure
+line is overwritten, so a PTY read can capture an intermediate screen.
+
+The bounded test-only correction keeps the existing `wait_text` deadline and
+does not change reveal duration, product code or assertions. A
+`wait_stable_reveal_expiry` observation now reads only the current
+`VtScreen.application_text` and accepts expiry only when the same frame has
+`Reveal expired`, `Exposure: <hidden>`, and no expected synthetic value. It
+does not search historical screen events, add sleeps, retry a failed
+operation, or normalize whitespace. `assert_screen_observer_regression` now
+feeds a deterministic three-frame split repaint (old exposure, expired status
+with old exposure, then hidden exposure) and requires the helper to consume the
+third frame. This separates the known intermediate-render race from a genuine
+product expiry failure; native rerun is required before either is accepted.
+
 ### Static native TUI coverage matrix (not yet executed on macOS)
 
 The current macOS `run_tui_core_lab` exercises real PTY startup, three sizes,

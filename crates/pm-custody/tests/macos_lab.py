@@ -1258,6 +1258,45 @@ def assert_screen_observer_regression():
         raise AssertionError(
             "cursor-positioned screen regression: stale selected-row history satisfied wait"
         )
+
+    split_expiry = object.__new__(MacPtySession)
+    split_expiry.screen = VtScreen(64, 4)
+    split_expiry.output = bytearray()
+    split_expiry._decode_at = 0
+    split_expiry._screen_revision = split_expiry.screen.revision
+    split_expiry._screen_events = []
+    split_expiry._screen_finalized = False
+    split_expiry.eof = False
+    split_expiry.reads = 0
+    expiry_frames = iter((
+        b"\x1b[2J\x1b[1;1HStatus: Secret revealed temporarily"
+        b"\x1b[2;1HExposure: ticket05-e2e-password-canary",
+        b"\x1b[1;1H\x1b[2KStatus: Reveal expired",
+        b"\x1b[2;1H\x1b[2KExposure: <hidden>",
+    ))
+
+    def read_expiry_frame(_timeout):
+        try:
+            value = next(expiry_frames)
+        except StopIteration:
+            return False
+        split_expiry.reads += 1
+        split_expiry.output.extend(value)
+        split_expiry._consume_output()
+        return True
+
+    split_expiry._read_once = read_expiry_frame
+    assert wait_stable_reveal_expiry(
+        split_expiry, forbidden="ticket05-e2e-password-canary", timeout=1,
+    ).find("Reveal expired") >= 0
+    assert split_expiry.reads == 3, (
+        "cursor-positioned screen regression: intermediate expiry frame was accepted"
+    )
+    stable_expiry = split_expiry.screen.application_text()
+    assert "Exposure: <hidden>" in stable_expiry and \
+        "ticket05-e2e-password-canary" not in stable_expiry, (
+            "cursor-positioned screen regression: stable expiry retained exposure"
+        )
     assert_pasteboard_diagnostic_regression()
     assert_pty_helper_drain_regression()
 
@@ -2435,11 +2474,36 @@ def reveal_tui_field(session, title, label, index, expected):
         assert expected in session.screen.application_text(), (
             "TUI field reveal did not render the expected synthetic value", title, label,
         )
-    session.wait_text("Reveal expired", since=revealed)
-    if expected is not None:
-        assert expected not in session.screen.application_text(), (
-            "TUI field reveal remained visible after expiry", title, label,
-        )
+    wait_stable_reveal_expiry(session, forbidden=expected, since=revealed)
+
+
+def wait_stable_reveal_expiry(session, *, forbidden=None, timeout=8, since=0):
+    """Observe expiry only on one current frame with the exposure removed.
+
+    ``App::expire`` updates the status before the next complete terminal draw.
+    A PTY read can therefore expose a repaint where ``Reveal expired`` is
+    visible while the previous exposure line is still present.  Do not accept
+    that intermediate frame or search historical screen events: the status,
+    hidden exposure marker and forbidden value must agree on the current
+    screen before the original wait deadline expires.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        rendered = session._current_text_after(since)
+        if (
+            rendered is not None
+            and "Reveal expired" in rendered
+            and "Exposure: <hidden>" in rendered
+            and (forbidden is None or forbidden not in rendered)
+        ):
+            return rendered
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                "TUI PTY stable reveal-expiry observation timed out "
+                + session._screen_diagnostic(since)
+            )
+        session._read_once(min(0.1, remaining))
 
 
 def run_tui_ticket23_matrix(binary, profile, private, endpoint):
@@ -2507,8 +2571,7 @@ def run_tui_ticket23_matrix(binary, profile, private, endpoint):
         session.send_key("g")
         session.send_text("24", enter=True)
         session.wait_text("Generated secret revealed temporarily", since=generated)
-        session.wait_text("Reveal expired", since=generated)
-        assert "Exposure: <hidden>" in session.screen.application_text()
+        wait_stable_reveal_expiry(session, since=generated)
 
         history = session.mark()
         session.send_key("h")
