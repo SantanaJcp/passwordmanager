@@ -2,10 +2,156 @@
 
 use pm_process_runner::{BuildIdentity, Canary, CanaryLocation, ProcessRequest, run};
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::{
+    fs,
+    os::unix::{ffi::OsStringExt, fs::PermissionsExt},
+    process::Command,
+};
 
 const STDOUT_CANARY: &str = "SYNTHETIC_TICKET01_STDOUT_CANARY";
 const STDERR_CANARY: &str = "SYNTHETIC_TICKET01_STDERR_CANARY";
 const FILE_CANARY: &str = "SYNTHETIC_TICKET01_FILE_CANARY";
+
+#[cfg(unix)]
+#[test]
+#[ignore = "helper process for the public Drop diagnostic regression"]
+fn cleanup_failure_child() {
+    let report = std::env::var_os("PM_RUNNER_CLEANUP_REPORT").expect("report path is required");
+    let request = ProcessRequest::new(
+        "/bin/sh",
+        BuildIdentity::new("synthetic-cleanup-probe", "ticket-28-red"),
+    )
+    .args([
+        "-c",
+        "mkdir blocked; printf synthetic > blocked/artifact; chmod 0500 blocked",
+    ]);
+    let evidence = run(&request).expect("the fixture child should run");
+    fs::write(
+        report,
+        evidence.working_directory().as_os_str().as_encoded_bytes(),
+    )
+    .expect("the owned path should be reported to the parent fixture");
+    drop(evidence);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "helper process for the checked cleanup regression"]
+fn checked_cleanup_failure_child() {
+    let report = std::env::var_os("PM_RUNNER_CLEANUP_REPORT").expect("report path is required");
+    let request = ProcessRequest::new(
+        "/bin/sh",
+        BuildIdentity::new("synthetic-cleanup-probe", "ticket-28-green"),
+    )
+    .args([
+        "-c",
+        "mkdir blocked; printf synthetic > blocked/artifact; chmod 0500 blocked",
+    ]);
+    let evidence = run(&request).expect("the fixture child should run");
+    fs::write(
+        report,
+        evidence.working_directory().as_os_str().as_encoded_bytes(),
+    )
+    .expect("the owned path should be reported to the parent fixture");
+    assert!(
+        evidence.close().is_err(),
+        "checked cleanup should return its filesystem error"
+    );
+    eprintln!("CHECKED_ERROR_RETURNED");
+}
+
+#[cfg(unix)]
+#[test]
+fn drop_reports_an_owned_temporary_directory_cleanup_failure() {
+    let report =
+        std::env::temp_dir().join(format!("pm-runner-cleanup-report-{}", std::process::id()));
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "cleanup_failure_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("PM_RUNNER_CLEANUP_REPORT", &report)
+        .output()
+        .expect("cleanup helper process should start");
+    let owned = std::path::PathBuf::from(std::ffi::OsString::from_vec(
+        fs::read(&report).expect("cleanup helper should report its owned path"),
+    ));
+
+    let result = std::panic::catch_unwind(|| {
+        assert!(output.status.success(), "cleanup helper failed before Drop");
+        assert!(
+            owned.is_dir(),
+            "the failed cleanup must leave observable evidence"
+        );
+        assert!(
+            output
+                .stderr
+                .windows(b"CLEANUP_FAILED".len())
+                .any(|window| window == b"CLEANUP_FAILED"),
+            "Drop discarded the owned directory cleanup failure"
+        );
+    });
+
+    fs::set_permissions(owned.join("blocked"), fs::Permissions::from_mode(0o700))
+        .expect("fixture should restore the exact owned directory");
+    fs::remove_dir_all(&owned).expect("fixture should remove the exact owned directory");
+    fs::remove_file(&report).expect("fixture should remove its exact report");
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn checked_close_returns_the_cleanup_failure_without_a_drop_retry() {
+    let report = std::env::temp_dir().join(format!(
+        "pm-runner-checked-cleanup-report-{}",
+        std::process::id()
+    ));
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "checked_cleanup_failure_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("PM_RUNNER_CLEANUP_REPORT", &report)
+        .output()
+        .expect("checked cleanup helper process should start");
+    let owned = std::path::PathBuf::from(std::ffi::OsString::from_vec(
+        fs::read(&report).expect("cleanup helper should report its owned path"),
+    ));
+    let result = std::panic::catch_unwind(|| {
+        assert!(output.status.success(), "checked cleanup helper failed");
+        assert!(
+            owned.is_dir(),
+            "the single failed attempt must leave evidence observable"
+        );
+        assert!(
+            output
+                .stderr
+                .windows(b"CHECKED_ERROR_RETURNED".len())
+                .any(|window| { window == b"CHECKED_ERROR_RETURNED" })
+        );
+        assert!(
+            !output
+                .stderr
+                .windows(b"CLEANUP_FAILED".len())
+                .any(|window| { window == b"CLEANUP_FAILED" }),
+            "Drop retried or reported after checked close already attempted cleanup"
+        );
+    });
+    fs::set_permissions(owned.join("blocked"), fs::Permissions::from_mode(0o700))
+        .expect("fixture should restore the exact owned directory");
+    fs::remove_dir_all(&owned).expect("fixture should remove the exact owned directory");
+    fs::remove_file(&report).expect("fixture should remove its exact report");
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
 
 #[cfg(unix)]
 #[test]
@@ -54,6 +200,9 @@ fn runs_a_real_process_in_an_owned_temporary_directory_and_records_evidence() {
             CanaryLocation::TemporaryFile("artifact.bin".into()),
         ]
     );
+    evidence
+        .close()
+        .expect("checked evidence cleanup should succeed");
 }
 
 #[cfg(unix)]
@@ -77,6 +226,10 @@ fn uses_a_fresh_temporary_directory_for_each_process() {
         String::from_utf8_lossy(second.stdout()).trim(),
         second.working_directory().to_string_lossy()
     );
+    first.close().expect("first checked cleanup should succeed");
+    second
+        .close()
+        .expect("second checked cleanup should succeed");
 }
 
 #[cfg(unix)]
@@ -101,6 +254,9 @@ fn records_only_the_effective_environment_value() {
             .locations()
             .is_empty()
     );
+    evidence
+        .close()
+        .expect("checked evidence cleanup should succeed");
 }
 
 #[cfg(unix)]
@@ -135,6 +291,9 @@ fn times_out_and_terminates_a_process_tree() {
     assert!(evidence.termination().timed_out());
     assert!(!evidence.termination().success());
     assert!(started.elapsed() < Duration::from_secs(2));
+    evidence
+        .close()
+        .expect("checked evidence cleanup should succeed");
 }
 
 #[cfg(unix)]
@@ -152,6 +311,9 @@ fn timeout_still_applies_after_the_process_group_leader_exits() {
 
     assert!(evidence.termination().timed_out());
     assert!(started.elapsed() < Duration::from_millis(500));
+    evidence
+        .close()
+        .expect("checked evidence cleanup should succeed");
 }
 
 #[cfg(unix)]
@@ -169,4 +331,7 @@ fn bounds_captured_output_and_marks_the_canary_scan_incomplete() {
     assert_eq!(evidence.stdout().len(), 16);
     assert!(evidence.stdout_truncated());
     assert!(!evidence.canary_scan_complete());
+    evidence
+        .close()
+        .expect("checked evidence cleanup should succeed");
 }

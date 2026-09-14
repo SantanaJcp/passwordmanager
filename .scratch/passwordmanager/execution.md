@@ -318,13 +318,57 @@ El candidato Windows aislado `50dd1bf` pasó el
 crash deliberado y consultas de ausencia final de recursos propios. Esto no
 acredita la TUI completa ni resuelve 27. Su launcher ConPTY sigue en preparación.
 
-macOS `f1a1a51` alcanzó copia TUI en el
-[run 34855277724](https://github.com/SantanaJcp/passwordmanager/actions/runs/34855277724),
-pero el probe de clipboard agente falló: ARM devolvió rc0 sin registrar si
-contenía el canario; Intel agotó el plazo. No hay evidencia suficiente para
-afirmar extracción ni aislamiento. La siguiente prueba debe distinguir ambos
-con flags seguros y controles humanos vigentes, sin imprimir el contenido.
+macOS `f1a1a51` alcanzó copia TUI, pero su log no distinguía rc0 de
+extracción. El diagnóstico posterior sobre binario normal `73e9175`,
+[run 34858597883](https://github.com/SantanaJcp/passwordmanager/actions/runs/34858597883),
+**confirmó exposición del canario en ambos CPU**: el agente devolvió el valor
+exacto y el humano conservaba la copia antes/después. Las identidades eran las
+esperadas, pero ambos procesos compartían el dominio launchd humano. El
+laboratorio no satisface G1 por cambiar sólo UID mediante sudo; el siguiente
+fixture debe probar un dominio agente separado real y conservar este resultado
+como evidencia del perfil inseguro. No se afirma aislamiento ni cierre de 26.
 
 Se mantienen **25/35 tickets integrados**. Los cuatro cleanups recién
 autorizados siguen en 28; este checkpoint no los declara implementados ni
 sustituye la revisión unificada final.
+
+### Integración de los cuatro cleanups autorizados y corte nativo actual
+
+2026-09-14 — Merger distinto integró `a4b7704..f3fe05d` sobre `168573d`,
+commit `b467d0e`: cierre comprobado del directorio de evidencia y propagación
+de fallos de limpieza en keygen, `write_new` y `rpc_download_atomic`. Conserva
+el error primario y todos los errores tipados de cleanup, sin reintentos ni
+borrado de recursos ajenos. El informe distingue el RED conductual de este
+candidato de los fallos de compilación de un candidato anterior y declara la
+sobrescritura accidental de un log histórico, sin inventar su recuperación.
+
+Check, build limpio offline, focalizados y barrida secuencial final de
+**22/22 labs Linux x86_64** pasaron; evidencia en
+[cleanup-errors](../../docs/verification/cleanup-errors.md). Los dos casos
+`ignored` son entradas de subprocesos ejecutadas por sus tests padres.
+Los dos alcances de la última autorización quedan integrados. Esto no cierra
+el ticket 28 ni constituye revisión formal o certificación de seguridad.
+
+- **macOS:** el [run 34862828726](https://github.com/SantanaJcp/passwordmanager/actions/runs/34862828726)
+  sobre `d514233` falló antes de ejecutar el nuevo probe de dominio aislado:
+  Apple Silicon no observó la selección en la segunda TUI a 80×24;
+  Intel no obtuvo el cierre esperado de la primera TUI. El control compartido
+  volvió a mostrar extracción en ARM; en Intel expiró el probe sin medirla.
+  No invalida la exposición confirmada en ambos CPU por la corrida anterior,
+  ni acredita el nuevo aislamiento. Falta además la matriz completa TUI.
+- **Windows:** el launcher ConPTY real de `7998eba` ya demostró el RED de
+  producto: `tui` termina con `INVALID_ARGUMENT` antes del criterio de vida
+  ([run 34857970004](https://github.com/SantanaJcp/passwordmanager/actions/runs/34857970004)).
+  El [run 34864402493](https://github.com/SantanaJcp/passwordmanager/actions/runs/34864402493)
+  de `a6ddb89` pasó 8 tests nativos, 1 pipe, 6 observer y 1 sync, pero falló al
+  encontrar modo de foco 1004 en el observador. `9e50f51` reconoce ese modo
+  estáticamente; no tiene verificación nativa y el movimiento mecánico de la
+  TUI compartida no implementa aún la TUI Windows completa.
+- **G7:** el candidato de lectura nativa en memoria protegida tiene evidencia
+  Linux parcial; la nueva fixture ENOSPC `33516bb` sólo pasó comprobaciones
+  estáticas y requiere primero componer la API actual de auditoría. No hay
+  aceptación integral de memoria, disco lleno o crash-safety.
+
+Se mantienen **25/35 tickets integrados** y el PR en borrador. Los worktrees
+26–28 quedan preservados sin procesos de verificación activos en este corte.
+La revisión Astra global se ejecutará después de integrar todos los tickets.

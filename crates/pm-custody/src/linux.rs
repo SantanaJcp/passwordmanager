@@ -330,8 +330,7 @@ fn keygen(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure>
     }
     encoded.zeroize();
     if let Err(error) = write_new(&public_path, &spki, 0o444) {
-        let _ = fs::remove_file(private_path);
-        return Err(error);
+        return Err(error.after_owned_path_cleanup(fs::remove_file(private_path)));
     }
     Ok(())
 }
@@ -1732,8 +1731,8 @@ fn rpc_download_atomic(
         Ok(written)
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-        return result;
+        return result
+            .map_err(|error: Failure| error.after_owned_path_cleanup(fs::remove_file(&temporary)));
     }
     drop(output);
     fs::rename(&temporary, destination).map_err(|_| Failure::Unavailable)?;
@@ -5726,7 +5725,8 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Failure> {
     })();
     if result.is_err() {
         drop(file);
-        let _ = fs::remove_file(path);
+        return result
+            .map_err(|error: Failure| error.after_owned_path_cleanup(fs::remove_file(path)));
     }
     result
 }

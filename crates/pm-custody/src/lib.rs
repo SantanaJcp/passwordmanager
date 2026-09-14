@@ -15,17 +15,15 @@ pub use pm_native_channel::{AuthenticatedHumanChannel, ChannelAuthenticationErro
 #[cfg(target_os = "windows")]
 pub use pm_native_channel::{WindowsClientPipe, WindowsEndpoint, WindowsServerPipe};
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod failure;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-#[derive(Clone, Copy)]
-enum Failure {
-    Usage,
-    Unavailable,
-}
+use failure::Failure;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn take_path(
