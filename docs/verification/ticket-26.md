@@ -1287,6 +1287,58 @@ pre/post controls as `yes`, and no exact canary in either captured stream on
 both architectures before any isolation evidence is considered. The shared
 bootstrap control remains a documented negative, not acceptance evidence.
 
+### Run 26 TUI fixture diagnosis and bounded correction
+
+Native run 34862828726 on `d514233` reached the TUI fixture on both
+architectures but did not reach the isolated pasteboard probe. The Apple
+silicon job timed out while waiting for the selected
+`auth[0].password` row in a fresh `80x24` session. Its fixed observer state was
+`mode=alternate render=field-list event=post-mark parser=ground child=alive`.
+The Intel job reached the same shared-bootstrap control, whose agent probe
+used its existing 30-second bound and returned `timeout`; it then failed the
+first session's `wait_exit(timeout=8)` assertion after sending `l`. The run
+therefore proves neither isolated pasteboard behavior nor a product exit
+failure. No raw PTY screen or agent output was captured, and no local runtime
+reproduction is claimed.
+
+Static inspection found the concrete ARM fixture defect: every fresh TUI
+session resets `App.selected` to catalog index zero, while only the first
+session searched for `Password` before calling `select_tui_password_for_copy`.
+The isolated and expiry sessions sent fourteen field-navigation keys from an
+unspecified catalog item, so the selected row was not necessarily
+`auth[0].password`. The bounded correction searches for the synthetic
+`Password` catalog title in each fresh session before opening the explicit
+field list. The field index remains the existing contract-driven fourteen;
+there is no implicit field substitution or catalog-order assumption.
+
+The Intel failure is not independently localized by this run. Static
+inspection identifies a bounded fixture-lifecycle ambiguity: the unsupported
+shared-bootstrap negative was run inside the same TUI session that had the
+existing 30-second idle bound. If its direct agent probe consumed that bound,
+the subsequent `l` assertion could race the already-defined TUI idle behavior.
+The correction runs that same real TUI copy plus shared bootstrap probe in a
+disposable, separately labelled control session, then runs the ordinary
+keyboard session without the control's external wait. It does not alter the
+product idle bound, the copy lease, the probe bound, the agent assertion, or
+cleanup policy; the shared control remains unsupported evidence and never
+contributes to acceptance. If the control session exits or cleanup fails, the
+categorized control result or cleanup failure remains visible. The next native
+run must confirm whether this removes the Intel ambiguity; it is not claimed
+as a verified product or fixture cause here.
+
+The next native run must first show the fresh-session title searches and
+complete the existing first/isolated/expiry TUI flows before interpreting the
+isolated system-launchd result. It must retain the shared-bootstrap control as
+`unsupported`, require the existing human pre/post canary controls, and keep
+the normal generic failure path. A native pass of the revised fixture is not
+by itself Ticket 26 acceptance: the full TUI 23--25 matrix, reboot/FileVault,
+signing/notarization and final integration gates remain separate.
+
+The checkpoint was prepared statically on Linux only: Python AST parsing,
+shell syntax checks, the macOS custody checker, and `git diff --check` pass for
+the uncommitted correction. No Cargo, build, parser runtime, system lab or
+native run was executed for this correction; native behavior remains pending.
+
 ## Remaining acceptance work
 
 - Compose and verify the complete keyboard TUI through the normal

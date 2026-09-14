@@ -1139,9 +1139,13 @@ def assert_human_pasteboard_canary(secret, *, diagnostic=False, phase=None):
         )
         if phase is not None:
             assert phase in ("before", "after")
+            phase_name = {
+                "before": b"pasteboard-human-canary-before",
+                "after": b"pasteboard-human-canary-after",
+            }[phase]
             emit_diagnostic(
-                b"PM26_DIAGNOSTIC pasteboard-human-canary-" + phase.encode("ascii")
-                + b"=" + (b"yes" if canary_read else b"no")
+                b"PM26_DIAGNOSTIC " + phase_name + b"="
+                + (b"yes" if canary_read else b"no")
             )
     assert canary_read, "human AppKit pasteboard control did not read the exact canary"
 
@@ -1878,6 +1882,10 @@ def tui_search(session, value):
 
 
 def select_tui_password_for_copy(session):
+    # Catalog order is defined by opaque item IDs, not fixture insertion order.
+    # Establish the intended record through the same human-visible search used
+    # by the product before relying on the field descriptor index.
+    tui_search(session, "Password")
     start = session.mark()
     session.send_key("c")
     session.wait_text("Fields (explicit selection; values hidden)", since=start)
@@ -1887,6 +1895,35 @@ def select_tui_password_for_copy(session):
     copy_start = session.mark()
     session.send_key("enter")
     return copy_start
+
+
+def run_shared_pasteboard_control(
+    binary, profile, private, endpoint, *, pasteboard_observation,
+):
+    """Keep the shared-bootstrap negative separate from the timed TUI flow.
+
+    The direct UID-switched probe is intentionally an unsupported control.  On
+    a runner where that probe reaches its existing 30-second bound, keeping it
+    in the same 30-second-idle TUI session would race the product's existing
+    idle behavior and make the later explicit-lock assertion ambiguous.  This
+    disposable session exercises the same real TUI copy path, while the main
+    session remains reserved for the normal keyboard flow.
+    """
+    shared = start_macos_tui(
+        binary, profile, private, endpoint, idle=30, reveal=1, copy=30,
+    )
+    try:
+        copied_start = select_tui_password_for_copy(shared)
+        shared.wait_text("Copied explicitly", since=copied_start)
+        if pasteboard_observation:
+            emit_diagnostic(b"PM26_DIAGNOSTIC pasteboard-shared-control=unsupported")
+            assert_agent_cannot_read_pasteboard(
+                TUI_PASSWORD_RECORD, diagnostic=True, require_denied=False
+            )
+    finally:
+        close_session_preserving_primary(shared)
+    assert TUI_PASSWORD_RECORD not in bytes(shared.output)
+    assert b"\x1b]52;" not in bytes(shared.output)
 
 
 def run_tui_core_lab(
@@ -1900,6 +1937,11 @@ def run_tui_core_lab(
         TUI_PASSWORD_RECORD, scratch, agent_directory, agent_uid,
         owned_paths, owned_launchd_labels,
     )
+    if pasteboard_observation:
+        run_shared_pasteboard_control(
+            binary, profile, private, endpoint,
+            pasteboard_observation=True,
+        )
     first = start_macos_tui(
         binary, profile, private, endpoint, idle=30, reveal=1, copy=30,
     )
@@ -1930,14 +1972,8 @@ def run_tui_core_lab(
             "ticket05-e2e-search-canary", "File", "Exchange Relationship",
         ):
             tui_search(first, title)
-        tui_search(first, "Password")
         copied_start = select_tui_password_for_copy(first)
         first.wait_text("Copied explicitly", since=copied_start)
-        if pasteboard_observation:
-            emit_diagnostic(b"PM26_DIAGNOSTIC pasteboard-shared-control=unsupported")
-            assert_agent_cannot_read_pasteboard(
-                TUI_PASSWORD_RECORD, diagnostic=True, require_denied=False
-            )
         first.send_key("l")
         assert first.wait_exit(timeout=8) == 0
         assert b"\x1b[6n" not in bytes(first.output), (
