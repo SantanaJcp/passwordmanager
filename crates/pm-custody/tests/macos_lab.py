@@ -1475,11 +1475,12 @@ def assert_pasteboard_diagnostic_regression():
         b"state = not running\nlast exit code = 0\n"
     ) == 0
     assert parse_launchd_last_exit_code(
-        b"last exit code = 4: EXAMPLE\n"
+        b"last exit code = 4\n"
     ) == 4
     for malformed in (
         b"state = not running\n",
         b"last exit code = nope\n",
+        b"last exit code = 4: EXAMPLE\n",
         b"last exit code = 0\nlast exit code = 0\n",
     ):
         try:
@@ -1612,7 +1613,7 @@ def parse_launchd_last_exit_code(output):
     matches = [line.strip() for line in lines if line.strip().startswith("last exit code = ")]
     if len(matches) != 1:
         raise AssertionError("isolated pasteboard launch status lacked one last-exit field")
-    match = re.fullmatch(r"last exit code = (-?[0-9]+)(?:: .+)?", matches[0])
+    match = re.fullmatch(r"last exit code = (-?[0-9]+)", matches[0])
     if match is None:
         raise AssertionError("isolated pasteboard launch status had malformed last-exit field")
     return int(match.group(1), 10)

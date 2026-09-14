@@ -951,8 +951,8 @@ the Python AST parses; the shell command plan still has normal and explicit
 diagnostic modes with no implicit feature; the PTY implementation contains
 `forkpty`/`TIOCSWINSZ`, prompt-render synchronization, strict incremental
 UTF-8 decoding across split reads, bounded child wait and one teardown policy
-(SIGTERM plus checked wait/close; a timeout is a failure, not a forced-signal
-fallback); the macOS fixture contains neither a shell clipboard command
+(with checked wait/close for the owned helper group; a timeout is a failure,
+not an escalation or retry); the macOS fixture contains neither a shell clipboard command
 nor an alternate/fallback branch; and the existing nine native tests and
 wrong-UID/negative assertions remain in the same harness. No Linux run or
 local macOS result is substituted for the required normal Intel+Apple-silicon
@@ -1537,6 +1537,41 @@ as the core flow, with real keyboard/PTY observations and engine/file checks
 after each commit point. This table records missing native coverage only; the
 existing Linux 23--25 evidence remains separate, no macOS acceptance is
 claimed, and no product code or deadline is changed by this preparation.
+
+### Static matrix carry-forward map (fixture and adapter preflight)
+
+The table above is a coverage inventory, not an implementation plan. Before
+adding any matrix code, bind each Linux assertion to the existing macOS PTY,
+AppKit and native-stream seams as follows. This mapping is written before a
+future GREEN run; it does not claim that any of these native scenarios has
+executed.
+
+| Existing Linux source/assertion | macOS adapter and required fixture |
+| --- | --- |
+| `tui_content_lab.py`: `screen`, `wait_text`, `send`, `query`, `choose_field` | `VtScreen.application_text`, `MacPtySession.wait_text`, `send_key`/`send_text`, `tui_search` and `select_tui_password_for_copy`; resize only with `MacPtySession.resize` plus a current-screen wait. Keep split UTF-8, wide-cell and row-position assertions; do not flatten rows or normalize whitespace. |
+| `tui_content_lab.py`: `setup` and `catalog_cases` | Extend the existing `seed_tui_content` fixture with the same seven-kind/field seed and synthetic token-exchange, notes, source/custom and attachment descriptors. Assert the seed command's `types=7` result before starting the TUI; do not create a second vault engine or silently substitute a field. |
+| `tui_content_lab.py`: wrong password, reveal expiry, clipboard race, trash/restore/purge | Fresh real `start_macos_tui` sessions over the human TLS/RPK socket; use `read_appkit_pasteboard`/`write_appkit_pasteboard` and `OwnedClipboard` only. Preserve the exact canary, replacement-owner check, no-secret PTY scan, `l` exit and durable revision/audit counts. |
+| `tui_access_lab.py`: `authorization`, `discover`, `wait_state`, `choose` | Provision distinct synthetic agent keys/profiles and a real provider socket under the collision-checked root. Drive `a`/`n`, `e`, `s`, `x`, `w`, `x` with `MacPtySession`; assert next real agent operations and safe pending context, not only screen labels. The passkey `v` case retains the existing real provider/browser harness and fresh human approval channel. |
+| `tui_operations_lab.py`: `onepux`, `seed_remote_device`, `send_long` and durable assertions | Create deterministic CSV/1PUX/native/JSONL/recovery fixtures and a >16 MiB attachment before the TUI. Replace `tmux send_long` with visible-suffix waits plus `send_text`; run the existing `human-streaming-file`/native stream path and real `pm-sync` process with distinct device keys. Assert source bytes, digest/length, 0600 destination, pinned namespace and durable job/restart state. |
+| `tui_operations_lab.py`: `ClosingEndpoint` and negative confirmations | Use an owned native Unix endpoint that closes connections for the offline branch; all invalid source, existing destination, wrong pin, confirmation mismatch and cancelled flows must remain explicit failures with no retry or alternate endpoint. |
+
+The Mac fixture inventory must therefore be created and ownership-registered
+before the operation driver is changed: one deterministic content seed, three
+or more agent identities plus provider, CSV and 1PUX inputs, remote sync
+identity/pairing, backup/plaintext/restore destinations, recovery material,
+large-attachment source/destination, and every owned child socket/process.
+Each path is collision-checked, synthetic and removed only through the existing
+strict ledger. `seed_tui_content`, the real service and all stream helpers run
+before the first matrix `PASS`; no fixture setup failure is converted into a
+screen-only success.
+
+The implementation order is fixed: (1) add only fixture construction and
+adapter assertions, (2) run a focused real-PTY content/access/operations
+scenario with the existing deadlines, (3) add the complete matrix runner, and
+(4) run the normal two-architecture native job. The runner must retain the
+current core cases and negative pasteboard control, use AppKit for copy, and
+report each 23/24/25 contract in its final PASS. Until that sequence runs,
+the static map and Linux labs are planning evidence only.
 
 ## Remaining acceptance work
 
