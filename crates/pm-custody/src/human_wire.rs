@@ -25,6 +25,7 @@ const LAB_AGENT_B: [u8; 16] = [0xb2; 16];
 
 /// Handles the shared catalog and exposure operations, or returns `None` for an opcode
 /// owned by another shared human-wire slice.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn handle_request_slice(
     vault: &mut HumanVault,
     path: &std::path::Path,
@@ -943,21 +944,6 @@ fn push_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), Failure> {
     );
     output.extend_from_slice(value);
     Ok(())
-}
-
-fn write_frame(output: &mut impl Write, value: &[u8]) -> Result<(), Failure> {
-    if value.len() > MAX_HUMAN_FRAME {
-        return Err(Failure::Unavailable);
-    }
-    output
-        .write_all(
-            &u32::try_from(value.len())
-                .map_err(|_| Failure::Unavailable)?
-                .to_be_bytes(),
-        )
-        .and_then(|()| output.write_all(value))
-        .and_then(|()| output.flush())
-        .map_err(|_| Failure::Unavailable)
 }
 
 fn read_frame_bounded(input: &mut impl Read, maximum: usize) -> Result<Vec<u8>, Failure> {

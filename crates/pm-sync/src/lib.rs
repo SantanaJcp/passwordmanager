@@ -2,14 +2,14 @@
 
 //! Opaque self-hosted synchronization storage and E2EE vault replication.
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use minicbor::{Decoder, Encoder};
-use pm_crypto::{digest, SyncPairing};
+use pm_crypto::{SyncPairing, digest};
 use pm_vault::{
     CausalReducer, ReceivedCiphertextAttachment, ReceivedCiphertextGraph, ReceivedCiphertextStream,
     ReductionError, SignedCausalEvent,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     fmt,
     io::{Read, Write},
@@ -623,7 +623,8 @@ impl SyncReplica {
         transport: &impl SyncTransport,
         path: &Path,
     ) -> Result<[u8; 32], SyncError> {
-        let mut input = pm_native_channel::open_regular_file(path).map_err(map_open_error)?;
+        let mut input =
+            pm_native_channel::open_regular_file(path).map_err(|error| map_open_error(&error))?;
         let metadata = input.metadata().map_err(|_| SyncError::Unavailable)?;
         if !metadata.file_type().is_file() {
             return Err(SyncError::InvalidRequest);
@@ -757,7 +758,7 @@ impl SyncReplica {
     }
 }
 
-fn map_open_error(error: std::io::Error) -> SyncError {
+fn map_open_error(error: &std::io::Error) -> SyncError {
     if error.kind() == std::io::ErrorKind::InvalidInput {
         return SyncError::InvalidRequest;
     }

@@ -14,11 +14,7 @@ use std::{
 
 #[cfg(unix)]
 use std::{
-    fs::OpenOptions,
-    os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
-    },
+    os::{fd::AsRawFd, unix::fs::MetadataExt},
     process::{Child, Command, Stdio},
 };
 
@@ -41,21 +37,22 @@ use rustls::{ClientConnection, StreamOwned};
 use std::os::unix::net::UnixStream;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::human_wire::{read_frame, write_frame};
 #[cfg(target_os = "linux")]
 use crate::linux::{
     Cursor, HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared, connect,
-    decode_prepared_response, finish_arguments, hex, open_1pux_source, push_bytes, read_frame,
+    decode_prepared_response, finish_arguments, hex, open_1pux_source, push_bytes,
     read_import_source, read_key, read_profile, rpc_commit, rpc_download_atomic, rpc_history,
     rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore, rpc_unlock,
-    send_file_descriptor, write_frame,
+    send_file_descriptor,
 };
 #[cfg(target_os = "windows")]
 use crate::windows::{
     Cursor, HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared,
     connect_tui as connect, decode_prepared_response, finish_arguments, hex, open_1pux_source,
-    push_bytes, read_frame, read_import_source, read_profile, rpc_commit, rpc_download_atomic,
-    rpc_history, rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore,
-    rpc_unlock, send_file_handle, write_frame,
+    push_bytes, read_import_source, read_profile, rpc_commit, rpc_download_atomic, rpc_history,
+    rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore, rpc_unlock,
+    send_file_handle,
 };
 use crate::{Failure, take_path};
 
@@ -686,11 +683,16 @@ fn run_authenticated_session(
 }
 
 fn combine_failures<const N: usize>(results: [Result<(), Failure>; N]) -> Result<(), Failure> {
-    if results.into_iter().all(|result| result.is_ok()) {
-        Ok(())
-    } else {
-        Err(Failure::Unavailable)
+    let mut failure: Option<Failure> = None;
+    for result in results {
+        if let Err(error) = result {
+            failure = Some(match failure {
+                Some(previous) => previous.merge(error),
+                None => error,
+            });
+        }
     }
+    failure.map_or(Ok(()), Err)
 }
 
 fn event_loop(
@@ -730,6 +732,7 @@ fn event_loop(
                 match handle_key(app, tls, key) {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
+                    Err(error) if error.has_native_cleanup_failure() => return Err(error),
                     Err(_) => {
                         app.operation = None;
                         app.input.zeroize();
@@ -1181,8 +1184,8 @@ fn transfer_import_file(tls: &mut HumanTls, source: &File) -> Result<Vec<u8>, Fa
 
 #[cfg(target_os = "windows")]
 fn transfer_import_file(tls: &mut HumanTls, source: &File) -> Result<Vec<u8>, Failure> {
-    let lease =
-        pm_native_channel::ProcessHandleTransferLease::begin().map_err(|_| Failure::Unavailable)?;
+    let lease = pm_native_channel::ProcessHandleTransferLease::begin()
+        .map_err(|error| Failure::Unavailable.after_native_cleanup(error.cleanup_result()))?;
     let operation = send_file_handle(tls, source).and_then(|()| read_frame(tls));
     match operation {
         Ok(response) => match lease.finish() {
@@ -1699,6 +1702,7 @@ fn sync_now(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failur
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_wraps)]
 fn sync_endpoint_available(path: &Path) -> Result<bool, Failure> {
     Ok(UnixStream::connect(path).is_ok())
 }

@@ -43,22 +43,19 @@ use rustls::{
 use signature::Signer as _;
 use zeroize::{Zeroize, Zeroizing};
 
-use pm_crypto::KdfProfile;
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
 use pm_vault::{
-    AgentEnrollment, Attachment, AttemptOutcome, AttemptVault, AuditAction, AuditActorKind,
-    AuditDeviceCustody, AuditEvent, AuditOutcome, AuthRecord, AuthorizationReason,
-    AutonomousAuditVault, CsvDelimiter, CsvEncoding, CsvField, CsvImportDecision, CsvImportProfile,
-    CsvMapping, CsvRowStatus, CustomField, DelegatedVault, Destination, GeneratorConfig,
-    HumanCommitError, HumanMetadata, HumanVault, HumanVerification, LogicalRecord, LogicalValue,
-    PasskeyOperation, PasskeyProvider, PasskeyStatus, PasswordRecord, PreparedHumanCommand,
-    PrivateKeyFormat, RecordKind, SearchQuery, SourceEncoding, SourceField, TotpAlgorithm,
+    Attachment, AttemptOutcome, AttemptVault, AuditAction, AuditActorKind, AuditDeviceCustody,
+    AuditEvent, AuditOutcome, AuthRecord, AutonomousAuditVault, CustomField, DelegatedVault,
+    Destination, HumanMetadata, HumanVault, LogicalRecord, LogicalValue, PasskeyOperation,
+    PasskeyProvider, PasskeyStatus, PrivateKeyFormat, RecordKind, SourceEncoding, SourceField,
+    TotpAlgorithm,
 };
 
 use crate::human_wire::{
-    commit_authority, encode_prepared, handle_native_backup_download, handle_native_backup_restore,
+    encode_prepared, handle_native_backup_download, handle_native_backup_restore,
     handle_native_recovery, handle_plaintext_backup_download, handle_recovery_rotation,
-    handle_stream_download, handle_stream_upload,
+    handle_stream_download, handle_stream_upload, read_frame, write_frame,
 };
 use crate::{Failure, take_path};
 

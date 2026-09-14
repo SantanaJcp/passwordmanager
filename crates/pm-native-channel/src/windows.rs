@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::{io, ptr, sync::Arc};
+use std::{
+    io, ptr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use windows_sys::Win32::{
     Foundation::{
         CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INSUFFICIENT_BUFFER,
@@ -711,16 +717,57 @@ pub struct ProcessHandleTransferLease {
     active: bool,
 }
 
+static PROCESS_HANDLE_TRANSFER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Failure to start a process-handle transfer lease, including whether
+/// restoring a partially-installed process DACL also failed.
+#[derive(Debug)]
+pub struct ProcessHandleTransferBeginError {
+    cleanup_failed: bool,
+}
+
+impl ProcessHandleTransferBeginError {
+    /// Returns the result of cleanup attempted while starting the lease.
+    pub const fn cleanup_result(&self) -> Result<(), ChannelAuthenticationError> {
+        if self.cleanup_failed {
+            Err(ChannelAuthenticationError)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl ProcessHandleTransferLease {
     /// Adds a non-inheritable process ACE for the installed virtual service.
     ///
     /// # Errors
     /// Returns an opaque error if SID resolution, DACL query/install, or
     /// post-install verification fails.
-    pub fn begin() -> Result<Self, ChannelAuthenticationError> {
-        let sid = installed_service_sid()?;
+    pub fn begin() -> Result<Self, ProcessHandleTransferBeginError> {
+        if PROCESS_HANDLE_TRANSFER_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ProcessHandleTransferBeginError {
+                cleanup_failed: false,
+            });
+        }
+        let lease = Self::begin_unique();
+        if lease.is_err() {
+            PROCESS_HANDLE_TRANSFER_ACTIVE.store(false, Ordering::Release);
+        }
+        lease
+    }
+
+    fn begin_unique() -> Result<Self, ProcessHandleTransferBeginError> {
+        let sid = installed_service_sid().map_err(|_| ProcessHandleTransferBeginError {
+            cleanup_failed: false,
+        })?;
         let process = unsafe { GetCurrentProcess() };
-        let (original_descriptor, original_dacl) = query_process_dacl(process)?;
+        let (original_descriptor, original_dacl) =
+            query_process_dacl(process).map_err(|_| ProcessHandleTransferBeginError {
+                cleanup_failed: false,
+            })?;
         let mut entry = EXPLICIT_ACCESS_W {
             grfAccessPermissions: PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
             grfAccessMode: GRANT_ACCESS,
@@ -737,20 +784,18 @@ impl ProcessHandleTransferLease {
         if created != ERROR_SUCCESS || installed_dacl.is_null() {
             let installed = free_local(installed_dacl.cast());
             let original = free_local(original_descriptor);
-            if installed.is_err() || original.is_err() {
-                return Err(ChannelAuthenticationError);
-            }
-            return Err(ChannelAuthenticationError);
+            return Err(ProcessHandleTransferBeginError {
+                cleanup_failed: installed.is_err() || original.is_err(),
+            });
         }
         let installed_bytes = match acl_bytes(installed_dacl) {
             Ok(value) => value,
-            Err(error) => {
+            Err(_error) => {
                 let installed = free_local(installed_dacl.cast());
                 let original = free_local(original_descriptor);
-                if installed.is_err() || original.is_err() {
-                    return Err(ChannelAuthenticationError);
-                }
-                return Err(error);
+                return Err(ProcessHandleTransferBeginError {
+                    cleanup_failed: installed.is_err() || original.is_err(),
+                });
             }
         };
         let applied = unsafe {
@@ -767,10 +812,9 @@ impl ProcessHandleTransferLease {
         if applied != ERROR_SUCCESS {
             let first = free_local(installed_dacl.cast());
             let second = free_local(original_descriptor);
-            if first.is_err() || second.is_err() {
-                return Err(ChannelAuthenticationError);
-            }
-            return Err(ChannelAuthenticationError);
+            return Err(ProcessHandleTransferBeginError {
+                cleanup_failed: first.is_err() || second.is_err(),
+            });
         }
         let mut lease = Self {
             original_descriptor,
@@ -780,8 +824,8 @@ impl ProcessHandleTransferLease {
             active: true,
         };
         if lease.current_matches(&lease.installed_bytes).is_err() {
-            lease.finish()?;
-            return Err(ChannelAuthenticationError);
+            let cleanup_failed = lease.finish().is_err();
+            return Err(ProcessHandleTransferBeginError { cleanup_failed });
         }
         Ok(lease)
     }
@@ -793,6 +837,13 @@ impl ProcessHandleTransferLease {
     /// Returns an opaque error for concurrent change, restore, verification,
     /// or descriptor cleanup failure.
     pub fn finish(mut self) -> Result<(), ChannelAuthenticationError> {
+        self.finish_inner()
+    }
+
+    fn finish_inner(&mut self) -> Result<(), ChannelAuthenticationError> {
+        if !self.active {
+            return Ok(());
+        }
         let result = (|| {
             self.current_matches(&self.installed_bytes)?;
             if unsafe {
@@ -814,6 +865,7 @@ impl ProcessHandleTransferLease {
         let installed = free_local(self.installed_dacl.cast());
         let original = free_local(self.original_descriptor);
         self.active = false;
+        PROCESS_HANDLE_TRANSFER_ACTIVE.store(false, Ordering::Release);
         if result.is_err() || installed.is_err() || original.is_err() {
             Err(ChannelAuthenticationError)
         } else {
@@ -835,9 +887,31 @@ impl ProcessHandleTransferLease {
 
 impl Drop for ProcessHandleTransferLease {
     fn drop(&mut self) {
-        if self.active {
-            std::process::abort();
+        if self.active && self.finish_inner().is_err() {
+            report_process_transfer_cleanup_failure();
         }
+    }
+}
+
+fn report_process_transfer_cleanup_failure() {
+    const MARKER: &[u8] = b"PM_NATIVE_CLEANUP_FAILED component=process-handle-transfer\r\n";
+    const MARKER_LENGTH: u32 = 60;
+    const _: () = assert!(MARKER.len() == MARKER_LENGTH as usize);
+    let mut written = 0;
+    if unsafe {
+        WriteFile(
+            windows_sys::Win32::System::Console::GetStdHandle(
+                windows_sys::Win32::System::Console::STD_ERROR_HANDLE,
+            ),
+            MARKER.as_ptr(),
+            MARKER_LENGTH,
+            &raw mut written,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        // Drop cannot return a second failure. This one attempted write is the
+        // fixed external signal; it is deliberately neither retried nor fatal.
     }
 }
 

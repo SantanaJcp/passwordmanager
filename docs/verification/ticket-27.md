@@ -1719,10 +1719,13 @@ reparse, identidad, número de links y tamaño antes de entregarlo al procesador
 1PUX común. Todos los handles tienen ownership único y cierre comprobado en
 todas las ramas.
 
-El lease conserva el descriptor original y el DACL instalado. Al terminar la
-transferencia consulta el DACL actual: sólo restaura el original si sigue siendo
-exactamente el que instaló. Si otra parte lo cambió, falla y termina la TUI sin
-sobrescribir el cambio ajeno, sin retry. Error de query, instalación,
+El lease conserva el descriptor original y el DACL instalado. Sólo puede existir
+uno por proceso. Al terminar la transferencia observa el DACL actual y sólo
+restaura el original si sigue siendo exactamente el que instaló. Esta comparación
+detecta cambios ya visibles, pero no es un CAS atómico frente a un administrador
+concurrente. Si observa un cambio, falla y termina la TUI sin sobrescribirlo, sin
+retry. Un fallo de restauración también sale del bucle TUI en vez de convertirse
+en un estado recuperable con un grant incierto. Error de query, instalación,
 duplicación, validación, cierre o restauración es fallo explícito; no se copia a
 un temporal, no se reabre por nombre y no se transmite el fichero como ruta o
 como alternativa degradada.

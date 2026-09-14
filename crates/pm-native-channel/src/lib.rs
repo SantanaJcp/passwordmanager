@@ -12,8 +12,9 @@ mod windows;
 
 #[cfg(target_os = "windows")]
 pub use windows::{
-    ConPty, OwnedClipboard, ProcessHandleTransferLease, WindowsClientPipe, WindowsServerPipe,
-    WindowsStopEvent, dpapi_protect_machine, dpapi_unprotect, windows_named_pipe_available,
+    ConPty, OwnedClipboard, ProcessHandleTransferBeginError, ProcessHandleTransferLease,
+    WindowsClientPipe, WindowsServerPipe, WindowsStopEvent, dpapi_protect_machine, dpapi_unprotect,
+    windows_named_pipe_available,
 };
 
 /// One of the two Windows named-pipe endpoints. Roles are fixed by the
