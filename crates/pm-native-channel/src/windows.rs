@@ -39,7 +39,7 @@ use windows_sys::Win32::{
             SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
             SERVICE_STATUS_PROCESS,
         },
-        Threading::{GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken},
+        Threading::{GetCurrentProcess, GetCurrentThread, OpenThreadToken},
     },
     UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE},
 };
@@ -91,27 +91,9 @@ impl WindowsServerPipe {
             lpSecurityDescriptor: descriptor,
             bInheritHandle: 0,
         };
-        let handle = unsafe {
-            CreateNamedPipeW(
-                name.as_ptr(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
-                PIPE_BUFFER,
-                PIPE_BUFFER,
-                0,
-                &raw const security,
-            )
-        };
-        let creation_error = if handle == INVALID_HANDLE_VALUE {
-            Some(unsafe { GetLastError() })
-        } else {
-            None
-        };
+        let creation = create_pipe_instance(name.as_ptr(), &raw const security);
         unsafe { LocalFree(descriptor) };
-        if creation_error.is_some() {
-            return Err(ChannelAuthenticationError);
-        }
+        let handle = creation.map_err(|_| ChannelAuthenticationError)?;
         Ok(Self {
             handle,
             expected_client_sid: client_sid.to_owned(),
@@ -198,6 +180,28 @@ impl WindowsServerPipe {
             client_pid: self.client_pid,
         })
     }
+}
+
+fn create_pipe_instance(
+    name: *const u16,
+    security: *const SECURITY_ATTRIBUTES,
+) -> Result<HANDLE, u32> {
+    let handle = unsafe {
+        CreateNamedPipeW(
+            name,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            PIPE_BUFFER,
+            PIPE_BUFFER,
+            0,
+            security,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(unsafe { GetLastError() });
+    }
+    Ok(handle)
 }
 
 impl Drop for WindowsServerPipe {
@@ -791,11 +795,62 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::{
-        Foundation::CloseHandle, Security::TOKEN_QUERY, System::Threading::GetCurrentProcess,
+        Foundation::{CloseHandle, ERROR_ACCESS_DENIED},
+        Security::TOKEN_QUERY,
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
 
     const CANARY: &[u8] = b"ticket27-synthetic-native-canary";
     static CLIPBOARD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct OwnedTestPipe(HANDLE);
+
+    impl Drop for OwnedTestPipe {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    fn create_owned_test_pipe(
+        vault: &str,
+        owner_sid: &str,
+        service_sid: &str,
+        client_sid: &str,
+    ) -> Result<OwnedTestPipe, u32> {
+        let name = wide(
+            &WindowsEndpoint::Agent
+                .pipe_name(vault)
+                .expect("the test vault identifier is valid"),
+        );
+        let canonical = windows_pipe_sddl(service_sid, client_sid)
+            .expect("the test service and client SIDs are valid");
+        let service_owner = format!("O:{service_sid}G:{service_sid}");
+        let creator_owner = format!("O:{owner_sid}G:{owner_sid}");
+        let owned_sddl = canonical.replacen(&service_owner, &creator_owner, 1);
+        assert!(owned_sddl.starts_with(&creator_owner));
+        let sddl = wide(&owned_sddl);
+        let mut descriptor = ptr::null_mut();
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            return Err(unsafe { GetLastError() });
+        }
+        let security = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+                .expect("SECURITY_ATTRIBUTES fits in DWORD"),
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let result = create_pipe_instance(name.as_ptr(), &raw const security);
+        unsafe { LocalFree(descriptor) };
+        result.map(OwnedTestPipe)
+    }
 
     #[test]
     fn named_pipe_first_instance_rejects_second_protected_instance() {
@@ -816,21 +871,25 @@ mod tests {
         let vault = format!("{stamp:032x}");
         let service_sid = "S-1-5-80-27027";
         let different_client_sid = "S-1-5-21-999999999-999999999-999999999-9999";
-        let first = WindowsServerPipe::create(
-            WindowsEndpoint::Agent,
+        let first = create_owned_test_pipe(
             &vault,
+            &current_client_sid,
             service_sid,
             &current_client_sid,
         )
-        .unwrap();
-        assert!(
-            WindowsServerPipe::create(
-                WindowsEndpoint::Agent,
+        .unwrap_or_else(|error| {
+            panic!("first named pipe creation failed with GetLastError={error}")
+        });
+        assert_eq!(
+            create_owned_test_pipe(
                 &vault,
+                &current_client_sid,
                 service_sid,
                 different_client_sid,
             )
-            .is_err()
+            .err(),
+            Some(ERROR_ACCESS_DENIED),
+            "second named pipe creation returned an unexpected GetLastError"
         );
         drop(first);
     }

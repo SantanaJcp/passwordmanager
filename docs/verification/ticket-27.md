@@ -829,9 +829,10 @@ API y a una regresión nativa real:
 1. Añadir primero una prueba `#[cfg(target_os = "windows")]` que abra el token
    del proceso actual y obtenga su SID mediante la API del sistema. La prueba
    crea un identificador de bóveda hexadecimal único y una primera instancia
-   de `WindowsServerPipe` con ese SID de cliente y un SID de servicio
-   sintético. Mientras el primer handle sigue vivo, intenta crear la segunda
-   instancia con el mismo nombre, el mismo servicio y un SID de cliente
+   del helper nativo compartido por `WindowsServerPipe`, con un descriptor
+   propietario del SID actual, ese SID como cliente y un SID de servicio
+   sintético en las ACE. Mientras el primer handle sigue vivo, intenta crear la
+   segunda instancia con el mismo nombre, el mismo servicio y un SID de cliente
    distinto; la primera creación debe pasar y la segunda debe devolver error.
    El recurso es propio de la prueba y se libera por RAII al terminar. No hay
    mocks, skips, nombres compartidos ni reintentos.
@@ -868,3 +869,55 @@ La validación estática adicional usó directamente el `rustfmt` de Rust 1.98.1
 `windows-sys 0.61.2` confirmó `OpenProcessToken` bajo
 `Win32::System::Threading` y `TOKEN_QUERY` bajo `Win32::Security`; los imports
 del test siguen esas ubicaciones. No se ejecutaron Cargo ni una prueba Windows.
+
+## Corrección del fixture de regresión named pipe (método antes del código)
+
+La corrida nativa 14 (`34838861714`, sobre `23bc5e6`) falló en el `unwrap` de
+la primera creación de la regresión del pipe; las otras cuatro pruebas del
+canal pasaron y el servicio ni siquiera llegó a iniciarse. Ese `unwrap` no
+conservaba `GetLastError`, por lo que esta corrida no demuestra que la
+corrección de banderas del servidor haya fallado. La hipótesis acotada es que
+el fixture pedía como propietario y grupo `S-1-5-80-27027`, un SID de servicio
+sintético que no está en el token del runner (`S-1-5-21-...`). La fuente
+primaria de
+[CreatePrivateObjectSecurityWithMultipleInheritance](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createprivateobjectsecuritywithmultipleinheritance)
+indica que la validación de propietario acepta el `TokenUser` o un grupo
+autorizado del token y puede devolver `ERROR_INVALID_OWNER`; la documentación
+de [seguridad de named pipes](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
+confirma que el descriptor entregado a `CreateNamedPipe` gobierna ambos
+extremos. Esta es una hipótesis comprobable, no una causa ya observada en
+Windows.
+
+Antes de cambiar la prueba se fijó este método mínimo:
+
+1. Mantener sin cambios `windows_pipe_sddl`, su validación de SID y el
+   descriptor de producción: el proceso real del servicio seguirá usando su
+   SID de servicio como propietario/grupo y conservará las ACE de SYSTEM,
+   servicio y cliente. No se sustituye la cuenta por `LocalSystem` ni se
+   relaja la identidad.
+2. Construir únicamente para la regresión un descriptor derivado del SDDL
+   canónico, reemplazando propietario/grupo por el SID del token actual del
+   runner. Las ACE de SYSTEM, servicio y cliente permanecen idénticas. La
+   primera instancia usa un nombre hexadecimal único, un handle propio y el
+   SID cliente actual; la segunda usa el mismo nombre y un SID cliente válido
+   distinto. Así el descriptor es válido para el creador sin falsear el
+   contrato de producción.
+3. Compartir con producción el helper que llama a `CreateNamedPipeW` y hace
+   `GetLastError` inmediatamente cuando devuelve `INVALID_HANDLE_VALUE`, antes
+   de que el caller libere el descriptor. La prueba debe mostrar el código
+   Win32 solo en el mensaje de fallo del test y debe exigir que la primera
+   creación pase y la segunda devuelva exactamente `ERROR_ACCESS_DENIED` por
+   `FILE_FLAG_FIRST_PIPE_INSTANCE`; el camino público continúa descartando el
+   código y devolviendo `ChannelAuthenticationError` opaco. Un wrapper RAII
+   cierra el primer handle incluso durante unwinding.
+4. No se añade retry, timeout, pipe alternativo ni salida de secretos. La
+   siguiente ejecución Windows es la que debe aportar el código real de un
+   eventual fallo de fixture o de API; hasta entonces no se atribuye el RED a
+   la corrección del servidor ni se marca aceptación.
+
+La regresión estática se ejecuta primero contra el test anterior y debe
+comprobar que el nuevo fixture exige el SID propietario actual, que conserva
+las ACE canónicas, que informa `GetLastError` y que mantiene el error exacto de
+segunda instancia. En este host solo se ejecutan el checker, `rustfmt` directo,
+`sh -n` y `git diff --check`; no se ejecuta Cargo ni se simula Windows. El
+laboratorio nativo normal sigue siendo obligatorio después de este diagnóstico.

@@ -207,8 +207,16 @@ require_literal 'token_sid(token)' "$native_channel"
 require_literal 'SystemTime::now()' "$native_channel"
 require_literal 'format!("{stamp:032x}")' "$native_channel"
 require_literal 'different_client_sid' "$native_channel"
-require_literal 'WindowsServerPipe::create' "$native_channel"
-require_literal '.is_err()' "$native_channel"
+require_literal 'create_owned_test_pipe' "$native_channel"
+require_literal 'create_pipe_instance' "$native_channel"
+require_literal 'struct OwnedTestPipe' "$native_channel"
+require_literal 'impl Drop for OwnedTestPipe' "$native_channel"
+require_literal 'let creator_owner' "$native_channel"
+require_literal '&current_client_sid,' "$native_channel"
+require_literal 'ERROR_ACCESS_DENIED' "$native_channel"
+require_literal 'Some(ERROR_ACCESS_DENIED)' "$native_channel"
+require_literal 'replacen(&service_owner, &creator_owner, 1)' "$native_channel"
+require_literal 'panic!("first named pipe creation failed with GetLastError={error}")' "$native_channel"
 require_literal 'CreateNamedPipeW' "$native_channel"
 require_literal 'CreateFileW' "$native_channel"
 require_literal 'SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION' "$native_channel"
@@ -244,14 +252,23 @@ printf '%s\n' "$client_pipe_block" | grep -Fq 'SECURITY_SQOS_PRESENT | SECURITY_
     echo 'CreateFileW client must retain identification SQOS flags' >&2
     exit 1
 }
-creation_error_line=$(grep -nF 'let creation_error = if handle == INVALID_HANDLE_VALUE' "$native_channel" | cut -d: -f1)
-descriptor_free_line=$(grep -nF 'LocalFree(descriptor)' "$native_channel" | head -n1 | cut -d: -f1)
-test -n "$creation_error_line" && test -n "$descriptor_free_line" &&
-    test "$creation_error_line" -lt "$descriptor_free_line" || {
-    echo 'CreateNamedPipeW errors must capture GetLastError before LocalFree' >&2
+pipe_helper_block=$(awk '
+    /^fn create_pipe_instance\(/ { inside = 1 }
+    inside { print }
+    inside && /^}/ { exit }
+' "$native_channel")
+printf '%s\n' "$pipe_helper_block" | grep -Fq 'if handle == INVALID_HANDLE_VALUE' &&
+    printf '%s\n' "$pipe_helper_block" | grep -Fq 'return Err(unsafe { GetLastError() });' || {
+    echo 'CreateNamedPipeW helper must capture GetLastError on invalid handle' >&2
     exit 1
 }
-require_literal 'Some(unsafe { GetLastError() })' "$native_channel"
+creation_call_line=$(grep -nF 'let creation = create_pipe_instance' "$native_channel" | head -n1 | cut -d: -f1)
+descriptor_free_line=$(grep -nF 'LocalFree(descriptor)' "$native_channel" | head -n1 | cut -d: -f1)
+test -n "$creation_call_line" && test -n "$descriptor_free_line" &&
+    test "$creation_call_line" -lt "$descriptor_free_line" || {
+    echo 'CreateNamedPipeW result must be captured before LocalFree' >&2
+    exit 1
+}
 
 require_literal '$diagnosticDir = Join-Path $root' "$lab"
 require_literal '$diagnosticPath = Join-Path $diagnosticDir' "$lab"
