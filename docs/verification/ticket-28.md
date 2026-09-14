@@ -620,3 +620,21 @@ la protección del primer `NativeStdin` de los restantes `read_wire_field`; no s
 considera RED un fallo anterior al segundo header. El GREEN posterior migrará
 el inventario de campos secretos al lector protegido común sin cambiar límites,
 orden, CRLF/EOF ni los campos declaradamente públicos.
+
+La primera ejecución del caso adicional pasó sólo porque el fixture colocaba el
+header grande en la posición de `title`; no alcanzó el segundo secreto y queda
+invalidada. El segundo intento añadió conteo exacto de bytes pendientes, pero
+conservaba el mismo orden y también queda invalidado. Tras entregar password,
+title y username completos, `/tmp/pm28-red-custody-subsequent-frame-attempt3.log`
+terminó rc1 por timeout: `secret_one` había reservado un `Vec` ordinario y
+esperaba payload. El GREEN cambia todos los campos stdin previamente envueltos
+en `Zeroizing<Vec>` a `ProtectedBytes`, usa `NativeStdin` sin prefetch en todos
+esos callers, y conserva los campos públicos y límites. El lab pasó rc0 en
+`/tmp/pm28-green-custody-subsequent-frame.log`; el compile enfocado final pasó
+rc0 en `/tmp/pm28-green-custody-inventory-compile-attempt2.log`. Un intento de
+ampliar simultáneamente todos los frames TLS no compiló y fue retirado completo;
+se conserva `/tmp/pm28-green-custody-frames-compile.log` como fallo de
+composición, no como evidencia conductual ni GREEN. Los frames TLS abiertos,
+serializers y responses siguen pendientes de su RED público discriminante.
+La suite enfocada `pm-custody` pasó rc0
+(`/tmp/pm28-green-custody-inventory-focused.log`).

@@ -199,11 +199,11 @@ fn human_ssh_lab_setup(arguments: &mut impl Iterator<Item = OsString>) -> Result
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
-    let ssh_private = Zeroizing::new(read_wire_field(&mut input, 16 * 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
+    let ssh_private = read_protected_wire_field(&mut input, 16 * 1024)?;
     let ssh_public = read_wire_field(&mut input, 16 * 1024)?;
-    let account_password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let account_password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
         .map_err(|_| Failure::Unavailable)?;
@@ -238,9 +238,9 @@ fn human_github_lab_setup(arguments: &mut impl Iterator<Item = OsString>) -> Res
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
-    let token = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
+    let token = read_protected_wire_field(&mut input, 1024)?;
     let record = LogicalRecord::new(
         RecordKind::Token,
         HumanMetadata {
@@ -716,8 +716,8 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let (opcode, mut request) = match action.to_str() {
         Some("setup") => (19, vec![19]),
         Some("suspend") => (20, vec![20]),
@@ -742,8 +742,8 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
         }
     }
     if opcode == 41 {
-        let subject_token = Zeroizing::new(read_wire_field(&mut input, 64 * 1024)?);
-        let requester_secret = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+        let subject_token = read_protected_wire_field(&mut input, 64 * 1024)?;
+        let requester_secret = read_protected_wire_field(&mut input, 1024)?;
         push_bytes(&mut request, &subject_token)?;
         push_bytes(&mut request, &requester_secret)?;
     }
@@ -796,8 +796,8 @@ fn human_csv_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<()
     }
     let key = read_key(&private_path, current_uid())?;
     let source = read_import_source(&source_path)?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
         .map_err(|_| Failure::Unavailable)?;
@@ -1102,8 +1102,8 @@ fn human_1pux_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
         .map_err(|_| Failure::Unavailable)?;
@@ -1221,8 +1221,8 @@ fn human_history_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Res
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
 
     let records = content_fixture_records()?;
@@ -1392,8 +1392,8 @@ fn human_history_list(arguments: &mut impl Iterator<Item = OsString>) -> Result<
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
     let history = rpc_history(&mut tls, item)?;
     println!(
@@ -1415,8 +1415,8 @@ fn human_history_purge_item(arguments: &mut impl Iterator<Item = OsString>) -> R
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
     let purge = rpc_prepare_purge_item(&mut tls, item)?;
     if !purge.terminal || purge.revision_ids.is_empty() {
@@ -1456,8 +1456,8 @@ fn human_backup_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Resu
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
 
     let records = content_fixture_records()?;
@@ -1556,8 +1556,8 @@ fn human_backup_restore(arguments: &mut impl Iterator<Item = OsString>) -> Resul
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
     let mut request = vec![34];
     push_bytes(&mut request, &password)?;
@@ -1590,9 +1590,9 @@ fn human_recovery_restore(arguments: &mut impl Iterator<Item = OsString>) -> Res
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
-    let mut recovery = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
+    let mut recovery = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
     let mut request = vec![42];
     push_bytes(&mut request, &recovery)?;
@@ -1634,9 +1634,9 @@ fn human_master_rotate(arguments: &mut impl Iterator<Item = OsString>) -> Result
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
-    let mut replacement = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
+    let mut replacement = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
     let mut request = vec![43];
     push_bytes(&mut request, &replacement)?;
@@ -1669,8 +1669,8 @@ fn human_recovery_rotate(arguments: &mut impl Iterator<Item = OsString>) -> Resu
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
     write_frame(&mut tls, &[44])?;
     let response = read_frame(&mut tls)?;
@@ -1686,7 +1686,7 @@ fn human_recovery_rotate(arguments: &mut impl Iterator<Item = OsString>) -> Resu
     std::io::stdout()
         .flush()
         .map_err(|_| Failure::Unavailable)?;
-    let mut confirmation = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut confirmation = read_protected_wire_field(&mut input, 1024)?;
     write_frame(&mut tls, &confirmation)?;
     confirmation.zeroize();
     code.zeroize();
@@ -1982,11 +1982,11 @@ fn human_password_crud(arguments: &mut impl Iterator<Item = OsString>) -> Result
     let password = read_protected_wire_field(&mut input, 1024)?;
     let title = read_wire_string(&mut input, 1024)?;
     let username = read_wire_string(&mut input, 1024 * 1024)?;
-    let secret_one = Zeroizing::new(read_wire_field(&mut input, 1024 * 1024)?);
+    let secret_one = read_protected_wire_field(&mut input, 1024 * 1024)?;
     let destination = read_wire_string(&mut input, 8 * 1024)?;
     let notes = read_wire_string(&mut input, 1024 * 1024)?;
     let edited_title = read_wire_string(&mut input, 1024)?;
-    let secret_two = Zeroizing::new(read_wire_field(&mut input, 1024 * 1024)?);
+    let secret_two = read_protected_wire_field(&mut input, 1024 * 1024)?;
 
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
@@ -2078,8 +2078,8 @@ fn human_content_flow(arguments: &mut impl Iterator<Item = OsString>) -> Result<
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
         .map_err(|_| Failure::Unavailable)?;
@@ -2178,8 +2178,8 @@ fn human_audit_lifecycle(arguments: &mut impl Iterator<Item = OsString>) -> Resu
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
 
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
@@ -2245,8 +2245,8 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let hash = pattern_digest(SIZE)?;
     let descriptor = Attachment::descriptor(
         [0x7b; 16],
@@ -2374,8 +2374,8 @@ fn human_streaming_stall(arguments: &mut impl Iterator<Item = OsString>) -> Resu
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let descriptor = Attachment::descriptor(
         [0x7d; 16],
         "interrupted.bin",
