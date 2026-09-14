@@ -95,6 +95,8 @@ require_literal 'macos-ticket26-diagnostics = []' "$custody_manifest"
 require_literal '--features macos-ticket26-diagnostics' "$lab"
 require_literal 'PM_MACOS_TICKET26_DIAGNOSTIC' "$harness"
 require_literal 'feature = "macos-ticket26-diagnostics"' "$custody_source"
+require_literal 'ticket26_diagnostic_error' "$custody_source"
+require_literal 'PM26_DIAGNOSTIC error=' "$custody_source"
 require_literal 'libc::F_GETFL' "$custody_source"
 require_literal 'set_nonblocking(false)' "$custody_source"
 require_literal 'accepted-stream-nonblocking-before=' "$custody_source"
@@ -102,6 +104,8 @@ require_literal 'accepted-stream-nonblocking-after=' "$custody_source"
 require_literal 'require_readable_regular(AGENT, agent_profile' "$harness"
 require_literal 'require_readable_regular(AGENT, agent_key' "$harness"
 require_literal 'os.chmod(sys.argv[1], 0o666)' "$harness"
+require_literal 'human_authorization_setup' "$harness"
+require_literal '"env", f"{DIAGNOSTIC_ENV}=1"' "$harness"
 if grep -Fq 'RUNNER_TEMP' "$harness"; then
     echo 'macOS custody laboratory still depends on the private runner temp root' >&2
     exit 1
@@ -146,6 +150,9 @@ assert module.diagnostic_lines(b"PM26_DIAGNOSTIC phase=client-profile\n") == [
 assert module.diagnostic_lines(
     b"PM26_DIAGNOSTIC accepted-stream-nonblocking-before=1\n"
 ) == [b"PM26_DIAGNOSTIC accepted-stream-nonblocking-before=1"]
+assert module.diagnostic_lines(
+    b"PM26_DIAGNOSTIC error=server-human-setup-password-commit\n"
+) == [b"PM26_DIAGNOSTIC error=server-human-setup-password-commit"]
 try:
     module.diagnostic_lines(b"PM26_DIAGNOSTIC phase=client-profile path=/secret\n")
 except AssertionError:

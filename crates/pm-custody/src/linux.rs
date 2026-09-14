@@ -91,18 +91,28 @@ enum Ticket26DiagnosticPhase {
     ClientProcess,
     ClientProfile,
     ClientKey,
+    ClientHumanInput,
     ClientConnected,
     ClientStreamConfigured,
     ClientPeer,
     ClientTlsConfigured,
     ClientTlsFlushed,
     ClientReady,
+    ClientHumanMagic,
+    ClientHumanUnlocked,
+    ClientHumanSetupRequest,
+    ClientHumanSetupResponse,
     ServerStreamConfigured,
     ServerPeer,
     ServerTlsConfigured,
     ServerTlsRequest,
     ServerAlpn,
     ServerReady,
+    ServerHumanUnlockFrame,
+    ServerHumanUnlocked,
+    ServerHumanUnlockResponse,
+    ServerHumanSetupRequest,
+    ServerHumanSetupResponse,
 }
 
 #[derive(Clone, Copy)]
@@ -117,18 +127,89 @@ impl Ticket26DiagnosticPhase {
             Self::ClientProcess => "client-process",
             Self::ClientProfile => "client-profile",
             Self::ClientKey => "client-key",
+            Self::ClientHumanInput => "client-human-input",
             Self::ClientConnected => "client-connected",
             Self::ClientStreamConfigured => "client-stream-configured",
             Self::ClientPeer => "client-peer",
             Self::ClientTlsConfigured => "client-tls-configured",
             Self::ClientTlsFlushed => "client-tls-flushed",
             Self::ClientReady => "client-ready",
+            Self::ClientHumanMagic => "client-human-magic",
+            Self::ClientHumanUnlocked => "client-human-unlocked",
+            Self::ClientHumanSetupRequest => "client-human-setup-request",
+            Self::ClientHumanSetupResponse => "client-human-setup-response",
             Self::ServerStreamConfigured => "server-stream-configured",
             Self::ServerPeer => "server-peer",
             Self::ServerTlsConfigured => "server-tls-configured",
             Self::ServerTlsRequest => "server-tls-request",
             Self::ServerAlpn => "server-alpn",
             Self::ServerReady => "server-ready",
+            Self::ServerHumanUnlockFrame => "server-human-unlock-frame",
+            Self::ServerHumanUnlocked => "server-human-unlocked",
+            Self::ServerHumanUnlockResponse => "server-human-unlock-response",
+            Self::ServerHumanSetupRequest => "server-human-setup-request",
+            Self::ServerHumanSetupResponse => "server-human-setup-response",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Ticket26DiagnosticError {
+    ClientHumanInput,
+    ClientHumanConnect,
+    ClientHumanMagic,
+    ClientHumanUnlock,
+    ClientHumanSetupRequest,
+    ClientHumanSetupResponse,
+    ServerHumanUnlockRead,
+    ServerHumanUnlockDecode,
+    ServerHumanUnlockVault,
+    ServerHumanUnlockResponse,
+    ServerHumanRequestRead,
+    ServerHumanSetupInput,
+    ServerHumanSetupPasswordPrepare,
+    ServerHumanSetupPasswordCommit,
+    ServerHumanSetupNotePrepare,
+    ServerHumanSetupNoteCommit,
+    ServerHumanSetupAgentAPrepare,
+    ServerHumanSetupAgentACommit,
+    ServerHumanSetupAgentBPrepare,
+    ServerHumanSetupAgentBCommit,
+    ServerHumanSetupResumePrepare,
+    ServerHumanSetupResumeCommit,
+    ServerHumanSetupEnablePrepare,
+    ServerHumanSetupEnableCommit,
+    ServerHumanResponseWrite,
+}
+
+impl Ticket26DiagnosticError {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::ClientHumanInput => "client-human-input",
+            Self::ClientHumanConnect => "client-human-connect",
+            Self::ClientHumanMagic => "client-human-magic",
+            Self::ClientHumanUnlock => "client-human-unlock",
+            Self::ClientHumanSetupRequest => "client-human-setup-request",
+            Self::ClientHumanSetupResponse => "client-human-setup-response",
+            Self::ServerHumanUnlockRead => "server-human-unlock-read",
+            Self::ServerHumanUnlockDecode => "server-human-unlock-decode",
+            Self::ServerHumanUnlockVault => "server-human-unlock-vault",
+            Self::ServerHumanUnlockResponse => "server-human-unlock-response",
+            Self::ServerHumanRequestRead => "server-human-request-read",
+            Self::ServerHumanSetupInput => "server-human-setup-input",
+            Self::ServerHumanSetupPasswordPrepare => "server-human-setup-password-prepare",
+            Self::ServerHumanSetupPasswordCommit => "server-human-setup-password-commit",
+            Self::ServerHumanSetupNotePrepare => "server-human-setup-note-prepare",
+            Self::ServerHumanSetupNoteCommit => "server-human-setup-note-commit",
+            Self::ServerHumanSetupAgentAPrepare => "server-human-setup-agent-a-prepare",
+            Self::ServerHumanSetupAgentACommit => "server-human-setup-agent-a-commit",
+            Self::ServerHumanSetupAgentBPrepare => "server-human-setup-agent-b-prepare",
+            Self::ServerHumanSetupAgentBCommit => "server-human-setup-agent-b-commit",
+            Self::ServerHumanSetupResumePrepare => "server-human-setup-resume-prepare",
+            Self::ServerHumanSetupResumeCommit => "server-human-setup-resume-commit",
+            Self::ServerHumanSetupEnablePrepare => "server-human-setup-enable-prepare",
+            Self::ServerHumanSetupEnableCommit => "server-human-setup-enable-commit",
+            Self::ServerHumanResponseWrite => "server-human-response-write",
         }
     }
 }
@@ -167,6 +248,16 @@ const fn ticket26_diagnostic_accepted_nonblocking(
     _nonblocking: bool,
 ) {
 }
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic_error(error: Ticket26DiagnosticError) {
+    if std::env::var_os("PM_MACOS_TICKET26_DIAGNOSTIC").as_deref() == Some(OsStr::new("1")) {
+        eprintln!("PM26_DIAGNOSTIC error={}", error.name());
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic_error(_error: Ticket26DiagnosticError) {}
 
 impl Role {
     const fn byte(self) -> u8 {
@@ -844,6 +935,7 @@ fn agent_attempt(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), F
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
     let profile_path = take_path(arguments, "--profile")?;
     let private_path = take_path(arguments, "--private")?;
@@ -853,14 +945,34 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
     if action_flag != "--action" {
         return Err(Failure::Usage);
     }
+    let diagnostic_setup = action.to_str() == Some("setup");
     finish_arguments(arguments)?;
-    let profile = read_profile(&profile_path)?;
+    let profile = read_profile(&profile_path).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+        }
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientProcess);
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientProfile);
+    }
     if profile.role != Role::Human {
         return Err(Failure::Unavailable);
     }
-    let key = read_key(&private_path, current_uid())?;
+    let key = read_key(&private_path, current_uid()).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+        }
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientKey);
+    }
     let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let password = Zeroizing::new(read_wire_field(&mut input, 1024).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+        }
+    })?);
     let (opcode, mut request) = match action.to_str() {
         Some("setup") => (19, vec![19]),
         Some("suspend") => (20, vec![20]),
@@ -871,14 +983,28 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
         _ => return Err(Failure::Usage),
     };
     if matches!(opcode, 19 | 22) {
-        let first = read_wire_field(&mut input, SPKI_BYTES)?;
+        let first = read_wire_field(&mut input, SPKI_BYTES).inspect_err(|_| {
+            if diagnostic_setup {
+                ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+            }
+        })?;
         if first.len() != SPKI_BYTES {
+            if diagnostic_setup {
+                ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+            }
             return Err(Failure::Unavailable);
         }
         request.extend_from_slice(&first);
         if opcode == 19 {
-            let second = read_wire_field(&mut input, SPKI_BYTES)?;
+            let second = read_wire_field(&mut input, SPKI_BYTES).inspect_err(|_| {
+                if diagnostic_setup {
+                    ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+                }
+            })?;
             if second.len() != SPKI_BYTES {
+                if diagnostic_setup {
+                    ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+                }
                 return Err(Failure::Unavailable);
             }
             request.extend_from_slice(&second);
@@ -890,12 +1016,52 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
         push_bytes(&mut request, &subject_token)?;
         push_bytes(&mut request, &requester_secret)?;
     }
-    let mut tls = connect(&profile, &key, &socket_path)?;
-    tls.write_all(HUMAN_MAGIC)
-        .map_err(|_| Failure::Unavailable)?;
-    rpc_unlock(&mut tls, &password)?;
-    write_frame(&mut tls, &request)?;
-    expect_status(&read_frame(&mut tls)?, 0)?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientHumanInput);
+    }
+    let mut tls = connect(&profile, &key, &socket_path).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanConnect);
+        }
+    })?;
+    tls.write_all(HUMAN_MAGIC).map_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanMagic);
+        }
+        Failure::Unavailable
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientHumanMagic);
+    }
+    rpc_unlock(&mut tls, &password).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanUnlock);
+        }
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientHumanUnlocked);
+    }
+    write_frame(&mut tls, &request).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanSetupRequest);
+        }
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientHumanSetupRequest);
+    }
+    let response = read_frame(&mut tls).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanSetupResponse);
+        }
+    })?;
+    expect_status(&response, 0).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanSetupResponse);
+        }
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientHumanSetupResponse);
+    }
     println!(
         "PASS human-authorization action={}",
         action.to_string_lossy()
@@ -2721,7 +2887,9 @@ fn connect(
     socket_path: &Path,
 ) -> Result<rustls::StreamOwned<ClientConnection, UnixStream>, Failure> {
     let stream = UnixStream::connect(socket_path).map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientConnected);
     configure_unix_stream(&stream)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientStreamConfigured);
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
         .map_err(|_| Failure::Unavailable)?;
@@ -2731,11 +2899,13 @@ fn connect(
     if unix_peer_uid(&stream).map_err(|_| Failure::Unavailable)? != profile.server_uid {
         return Err(Failure::Unavailable);
     }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientPeer);
     let config = client_config(key, &profile.server_spki, profile.role)?;
     let server_name =
         ServerName::try_from("passwordmanager.invalid").map_err(|_| Failure::Unavailable)?;
     let connection =
         ClientConnection::new(Arc::new(config), server_name).map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientTlsConfigured);
     Ok(rustls::StreamOwned::new(connection, stream))
 }
 
@@ -2884,16 +3054,26 @@ fn expect_status(response: &[u8], status: u8) -> Result<(), Failure> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_human_rpc(
     tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
     service: &VaultService,
     channel: AuthenticatedHumanChannel,
 ) -> Result<(), Failure> {
-    let unlock = read_human_unlock_frame(tls, service)?;
+    let unlock = read_human_unlock_frame(tls, service).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockRead);
+    })?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanUnlockFrame);
     let mut cursor = Cursor::new(&unlock);
-    cursor.expect(&[1])?;
-    let mut password = Zeroizing::new(cursor.bytes()?);
-    cursor.finish()?;
+    cursor.expect(&[1]).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockDecode);
+    })?;
+    let mut password = Zeroizing::new(cursor.bytes().inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockDecode);
+    })?);
+    cursor.finish().inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockDecode);
+    })?;
     let mut vault = HumanVault::unlock_with_audit_custody(
         &service.path,
         &password,
@@ -2901,11 +3081,22 @@ fn handle_human_rpc(
         channel,
         Arc::clone(&service.audit_custody),
     )
-    .map_err(|_| Failure::Unavailable)?;
+    .map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockVault);
+        Failure::Unavailable
+    })?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanUnlocked);
     password.zeroize();
-    write_frame(tls, &[0])?;
+    write_frame(tls, &[0]).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockResponse);
+    })?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanUnlockResponse);
+    let mut setup_completed = false;
     loop {
         let Ok(request) = read_frame(tls) else {
+            if !setup_completed {
+                ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanRequestRead);
+            }
             return Ok(());
         };
         if request == [14] {
@@ -2959,13 +3150,26 @@ fn handle_human_rpc(
             handle_recovery_rotation(&mut vault, tls, &request[1..])?;
             continue;
         }
+        let setup_request = request.first() == Some(&19);
+        if setup_request {
+            ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanSetupRequest);
+        }
         let drop_response = request.first() == Some(&8);
         let response = handle_human_request(&mut vault, service, &request);
         if drop_response {
             let _ = tls.sock.shutdown(Shutdown::Both);
             return response.map(|_| ());
         }
-        write_frame(tls, &response?)?;
+        let response = response?;
+        write_frame(tls, &response).inspect_err(|_| {
+            if setup_request {
+                ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanResponseWrite);
+            }
+        })?;
+        if setup_request {
+            ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanSetupResponse);
+            setup_completed = true;
+        }
     }
 }
 
@@ -3600,6 +3804,7 @@ fn commit_authority(
 
 fn authorization_setup(vault: &mut HumanVault, first: &[u8], second: &[u8]) -> Result<(), Failure> {
     if first.len() != SPKI_BYTES || second.len() != SPKI_BYTES || first == second {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupInput);
         return Err(Failure::Unavailable);
     }
     let record = PasswordRecord::new(
@@ -3609,12 +3814,18 @@ fn authorization_setup(vault: &mut HumanVault, first: &[u8], second: &[u8]) -> R
         "https://ticket07.invalid/login",
         "",
     )
-    .map_err(|_| Failure::Unavailable)?;
-    let prepared = vault
-        .prepare_create(&record)
-        .map_err(|_| Failure::Unavailable)?;
+    .map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupPasswordPrepare);
+        Failure::Unavailable
+    })?;
+    let prepared = vault.prepare_create(&record).map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupPasswordPrepare);
+        Failure::Unavailable
+    })?;
     let item = *prepared.item_id();
-    commit_authority(vault, &prepared)?;
+    commit_authority(vault, &prepared).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupPasswordCommit);
+    })?;
     let note = LogicalRecord::new(
         RecordKind::Note,
         HumanMetadata {
@@ -3629,30 +3840,59 @@ fn authorization_setup(vault: &mut HumanVault, first: &[u8], second: &[u8]) -> R
         vec![],
         vec![],
     )
-    .map_err(|_| Failure::Unavailable)?;
-    let prepared = vault
-        .prepare_create_record(&note)
-        .map_err(|_| Failure::Unavailable)?;
-    commit_authority(vault, &prepared)?;
+    .map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupNotePrepare);
+        Failure::Unavailable
+    })?;
+    let prepared = vault.prepare_create_record(&note).map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupNotePrepare);
+        Failure::Unavailable
+    })?;
+    commit_authority(vault, &prepared).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupNoteCommit);
+    })?;
     for (subject, request, rpk, label) in [
         (LAB_AGENT_A, [0x31; 16], first, "Synthetic agent A"),
         (LAB_AGENT_B, [0x32; 16], second, "Synthetic agent B"),
     ] {
+        let (prepare_error, commit_error) = if subject == LAB_AGENT_A {
+            (
+                Ticket26DiagnosticError::ServerHumanSetupAgentAPrepare,
+                Ticket26DiagnosticError::ServerHumanSetupAgentACommit,
+            )
+        } else {
+            (
+                Ticket26DiagnosticError::ServerHumanSetupAgentBPrepare,
+                Ticket26DiagnosticError::ServerHumanSetupAgentBCommit,
+            )
+        };
         let enrollment = AgentEnrollment::new(subject, request, rpk, label, "ticket07-userns")
-            .map_err(|_| Failure::Unavailable)?;
-        let prepared = vault
-            .prepare_agent_enrollment(&enrollment)
-            .map_err(|_| Failure::Unavailable)?;
-        commit_authority(vault, prepared.prepared())?;
+            .map_err(|_| {
+                ticket26_diagnostic_error(prepare_error);
+                Failure::Unavailable
+            })?;
+        let prepared = vault.prepare_agent_enrollment(&enrollment).map_err(|_| {
+            ticket26_diagnostic_error(prepare_error);
+            Failure::Unavailable
+        })?;
+        commit_authority(vault, prepared.prepared()).inspect_err(|_| {
+            ticket26_diagnostic_error(commit_error);
+        })?;
     }
-    let prepared = vault
-        .prepare_delegated_resume()
-        .map_err(|_| Failure::Unavailable)?;
-    commit_authority(vault, &prepared)?;
-    let prepared = vault
-        .prepare_enable(item)
-        .map_err(|_| Failure::Unavailable)?;
-    commit_authority(vault, &prepared)
+    let prepared = vault.prepare_delegated_resume().map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupResumePrepare);
+        Failure::Unavailable
+    })?;
+    commit_authority(vault, &prepared).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupResumeCommit);
+    })?;
+    let prepared = vault.prepare_enable(item).map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupEnablePrepare);
+        Failure::Unavailable
+    })?;
+    commit_authority(vault, &prepared).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupEnableCommit);
+    })
 }
 
 fn authorization_suspend(vault: &mut HumanVault) -> Result<(), Failure> {
@@ -4316,6 +4556,7 @@ fn handle_human_request(
         }
         19 => {
             if rest.len() != SPKI_BYTES * 2 {
+                ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupInput);
                 return Err(Failure::Unavailable);
             }
             authorization_setup(vault, &rest[..SPKI_BYTES], &rest[SPKI_BYTES..])?;

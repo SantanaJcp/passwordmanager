@@ -360,6 +360,62 @@ must also pass on the eventual integrated candidate; those preserve the
 existing provider, backup, passkey, recovery, SSH and web flows but cannot
 replace the native method above.
 
+### Ninth-run human-authorization setup diagnostic method
+
+Run `34799626677` on `249cbd8` is a new RED after the accepted-stream fix:
+Intel completed the laboratory, while Apple silicon reached client/server
+`READY` for the real agent probe and then `human-authorization --action setup`
+returned exit 4. The captured traceback exposes only the command and the
+public `CUSTODY_UNAVAILABLE` boundary; it does not identify whether setup
+failed while reading the human inputs, connecting/unlocking, or applying one
+of its signed vault mutations. The existing `finally` cleanup remains
+unchanged and is not part of this diagnostic.
+
+Before editing, the single-variable method is fixed as follows:
+
+1. Keep the exact public setup invocation, wire fields, password handling,
+   TLS/RPK/ALPN checks, `IO_TIMEOUT`, and all assertions. Add no retry, sleep,
+   deadline, alternate transport, TLS relaxation, or product behavior change.
+2. Under only the existing laboratory feature
+   `macos-ticket26-diagnostics` **and** the exact opt-in
+   `PM_MACOS_TICKET26_DIAGNOSTIC=1`, emit fixed phase names around the human
+   authorization client and server boundaries: profile/key input, socket and
+   peer setup, TLS configuration, unlock request/response, setup request,
+   and setup response. On the server, add fixed setup boundary phases and fixed
+   error categories for input validation, unlock, each prepare/commit stage,
+   and response writing. No phase includes a path, account, key, password,
+   vault byte, request body, dynamic error text, or timing.
+3. The fixture invokes only this setup subprocess with the opt-in, captures
+   its bounded stderr and the custodian-owned diagnostic file, validates the
+   existing fixed grammar, strips only the unchanged terminal
+   `CUSTODY_UNAVAILABLE` line, and reports a bounded phase/category suffix.
+   The original success assertion remains for a future green run; a failure
+   must still be exactly exit 4, empty stdout, and
+   `CUSTODY_UNAVAILABLE\n`. Diagnostics are evidence only and cannot turn a
+   failure into a pass.
+4. First run the available local syntax/checker tests and preserve the native
+   RED record. If the phase/category identifies a deterministic fixture or
+   product cause that is safely correctable within Ticket 26, write a
+   public-seam regression before the minimal fix and rerun the same lab. If
+   the native run is required to distinguish the categories, freeze this
+   diagnostic-only checkpoint without changing product logic.
+
+This method remains feature- and opt-in-gated, preserves the negative and
+human-authorization contracts, and is not a Ticket 26 acceptance claim.
+
+Checkpoint evidence from this worktree:
+
+- TDD RED: before the implementation, the macOS checker exited `1` because
+  `ticket26_diagnostic_error` was absent from `linux.rs`.
+- GREEN: the final `./scripts/check.sh` passed (workspace checks, tests, and
+  clippy); `pm-custody` tests also passed with
+  `--features macos-ticket26-diagnostics`. Python compilation, shell syntax,
+  the focused macOS CI checker, and `git diff --check` passed.
+- Native status: no local macOS runner is available. The ARM failure from run
+  `34799626677` remains the preserved RED; this checkpoint adds evidence only
+  and needs the same native lab rerun to identify a phase/category before any
+  product or fixture correction.
+
 ## Remaining acceptance work
 
 - Rerun the repaired checkpoint on both authorized ephemeral macOS

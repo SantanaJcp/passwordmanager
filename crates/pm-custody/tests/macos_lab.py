@@ -29,7 +29,8 @@ DIAGNOSTIC_ENV = "PM_MACOS_TICKET26_DIAGNOSTIC"
 DIAGNOSTIC_LOG = STATE / "ticket26-diagnostic.log"
 DIAGNOSTIC_LINE = re.compile(
     rb"(?:PM26_DIAGNOSTIC phase=[a-z-]+|"
-    rb"PM26_DIAGNOSTIC accepted-stream-nonblocking-(?:before|after)=[01])$"
+    rb"PM26_DIAGNOSTIC accepted-stream-nonblocking-(?:before|after)=[01]|"
+    rb"PM26_DIAGNOSTIC error=[a-z-]+)$"
 )
 PEER_UID_SCRIPT = """
 import ctypes, socket, sys
@@ -273,6 +274,38 @@ def diagnostic_lines(value):
     return lines
 
 
+def human_authorization_setup(binary, profile, private, endpoint, first, second):
+    command = [
+        "env", f"{DIAGNOSTIC_ENV}=1", binary, "human-authorization",
+        "--profile", profile, "--private", private, "--socket", endpoint,
+        "--action", "setup",
+    ]
+    result = run(command, check=False, input=wire_fields([PASSWORD, first, second]))
+    diagnostic_stderr = result.stderr
+    if result.returncode == 4:
+        assert diagnostic_stderr.endswith(b"CUSTODY_UNAVAILABLE\n")
+        diagnostic_stderr = diagnostic_stderr.removesuffix(b"CUSTODY_UNAVAILABLE\n")
+    assert result.returncode in (0, 4), (
+        "human authorization setup exited outside its public contract",
+        result.returncode,
+    )
+    client = diagnostic_lines(diagnostic_stderr)
+    service = sudo(["tail", "-n", "32", DIAGNOSTIC_LOG], check=False)
+    assert service.returncode == 0 and service.stderr == b"", (
+        "custodian diagnostic log unavailable", service.returncode,
+    )
+    server = diagnostic_lines(service.stdout)
+    print("PM26_DIAGNOSTIC client=" + ",".join(line.decode() for line in client))
+    print("PM26_DIAGNOSTIC server=" + ",".join(line.decode() for line in server))
+    if result.returncode == 0:
+        assert result.stdout == b"PASS human-authorization action=setup\n"
+        return result
+    assert result.stdout == b""
+    raise AssertionError(
+        "human authorization setup remained unavailable; see fixed PM26_DIAGNOSTIC lines"
+    )
+
+
 def probe(binary, user, profile, private, endpoint, *, allowed=True, diagnostic=False):
     command = [binary, "probe", "--profile", profile, "--private", private,
                "--socket", endpoint]
@@ -499,11 +532,10 @@ def main():
             )
             expect_unavailable(failure)
 
-        setup = run([INSTALL / "pm-custody", "human-authorization", "--profile", human_profile,
-                     "--private", human_key, "--socket", RUNTIME / "human.sock", "--action", "setup"],
-                    input=wire_fields([PASSWORD, published_agent_pub.read_bytes(),
-                                       published_other_pub.read_bytes()]))
-        assert setup.stdout == b"PASS human-authorization action=setup\n" and setup.stderr == b""
+        human_authorization_setup(
+            INSTALL / "pm-custody", human_profile, human_key, RUNTIME / "human.sock",
+            published_agent_pub.read_bytes(), published_other_pub.read_bytes(),
+        )
         suspend = run([INSTALL / "pm-custody", "human-authorization", "--profile", human_profile,
                        "--private", human_key, "--socket", RUNTIME / "human.sock", "--action", "suspend"],
                       input=wire_fields([PASSWORD]))
