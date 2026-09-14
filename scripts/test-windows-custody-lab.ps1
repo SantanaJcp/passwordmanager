@@ -120,11 +120,39 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
         Assert-True ($allowed -contains [string]$line) 'unexpected service diagnostic phase'
         Write-Host "SERVICE_PHASE $line"
     }
+    Assert-ServiceDiagnosticGenerations $lines
     Assert-HumanDiagnosticTrace $lines
 }
 
-function Assert-HumanDiagnosticTrace([object[]]$Lines) {
-    $observed = @($Lines | Where-Object { [string]$_ -like 'phase=human-*' -and $_ -notin @('phase=human-tls-ok', 'phase=human-pipe-ok') })
+function Assert-ServiceDiagnosticGenerations([object[]]$Lines) {
+    $starts = @()
+    for ($index = 0; $index -lt $Lines.Count; $index++) {
+        if ([string]$Lines[$index] -eq 'phase=args-ok') { $starts += $index }
+    }
+    Assert-True ($starts.Count -gt 0 -and $starts[0] -eq 0) 'diagnostic history lacks its first service generation'
+    for ($generation = 0; $generation -lt $starts.Count; $generation++) {
+        $end = if ($generation + 1 -lt $starts.Count) { $starts[$generation + 1] } else { $Lines.Count }
+        $segment = @($Lines[$starts[$generation]..($end - 1)])
+        foreach ($phase in @('phase=args-ok', 'phase=bootstrap-ok', 'phase=audit-ok', 'phase=agent-tls-ok', 'phase=agent-pipe-ok', 'phase=human-tls-ok', 'phase=human-pipe-ok')) {
+            $matching = @($segment | Where-Object { [string]$_ -eq $phase })
+            Assert-True ($matching.Count -eq 1) "service generation has missing/repeated phase: $phase"
+        }
+        Assert-True ([Array]::IndexOf($segment, 'phase=agent-tls-ok') -lt [Array]::IndexOf($segment, 'phase=agent-pipe-ok')) 'agent pipe preceded its TLS configuration'
+        Assert-True ([Array]::IndexOf($segment, 'phase=human-tls-ok') -lt [Array]::IndexOf($segment, 'phase=human-pipe-ok')) 'human pipe preceded its TLS configuration'
+        $firstConnection = [Array]::IndexOf($segment, 'phase=human-accepted')
+        if ($firstConnection -ge 0) {
+            Assert-True ([Array]::IndexOf($segment, 'phase=agent-pipe-ok') -lt $firstConnection) 'agent listener was not ready before a human connection'
+            Assert-True ([Array]::IndexOf($segment, 'phase=human-pipe-ok') -lt $firstConnection) 'human listener was not ready before a human connection'
+        }
+        $failed = @($segment | Where-Object { [string]$_ -eq 'phase=service-failed' })
+        Assert-True ($failed.Count -le 1) 'service generation repeated its terminal failure'
+        if ($failed.Count -eq 1) {
+            Assert-True ([string]$segment[-1] -eq 'phase=service-failed') 'service failure was not terminal in its generation'
+        }
+    }
+}
+
+function Assert-OneHumanDiagnosticTrace([object[]]$Observed) {
     $prefix = @(
         'phase=human-accepted'
         'phase=human-magic-alpn'
@@ -152,10 +180,10 @@ function Assert-HumanDiagnosticTrace([object[]]$Lines) {
     }
     $validPrefix = $false
     foreach ($candidate in $candidates) {
-        if ($observed.Count -gt $candidate.Count) { continue }
+        if ($Observed.Count -gt $candidate.Count) { continue }
         $matches = $true
-        for ($index = 0; $index -lt $observed.Count; $index++) {
-            if ([string]$observed[$index] -ne [string]$candidate[$index]) {
+        for ($index = 0; $index -lt $Observed.Count; $index++) {
+            if ([string]$Observed[$index] -ne [string]$candidate[$index]) {
                 $matches = $false
                 break
             }
@@ -165,7 +193,21 @@ function Assert-HumanDiagnosticTrace([object[]]$Lines) {
             break
         }
     }
-    Assert-True $validPrefix 'human service diagnostic phases are out of order or repeated'
+    Assert-True $validPrefix 'one human connection has phases out of order or repeated'
+}
+
+function Assert-HumanDiagnosticTrace([object[]]$Lines) {
+    $observed = @($Lines | Where-Object { [string]$_ -like 'phase=human-*' -and $_ -notin @('phase=human-tls-ok', 'phase=human-pipe-ok') })
+    $trace = [Collections.Generic.List[object]]::new()
+    foreach ($phase in $observed) {
+        if ([string]$phase -eq 'phase=human-accepted' -and $trace.Count -gt 0) {
+            Assert-OneHumanDiagnosticTrace ($trace.ToArray())
+            $trace.Clear()
+        }
+        Assert-True ($trace.Count -gt 0 -or [string]$phase -eq 'phase=human-accepted') 'human phase lacks its connection boundary'
+        $trace.Add($phase)
+    }
+    if ($trace.Count -gt 0) { Assert-OneHumanDiagnosticTrace ($trace.ToArray()) }
 }
 
 function Get-Sid([string]$Name) {
@@ -519,7 +561,25 @@ try {
     $p = Start-AsUser $humanCredential $custody @('probe', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $emptyInput $humanOut $humanErr
     Assert-True ($p.ExitCode -eq 0) 'human channel failed after post-operation restart'
 
-    $passMessage = "PASS ticket27 windows=$product cpu=$osArch service-virtual-account=1 dacl=protected dpapi=machine pipe=bilateral tls=1.3-rpk human=unlock-lock restart=scm-stop agent-admin=0"
+    # Preserve the independent abrupt-crash/recovery scenario. This is not a
+    # substitute path after STOP failure: both graceful STOP assertions above
+    # must already have succeeded before this intentional process kill.
+    $crashPid = Get-StoppableServicePid $serviceName
+    Stop-Process -Id $crashPid -Force -ErrorAction Stop
+    Start-Sleep -Seconds 1
+    $crashed = @(Get-CimInstance Win32_Process -Filter "ProcessId=$crashPid" -ErrorAction Stop)
+    Assert-True ($crashed.Count -eq 0) 'intentionally crashed service PID remains alive'
+    Invoke-Checked 'sc.exe' @('start', $serviceName)
+    Start-Sleep -Seconds 2
+    $postCrashPid = Get-StoppableServicePid $serviceName
+    Assert-True ($postCrashPid -ne $crashPid) 'crash recovery reused the terminated PID'
+    $p = Start-AsUser $agentCredential $custody @('probe', '--profile', $agentProfile, '--private', $agentPrivate, '--vault-id', $vaultId) $emptyInput $agentOut $agentErr
+    Assert-True ($p.ExitCode -eq 0) 'agent channel failed after intentional crash recovery'
+    $p = Start-AsUser $humanCredential $custody @('probe', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $emptyInput $humanOut $humanErr
+    Assert-True ($p.ExitCode -eq 0) 'human channel failed after intentional crash recovery'
+    Write-ServiceSubphaseDiagnostics $diagnosticPath
+
+    $passMessage = "PASS ticket27 windows=$product cpu=$osArch service-virtual-account=1 dacl=protected dpapi=machine pipe=bilateral tls=1.3-rpk human=unlock-lock restart=scm-stop+crash agent-admin=0"
 }
 catch {
     $bodyError = $_

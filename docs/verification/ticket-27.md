@@ -1039,15 +1039,21 @@ nuevo y repite los probes agente y humano con los mismos SIDs, DACL, perfiles y
 RPK. El probe humano sólo completa su canal; no desbloquea ni reautentica una
 operación externa. Tras el recorrido humano posterior se repite la misma
 parada/reinicio, para cubrir tanto threads esperando conexión como una conexión
-ya atendida. Todo error de SCM, consulta, proceso o canal aborta el lab.
+ya atendida. Sólo después de que ambas paradas SCM hayan pasado se conserva el
+caso independiente de crash: mata intencionalmente ese PID, exige que termine,
+reinicia y repite ambos probes. Todo error de SCM, consulta, proceso o canal
+aborta el lab.
 
 El RED previo es cerrado: sobre `9878bc6`, `dwControlsAccepted=0` y el handler
 devuelve `ERROR_CALL_NOT_IMPLEMENTED`, por lo que el primer `Stop-Service` debe
-fallar antes de unlock. Se elimina del fixture la sustitución heredada que
-mataba el PID con `Stop-Process -Force` para representar un reinicio, y cleanup
-deja de usar `Stop-Service -Force`; ninguna de esas rutas puede convertir una
-parada SCM fallida en éxito. Los procesos/servicio pertenecen a la raíz única
-del lab y la limpieza conserva su agregación de errores.
+fallar antes de unlock. El `Stop-Process -Force` heredado no era un fallback:
+es la inyección deliberada de crash/restart y se conserva como escenario
+separado, nunca como alternativa después de STOP fallido. Cleanup usa
+`Stop-Service` normal sin `-Force`; el switch de PowerShell ampliaría la
+operación a servicios dependientes y no significa terminar a la fuerza el
+proceso. Ninguna ruta convierte una parada SCM fallida en éxito. Los
+procesos/servicio pertenecen a la raíz única del lab y la limpieza conserva su
+agregación de errores.
 
 La implementación propuesta usa un evento manual-reset de STOP, creado y
 cerrado por el runtime del servicio. El contexto estable registrado con
@@ -1083,6 +1089,17 @@ después del drain y cada handle/evento se cierra exactamente una vez. Los
 clientes instalados pueden conservar I/O síncrono: STOP cancela únicamente las
 operaciones overlapped de los handles server owned por este proceso.
 
+El diagnóstico opt-in conserva `startup.phases` como historia append-only
+durante stop, restart y crash; no trunca ni limpia un log vivo. El parser separa
+generaciones por el único `args-ok` de cada proceso, exige una sola copia de
+cada fase de inicialización por generación y comprueba que el TLS de cada rol
+preceda a su pipe. Dentro de cada generación separa conexiones humanas por
+`human-accepted` y valida orden/cardinalidad dentro de cada conexión, permitiendo
+el prefijo corto del probe y la secuencia completa de unlock/lock. Así dos
+probes no parecen una fase repetida ni ocultan una repetición real. La fase
+`human-magic-alpn` acredita aceptación del MAGIC aplicativo después de TLS y
+ALPN; no se denomina ni se usa como evidencia adicional de handshake.
+
 Este orden sigue las APIs primarias: Microsoft exige conservar `OVERLAPPED` y
 buffer hasta completar la operación y usar un evento para sincronizar
 ([I/O síncrono y asíncrono](https://learn.microsoft.com/en-us/windows/win32/fileio/synchronous-and-asynchronous-i-o));
@@ -1097,9 +1114,10 @@ desde su handler
 [control handler](https://learn.microsoft.com/en-us/windows/win32/services/service-control-handler-function)).
 
 Antes de GREEN, el checker estático exige en el fixture las dos paradas sin
-`-Force`, PID terminado/nuevo y probes bilaterales; en producto exige las APIs,
-flags y estados anteriores y rechaza `CancelSynchronousIo`, polling, sleeps y
-timeouts añadidos. Esta inspección no acredita la carrera: el mismo lab Windows
+`-Force`, el crash separado, PID terminado/nuevo, probes bilaterales y parsing
+por generación/conexión; en producto exige las APIs, flags y estados anteriores
+y rechaza `CancelSynchronousIo`, polling, sleeps y timeouts añadidos. Esta
+inspección no acredita la carrera: el mismo lab Windows
 11 ARM64 debe observar el RED previo y, después del código, STOP antes de
 unlock, STOP después de tráfico, reinicio con nuevo PID y ambos canales. Luego
 siguen los cinco tests nativos, pipe contract, DPAPI, ConPTY, clipboard, cleanup

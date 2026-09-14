@@ -39,7 +39,7 @@ require(
     "native channel",
 )
 assert "CancelSynchronousIo" not in SERVICE + CHANNEL
-assert "Stop-Process" not in HARNESS
+assert HARNESS.count("Stop-Process -Id $crashPid -Force -ErrorAction Stop") == 1
 assert "Stop-Service -Name $serviceName -Force" not in HARNESS
 assert HARNESS.count("Stop-OwnedService $serviceName") == 2
 assert HARNESS.index("Stop-OwnedService $serviceName $preUnlockPid") < HARNESS.index(
@@ -48,5 +48,10 @@ assert HARNESS.index("Stop-OwnedService $serviceName $preUnlockPid") < HARNESS.i
 assert HARNESS.count("agent RPK channel failed after SCM restart") == 1
 assert HARNESS.count("human RPK channel failed after SCM restart") == 1
 assert "Get-CimInstance Win32_Process -Filter \"ProcessId=$ServiceProcessId\"" in HARNESS
-assert "restart=scm-stop" in HARNESS
+assert HARNESS.index("Stop-OwnedService $serviceName $servicePid") < HARNESS.index(
+    "Stop-Process -Id $crashPid -Force"
+)
+assert "Assert-ServiceDiagnosticGenerations $lines" in HARNESS
+assert "Assert-OneHumanDiagnosticTrace" in HARNESS
+assert "restart=scm-stop+crash" in HARNESS
 print("PASS windows-stop-contract static=1 native=NOT_RUN")
