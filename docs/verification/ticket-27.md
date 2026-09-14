@@ -211,6 +211,24 @@ token administrativo que ya comprueba el preflight. Este fallo no es evidencia
 de producto y exige una nueva corrida Windows nativa; no se marca ningún
 criterio como completo.
 
+La cuarta ejecución nativa,
+[run 34797595176](https://github.com/SantanaJcp/passwordmanager/actions/runs/34797595176),
+acreditó los tests DPAPI y ConPTY, pero el test público de carrera clipboard
+falló porque la segunda lease tampoco se reconoció como propietaria al limpiar.
+Antes de cambiar el comportamiento se extiende el mismo test nativo con un
+diagnóstico acotado y sin payload: registra los sequence numbers después de
+`EmptyClipboard`, después de `SetClipboardData`, inmediatamente antes y después
+de `CloseClipboard`; registra además si existe owner HWND/open HWND, los
+resultados booleanos de cada API y `GetLastError` solo al fallar. La aserción
+original permanece. Esto discrimina si el sequence cambia al cerrar, si la
+apertura con HWND nulo deja owner inválido, o si otro escritor cambia el
+clipboard después. No mueve la decisión de ownership fuera del lock, no añade
+sleeps/retries/deadlines y no imprime el secreto sintético. La documentación de
+Microsoft establece que `OpenClipboard(NULL)` seguido por `EmptyClipboard`
+deja owner nulo y puede hacer fallar `SetClipboardData`, mientras el sequence se
+incrementa al vaciar o cambiar contenido; por eso ninguna corrección se atribuye
+hasta observar estos puntos en Windows 11 ARM64.
+
 ## Regresión Linux del checkpoint
 
 Después de extraer el motor wire compartido, `./scripts/check.sh` terminó con

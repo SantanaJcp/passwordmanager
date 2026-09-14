@@ -44,6 +44,9 @@ use windows_sys::Win32::{
 };
 use zeroize::Zeroizing;
 
+#[cfg(test)]
+use windows_sys::Win32::System::DataExchange::{GetClipboardOwner, GetOpenClipboardWindow};
+
 use crate::{ChannelAuthenticationError, WindowsEndpoint, windows_pipe_sddl};
 
 const PIPE_BUFFER: u32 = 1024 * 1024;
@@ -371,6 +374,41 @@ fn crypt(value: &[u8], protect: bool) -> Result<Zeroizing<Vec<u8>>, ChannelAuthe
 
 pub struct OwnedClipboard {
     sequence: u32,
+    #[cfg(test)]
+    diagnostic: ClipboardDiagnostic,
+}
+
+#[cfg(test)]
+struct ClipboardDiagnostic {
+    after_empty: u32,
+    owner_after_empty: usize,
+    after_set: u32,
+    owner_after_set: usize,
+    open_before_close: usize,
+    close_succeeded: bool,
+    close_error: u32,
+    after_close: u32,
+    owner_after_close: usize,
+    open_after_close: usize,
+}
+
+#[cfg(test)]
+impl ClipboardDiagnostic {
+    fn emit(&self, label: &str) {
+        eprintln!(
+            "[PM27-CLIPBOARD-DIAG] lease={label} after_empty={} owner_after_empty={} after_set={} owner_after_set={} open_before_close={} close_succeeded={} close_error={} after_close={} owner_after_close={} open_after_close={}",
+            self.after_empty,
+            self.owner_after_empty,
+            self.after_set,
+            self.owner_after_set,
+            self.open_before_close,
+            self.close_succeeded,
+            self.close_error,
+            self.after_close,
+            self.owner_after_close,
+            self.open_after_close,
+        );
+    }
 }
 
 impl OwnedClipboard {
@@ -394,6 +432,10 @@ impl OwnedClipboard {
             if unsafe { EmptyClipboard() } == 0 {
                 return Err(ChannelAuthenticationError);
             }
+            #[cfg(test)]
+            let after_empty = unsafe { GetClipboardSequenceNumber() };
+            #[cfg(test)]
+            let owner_after_empty = unsafe { GetClipboardOwner() } as usize;
             let bytes = utf16
                 .len()
                 .checked_mul(2)
@@ -417,10 +459,41 @@ impl OwnedClipboard {
             }
             let sequence = unsafe { GetClipboardSequenceNumber() };
             (sequence != 0)
-                .then_some(Self { sequence })
+                .then_some(Self {
+                    sequence,
+                    #[cfg(test)]
+                    diagnostic: ClipboardDiagnostic {
+                        after_empty,
+                        owner_after_empty,
+                        after_set: sequence,
+                        owner_after_set: unsafe { GetClipboardOwner() } as usize,
+                        open_before_close: unsafe { GetOpenClipboardWindow() } as usize,
+                        close_succeeded: false,
+                        close_error: 0,
+                        after_close: 0,
+                        owner_after_close: 0,
+                        open_after_close: 0,
+                    },
+                })
                 .ok_or(ChannelAuthenticationError)
         })();
-        unsafe { CloseClipboard() };
+        let close_succeeded = unsafe { CloseClipboard() } != 0;
+        let close_error = if close_succeeded {
+            0
+        } else {
+            unsafe { GetLastError() }
+        };
+        #[cfg(not(test))]
+        let _ = (close_succeeded, close_error);
+        #[cfg(test)]
+        let result = result.map(|mut clipboard| {
+            clipboard.diagnostic.close_succeeded = close_succeeded;
+            clipboard.diagnostic.close_error = close_error;
+            clipboard.diagnostic.after_close = unsafe { GetClipboardSequenceNumber() };
+            clipboard.diagnostic.owner_after_close = unsafe { GetClipboardOwner() } as usize;
+            clipboard.diagnostic.open_after_close = unsafe { GetOpenClipboardWindow() } as usize;
+            clipboard
+        });
         result
     }
 
@@ -685,6 +758,14 @@ mod tests {
     fn clipboard_sequence_never_clears_a_newer_owner() {
         let first = OwnedClipboard::copy(CANARY).unwrap();
         let second = OwnedClipboard::copy(b"ticket27-new-owner").unwrap();
+        first.diagnostic.emit("first");
+        second.diagnostic.emit("second");
+        eprintln!(
+            "[PM27-CLIPBOARD-DIAG] current_sequence={} current_owner={} current_open={}",
+            unsafe { GetClipboardSequenceNumber() },
+            unsafe { GetClipboardOwner() } as usize,
+            unsafe { GetOpenClipboardWindow() } as usize,
+        );
         assert!(!first.clear_if_owned().unwrap());
         assert!(second.clear_if_owned().unwrap());
     }
