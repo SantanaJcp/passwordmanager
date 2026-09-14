@@ -1382,3 +1382,102 @@ raíz propia. Cada error de consulta o presencia residual se agrega a
 fuerza otro borrado y no se inspecciona ni modifica un recurso ajeno. El checker
 estático exige la función y su llamada posterior al cleanup, pero sólo Windows
 nativo acredita las tres ausencias.
+
+### Resultado nativo de la composición base
+
+La corrida Windows 11 ARM64
+[`34853430364`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34853430364)
+sobre el producto exacto `50dd1bf` terminó verde. La fuente libsodium
+autenticada compiló con MSVC; pasaron seis tests nativos y el contrato de pipe.
+El servicio completó `human-unlock-ok/ack`, `human-lock-request`,
+`human-audit-open/append` y `human-lock-ack`; después alcanzó ambos STOP/restart,
+el crash deliberado y los probes bilaterales. El harness imprimió su PASS sólo
+después de que las consultas terminantes confirmaron ausencia del servicio, los
+dos usuarios y la raíz propia. El log completo está preservado en
+`/tmp/pm-windows-composed-run18-full.log`.
+
+Esto cierra el RED de bóveda vacía y la carrera STOP para esta composición, no
+el ticket 27 completo. La corrida no lanzó la TUI, no adjuntó un proceso a
+ConPTY, no ejercitó clipboard desde una sesión humana, no cubrió x64/reboot/FDE
+ni acredita Windows Terminal visible.
+
+### Propuesta de seam único para TUI Windows 23–25
+
+La superficie actual aún no puede satisfacer el método. `windows::run` sólo
+ofrece `service`, `probe` y `human-lock`; su servidor humano acepta únicamente
+unlock seguido de opcode 14. La TUI completa y los opcodes 46/51–79 viven en
+`linux/tui.rs` y `linux.rs`, con tipos concretos `UnixStream`, `/dev/tty`,
+`wl-copy` y `SCM_RIGHTS`. `ConPty` sólo crea/redimensiona una pseudoconsola; no
+lanza el binario mediante `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`. Por tanto los
+tests actuales de `ConPty` y `OwnedClipboard` prueban primitivas, no composición
+humana.
+
+La extracción propuesta mantiene un solo motor, protocolo, modelo y keymap:
+
+1. `human_wire` contiene el dispatch humano 1–79, `FrameReader`/`FrameWriter` y
+   el estado común necesario (bóveda, auditoría, autoridad y trabajos sync).
+   Se parametriza sobre un stream `Read+Write` y una interfaz estrecha de
+   transferencia nativa; Linux y Windows sólo autentican su canal y entregan
+   el stream TLS al mismo dispatch. No se copia el match de opcodes en
+   `windows.rs`.
+2. `tui` contiene `App`, modos, render, keymap, confirmaciones, timers y loop de
+   eventos actuales. Un adaptador de plataforma suministra: conexión humana
+   TLS (`UnixStream` o `WindowsClientPipe`), terminal propio, lease de clipboard
+   y operaciones de fichero. Crossterm/Ratatui siguen siendo la única UI.
+   Linux conserva `/dev/tty`; el proceso Windows usa los handles estándar que
+   le entrega ConPTY. Ambos conservan la misma taxonomía pública
+   `INVALID_ARGUMENT`/`CUSTODY_UNAVAILABLE` y los errores de operación visibles.
+3. El clipboard común expone sólo `copy_owned(bytes)` y
+   `clear_if_owned(lease)`. Linux conserva el proceso `wl-copy`; Windows usa
+   `OwnedClipboard` y su HWND/sequence bajo el lock existente. La pérdida de
+   owner devuelve “limpieza no confirmada” y nunca borra contenido posterior.
+   No se emite OSC52 ni se sustituye clipboard por stdout.
+4. Descargas/exportaciones/restores ya viajan en frames acotados; el adaptador
+   Windows debe crear destino nuevo con DACL humana, escribir incrementalmente,
+   `FlushFileBuffers` y publicar atómicamente con el seam durable nativo. Un
+   destino existente o fallo de flush/publicación falla sin truncar ni usar
+   otro path. CSV conserva su límite confirmado y restore/attachments no se
+   materializan en un frame grande.
+5. El único caso `SCM_RIGHTS`, el 1PUX ya abierto, requiere transferencia nativa
+   del mismo objeto File. La propuesta Windows envía el valor del handle por el
+   TLS humano y el servidor, ligado al PID/SID ya autenticado del Named Pipe,
+   impersona sólo para abrir ese proceso con `PROCESS_DUP_HANDLE` y ejecuta
+   `DuplicateHandle` hacia sí mismo. Después valida tipo, reparse, identidad,
+   links, DACL y tamaño en el handle duplicado y `pm-vault` vuelve a comprobar
+   identidad/digest al consumirlo. Si cualquier permiso o identidad no
+   coincide, falla; no copia a un temporal, no reabre por path y no cambia a
+   streaming como fallback.
+6. `pm-sync` es actualmente `cfg(target_os="linux")` y usa Unix sockets. La TUI
+   Windows no puede marcar pairing/sync verde hasta que el mismo protocolo
+   opaco TLS-RPK tenga un transporte Windows primario (Named Pipe local con
+   identidad bilateral y ACL cerrada, o un transporte remoto ya confirmado).
+   Ese transporte implementa la interfaz existente de `SyncTransport`; no crea
+   otro ledger, no cambia backoff y no convierte offline en éxito.
+
+El método nativo TDD debe fallar primero porque el binario normal todavía no
+expone `tui`, no por una herramienta ausente. Un launcher test-only crea pipes
+propios, `ConPty(80x24)` y un proceso `pm-custody.exe tui` real mediante
+`STARTUPINFOEXW`; espera texto visible antes de cada tecla, redimensiona a
+42x12 y 100x30 y une/cierra proceso, HPCON y handles con errores visibles. La
+misma sesión recorre los siete tipos/campos y selección sin secreto, autoridad
+y pendientes, import/export/backup/restore/rotaciones, pair/sync/offline/retire,
+auditoría/purga y attachment mayor de 16 MiB, comprobando resultado durable en
+el motor. Contraseña, canarios y controles no aparecen en la captura VT; no hay
+OSC52.
+
+Para copy se selecciona un campo exacto, se lee `CF_UNICODETEXT` desde la sesión
+humana, se comprueba expiración y luego se publica una selección sintética con
+otro owner: timeout/lock deben conservarla. Un proceso agente intenta leer en
+paralelo y no obtiene el secreto. Como el clipboard de Windows pertenece a la
+window station/session y no al SID, el fixture debe crear una estación/sesión
+humana de vida acotada con DACL explícita y lanzar allí TUI, lector e interloper;
+el agente queda fuera. Si el runner no puede crear o validar ese aislamiento,
+el lab falla: Named Pipe DACL no se presenta como aislamiento de clipboard y
+no se toca la sesión interactiva del usuario. El runner hosted headless puede
+acreditar ConPTY real, pero no Windows Terminal visible; esa diferencia queda
+explícita.
+
+Éxito requiere además cleanup estricto y ausencia comprobada de proceso TUI,
+HPCON, handles, window station, servicio, cuentas y raíz. Luego se repiten los
+tests nativos, checker, build/check completo y el lab Windows. No se declara
+TUI ni ticket 27 por tests unitarios de las primitivas.
