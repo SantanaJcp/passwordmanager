@@ -3271,34 +3271,6 @@ fn handle_human_request(
         return response;
     }
     match opcode {
-        60 => {
-            let pin: [u8; 44] = rest.try_into().map_err(|_| Failure::Unavailable)?;
-            let protected = Zeroizing::new(
-                vault
-                    .create_sync_pairing(pin)
-                    .map_err(|_| Failure::Unavailable)?
-                    .to_protected_bytes(),
-            );
-            let mut response = vec![0];
-            push_bytes(&mut response, &protected)?;
-            Ok(response)
-        }
-        61 => {
-            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
-            let record = vault.read_record(item).map_err(|_| Failure::Unavailable)?;
-            let mut response = vec![0];
-            response.extend_from_slice(
-                &u16::try_from(record.attachments().len())
-                    .map_err(|_| Failure::Unavailable)?
-                    .to_be_bytes(),
-            );
-            for attachment in record.attachments() {
-                response.extend_from_slice(attachment.id());
-                push_bytes(&mut response, attachment.name().as_bytes())?;
-                response.extend_from_slice(&attachment.size().to_be_bytes());
-            }
-            Ok(response)
-        }
         63 => {
             let mut cursor = Cursor::new(rest);
             let protected = Zeroizing::new(cursor.bytes()?);
@@ -3333,19 +3305,6 @@ fn handle_human_request(
             let mut response = vec![0];
             response.extend_from_slice(&job);
             Ok(response)
-        }
-        64 => {
-            let device: [u8; 16] = rest.try_into().map_err(|_| Failure::Unavailable)?;
-            let prepared = vault
-                .prepare_device_retirement(device)
-                .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
-        }
-        65 => {
-            if !rest.is_empty() {
-                return Err(Failure::Unavailable);
-            }
-            Ok(vec![0])
         }
         66 => {
             let job: [u8; 16] = rest.try_into().map_err(|_| Failure::Unavailable)?;

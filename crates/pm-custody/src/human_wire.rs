@@ -34,7 +34,7 @@ pub(crate) fn handle_request_slice(
     opcode: u8,
     request: &[u8],
 ) -> Option<Result<Vec<u8>, Failure>> {
-    if !matches!(opcode, 2..=13 | 15..=16 | 19..=30 | 33 | 35..=37 | 40..=41 | 43 | 45..=46 | 49..=59)
+    if !matches!(opcode, 2..=13 | 15..=16 | 19..=30 | 33 | 35..=37 | 40..=41 | 43 | 45..=46 | 49..=61 | 64..=65)
     {
         return None;
     }
@@ -759,6 +759,47 @@ pub(crate) fn handle_request_slice(
         50 => generate(vault, request),
         51 => field_catalog(vault, request),
         52 | 53 => expose_field(vault, opcode, request),
+        60 => {
+            let pin: [u8; 44] = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let protected = Zeroizing::new(
+                vault
+                    .create_sync_pairing(pin)
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_protected_bytes(),
+            );
+            let mut response = vec![0];
+            push_bytes(&mut response, &protected)?;
+            Ok(response)
+        }
+        61 => {
+            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let record = vault.read_record(item).map_err(|_| Failure::Unavailable)?;
+            let mut response = vec![0];
+            response.extend_from_slice(
+                &u16::try_from(record.attachments().len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            for attachment in record.attachments() {
+                response.extend_from_slice(attachment.id());
+                push_bytes(&mut response, attachment.name().as_bytes())?;
+                response.extend_from_slice(&attachment.size().to_be_bytes());
+            }
+            Ok(response)
+        }
+        64 => {
+            let device = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_device_retirement(device)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
+        }
+        65 => {
+            if !rest.is_empty() {
+                return Err(Failure::Unavailable);
+            }
+            Ok(vec![0])
+        }
         _ => unreachable!("closed opcode set checked above"),
     })())
 }
