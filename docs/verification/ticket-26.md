@@ -1096,6 +1096,77 @@ system lab, native rerun or complete Ticket 23--25 acceptance is claimed. The
 next native run must still prove the normal two-architecture TUI core and the
 separately documented full keyboard matrix.
 
+### Native run 24 pasteboard negative-observation correction
+
+Run [`34855277724`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34855277724)
+on `f1a1a51` reached the real TUI copy assertion on both authorized macOS
+targets after the ordinary build, unit tests and architecture checks passed.
+The human-side read is the exact `TUI_PASSWORD_RECORD` control in the harness;
+the traceback therefore shows that this positive control completed before the
+agent-side probe. This is not native acceptance: Intel's `_pmagent26`
+`osascript` probe timed out after the existing 30-second bound, while Apple
+silicon returned exit code `0` from the same command.
+
+The old assertion required `returncode != 0` and checked that the exact canary
+was absent from captured stdout and stderr. The Apple-silicon traceback prints
+only the return code, not either captured stream. Consequently the run proves
+neither that the agent extracted the canary nor that it was isolated from the
+human pasteboard; it records only `rc=0`. The Intel timeout similarly has no
+completed read result. The later PTY-close `incomplete-control` error is a
+separate cleanup observation and cannot classify the pasteboard result.
+
+Static inspection also found a fixture boundary that must be distinguished
+before changing the negative test: the agent command is launched as a direct
+`sudo -u _pmagent26 osascript` child of the logged-in human harness. It does
+not explicitly enter a distinct launchd bootstrap or login session. The
+production service is separately installed as a system LaunchDaemon under
+`_passwordmanager`; that service's domain is not evidence about the agent
+probe's GUI session. Apple's session model makes login/bootstrap sessions a
+relevant boundary, and Apple's launchd guidance distinguishes system daemons
+from per-user agents ([Root and Login Sessions](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPMultipleUsers/Concepts/SystemContexts.html),
+[Creating Launch Daemons and Agents](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)).
+The possibility that the UID-switched child retains the caller's bootstrap is
+a source-supported fixture hypothesis, not a native finding; no product or
+fixture session change is authorized by this record.
+
+The bounded diagnostic-only correction records the missing distinction under
+the existing `macos-ticket26-diagnostics` feature and exact
+`PM_MACOS_TICKET26_DIAGNOSTIC=1` opt-in. It emits only fixed categories, never
+the canary, captured bytes, numeric UIDs, paths or OS error text:
+
+- `pasteboard-human-canary-read=yes|no` records the exact human positive
+  control before the negative probe;
+- `pasteboard-agent-result=zero|nonzero|timeout`,
+  `pasteboard-agent-canary-stdout=present|absent` and
+  `pasteboard-agent-canary-stderr=present|absent` distinguish command outcome
+  from exact-canary exposure;
+- `pasteboard-agent-success-read=yes|no|indeterminate` is `yes` only when the
+  exact human canary is observed in either captured stream, `no` for a completed
+  result without that canary (including `rc=0` with empty/different output),
+  and `indeterminate` for the existing timeout;
+- `pasteboard-human-identity` and `pasteboard-agent-identity` classify the
+  expected synthetic identity without printing its UID; and
+- `pasteboard-human-domain`, `pasteboard-agent-domain` and
+  `pasteboard-domain-relation` classify `launchctl manageruid` as
+  `system|human|other|unavailable|unparseable` and compare the two contexts as
+  `same|different|indeterminate`. The command's bootstrap-namespace meaning
+  follows the documented [`launchctl manageruid`](https://github.com/apple-oss-distributions/launchd/blob/main/man/launchctl.1)
+  interface; its numeric output is never printed.
+
+The negative assertion now rejects exact-canary exposure or an indeterminate
+timeout, but does not reject a completed zero exit solely because it is zero:
+the human exact-canary control and the categorical identity/domain evidence
+must be considered together. This is an evidence correction, not a claim that
+the run proved isolation or a relaxation of the native G1 requirement. A
+future native run must capture these fixed categories before any decision to
+redesign the agent fixture; normal mode remains unchanged and emits no
+diagnostic output.
+
+The checkpoint has only had a Python AST parse and static diff inspection on
+the Linux host; no local Cargo, macOS runtime, system lab or native acceptance
+is claimed. The Mac24 result remains a RED with canary exposure status
+`indeterminate` (ARM `rc=0`, Intel timeout), not evidence of extraction.
+
 ## Remaining acceptance work
 
 - Compose and verify the complete keyboard TUI through the normal

@@ -48,6 +48,26 @@ DIAGNOSTIC_LINE = re.compile(
     rb"(?:ok|vault-error) elapsed-ms=[0-9]{1,6}|"
     rb"PM26_DIAGNOSTIC launchd-service="
     rb"(?:same-pid|different-pid|unavailable|unparseable)|"
+    rb"PM26_DIAGNOSTIC pasteboard-human-canary-read="
+    rb"(?:yes|no|indeterminate)|"
+    rb"PM26_DIAGNOSTIC pasteboard-agent-result="
+    rb"(?:zero|nonzero|timeout)|"
+    rb"PM26_DIAGNOSTIC pasteboard-agent-canary-stdout="
+    rb"(?:present|absent)|"
+    rb"PM26_DIAGNOSTIC pasteboard-agent-canary-stderr="
+    rb"(?:present|absent)|"
+    rb"PM26_DIAGNOSTIC pasteboard-agent-success-read="
+    rb"(?:yes|no|indeterminate)|"
+    rb"PM26_DIAGNOSTIC pasteboard-human-identity="
+    rb"(?:expected|unexpected|unavailable|unparseable)|"
+    rb"PM26_DIAGNOSTIC pasteboard-agent-identity="
+    rb"(?:expected|unexpected|unavailable|unparseable)|"
+    rb"PM26_DIAGNOSTIC pasteboard-human-domain="
+    rb"(?:system|human|other|unavailable|unparseable)|"
+    rb"PM26_DIAGNOSTIC pasteboard-agent-domain="
+    rb"(?:system|human|other|unavailable|unparseable)|"
+    rb"PM26_DIAGNOSTIC pasteboard-domain-relation="
+    rb"(?:same|different|indeterminate)|"
     rb"PM26_DIAGNOSTIC unlock-phase="
     rb"(?:channel-verified|sqlite-opened|durability-configured|bundle-loaded|"
     rb"kdf-start|kdf-end|root-authenticated) elapsed-ms=[0-9]{1,6}|"
@@ -834,6 +854,7 @@ def assert_screen_observer_regression():
         raise AssertionError(
             "cursor-positioned screen regression: stale selected-row history satisfied wait"
         )
+    assert_pasteboard_diagnostic_regression()
 
 
 def read_appkit_pasteboard():
@@ -852,14 +873,138 @@ def write_appkit_pasteboard(value):
     )
 
 
-def assert_agent_cannot_read_pasteboard(secret):
-    result = sudo(
-        ["osascript", "-e", "the clipboard as text"],
-        user=AGENT, check=False,
+def emit_diagnostic(line):
+    diagnostic_lines(line)
+    print(line.decode("ascii"))
+
+
+def classify_identity(result, expected_uid):
+    if result.returncode != 0:
+        return b"unavailable"
+    if result.stderr:
+        return b"unparseable"
+    return b"expected" if result.stdout.strip() == str(expected_uid).encode() else b"unexpected"
+
+
+def classify_launchd_domain(result, human_uid):
+    if result.returncode != 0:
+        return b"unavailable"
+    if result.stderr:
+        return b"unparseable"
+    manager_uid = result.stdout.strip()
+    if manager_uid == b"0":
+        return b"system"
+    if manager_uid == str(human_uid).encode():
+        return b"human"
+    try:
+        int(manager_uid, 10)
+    except ValueError:
+        return b"unparseable"
+    return b"other"
+
+
+def classify_domain_relation(human_domain, agent_domain):
+    if human_domain in {b"unavailable", b"unparseable"} \
+            or agent_domain in {b"unavailable", b"unparseable"}:
+        return b"indeterminate"
+    return b"same" if human_domain == agent_domain else b"different"
+
+
+def classify_pasteboard_output(secret, stdout, stderr, returncode):
+    canary_stdout = secret in stdout
+    canary_stderr = secret in stderr
+    result_status = (
+        b"timeout" if returncode is None
+        else b"zero" if returncode == 0 else b"nonzero"
     )
-    assert result.returncode != 0 and secret not in result.stdout and secret not in result.stderr, (
-        "agent obtained the copied AppKit value", result.returncode,
+    success_read = (
+        b"yes" if canary_stdout or canary_stderr
+        else b"indeterminate" if returncode is None else b"no"
     )
+    return result_status, canary_stdout, canary_stderr, success_read
+
+
+def assert_pasteboard_diagnostic_regression():
+    canary = b"synthetic-pasteboard-canary"
+    status, stdout, stderr, success = classify_pasteboard_output(
+        canary, b"", b"", 0
+    )
+    assert (status, stdout, stderr, success) == (b"zero", False, False, b"no")
+    status, stdout, stderr, success = classify_pasteboard_output(
+        canary, canary + b"\n", b"", 0
+    )
+    assert (status, stdout, stderr, success) == (b"zero", True, False, b"yes")
+    status, stdout, stderr, success = classify_pasteboard_output(
+        canary, b"", canary + b"\n", 1
+    )
+    assert (status, stdout, stderr, success) == (b"nonzero", False, True, b"yes")
+    status, stdout, stderr, success = classify_pasteboard_output(
+        canary, b"", b"", None
+    )
+    assert (status, stdout, stderr, success) == (b"timeout", False, False, b"indeterminate")
+
+
+def assert_human_pasteboard_canary(secret, *, diagnostic=False):
+    value = read_appkit_pasteboard()
+    canary_read = value == secret
+    if diagnostic:
+        emit_diagnostic(
+            b"PM26_DIAGNOSTIC pasteboard-human-canary-read="
+            + (b"yes" if canary_read else b"no")
+        )
+    assert canary_read, "human AppKit pasteboard control did not read the exact canary"
+
+
+def assert_agent_cannot_read_pasteboard(secret, *, diagnostic=False):
+    if diagnostic:
+        human_uid = os.getuid()
+        agent_uid = pwd.getpwnam(AGENT).pw_uid
+        human_identity = classify_identity(run(["id", "-u"], check=False), human_uid)
+        agent_identity = classify_identity(
+            sudo(["id", "-u"], user=AGENT, check=False), agent_uid
+        )
+        human_domain = classify_launchd_domain(
+            run(["launchctl", "manageruid"], check=False), human_uid
+        )
+        agent_domain = classify_launchd_domain(
+            sudo(["launchctl", "manageruid"], user=AGENT, check=False), human_uid
+        )
+    try:
+        result = sudo(
+            ["osascript", "-e", "the clipboard as text"],
+            user=AGENT, check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        if not diagnostic:
+            raise
+        result = None
+        stdout = error.stdout or b""
+        stderr = error.stderr or b""
+    else:
+        stdout = result.stdout
+        stderr = result.stderr
+        result_status = b"zero" if result.returncode == 0 else b"nonzero"
+
+    result_status, canary_stdout, canary_stderr, success_read = classify_pasteboard_output(
+        secret, stdout, stderr, None if result is None else result.returncode
+    )
+    if diagnostic:
+        for name, value in (
+            (b"pasteboard-agent-result", result_status),
+            (b"pasteboard-agent-canary-stdout", b"present" if canary_stdout else b"absent"),
+            (b"pasteboard-agent-canary-stderr", b"present" if canary_stderr else b"absent"),
+            (b"pasteboard-agent-success-read", success_read),
+            (b"pasteboard-human-identity", human_identity),
+            (b"pasteboard-agent-identity", agent_identity),
+            (b"pasteboard-human-domain", human_domain),
+            (b"pasteboard-agent-domain", agent_domain),
+            (b"pasteboard-domain-relation", classify_domain_relation(human_domain, agent_domain)),
+        ):
+            emit_diagnostic(b"PM26_DIAGNOSTIC " + name + b"=" + value)
+    assert not canary_stdout and not canary_stderr, (
+        "agent pasteboard probe exposed the exact human canary", result_status,
+    )
+    assert result is not None, "agent pasteboard probe result was indeterminate"
 
 
 def create_account(name, uid, owned_records):
@@ -1370,6 +1515,7 @@ def select_tui_password_for_copy(session):
 
 def run_tui_core_lab(
     binary, profile, private, endpoint, agent_profile, agent_private, agent_endpoint,
+    *, diagnostic=False,
 ):
     seed_tui_content(binary, profile, private, endpoint)
     first = start_macos_tui(
@@ -1405,8 +1551,8 @@ def run_tui_core_lab(
         tui_search(first, "Password")
         copied_start = select_tui_password_for_copy(first)
         first.wait_text("Copied explicitly", since=copied_start)
-        assert read_appkit_pasteboard() == TUI_PASSWORD_RECORD
-        assert_agent_cannot_read_pasteboard(TUI_PASSWORD_RECORD)
+        assert_human_pasteboard_canary(TUI_PASSWORD_RECORD, diagnostic=diagnostic)
+        assert_agent_cannot_read_pasteboard(TUI_PASSWORD_RECORD, diagnostic=diagnostic)
         write_appkit_pasteboard(TUI_EXTERNAL_REPLACEMENT)
         expiry_start = first.mark()
         first.wait_text("Clipboard custody expired", since=expiry_start)
@@ -1714,6 +1860,7 @@ def main():
         run_tui_core_lab(
             INSTALL / "pm-custody", human_profile, human_key, RUNTIME / "human.sock",
             agent_profile, agent_key, RUNTIME / "agent.sock",
+            diagnostic=diagnostic,
         )
         tui_core_verified = True
         suspend = run([INSTALL / "pm-custody", "human-authorization", "--profile", human_profile,
