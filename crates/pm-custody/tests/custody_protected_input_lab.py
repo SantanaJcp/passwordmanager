@@ -2,19 +2,24 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Public RED: custody locks a framed secret destination before payload read."""
 
+import array
+import fcntl
 import os
 import pathlib
 import resource
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import termios
 
 from linux_lab import as_uid
 
 CUSTODIAN = 1
 HUMAN = 2
+CANARY = b"synthetic-ticket28-custody-kernel-queued-canary" * 8
 
 
 def child_identity():
@@ -24,11 +29,18 @@ def child_identity():
     os.setuid(HUMAN)
 
 
+def queued_bytes(endpoint):
+    queued = array.array("i", [0])
+    fcntl.ioctl(endpoint.fileno(), termios.FIONREAD, queued, True)
+    return queued[0]
+
+
 def main():
     assert os.geteuid() == 0 and len(sys.argv) == 2
     source = pathlib.Path(sys.argv[1]).resolve(strict=True)
     root = pathlib.Path(tempfile.mkdtemp(prefix="pm-custody-protected-input-linux-lab-"))
     child = None
+    child_input = writer = None
     try:
         root.chmod(0o711)
         binary = root / "pm-custody"
@@ -52,14 +64,14 @@ def main():
             check=True, capture_output=True,
         )
         socket_path = root / "absent.sock"
+        child_input, writer = socket.socketpair()
         child = subprocess.Popen(
             [binary, "human-password-crud", "--profile", profile,
              "--private", human_key, "--socket", socket_path],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=child_input, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env={}, preexec_fn=child_identity,
         )
-        child.stdin.write((32).to_bytes(4, "big"))
-        child.stdin.flush()
+        writer.sendall((32).to_bytes(4, "big") + CANARY)
         try:
             child.wait(timeout=3)
         except subprocess.TimeoutExpired as error:
@@ -70,11 +82,20 @@ def main():
         child = None
         assert stdout == b"", stdout
         assert stderr == b"CUSTODY_UNAVAILABLE\n", stderr
+        remaining = queued_bytes(child_input)
+        assert remaining >= len(CANARY), (
+            "custody stdin prefetched secret payload before protected allocation",
+            remaining,
+        )
         assert not socket_path.exists()
     finally:
         if child is not None and child.poll() is None:
             child.send_signal(signal.SIGTERM)
             child.communicate(timeout=5)
+        if writer is not None:
+            writer.close()
+        if child_input is not None:
+            child_input.close()
         shutil.rmtree(root)
     print("PASS fault-safety custody-framed-secret=locked-before-read cleanup=verified")
 

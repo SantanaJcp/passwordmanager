@@ -493,3 +493,13 @@ en 1 s (`/tmp/pm28-custody-buffer-focused.log`); `scripts/check.sh` rc0 en
 `/tmp/pm28-custody-buffer-labs-summary.log`, con logs individuales prefijados
 `/tmp/pm28-custody-buffer-test-linux-`. No hubo retries dentro de aserciones.
 Este gate congela un checkpoint parcial integrable; ticket 28 permanece claimed.
+
+Corrección del seam de custodia antes de admitir el checkpoint: usar
+`stdin.lock()` invalida el claim “antes de leer payload”, porque su `BufReader`
+puede precargar el secreto al obtener el header. La regresión reemplaza stdin
+por socketpair, envía header más canario y, tras el rc4 por memlock=0, exige que
+el canario completo siga en la receive queue (`FIONREAD`). El RED correcto es
+rc4 con `FIONREAD=0`: la categoría pública es correcta pero el secreto ya entró
+en un buffer ordinario. El GREEN debe reutilizar el mismo `NativeStdin`
+multiplataforma del CLI desde un módulo común, sin duplicar unsafe, y conservar
+ownership del fd/handle y semántica Windows ya documentada.
