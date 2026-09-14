@@ -237,6 +237,14 @@ fn read_windows_console(
             if unsafe { GetLastError() } == ERROR_OPERATION_ABORTED {
                 continue;
             }
+            if *wide_prefix != 0 {
+                wide.fill(0);
+                *wide_prefix = 0;
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Windows console input ended with an unpaired UTF-16 surrogate",
+                ));
+            }
             return Ok(0);
         }
         let units =
