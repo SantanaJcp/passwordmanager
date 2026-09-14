@@ -2523,21 +2523,21 @@ mod tests {
     #[test]
     fn appkit_clipboard_lease_preserves_newer_owner_and_single_exit_cleanup() {
         let mut first = copy_secret(b"ticket26-tui-first-owner", Duration::from_secs(1))
-            .expect("first AppKit owner");
+            .unwrap_or_else(|_| panic!("first AppKit owner"));
         let mut replacement = copy_secret(b"ticket26-tui-new-owner", Duration::from_secs(1))
-            .expect("replacement AppKit owner");
+            .unwrap_or_else(|_| panic!("replacement AppKit owner"));
 
         // The old lease must not clear a newer pasteboard owner.  The
         // replacement remains independently cleanable on session exit.
         first
             .stop_if_owner()
-            .expect("stale AppKit owner cleanup is not an error");
+            .unwrap_or_else(|_| panic!("stale AppKit owner cleanup is not an error"));
         replacement
             .stop_if_owner()
-            .expect("current AppKit owner cleanup");
+            .unwrap_or_else(|_| panic!("current AppKit owner cleanup"));
         replacement
             .stop_if_owner()
-            .expect("cleanup is not retried after explicit exit cleanup");
+            .unwrap_or_else(|_| panic!("cleanup is not retried after explicit exit cleanup"));
     }
 
     #[test]
