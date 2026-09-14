@@ -94,10 +94,7 @@ impl WindowsServerPipe {
         let handle = unsafe {
             CreateNamedPipeW(
                 name.as_ptr(),
-                PIPE_ACCESS_DUPLEX
-                    | FILE_FLAG_FIRST_PIPE_INSTANCE
-                    | SECURITY_SQOS_PRESENT
-                    | SECURITY_IDENTIFICATION,
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 PIPE_BUFFER,
@@ -106,8 +103,13 @@ impl WindowsServerPipe {
                 &raw const security,
             )
         };
+        let creation_error = if handle == INVALID_HANDLE_VALUE {
+            Some(unsafe { GetLastError() })
+        } else {
+            None
+        };
         unsafe { LocalFree(descriptor) };
-        if handle == INVALID_HANDLE_VALUE {
+        if creation_error.is_some() {
             return Err(ChannelAuthenticationError);
         }
         Ok(Self {
@@ -786,10 +788,54 @@ fn write_handle(handle: HANDLE, buffer: &[u8]) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        Security::{OpenProcessToken, TOKEN_QUERY},
+        System::Threading::GetCurrentProcess,
+    };
     use windows_sys::Win32::System::Pipes::CreatePipe;
 
     const CANARY: &[u8] = b"ticket27-synthetic-native-canary";
     static CLIPBOARD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn named_pipe_first_instance_rejects_second_protected_instance() {
+        let mut token = ptr::null_mut();
+        assert_ne!(
+            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) },
+            0
+        );
+        let current_client_sid = token_sid(token);
+        assert_ne!(unsafe { CloseHandle(token) }, 0);
+        let current_client_sid = current_client_sid.unwrap();
+        assert!(current_client_sid.starts_with("S-1-5-21-"));
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let vault = format!("{stamp:032x}");
+        let service_sid = "S-1-5-80-27027";
+        let different_client_sid = "S-1-5-21-999999999-999999999-999999999-9999";
+        let first = WindowsServerPipe::create(
+            WindowsEndpoint::Agent,
+            &vault,
+            service_sid,
+            &current_client_sid,
+        )
+        .unwrap();
+        assert!(
+            WindowsServerPipe::create(
+                WindowsEndpoint::Agent,
+                &vault,
+                service_sid,
+                different_client_sid,
+            )
+            .is_err()
+        );
+        drop(first);
+    }
 
     #[test]
     fn dpapi_machine_roundtrip_uses_a_distinct_blob() {

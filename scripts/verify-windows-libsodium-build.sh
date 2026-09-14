@@ -11,11 +11,12 @@ verifier="$root/crates/pm-build-input-verifier/src/main.rs"
 attributes="$root/.gitattributes"
 cargo_config="$root/.cargo/config.toml"
 windows_service="$root/crates/pm-custody/src/windows.rs"
+native_channel="$root/crates/pm-native-channel/src/windows.rs"
 native_fs="$root/crates/pm-vault/src/native_fs.rs"
 vault_lib="$root/crates/pm-vault/src/lib.rs"
 vault_tests="$root/crates/pm-vault/src/onepux.rs"
 
-for file in "$workflow" "$prepare" "$lab" "$storage_diagnostics" "$verifier" "$attributes" "$cargo_config" "$windows_service" "$native_fs" "$vault_lib" "$vault_tests"; do
+for file in "$workflow" "$prepare" "$lab" "$storage_diagnostics" "$verifier" "$attributes" "$cargo_config" "$windows_service" "$native_channel" "$native_fs" "$vault_lib" "$vault_tests"; do
     test -f "$file" || {
         echo "required Windows source-build file is absent: $file" >&2
         exit 1
@@ -196,6 +197,61 @@ require_literal 'ServiceDiagnosticPhase::HumanTlsOk' "$windows_service"
 require_literal 'ServiceDiagnosticPhase::HumanPipeOk' "$windows_service"
 require_literal 'diagnostics.as_ref()' "$windows_service"
 require_literal 'record(ServiceDiagnosticPhase::ServiceFailed)' "$windows_service"
+
+# CreateNamedPipeW accepts only server open-mode flags; SQOS belongs on the
+# client CreateFileW call. The Windows unit regression exercises the real API
+# with an owned unique pipe, the current token SID and a different client SID.
+require_literal 'fn named_pipe_first_instance_rejects_second_protected_instance' "$native_channel"
+require_literal 'OpenProcessToken' "$native_channel"
+require_literal 'token_sid(token)' "$native_channel"
+require_literal 'SystemTime::now()' "$native_channel"
+require_literal 'format!("{stamp:032x}")' "$native_channel"
+require_literal 'different_client_sid' "$native_channel"
+require_literal 'WindowsServerPipe::create' "$native_channel"
+require_literal '.is_err()' "$native_channel"
+require_literal 'CreateNamedPipeW' "$native_channel"
+require_literal 'CreateFileW' "$native_channel"
+require_literal 'SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION' "$native_channel"
+
+if ! awk '
+    /CreateNamedPipeW\(/ { inside = 1 }
+    inside && /SECURITY_SQOS_PRESENT|SECURITY_IDENTIFICATION/ { bad = 1 }
+    inside && /^[[:space:]]*\)/ { done = 1; inside = 0 }
+    END { exit (bad || !done) }
+' "$native_channel"; then
+    echo 'CreateNamedPipeW server mode must not contain client SQOS flags' >&2
+    exit 1
+fi
+server_pipe_block=$(awk '
+    /CreateNamedPipeW\(/ { inside = 1 }
+    inside { print }
+    inside && /^[[:space:]]*\)/ { exit }
+' "$native_channel")
+printf '%s\n' "$server_pipe_block" | grep -Fq 'PIPE_ACCESS_DUPLEX' || {
+    echo 'CreateNamedPipeW must retain duplex access' >&2
+    exit 1
+}
+printf '%s\n' "$server_pipe_block" | grep -Fq 'FILE_FLAG_FIRST_PIPE_INSTANCE' || {
+    echo 'CreateNamedPipeW must retain first-instance protection' >&2
+    exit 1
+}
+client_pipe_block=$(awk '
+    /CreateFileW\(/ { inside = 1 }
+    inside { print }
+    inside && /^[[:space:]]*\)/ { exit }
+' "$native_channel")
+printf '%s\n' "$client_pipe_block" | grep -Fq 'SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION' || {
+    echo 'CreateFileW client must retain identification SQOS flags' >&2
+    exit 1
+}
+creation_error_line=$(grep -nF 'let creation_error = if handle == INVALID_HANDLE_VALUE' "$native_channel" | cut -d: -f1)
+descriptor_free_line=$(grep -nF 'LocalFree(descriptor)' "$native_channel" | head -n1 | cut -d: -f1)
+test -n "$creation_error_line" && test -n "$descriptor_free_line" &&
+    test "$creation_error_line" -lt "$descriptor_free_line" || {
+    echo 'CreateNamedPipeW errors must capture GetLastError before LocalFree' >&2
+    exit 1
+}
+require_literal 'Some(unsafe { GetLastError() })' "$native_channel"
 
 require_literal '$diagnosticDir = Join-Path $root' "$lab"
 require_literal '$diagnosticPath = Join-Path $diagnosticDir' "$lab"

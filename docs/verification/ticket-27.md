@@ -804,3 +804,59 @@ checker volvió a pasar, junto con `git diff --check` y `sh -n` del checker. No
 se ejecutaron Cargo, compilación, laboratorios ni PowerShell en este host por la
 ventana Linux compartida; la sintaxis y ACL reales de Windows siguen pendientes
 de la corrida hospedada autorizada.
+
+## Corrección acotada de banderas del servidor de named pipe (método antes del código)
+
+La corrida nativa 13 (`34837323516`, sobre `deaa746`) llegó a `args-ok`,
+`bootstrap-ok`, `audit-ok`, `agent-tls-ok` y `human-tls-ok`, pero no produjo
+`agent-pipe-ok` ni `human-pipe-ok` y terminó en `service-failed`. La revisión del
+seam que crea el pipe encontró que `CreateNamedPipeW` recibía, dentro de
+`dwOpenMode`, `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`. La
+documentación primaria de
+[CreateNamedPipeW](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew)
+limita ese parámetro a los modos de acceso del pipe y las banderas de servidor
+enumeradas; las banderas SQOS no forman parte de esa lista. Esas banderas sí
+pertenecen al parámetro de atributos de la llamada cliente
+[`CreateFileW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew),
+donde continúan siendo necesarias para solicitar impersonación de nivel
+identification. La inferencia causal queda acotada a la incompatibilidad de la
+invocación del servidor hasta repetirla en Windows; el log no se usa para
+afirmar una causa del motor ni para cerrar el ticket.
+
+Antes de editar el seam se fijó este método TDD, limitado a las banderas de la
+API y a una regresión nativa real:
+
+1. Añadir primero una prueba `#[cfg(target_os = "windows")]` que abra el token
+   del proceso actual y obtenga su SID mediante la API del sistema. La prueba
+   crea un identificador de bóveda hexadecimal único y una primera instancia
+   de `WindowsServerPipe` con ese SID de cliente y un SID de servicio
+   sintético. Mientras el primer handle sigue vivo, intenta crear la segunda
+   instancia con el mismo nombre, el mismo servicio y un SID de cliente
+   distinto; la primera creación debe pasar y la segunda debe devolver error.
+   El recurso es propio de la prueba y se libera por RAII al terminar. No hay
+   mocks, skips, nombres compartidos ni reintentos.
+2. Cambiar únicamente `dwOpenMode` de `CreateNamedPipeW` para conservar
+   `PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE`; también se conservan
+   `PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS`,
+   la DACL explícita y las comprobaciones bilaterales SID/PID. Se eliminan de
+   ese parámetro solo las banderas SQOS que pertenecen al cliente. La llamada
+   `CreateFileW` mantiene
+   `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`; no se sustituye el pipe,
+   no se relaja autenticación local y no se introduce fallback.
+3. Si la creación del servidor devuelve `INVALID_HANDLE_VALUE`, capturar
+   `GetLastError` inmediatamente, antes de `LocalFree(descriptor)`. La captura
+   evita que liberar el descriptor opaque el diagnóstico interno; la API pública
+   conserva `ChannelAuthenticationError` opaco y no imprime código Win32,
+   ruta, SID ni otro dato dinámico.
+
+La regresión textual del checker se ejecutó antes de la corrección y dio RED
+con `CreateNamedPipeW server mode must not contain client SQOS flags`. Después
+de la prueba y del cambio acotado, pasaron
+`./scripts/verify-windows-libsodium-build.sh`, `sh -n
+scripts/verify-windows-libsodium-build.sh` y `git diff --check`. No se ejecutó
+Cargo, `check.sh`, PowerShell ni el test Windows en este host: no hay target
+Windows/MSVC y la ventana de Cargo compartida estaba reservada. El siguiente
+job Windows debe ejecutar la regresión contra el API real y el laboratorio
+normal; cualquier ejecución con diagnósticos sigue siendo observación y no
+aceptación. El ticket permanece sin aceptar hasta que la corrida normal con
+`service_diagnostics=false` y los demás gates nativos pasen.
