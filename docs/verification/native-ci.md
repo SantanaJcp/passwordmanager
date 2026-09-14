@@ -302,5 +302,10 @@ Los nueve tests por CPU no representan toda la suite: varios tests conservan
 `cfg` Linux y ejecutaron cero casos. Ninguna corrida pasó la aceptación de
 custodia completa; no acreditan TUI compuesta, reboot/FDE, firma ni los gates
 26/31. Los ajustes de anchuras y preparación siguen en el candidato aislado.
-Una raíz efímera compartida fuera del home privado del runner requiere acordar
-su método antes de cambiar el requisito actual; no se aplicará como fallback.
+Después de esta evidencia, el usuario autorizó una raíz efímera única
+`/private/var/tmp/passwordmanager-ticket26`, con padre root `01777`, colisiones
+rechazadas, raíz propia `0711` y privados `0700`, sin fallback ni cambios en
+homes ajenos. El candidato `aa19385` documenta y aplica ese método; su corrida
+[34795572781](https://github.com/SantanaJcp/passwordmanager/actions/runs/34795572781)
+está pendiente de resultado. La autorización consta en
+[execution.md](../../.scratch/passwordmanager/execution.md).
