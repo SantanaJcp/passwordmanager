@@ -277,6 +277,16 @@ impl ProcessEvidence {
             .iter()
             .find(|observation| observation.label == label)
     }
+
+    /// Removes the owned temporary directory and reports the single cleanup
+    /// attempt to callers that need a checked completion boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns the filesystem error from removing the owned directory.
+    pub fn close(self) -> io::Result<()> {
+        self.temporary_directory.close()
+    }
 }
 
 /// Executes the request directly, without a shell, in a fresh owned directory.
@@ -594,6 +604,7 @@ fn read_artifacts(root: &Path) -> io::Result<ScannedArtifacts> {
 #[derive(Debug)]
 struct TemporaryDirectory {
     path: PathBuf,
+    cleanup_attempted: bool,
 }
 
 impl TemporaryDirectory {
@@ -610,7 +621,12 @@ impl TemporaryDirectory {
                 std::process::id()
             ));
             match create_private_directory(&path) {
-                Ok(()) => return Ok(Self { path }),
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        cleanup_attempted: false,
+                    });
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),
             }
@@ -624,11 +640,21 @@ impl TemporaryDirectory {
     fn path(&self) -> &Path {
         &self.path
     }
+
+    fn close(mut self) -> io::Result<()> {
+        self.cleanup_attempted = true;
+        fs::remove_dir_all(&self.path)
+    }
 }
 
 impl Drop for TemporaryDirectory {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        if !self.cleanup_attempted {
+            self.cleanup_attempted = true;
+            if fs::remove_dir_all(&self.path).is_err() {
+                eprintln!("CLEANUP_FAILED");
+            }
+        }
     }
 }
 

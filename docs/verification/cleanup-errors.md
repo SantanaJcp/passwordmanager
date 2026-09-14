@@ -132,13 +132,14 @@ pm-custody cleanup tests: 4 passed (including the existing sync-job tests)
 sequential lab sweep: SUMMARY count=20 failures=0
 ```
 
-The check and clean logs are `/tmp/pm-cleanup-check-final.log` and
-`/tmp/pm-cleanup-clean-final.log`; the one lab sweep wrote
-`/tmp/pm-cleanup-final-test-linux-*-lab.log`. The lab output included the
-real TUI access/pending, content and operations paths and the token-exchange,
-web-auth, passkey and recovery suites; their `LIMIT` lines remain explicit
-non-acceptance boundaries for product-browser, native and cross-platform
-coverage.
+The historical clean log is `/tmp/pm-cleanup-clean-final.log`, and the one
+historical lab sweep wrote `/tmp/pm-cleanup-final-test-linux-*-lab.log`. The
+historical check path `/tmp/pm-cleanup-check-final.log` was later overwritten
+by a subsequent merger invocation; it is not treated as recoverable historical
+evidence. The lab output included the real TUI access/pending, content and
+operations paths and the token-exchange, web-auth, passkey and recovery suites;
+their `LIMIT` lines remain explicit non-acceptance boundaries for product-
+browser, native and cross-platform coverage.
 
 The published-target regression was tightened after an observed test-owned
 residue: it now inventories the exact temporary database and sidecars plus
@@ -155,3 +156,61 @@ or deleted by a glob.
 
 This evidence is Linux x86_64 only. It does not close native gates, dispatch
 or publish anything, and it is not the formal Astra review.
+
+## Merger cleanup-errors — custody and process ownership
+
+This separate merger integrated the frozen candidate range
+`a4b7704..f3fe05dbb39321deecc402007373a9511d1017d4` onto the clean root
+`168573d`. Only the 13 code, test and script paths in that range were admitted;
+the candidate issue-28 file and `docs/verification/ticket-28.md` were
+deliberately excluded. No other worktree, native target, default branch,
+workflow dispatch or publication was changed.
+
+The merger applied the authorized cleanup-error contract and records that
+method here: preserve the primary custody failure, append every typed failure
+from an exact owned cleanup in order, report a fixed `CLEANUP_FAILED` marker,
+and never retry, delete an authenticated target, substitute a path or hide an
+error. The process-runner `close()` boundary performs one checked removal;
+`Drop` reports a fixed marker only when no explicit close was attempted. The
+fault labs inject one exact Linux syscall failure and use only synthetic data;
+the RPC lab cuts a real peer after partial output and verifies the owned
+partial file remains visible. These are cleanup propagation checks, not a new
+behavioral RED claim; the candidate's earlier compile/harness-only checkpoint
+remains classified above as non-behavioral.
+
+Verification order in the exclusive Linux window was: formatting, path and
+conflict scans; focused `pm-process-runner`, `pm-cli`, and `pm-custody` tests;
+the two cleanup-fault laboratories; `scripts/check.sh`; one clean locked/
+offline build; and one sorted, sequential sweep of all 22 Linux lab scripts.
+The sweep used these fixed synthetic artifact directories and no retries:
+
+```text
+PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3
+PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64
+```
+
+Observed evidence:
+
+```text
+focused process-runner: 9 passed, 2 ignored; CLI: 1 passed;
+pm-custody cleanup filter: 10 passed across lib/bin targets;
+cleanup fault lab: PASS keygen/write-new/nested typed cleanup;
+RPC cleanup fault lab: PASS real peer-cut cleanup;
+scripts/check.sh: exit 0;
+scripts/clean-offline-build.sh: exit 0;
+sequential lab sweep: SUMMARY count=22 failures=0.
+```
+
+The current-run logs are `/tmp/pm-four-cleanups-root-check.log`,
+`/tmp/pm-four-cleanups-root-clean.log`,
+`/tmp/pm-cleanup-focused-process-runner.log`,
+`/tmp/pm-cleanup-focused-cli.log`, `/tmp/pm-cleanup-focused-custody.log`,
+`/tmp/pm-cleanup-focused-nested-lab.log`,
+`/tmp/pm-cleanup-focused-rpc-lab.log`, and
+`/tmp/pm-four-cleanups-root-test-linux-summary.log` with one per-lab log
+under the same prefix. The current cleanup fault outputs contain only fixed
+synthetic markers; no secret or dynamic OS error is asserted or printed.
+
+This is Linux x86_64 evidence only. It does not close native, Windows or
+macOS gates, does not claim the full product acceptance matrix, and is not the
+formal Astra review.

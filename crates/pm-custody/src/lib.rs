@@ -9,14 +9,12 @@ extern crate self as pm_custody;
 pub use pm_native_channel::{AuthenticatedHumanChannel, ChannelAuthenticationError, unix_peer_uid};
 
 #[cfg(target_os = "linux")]
+mod failure;
+#[cfg(target_os = "linux")]
 mod linux;
 
 #[cfg(target_os = "linux")]
-#[derive(Clone, Copy)]
-enum Failure {
-    Usage,
-    Unavailable,
-}
+use failure::Failure;
 
 #[cfg(target_os = "linux")]
 fn take_path(

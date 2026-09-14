@@ -21,4 +21,7 @@ fn version_starts_the_real_cli_and_reports_the_linked_c_build() {
     assert!(evidence.stderr().is_empty());
     assert_eq!(evidence.build().component(), "pm");
     assert_eq!(evidence.build().build_id(), "0.1.0");
+    evidence
+        .close()
+        .expect("checked process evidence cleanup should succeed");
 }
