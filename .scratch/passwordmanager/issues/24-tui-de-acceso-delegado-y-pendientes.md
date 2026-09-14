@@ -1,8 +1,8 @@
 # 24 — TUI de acceso delegado y pendientes
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-24
 Blocked by: 08,13,23
 Spec: ../spec.md
 Requirements: R01,R06,R07,R12,R13
@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-13 — Claimed tras integración y resolución23 en `0b897c1`, con18/18labs de merger. Sol medium por composición de autoridad, suspensión y confirmación UP/UV humana; no adelanta revisión formal ni modifica modelo de seguridad.

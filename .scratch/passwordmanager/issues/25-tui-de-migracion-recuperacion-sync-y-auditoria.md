@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-09-13 —23 integrado en `0b897c1` desbloquea esta tarea. Conservar cobertura de producto completo: la pantalla23 enumera adjuntos grandes pero todavía no acredita UX TUI de transferencia streaming; componer aquí las operaciones humanas de archivos/descarga/exportación sin imponer el límite de un frame ni usar CLI-only como sustituto. No declarar ese flujo probado por el catálogo de descriptores.

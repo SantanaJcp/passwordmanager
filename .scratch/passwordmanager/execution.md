@@ -140,3 +140,8 @@ sus flujos CLI en TUI; tampoco cierra la UX streaming pendiente para attachments
 mayores que el frame humano. La evidencia nativa reciente está en
 [native-ci.md](../../docs/verification/native-ci.md); la revisión formal
 permanece al final de los 35 tickets.
+
+
+## TUI23 integrada — frontera24/25
+
+Candidato `f1c375e` integrado sin conflictos como `c74aba0`, resolución23 en `0b897c1`. Merger distinto verificó `check.sh`, clean locked/offline (43.067 s) y barrida robusta de18labs, `count=18 failures=0`, sin reintentos. 47/48 y `primary_human_secret` retirados; exposición por catálogo51 e índice52/53, con negativas reales. Estado:23/35.24 y25 ahora tienen sus dependencias integradas;24 se asigna a Sol medium,25 espera slot libre. El flujo TUI streaming de adjuntos grandes se conserva como pendiente explícito de composición25, no queda validado por enumerar su descriptor.
