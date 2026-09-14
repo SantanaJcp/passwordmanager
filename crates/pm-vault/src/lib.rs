@@ -679,7 +679,7 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
         connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         connection.close().map_err(|(_, error)| error)?;
 
-        File::open(&temporary_path)?.sync_all()?;
+        native_fs::sync_file(&temporary_path)?;
         fs::hard_link(&temporary_path, path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 VaultError::AlreadyExists
@@ -687,7 +687,7 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                 VaultError::Io(error)
             }
         })?;
-        File::open(parent)?.sync_all()?;
+        native_fs::sync_directory(parent)?;
         Ok(())
     })();
 

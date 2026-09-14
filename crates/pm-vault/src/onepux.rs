@@ -1348,4 +1348,27 @@ mod tests {
         drop(file);
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn native_flush_seams_sync_synthetic_file_and_parent() {
+        use std::{
+            io::Write,
+            sync::atomic::{AtomicU64, Ordering},
+        };
+
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "pm-vault-native-flush-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = crate::native_fs::create_private(&path, true, true).unwrap();
+        file.write_all(b"synthetic native flush").unwrap();
+        drop(file);
+
+        crate::native_fs::sync_file(&path).unwrap();
+        crate::native_fs::sync_directory(path.parent().unwrap()).unwrap();
+
+        std::fs::remove_file(path).unwrap();
+    }
 }

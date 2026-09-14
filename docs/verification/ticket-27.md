@@ -595,3 +595,95 @@ confirma que el metadata flush es una garantía explícita, no una razón para
 ignorar un resultado fallido. Hasta observar el diagnóstico y una estrategia
 Windows documentada, no se cambia el seam Rust ni se afirma persistencia
 durable equivalente.
+
+## Corrección acotada del flush nativo (método antes del código)
+
+El diagnóstico nativo opt-in de
+[run 34807853352](https://github.com/SantanaJcp/passwordmanager/actions/runs/34807853352),
+sobre `b5788c3`, terminó correctamente como **diagnóstico**, no como aceptación:
+
+```text
+file-open-write=success
+file-flush-write=success
+file-open-readonly=success
+file-flush-readonly=access-denied
+directory-open-no-backup=access-denied
+directory-flush-no-backup=not-run
+directory-open-backup-readonly=success
+directory-flush-readonly=access-denied
+directory-open-backup-write=success
+directory-flush-write=success
+```
+
+La lectura exacta de los sitios de producción encontró solo dos usos de ruta que
+requieren este seam: `crates/pm-vault/src/lib.rs` abre en solo lectura el temporal
+antes del hard-link (línea 682 en el RED) y abre el directorio padre sin
+`FILE_FLAG_BACKUP_SEMANTICS` (línea 690). El `sync_all` de
+`crates/pm-vault/src/reducer.rs` ya se ejecuta sobre el handle escribible que
+devuelve `native_fs::create_private`; no se reescribe ni se cambia ningún otro
+camino de persistencia.
+
+El contrato verificable antes de implementar es:
+
+1. `sync_file` abre el archivo existente con acceso escribible, no sigue un
+   reparse point final y propaga el resultado de `sync_all`/`FlushFileBuffers`.
+2. `sync_directory` abre el directorio existente con acceso escribible y
+   `FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT`, comprueba que el
+   handle sea un directorio no reparse y propaga el flush. En Unix conserva
+   `O_CLOEXEC | O_NOFOLLOW` y el contrato de `sync_all` existente.
+3. `persist_new` conserva el orden `flush temporal -> hard-link -> flush padre`,
+   sus errores observables y la atomicidad; no cambia la API pública.
+4. `FILE_FLAG_OPEN_REPARSE_POINT` protege el componente final solamente. Los
+   padres siguen sujetos al contrato existente de raíz confiable/ACL; no se
+   inventa un recorrido alternativo ni se concede privilegio de volumen.
+
+No se permite convertir un error en éxito, ignorar `FlushFileBuffers`, usar un
+flush del volumen, añadir privilegios, cambiar a rename/copia, introducir
+fallback o ampliar plazos. Las referencias primarias que fijan el método son
+[CreateFile](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea)
+(`FILE_FLAG_BACKUP_SEMANTICS` para directorios),
+[Directory Handles](https://learn.microsoft.com/en-us/windows/win32/fileio/obtaining-a-handle-to-a-directory)
+y [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+(`GENERIC_WRITE` necesario).
+
+La regresión de contrato se añade primero en el test de `pm-vault`: un archivo y
+un directorio sintéticos se sincronizan mediante ambos seams, sin datos de
+custodia. Debe fallar en el estado anterior por funciones inexistentes y pasar
+después de la implementación. El checker exige además las llamadas en
+`persist_new`, los flags de apertura nativa y la ausencia de los dos `File::open`
+problemáticos. La validación Windows posterior debe repetir el job de producto
+normal (`diagnostic_only=false`) y observar el vault real; el diagnóstico opt-in
+no cuenta como aceptación. En este host no se simula PowerShell, MSVC ni el
+target Windows y no se ejecutan los checks/labs pesados mientras la ventana de
+Linux pertenece a otra integración.
+
+La RED local observada antes de implementar fue explícita: el comando enfocado
+`./scripts/cargo-local.sh test -p pm-vault --lib
+native_flush_seams_sync_synthetic_file_and_parent --locked --offline` terminó
+con exit 101 y dos `E0425` (`sync_file` y `sync_directory` ausentes). La corrida
+duró 16,2 s y no dejó procesos activos; su resultado no se repite hasta que
+root libere la ventana compartida de Cargo.
+
+## Verificación local de esta corrección
+
+Con la ventana Linux27 concedida por root y después de implementar, la regresión
+en verde fue:
+
+```text
+native_flush_seams_sync_synthetic_file_and_parent: 1 passed, 0 failed
+```
+
+También pasaron `cargo fmt --all -- --check`, `cargo clippy -p pm-vault --lib
+--locked --offline -- -D warnings`, y las suites enfocadas de `pm-vault`:
+`causal_reducer` (7), `history_lifecycle` (3), `local_vault` (3) y
+`onepux_import` (4), todas sin fallos. Los labs reales Linux
+`test-linux-1pux-import-lab.sh`, `test-linux-history-lab.sh` y
+`test-linux-sync-lab.sh` terminaron `PASS`; el último mantuvo `tls=1.3`, RPK
+mutual, ALPN `pm-sync/1` y proceso real.
+
+El checker `verify-windows-libsodium-build.sh`, `sh -n`, `git diff --check` y
+`check.sh` pasaron. `clean-offline-build.sh` eliminó el target y recompiló el
+workspace offline sin error en 38,63 s. No se ejecutó PowerShell, MSVC, Dumpbin
+ni un target Windows; por tanto no se afirma que el helper compile o funcione
+en Windows hasta la corrida nativa normal con `diagnostic_only=false`. No se
+modificó el cleanup heredado de `persist_new` ni se introdujo fallback.

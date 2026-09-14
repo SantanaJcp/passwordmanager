@@ -10,8 +10,11 @@ storage_diagnostics="$root/scripts/test-windows-storage-diagnostics.ps1"
 verifier="$root/crates/pm-build-input-verifier/src/main.rs"
 attributes="$root/.gitattributes"
 cargo_config="$root/.cargo/config.toml"
+native_fs="$root/crates/pm-vault/src/native_fs.rs"
+vault_lib="$root/crates/pm-vault/src/lib.rs"
+vault_tests="$root/crates/pm-vault/src/onepux.rs"
 
-for file in "$workflow" "$prepare" "$lab" "$storage_diagnostics" "$verifier" "$attributes" "$cargo_config"; do
+for file in "$workflow" "$prepare" "$lab" "$storage_diagnostics" "$verifier" "$attributes" "$cargo_config" "$native_fs" "$vault_lib" "$vault_tests"; do
     test -f "$file" || {
         echo "required Windows source-build file is absent: $file" >&2
         exit 1
@@ -66,6 +69,20 @@ require_literal 'storage diagnostics require explicit EphemeralCI' "$storage_dia
 require_literal 'storage diagnostics cleanup failed' "$storage_diagnostics"
 require_literal 'Assert-NotReparse' "$storage_diagnostics"
 require_literal '[IO.FileAttributes]::ReparsePoint' "$storage_diagnostics"
+require_literal 'pub(crate) fn sync_file' "$native_fs"
+require_literal 'pub(crate) fn sync_directory' "$native_fs"
+require_literal 'FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT' "$native_fs"
+require_literal 'GENERIC_READ | GENERIC_WRITE' "$native_fs"
+require_literal 'libc::O_CLOEXEC | libc::O_NOFOLLOW' "$native_fs"
+require_literal 'windows_file_identity(&file)?' "$native_fs"
+require_literal 'native_fs::sync_file(&temporary_path)?;' "$vault_lib"
+require_literal 'native_fs::sync_directory(parent)?;' "$vault_lib"
+require_literal 'native_flush_seams_sync_synthetic_file_and_parent' "$vault_tests"
+if grep -Fq 'File::open(&temporary_path)?.sync_all()' "$vault_lib" ||
+   grep -Fq 'File::open(parent)?.sync_all()' "$vault_lib"; then
+    echo 'Windows vault persistence must not flush through read-only path opens' >&2
+    exit 1
+fi
 require_literal 'diagnostic_only:' "$workflow"
 require_literal 'default: false' "$workflow"
 require_literal 'type: boolean' "$workflow"

@@ -126,6 +126,149 @@ pub(crate) fn create_private(path: &Path, read: bool, write: bool) -> io::Result
     }
 }
 
+/// Flushes an existing regular file through a writable, final-component-safe
+/// handle. Windows' `FlushFileBuffers` rejects a read-only handle even when
+/// opening the file itself succeeds, so this seam deliberately requests write
+/// access rather than relying on `File::open`.
+pub(crate) fn sync_file(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        if metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "directory passed to file sync",
+            ));
+        }
+        file.sync_all()
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{
+            Foundation::{GENERIC_READ, GENERIC_WRITE},
+            Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+
+        let file = open_existing_windows(
+            path,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+        )?;
+        let metadata = file.metadata()?;
+        if metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "directory passed to file sync",
+            ));
+        }
+        windows_file_identity(&file)?;
+        file.sync_all()
+    }
+}
+
+/// Flushes an existing directory through a writable backup-semantics handle.
+/// The final component is opened without following reparse points; trusted
+/// parent traversal remains the caller's existing responsibility.
+pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "regular file passed to directory sync",
+            ));
+        }
+        file.sync_all()
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{
+            Foundation::{GENERIC_READ, GENERIC_WRITE},
+            Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT},
+        };
+
+        let file = open_existing_windows(
+            path,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        )?;
+        let metadata = file.metadata()?;
+        if !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "regular file passed to directory sync",
+            ));
+        }
+        windows_file_identity(&file)?;
+        file.sync_all()
+    }
+}
+
+#[cfg(windows)]
+fn open_existing_windows(path: &Path, access: u32, flags: u32) -> io::Result<File> {
+    use std::{
+        os::windows::{ffi::OsStrExt, io::FromRawHandle},
+        ptr,
+    };
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    if access & (GENERIC_READ | GENERIC_WRITE) == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "existing path needs read or write access",
+        ));
+    }
+    if path.as_os_str().encode_wide().any(|unit| unit == 0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains NUL",
+        ));
+    }
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` is a valid NUL-terminated UTF-16 path, the null security
+    // and template pointers are accepted for an existing object, and the
+    // returned handle is owned by this function on success.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            flags,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `handle` is a successful, uniquely owned CreateFileW handle.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
 #[cfg(windows)]
 fn windows_file_identity(file: &File) -> io::Result<FileIdentity> {
     use std::os::windows::io::AsRawHandle;
