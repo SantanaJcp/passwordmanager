@@ -117,6 +117,8 @@ worker extraído llegó a reproducir una lectura `RUNNING/INDETERMINATE` en 1 de
 `RUNNING/PASSKEY_HUMAN_CONFIRMATION` fue legítima y no reprodujo un fallo
 adicional; en token exchange la negativa de audiencia original retornó un
 código distinto de cero sin `stdout`/`stderr`, sin reproducción en nueve
-corridas posteriores. Estos hechos no cierran gates 08/11/14 ni gates 26--32:
-la corrida modificada debe conservar la evidencia roja, demostrar la espera
+corridas posteriores. Los tickets 08, 11 y 14 ya estaban resueltos con su
+evidencia de producto y este ajuste de método no los reabre ni sustituye esa
+evidencia. Tampoco cierra las puertas nativas todavía pendientes de 26--32: la
+corrida modificada debe conservar la evidencia roja, demostrar la espera
 contractual y volver a terminar con las aserciones finales intactas.
