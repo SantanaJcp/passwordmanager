@@ -1173,3 +1173,32 @@ inspección el trait `Send` ausente, antes de obtener un log que demostrara un
 RED de compilación o comportamiento; no se registra como tal. La siguiente
 corrida debe identificar exactamente `0a0ec3d`, que añade el contrato de
 movimiento único, y volver a ejecutar todo el método nativo.
+
+La corrida nativa `34848533955` sobre producto exacto `0a0ec3d` compiló el
+backend Windows ARM64 y pasó los seis tests nativos —incluida la regresión
+`Send`— y el contrato de pipe (6+1). En el cuerpo, las aserciones alcanzadas
+demuestran: servicio inicial `RUNNING` y `CanStop`; probe agente inicial;
+`Stop-Service` antes de unlock; registro SCM `Stopped`, PID cero y ausencia del
+PID anterior; arranque con un PID distinto; probes agente y humano posteriores;
+y unlock humano hasta `human-unlock-ack`. El intento llegó después a
+`human-lock-request` y falló `CUSTODY_UNAVAILABLE` sin `human-audit-open`, el
+límite `AuditKeyUnavailable` ya aislado en una bóveda inicialmente vacía.
+
+No se ejecutaron las aserciones posteriores al `human-lock`: sustitución
+cross-role, invariancia del PID tras tráfico, segundo STOP/restart, probes tras
+ese segundo restart ni el crash/restart deliberado. El diagnóstico append-only
+contiene tres generaciones `args-ok`, frente al conteo inicial+restart de dos
+que se esperaba en ese punto; este run no alcanzó la aserción posterior que habría
+comparado el PID en uso con el PID devuelto por el restart, de modo que no se
+atribuye la generación adicional ni se afirma estabilidad del mismo proceso
+durante ambos probes.
+
+El `finally` sí se ejecutó: el log muestra `DeleteService SUCCESS`, seguido por
+la reparación ACL completa hasta cada hoja; `Remove-LocalUser` y cada
+`Remove-Item -ErrorAction Stop` retornaron sin alimentar `cleanupErrors`, y no
+apareció el fallo STOP que afectó corridas anteriores. Sin embargo, el harness
+no consulta de nuevo SCM, usuarios ni `Test-Path $root` después de borrarlos:
+por eso el run acredita que las operaciones de cleanup se alcanzaron y
+retornaron éxito, pero no una comprobación independiente de ausencia final.
+El resultado global permanece FAIL por auditoría; no se declara ticket 27 ni
+STOP completo.
