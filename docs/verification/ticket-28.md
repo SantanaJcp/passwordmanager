@@ -127,3 +127,64 @@ plaintext propios hayan sido migrados. Tampoco implementa VirtualLock/WER de
 Windows, evidencia macOS, fault injection fsync/WAL/disco, crash de intentos,
 ni la matriz completa de canarios. Esos criterios permanecen abiertos y este
 checkpoint no resuelve 28.
+
+## Segundo vertical preparado: buffers plaintext propios
+
+El inventario estático encuentra material propio todavía protegido sólo por
+`Zeroizing<Vec<u8>>`, no por memoria bloqueada:
+
+- `pm-cli`: password/confirmación/recovery leídos por `read_limited_line` antes
+  de entrar al boundary criptográfico;
+- `pm-custody`: password humano, token, requester secret, claves SSH,
+  passphrases, records/frames abiertos y requests temporales;
+- `pm-vault`: leases de password/token/SSH, auth serializado, chunks de
+  backup/attachment/import y plaintext de revisiones;
+- adaptadores `pm-web-auth` y `pm-ssh-client`: secretos ya entregados dentro de
+  su proceso confiable, además de heaps internos de TLS/russh explícitamente
+  fuera de la garantía completa G7.
+
+El siguiente RED acota primero la entrada humana: con `RLIMIT_MEMLOCK=0`, tras
+enviar sólo la primera línea a `pm vault create`, el proceso debe devolver
+`RESOURCE_UNAVAILABLE` **antes** de imprimir `Confirm master password`. La
+ejecución conservada en `/tmp/pm28-red-plaintext-buffer.log` terminó rc1 en 3 s:
+la variante previa llegó a esa confirmación y sólo falló por EOF
+(`unexpected end of input`), discriminando el buffer `Vec` desbloqueado de las
+claves centrales ya cubiertas. El GREEN creará
+un buffer opaco de longitud variable en el mismo allocator/budget protegido,
+consumirá y limpiará el `Vec` de entrada, no implementará `Clone`, `Debug`,
+`Display` o serialización, y migrará verticalmente cada frontera pública con un
+RED propio. No se afirmará cobertura completa hasta inventariar y ejercitar
+todos los grupos anteriores; TLS/russh/browser/Argon mantienen los límites
+documentados, no se renombran como memoria protegida.
+
+El checkpoint GREEN preparado consume una lectura temporal
+`Zeroizing<Vec<u8>>` y la transfiere a memoria bloqueada antes del siguiente
+prompt. Eso acota la vida y garantiza limpieza del buffer ordinario, pero no
+prueba entrada directa en memoria bloqueada: durante `read_until` la primera
+línea todavía reside brevemente en heap no bloqueado. Un vertical posterior
+debe preasignar/proteger el destino antes de leer bytes, sin alterar prompts ni
+formato público, antes de atribuir cumplimiento estricto G7 a la entrada.
+
+El GREEN de este checkpoint está conservado en
+`/tmp/pm28-green-plaintext-buffer.log`: terminó rc0 en 3 s, mantuvo positivo el
+control ptrace, rechazó memlock=0 antes de confirmación y verificó cleanup. Las
+suites enfocadas terminaron rc0 para `pm-crypto`
+(`/tmp/pm28-green2-pm-crypto-2.log`) y `pm-cli`
+(`/tmp/pm28-green2-pm-cli.log`). Antes de esas ejecuciones, el primer comando
+enfocado no llegó a compilar porque `Cargo.lock` omitía la dependencia workspace
+`zeroize` recién declarada (`/tmp/pm28-green2-pm-crypto.log`, rc101); se conserva
+como fallo de bookkeeping, no como RED conductual. La corrección sincronizó sólo
+esa entrada. Además, `LockedKey` reutiliza un allocator privado desde su array de
+stack y lo limpia en éxito o error, sin introducir una copia `Vec` desbloqueada.
+
+## Verticales de fault/crash pendientes de RED
+
+El seam de almacenamiento será un lab público separado, no una colección de
+callbacks internos. Cada caso parte de un vault nuevo y conserva snapshot de
+conteos/hashes. El orden previsto es: (a) `ENOSPC` real en `tmpfs` privado
+durante WAL/staging; (b) interposer de fixture acotado al PID/fd que falla el
+syscall `fdatasync/fsync` seleccionado una sola vez; (c) trigger SQLite real en
+audit y outbox; (d) `SIGKILL` después de observar staging/WAL, seguido de restart
+y consulta del mismo ID. Cada RED debe fallar por parcialidad, categoría falsa
+o retransmisión observable, no por falta del compilador/interposer. Ninguno se
+ejecuta hasta terminar el vertical anterior y recibir ventana exclusiva.

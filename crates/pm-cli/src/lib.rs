@@ -2,7 +2,7 @@
 
 //! Human vault bootstrap and delegated CLI/MCP presentation adapters.
 
-use pm_crypto::{KdfProfile, RecoveryCode};
+use pm_crypto::{KdfProfile, ProtectedBytes, RecoveryCode};
 use pm_custody::agent_rpc;
 use pm_interface::{
     Engine, ErrorCode, Json, Request, capabilities_result, dispatch, encode_json,
@@ -15,6 +15,7 @@ use std::{
     io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
 };
+use zeroize::Zeroizing;
 
 #[derive(Debug)]
 pub struct CliError {
@@ -773,21 +774,22 @@ fn create(path: &Path) -> Result<(), String> {
     let stdin = io::stdin();
     let mut input = stdin.lock();
     prompt("Master password (read from stdin):")?;
-    let password = read_limited_line(&mut input, 1024)?;
+    let password = read_protected_line(&mut input, 1024)?;
     prompt("Confirm master password:")?;
-    let confirmation = read_limited_line(&mut input, 1024)?;
-    if password != confirmation {
+    let confirmation = read_protected_line(&mut input, 1024)?;
+    if password.as_ref() != confirmation.as_ref() {
         return Err("master password confirmation does not match".into());
     }
-    let pending = PendingVault::new(&password, KdfProfile::DEFAULT).map_err(|e| e.to_string())?;
+    let pending = PendingVault::new(password.as_ref(), KdfProfile::DEFAULT)
+        .map_err(|error| error.to_string())?;
     let trusted_root = *pending.trusted_root();
     println!(
         "Recovery code (store externally): {}",
         pending.recovery_code()
     );
     prompt("Reintroduce recovery code to confirm the external copy:")?;
-    let reintroduced = read_limited_line(&mut input, 512)?;
-    let reintroduced: RecoveryCode = std::str::from_utf8(&reintroduced)
+    let reintroduced = read_protected_line(&mut input, 512)?;
+    let reintroduced: RecoveryCode = std::str::from_utf8(reintroduced.as_ref())
         .map_err(|_| "recovery code is not UTF-8".to_owned())?
         .parse()
         .map_err(|_| "recovery code is invalid".to_owned())?;
@@ -801,8 +803,8 @@ fn open(path: &Path) -> Result<(), String> {
     let stdin = io::stdin();
     let mut input = stdin.lock();
     prompt("Master password (read from stdin):")?;
-    let password = read_limited_line(&mut input, 1024)?;
-    let opened = open_vault(path, &password).map_err(|e| e.to_string())?;
+    let password = read_protected_line(&mut input, 1024)?;
+    let opened = open_vault(path, password.as_ref()).map_err(|e| e.to_string())?;
     println!("Vault opened: {}", hex(opened.trusted_root().vault_id()));
     Ok(())
 }
@@ -812,8 +814,8 @@ fn prompt(message: &str) -> Result<(), String> {
     writeln!(output, "{message}").map_err(|e| e.to_string())?;
     output.flush().map_err(|e| e.to_string())
 }
-fn read_limited_line(input: &mut impl BufRead, maximum: usize) -> Result<Vec<u8>, String> {
-    let mut value = Vec::with_capacity(maximum.min(128));
+fn read_protected_line(input: &mut impl BufRead, maximum: usize) -> Result<ProtectedBytes, String> {
+    let mut value = Zeroizing::new(Vec::with_capacity(maximum.min(128)));
     let mut limited = Read::by_ref(input)
         .take(u64::try_from(maximum + 2).map_err(|_| "input limit overflow".to_owned())?);
     let bytes = limited
@@ -831,7 +833,8 @@ fn read_limited_line(input: &mut impl BufRead, maximum: usize) -> Result<Vec<u8>
     if value.len() > maximum {
         return Err(format!("input exceeds {maximum} bytes"));
     }
-    Ok(value)
+    let value = std::mem::take(&mut *value);
+    ProtectedBytes::new(value).map_err(|error| error.to_string())
 }
 fn hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() * 2);

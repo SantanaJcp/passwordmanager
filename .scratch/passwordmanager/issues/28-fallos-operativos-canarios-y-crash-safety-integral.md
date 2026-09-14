@@ -61,3 +61,21 @@ con control ptrace positivo y UID no privilegiado terminó rc0, seguido de
 pm-crypto, check y clean offline verdes. Cobertura expresamente incompleta:
 faltan buffers plaintext, Windows/macOS y los recorridos de fault/crash/canarios;
 ningún criterio de 28 se marca cerrado todavía.
+
+2026-09-14 — Segundo tracer RED reproducido en
+`/tmp/pm28-red-plaintext-buffer.log` (rc1, 3 s): con memlock=0 y sólo la primera
+línea de password, el binario aceptó el `Vec` desbloqueado, imprimió la petición
+de confirmación y acabó como `unexpected end of input`, en vez de rechazar el
+primer secreto como `RESOURCE_UNAVAILABLE`. Inventario y orden de los siguientes
+seams (custodio/vault/adaptadores y fault real de disco/fsync/WAL/audit/outbox/
+crash) quedan en el método. No se escribió GREEN antes de observar este RED.
+El GREEN preparado limpia el buffer temporal y lo bloquea antes del siguiente
+prompt, pero la lectura aún ocurre brevemente en `Zeroizing<Vec<u8>>`; no se
+considera entrada directa protegida ni cierre G7 hasta eliminar ese tramo.
+
+2026-09-14 — Segundo checkpoint GREEN: `pm-crypto` y `pm-cli` enfocados rc0;
+lab público `/tmp/pm28-green-plaintext-buffer.log` rc0 en 3 s, con control ptrace
+positivo, rechazo memlock antes de confirmación y cleanup verificado. Un intento
+previo rc101 no compiló por `Cargo.lock` desincronizado y no cuenta como RED; se
+conserva en `/tmp/pm28-green2-pm-crypto.log`. Sigue sin probar lectura directa
+en memoria bloqueada ni los demás buffers/canales, por lo que 28 queda abierto.

@@ -85,36 +85,121 @@ impl KdfProfile {
     }
 }
 
-struct LockedKey(NonNull<u8>);
+/// Variable-length product-owned plaintext held only in locked native memory.
+///
+/// This type deliberately implements neither cloning nor diagnostic formatting.
+pub struct ProtectedBytes {
+    pointer: NonNull<u8>,
+    len: usize,
+}
 
-impl LockedKey {
-    fn new(mut value: [u8; KEY_BYTES]) -> Result<Self, CryptoError> {
+impl ProtectedBytes {
+    /// Consumes and wipes an ordinary buffer after copying it into locked memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::ResourceUnavailable`] when the process budget,
+    /// allocation, or native memory lock is unavailable.
+    pub fn new(mut value: Vec<u8>) -> Result<Self, CryptoError> {
+        let protected = Self::allocate_from_slice(&value);
+        wipe_ordinary_bytes(&mut value);
+        protected
+    }
+
+    fn allocate_from_slice(value: &[u8]) -> Result<Self, CryptoError> {
         sodium()?;
+        let len = value.len();
+        if len == 0 {
+            return Ok(Self {
+                pointer: NonNull::dangling(),
+                len: 0,
+            });
+        }
         LOCKED_SECRET_BYTES
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current
-                    .checked_add(KEY_BYTES)
+                    .checked_add(len)
                     .filter(|next| *next <= LOCKED_SECRET_BUDGET)
             })
             .map_err(|_| CryptoError::ResourceUnavailable)?;
         // SAFETY: sodium is initialized; a non-null allocation is owned here
-        // until it is either freed on failure or transferred into `Self`.
-        let pointer = unsafe { libsodium_sys::sodium_malloc(KEY_BYTES) }.cast::<u8>();
+        // until freed on failure or transferred into `Self`.
+        let pointer = unsafe { libsodium_sys::sodium_malloc(len) }.cast::<u8>();
         let Some(pointer) = NonNull::new(pointer) else {
-            LOCKED_SECRET_BYTES.fetch_sub(KEY_BYTES, Ordering::AcqRel);
+            LOCKED_SECRET_BYTES.fetch_sub(len, Ordering::AcqRel);
             return Err(CryptoError::ResourceUnavailable);
         };
-        // SAFETY: the allocation is valid for KEY_BYTES and `value` has the
-        // same exact length. Failure leaves no usable unlocked secret.
-        if unsafe { libsodium_sys::sodium_mlock(pointer.as_ptr().cast(), KEY_BYTES) } != 0 {
+        // SAFETY: the allocation is valid for `len`. A lock failure frees it
+        // before any plaintext is copied into the allocation.
+        if unsafe { libsodium_sys::sodium_mlock(pointer.as_ptr().cast(), len) } != 0 {
             unsafe { libsodium_sys::sodium_free(pointer.as_ptr().cast()) };
-            LOCKED_SECRET_BYTES.fetch_sub(KEY_BYTES, Ordering::AcqRel);
+            LOCKED_SECRET_BYTES.fetch_sub(len, Ordering::AcqRel);
             return Err(CryptoError::ResourceUnavailable);
         }
-        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), pointer.as_ptr(), KEY_BYTES) };
-        // SAFETY: `value` is valid for its exact length and is not read again.
-        unsafe { libsodium_sys::sodium_memzero(value.as_mut_ptr().cast(), value.len()) };
-        Ok(Self(pointer))
+        // SAFETY: both regions are valid for `len` initialized bytes and
+        // cannot overlap because `pointer` names a fresh allocation.
+        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), pointer.as_ptr(), len) };
+        Ok(Self { pointer, len })
+    }
+}
+
+fn wipe_ordinary_bytes(value: &mut [u8]) {
+    for byte in value {
+        // SAFETY: `byte` is a valid unique pointer for one initialized byte.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(Ordering::SeqCst);
+}
+
+impl AsRef<[u8]> for ProtectedBytes {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl Deref for ProtectedBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `pointer` owns `len` initialized bytes; dangling is valid for
+        // the explicitly supported zero-length slice.
+        unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), self.len) }
+    }
+}
+
+impl DerefMut for ProtectedBytes {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: `&mut self` uniquely owns `len` initialized bytes.
+        unsafe { std::slice::from_raw_parts_mut(self.pointer.as_ptr(), self.len) }
+    }
+}
+
+impl Drop for ProtectedBytes {
+    fn drop(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+        // SAFETY: the allocation remains valid and uniquely owned until free.
+        unsafe {
+            libsodium_sys::sodium_memzero(self.pointer.as_ptr().cast(), self.len);
+            libsodium_sys::sodium_free(self.pointer.as_ptr().cast());
+        }
+        LOCKED_SECRET_BYTES.fetch_sub(self.len, Ordering::AcqRel);
+    }
+}
+
+// SAFETY: ownership moves with the allocation and shared access exposes only
+// immutable bytes; mutation still requires unique `&mut` access.
+unsafe impl Send for ProtectedBytes {}
+unsafe impl Sync for ProtectedBytes {}
+
+struct LockedKey(ProtectedBytes);
+
+impl LockedKey {
+    fn new(mut value: [u8; KEY_BYTES]) -> Result<Self, CryptoError> {
+        let protected = ProtectedBytes::allocate_from_slice(&value).map(Self);
+        wipe_ordinary_bytes(&mut value);
+        protected
     }
 }
 
@@ -122,33 +207,20 @@ impl Deref for LockedKey {
     type Target = [u8; KEY_BYTES];
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY: `self.0` owns an initialized allocation of exactly KEY_BYTES.
-        unsafe { &*self.0.as_ptr().cast::<[u8; KEY_BYTES]>() }
+        self.0
+            .as_ref()
+            .try_into()
+            .expect("LockedKey always contains exactly KEY_BYTES")
     }
 }
 
 impl DerefMut for LockedKey {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: `&mut self` uniquely owns the allocation.
-        unsafe { &mut *self.0.as_ptr().cast::<[u8; KEY_BYTES]>() }
+        (&mut *self.0)
+            .try_into()
+            .expect("LockedKey always contains exactly KEY_BYTES")
     }
 }
-
-impl Drop for LockedKey {
-    fn drop(&mut self) {
-        // SAFETY: the allocation remains valid and uniquely owned until free.
-        unsafe {
-            libsodium_sys::sodium_memzero(self.0.as_ptr().cast(), KEY_BYTES);
-            libsodium_sys::sodium_free(self.0.as_ptr().cast());
-        }
-        LOCKED_SECRET_BYTES.fetch_sub(KEY_BYTES, Ordering::AcqRel);
-    }
-}
-
-// SAFETY: ownership moves with the allocation and shared access exposes only
-// immutable bytes; mutation still requires unique `&mut` access.
-unsafe impl Send for LockedKey {}
-unsafe impl Sync for LockedKey {}
 
 struct Secret(LockedKey);
 

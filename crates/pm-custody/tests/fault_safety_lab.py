@@ -157,9 +157,10 @@ def main():
         assert PASSWORD not in stdout + stderr
 
         denied = start_create(cli, root / "denied.sqlite3", memlock=0)
-        stdout, stderr = denied.communicate(input=PASSWORD + b"\n" + PASSWORD + b"\n", timeout=60)
+        stdout, stderr = denied.communicate(input=PASSWORD + b"\n", timeout=20)
         assert denied.returncode == 5, (denied.returncode, stdout, stderr)
         assert b"resource unavailable" in stderr.lower(), stderr
+        assert b"Confirm master password" not in stdout
         assert b"Recovery code" not in stdout
         assert PASSWORD not in stdout + stderr
         assert not (root / "denied.sqlite3").exists()
