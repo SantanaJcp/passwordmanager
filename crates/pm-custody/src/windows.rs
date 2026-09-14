@@ -686,20 +686,23 @@ fn handle_server_connection(
     service: &VaultService,
     peer_rpk: &[u8],
 ) -> Result<(), Failure> {
-    let (tls_pipe, human_channel) = if role == Role::Human {
+    let (tls_pipe, human_channel, human_transfer) = if role == Role::Human {
         let channel = AuthenticatedHumanChannel::authenticate_windows(pipe)
             .map_err(|_| Failure::Unavailable)?;
         let tls_pipe = channel
             .try_clone_windows_pipe()
             .map_err(|_| Failure::Unavailable)?;
+        let transfer_pipe = channel
+            .try_clone_windows_pipe()
+            .map_err(|_| Failure::Unavailable)?;
         if let Some(diagnostics) = service.diagnostics.as_ref() {
             diagnostics.record(ServiceDiagnosticPhase::HumanAccepted)?;
         }
-        (tls_pipe, Some(channel))
+        (tls_pipe, Some(channel), Some(transfer_pipe))
     } else {
         pipe.accept().map_err(|_| Failure::Unavailable)?;
         let tls_pipe = pipe.try_clone().map_err(|_| Failure::Unavailable)?;
-        (tls_pipe, None)
+        (tls_pipe, None, None)
     };
     let connection = ServerConnection::new(Arc::clone(config)).map_err(|_| Failure::Unavailable)?;
     let mut tls = rustls::StreamOwned::new(connection, tls_pipe);
@@ -727,6 +730,7 @@ fn handle_server_connection(
                 &mut tls,
                 service,
                 human_channel.ok_or(Failure::Unavailable)?,
+                human_transfer.ok_or(Failure::Unavailable)?,
             )
         }
         _ => Err(Failure::Unavailable),
@@ -737,6 +741,7 @@ fn serve_human(
     tls: &mut impl ReadWrite,
     service: &VaultService,
     channel: AuthenticatedHumanChannel,
+    transfer_pipe: WindowsServerPipe,
 ) -> Result<(), Failure> {
     let request = read_frame(tls)?;
     let mut cursor = Cursor::new(&request);
@@ -782,8 +787,7 @@ fn serve_human(
                 let token = read_frame(tls)?;
                 let source_value =
                     u64::from_be_bytes(token.try_into().map_err(|_| Failure::Unavailable)?);
-                let source = tls
-                    .sock
+                let source = transfer_pipe
                     .duplicate_client_file(source_value, 1024_u64.pow(4) + 256 * 1024 * 1024)
                     .map_err(|_| Failure::Unavailable)?;
                 crate::human_wire::handle_1pux_file(&mut vault, tls, rest, source)?;

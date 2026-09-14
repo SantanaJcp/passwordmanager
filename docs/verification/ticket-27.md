@@ -1744,6 +1744,45 @@ cambio concurrente del DACL. El caso positivo procesa un 1PUX sintético mayor
 que un frame desde el mismo handle. Ningún test modifica el DACL de un proceso o
 sesión ajenos; el fixture usa exclusivamente el proceso TUI propio efímero.
 
+### Composición sync nativa pendiente
+
+Los opcodes 60, 61, 64 y 65 ya pertenecen al handler humano común: creación del
+pairing cifrado por la bóveda, catálogo de adjuntos, retiro firmado y keepalive
+no se vuelven a implementar por plataforma. Los opcodes 63 y 66 deben usar un
+único `sync_job::Manager` común y conservar el journal durable y las fases
+cerradas actuales; una consulta de estado no relanza ni reautentica el trabajo.
+
+El binario `pm-sync` sigue hoy limitado explícitamente a Linux y su transporte
+de producción usa `UnixStream`. La composición Windows requiere extraer sólo
+el protocolo TLS-RPK/ALPN/framing y conectarlo a un adaptador Named Pipe local
+primario. Ese pipe tendrá nombre fijo por instalación, DACL protegida para
+SYSTEM, el SID del servicio sync y el SID cliente configurado, y validación
+bilateral SID/PID antes y después del handshake. No reutilizará un endpoint
+agent/human, TCP loopback, un fichero, ni una ejecución directa del store como
+ruta alternativa. El manager común persistirá config/status mediante los seams
+de fichero nativo; Windows deberá validar handle regular/no-reparse/link único y
+DACL esperada antes de abrir el contenedor. El ejecutable configurado también
+debe superar la verificación de firma fijada del contrato de distribución; una
+ruta existente o un PE cualquiera no bastan.
+
+El método nativo crea servidor y cliente sync efímeros con SIDs distintos, hace
+pair por teclado en ConPTY, inicia el trabajo una sola vez y observa
+queued/pushing/pulling/terminal mediante 66. Debe probar lock e idle durante el
+trabajo, reinicio desde journal, endpoint offline, saturación, integridad,
+autoridad y cleanup; ningún error puede aparecer como `Succeeded`. Sólo después
+se ejerce retiro del segundo dispositivo por teclado y convergencia cifrada.
+
+La corrida Windows ARM64
+[`34872816287`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34872816287)
+sobre `6cf246a0362284b4fe33738a9514f7dc438e8287` falló al compilar antes de
+ejecutar producto: el servidor humano había borrado el tipo concreto del
+transporte tras `&mut impl ReadWrite`, pero el opcode 31 intentaba acceder a
+`.sock`. La corrección conserva tres owners del mismo endpoint ya autenticado:
+el canal de identidad que entra en `HumanVault`, el handle que transporta
+TLS-RPK y un handle duplicado, ligado al mismo PID/SID, usado sólo para duplicar
+el archivo durante el lease 1PUX. El handler y el motor siguen siendo comunes;
+no se transmite path ni se añade otro canal.
+
 La corrida Windows 11 ARM64
 [`34869286841`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34869286841)
 sobre `6759151694773d68df832677030e7caaef1e06c5` tampoco alcanzó el producto.
