@@ -435,6 +435,37 @@ const ITEM: [u8; 16] = [0x17; 16];
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn human_retirement_commits_every_observed_prefix_for_the_exact_device() {
+    let owner_custody = test_audit_custody();
+    let remote_custody = test_audit_custody();
+    let dir = TestDir::new();
+    let vault = dir.path("retire.sqlite3");
+    persist(&vault);
+    let (mut owner, _owner_peer) = human(&vault, [0xa1; 16], &owner_custody);
+    let (remote, _remote_peer) = human(&vault, [0xb2; 16], &remote_custody);
+    let event = remote
+        .sign_causal_event(&revision([0x31; 16], [0x32; 16], 1))
+        .unwrap();
+    CausalReducer::open(&vault)
+        .unwrap()
+        .apply(&[event])
+        .unwrap();
+    let prepared = owner.prepare_device_retirement([0xb2; 16]).unwrap();
+    let signature = owner.sign(&prepared).unwrap();
+    owner
+        .commit(prepared.command(), &signature, prepared.body())
+        .unwrap();
+    assert!(
+        CausalReducer::open(&vault)
+            .unwrap()
+            .view()
+            .unwrap()
+            .device_retired(&[0xb2; 16])
+    );
+    assert!(owner.prepare_device_retirement([0xa1; 16]).is_err());
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn three_paired_replicas_converge_through_opaque_ciphertext_without_copying_sqlite() {
     let a_custody = test_audit_custody();

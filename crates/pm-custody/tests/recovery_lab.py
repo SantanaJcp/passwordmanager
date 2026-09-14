@@ -141,7 +141,7 @@ def main():
         daemon=start(binary,source,source_vault,SOURCE_DEVICE); daemons.append(daemon)
         exports=source_root/"exports"; exports.mkdir(); os.chown(exports,HUMAN,HUMAN); exports.chmod(0o700)
         observed=human(binary,source,"human-backup-exercise",[source_password],("--output-dir",exports))
-        assert b"types=7" in observed.stdout
+        assert b"types=7 records=8" in observed.stdout
         source_archive=exports/"ticket21-backup.pmb1"; assert source_archive.stat().st_size>2*1024*1024
         archive_hash=hashlib.sha256(source_archive.read_bytes()).digest()
         stop(daemons.pop());
@@ -161,7 +161,7 @@ def main():
         after=authority(target_vault)
         assert after[:3]==before[:3]
         assert set(before[3]).issubset(after[3]) and len(after[3])>len(before[3])
-        assert after[4]==before[4]+8 and root_identity(target_vault)==target_identity
+        assert after[4]==before[4]+9 and root_identity(target_vault)==target_identity
 
         corrupt=target_root/"corrupt.pmb1"; data=bytearray(archive.read_bytes()); data[len(data)//2]^=1
         corrupt.write_bytes(data); os.chown(corrupt,HUMAN,HUMAN); corrupt.chmod(0o600)

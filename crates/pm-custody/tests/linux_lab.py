@@ -305,13 +305,15 @@ def main():
                 [master, title, username, secret_one, destination, notes, edited_title, secret_two]
             )
 
-            # Force the encrypted audit insert to fail inside the real commit
+            # Permit the mandatory HumanUnlock record, then force the next
+            # encrypted audit insert to fail inside the real CRUD commit
             # reached over TLS. The failed client reconnects for a receipt and
             # observes the permitted no-op outcome; no production test hook is
             # involved.
             database = sqlite3.connect(vault)
             database.execute(
                 "CREATE TRIGGER lab_reject_audit BEFORE INSERT ON encrypted_audit_records "
+                "WHEN EXISTS (SELECT 1 FROM authority_events) "
                 "BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END"
             )
             database.commit()
@@ -327,11 +329,13 @@ def main():
                 "authority_events",
                 "outbox",
                 "human_receipts",
-                "audit_keys",
-                "audit_state",
-                "encrypted_audit_records",
             ]:
                 assert database.execute(f"select count(*) from {table}").fetchone() == (0,)
+            assert database.execute("select count(*) from audit_keys").fetchone() == (1,)
+            assert database.execute("select count(*) from audit_state").fetchone() == (1,)
+            assert database.execute(
+                "select count(*) from encrypted_audit_records"
+            ).fetchone() == (2,)
             assert database.execute(
                 "select count(*) from human_challenges where consumed=1"
             ).fetchone() == (0,)
@@ -352,7 +356,10 @@ def main():
             assert database.execute("select count(*) from human_receipts").fetchone() == (3,)
             assert database.execute("select count(*) from authority_events").fetchone() == (3,)
             assert database.execute("select count(*) from outbox").fetchone() == (3,)
-            assert database.execute("select count(*) from encrypted_audit_records").fetchone() == (3,)
+            # Both unlocks survived the injected failure: initial and receipt
+            # recovery. The successful CRUD client repeats those two unlocks,
+            # then commits three item mutations.
+            assert database.execute("select count(*) from encrypted_audit_records").fetchone() == (7,)
             assert database.execute("select count(*) from human_challenges where consumed=1").fetchone() == (3,)
             assert database.execute("select count(*) from human_challenges where consumed=0").fetchone() == (1,)
             assert database.execute("select count(*) from human_staging").fetchone() == (1,)
@@ -402,7 +409,8 @@ def main():
                 )
                 assert content.stdout == (
                     b"PASS content-e2e types=7 unicode-attachment=exact source-fields=preserved "
-                    b"search=1 organize=tag+favorite generator=configured passkey=storage-only\n"
+                    b"search=1 organize=tag+favorite generator=configured passkey=storage-only "
+                    b"legacy-exposure=rejected\n"
                 )
                 assert content.stderr == b""
                 streamed = as_uid(

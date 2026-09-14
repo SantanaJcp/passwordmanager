@@ -88,6 +88,20 @@ covered by the final real lab. A combined regression run later hit the new lab
 before the human socket finished accepting; the laboratory now waits one second
 after both socket paths appear, and the complete P4 run above passed.
 
+## Authorized asynchronous observation method
+
+For the expired challenge, the TTY confirmation is intentionally attempted once
+and must return its existing rejection code. The lab then observes the same
+outer attempt through the existing status operation until
+`WAITING_FOR_HUMAN` with a null result. Only the documented intermediate pair
+`RUNNING` + `reason=PASSKEY_HUMAN_CONFIRMATION` is accepted while the custody
+worker settles the request; any other state or reason fails. No second
+confirmation, authentication, arbitrary sleep or timeout extension is used.
+
+The historical diagnostic saw the legitimate `RUNNING` window before
+`WAITING_FOR_HUMAN` and did not reproduce any additional expiry failure. The
+final expiry and cancellation assertions therefore remain unchanged.
+
 All twelve earlier Linux labs were run against this candidate. The first ten
 passed sequentially before that transient P4 readiness failure; after its fix,
 P4, sync and real password/TOTP Keycloak web-auth all passed. Thus every current

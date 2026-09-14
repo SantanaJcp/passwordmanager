@@ -75,6 +75,25 @@ def parse(r,state=None):
     if state: assert m.group(2)==state,text
     return m.group(1)
 
+def observe_state(binary,uid,key,profile,sock,attempt,expected,allowed,timeout=15):
+    """Poll one public get until its contractually terminal state is visible."""
+    # Fifteen seconds is the existing as_uid command bound, not an extension.
+    deadline=time.monotonic()+timeout;seen=[]
+    while True:
+        result=agent(binary,uid,key,profile,sock,"get",attempt=attempt)
+        assert result.returncode==0 and result.stderr==b"",result
+        text=result.stdout.decode();match=re.search(
+            r"id=([0-9a-f]{32}).*state=([A-Z_]+) reason=([^ ]*) result=(.*)",text)
+        assert match,text
+        assert match.group(1)==attempt,(attempt,match.group(1))
+        observed=(match.group(2),match.group(3));seen.append(observed)
+        if observed[0]==expected:
+            return match.group(1)
+        assert match.group(4)=="",(attempt,observed,match.group(4))
+        assert observed in allowed,(attempt,observed,seen)
+        if time.monotonic() >= deadline:
+            raise AssertionError((attempt,expected,seen))
+
 def denied(r,code):
     assert r.returncode != 0 and r.stdout == f"DENIED code={code}\n".encode(), r
 
@@ -140,18 +159,18 @@ def main():
         discovery=as_uid(AGENT_A,[b,"agent-discover","--profile",aprof,"--private",ak,"--socket",runtime/"agent.sock"]).stdout.decode();item=re.search(r"set=([0-9a-f]{32}):",discovery).group(1)
         now=int(time.time()*1_000_000)
         success=agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="01"*16,context="success");sid=parse(success,"CREATED")
-        time.sleep(.05);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=sid),"SUCCEEDED")
+        observe_state(b,AGENT_A,ak,aprof,runtime/"agent.sock",sid,"SUCCEEDED",{("RUNNING","")})
         interface_env={"PM_PROFILE":str(aprof),"PM_PRIVATE":str(ak),"PM_SOCKET":str(runtime/"agent.sock")}
         assert parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="01"*16,context="success"),"SUCCEEDED")==sid
         conflict=agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="01"*16,context="reject");denied(conflict,3)
-        challenge=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="02"*16,context="challenge"),"CREATED");time.sleep(.05);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=challenge),"WAITING_FOR_HUMAN")
-        as_uid(PROVIDER,["touch",resolve+challenge]);time.sleep(.15);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=challenge),"SUCCEEDED")
-        cancelled=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="03"*16,context="challenge"),"CREATED");time.sleep(.05);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","cancel",attempt=cancelled),"CANCELLED")
-        ambiguous=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="04"*16,context="ambiguous"),"CREATED");time.sleep(.05);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=ambiguous),"INDETERMINATE")
-        lost=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="07"*16,context="response-loss"),"CREATED");time.sleep(.2);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=lost),"SUCCEEDED")
-        rejected=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="08"*16,context="reject"),"CREATED");time.sleep(.05);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=rejected),"FAILED")
+        challenge=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="02"*16,context="challenge"),"CREATED");observe_state(b,AGENT_A,ak,aprof,runtime/"agent.sock",challenge,"WAITING_FOR_HUMAN",{("RUNNING",""),("RUNNING","provider-challenge-ref")})
+        as_uid(PROVIDER,["touch",resolve+challenge]);observe_state(b,AGENT_A,ak,aprof,runtime/"agent.sock",challenge,"SUCCEEDED",{("WAITING_FOR_HUMAN","provider-challenge-ref"),("RUNNING","provider-challenge-ref")})
+        cancelled=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="03"*16,context="challenge"),"CREATED");parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","cancel",attempt=cancelled),"CANCELLED")
+        ambiguous=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="04"*16,context="ambiguous"),"CREATED");observe_state(b,AGENT_A,ak,aprof,runtime/"agent.sock",ambiguous,"INDETERMINATE",{("RUNNING","")})
+        lost=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="07"*16,context="response-loss"),"CREATED");observe_state(b,AGENT_A,ak,aprof,runtime/"agent.sock",lost,"SUCCEEDED",{("RUNNING",""),("INDETERMINATE","INDETERMINATE"),("RUNNING","INDETERMINATE")})
+        rejected=parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="08"*16,context="reject"),"CREATED");observe_state(b,AGENT_A,ak,aprof,runtime/"agent.sock",rejected,"FAILED",{("RUNNING","")})
         assert_interface_equivalence(pcli,AGENT_A,interface_env,item,sid,cancelled,now)
-        stop(daemon);daemon=start(b,boota,runtime,vault,psock);parse(agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","get",attempt=ambiguous),"INDETERMINATE")
+        stop(daemon);daemon=start(b,boota,runtime,vault,psock);observe_state(b,AGENT_A,ak,aprof,runtime/"agent.sock",ambiguous,"INDETERMINATE",{("RUNNING","INDETERMINATE")})
         data=json.loads(journal.read_text());assert data[ambiguous]["calls"]==1 and data[lost]["calls"]==1
         db=sqlite3.connect(vault);before=db.execute("select count(*) from authentication_attempts").fetchone()[0];db.execute("create trigger fail_ticket08_audit before insert on encrypted_audit_records begin select raise(abort,'ticket08 audit fault'); end");db.commit();db.close()
         atomic=agent(b,AGENT_A,ak,aprof,runtime/"agent.sock","start",item=item,issued_at=now,nonce="06"*16,context="success");denied(atomic,1)

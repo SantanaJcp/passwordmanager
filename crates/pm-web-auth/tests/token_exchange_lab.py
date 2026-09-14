@@ -6,9 +6,11 @@ import base64
 import json
 import os
 import pathlib
+import signal
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,6 +26,7 @@ CLIENT_ID = "pm-exchanger"
 CLIENT_SECRET = "ticket11-requester-client-secret-canary"
 TARGET = "pm-target"
 SCOPE = "target.read"
+FIXTURE_WAIT_SECONDS = 20
 
 
 def realm():
@@ -176,6 +179,84 @@ def start_daemon(custody, bootstrap, runtime, vault, provider_socket):
     )
 
 
+def wait_for_child_state(process, wait_flag, expected, description):
+    deadline = time.monotonic() + FIXTURE_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        pid, status = os.waitpid(process.pid, wait_flag | os.WNOHANG)
+        if pid == process.pid:
+            if os.WIFEXITED(status):
+                process.returncode = os.WEXITSTATUS(status)
+                raise AssertionError(f"custodian exited while {description}: rc={process.returncode}")
+            if os.WIFSIGNALED(status):
+                process.returncode = -os.WTERMSIG(status)
+                raise AssertionError(f"custodian was signalled while {description}: rc={process.returncode}")
+            if expected(status):
+                return
+            raise AssertionError(f"unexpected custodian state while {description}: status={status}")
+        if process.poll() is not None:
+            raise AssertionError(f"custodian exited while {description}: rc={process.returncode}")
+        time.sleep(.05)
+    raise TimeoutError(f"custodian state timeout while {description}: pid={process.pid}")
+
+
+def pause_for_state_scan(process):
+    if process.poll() is not None:
+        raise AssertionError(f"custodian exited before state scan: rc={process.returncode}")
+    process.send_signal(signal.SIGSTOP)
+    wait_for_child_state(
+        process,
+        os.WUNTRACED,
+        lambda status: os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGSTOP,
+        "stopping for state scan",
+    )
+
+
+def resume_after_state_scan(process):
+    process.send_signal(signal.SIGCONT)
+    wait_for_child_state(
+        process,
+        os.WCONTINUED,
+        os.WIFCONTINUED,
+        "resuming after state scan",
+    )
+
+
+def cleanup_owned_lab(processes, root, paused_process):
+    primary_error = sys.exception()
+    errors = []
+    if paused_process is not None and paused_process.poll() is None:
+        try:
+            paused_process.send_signal(signal.SIGCONT)
+        except BaseException as error:
+            error.add_note(f"token exchange cleanup resume: pid={paused_process.pid}")
+            errors.append(error)
+    for process in reversed(processes):
+        try:
+            common.stop(process)
+            if process.poll() is None:
+                raise AssertionError(f"owned process remained running: pid={process.pid}")
+        except BaseException as error:
+            error.add_note(f"token exchange cleanup process: pid={process.pid}")
+            errors.append(error)
+    try:
+        parent = pathlib.Path(tempfile.gettempdir()).resolve(strict=True)
+        root_stat = root.lstat()
+        if (root.parent.resolve(strict=True) != parent
+                or not root.name.startswith("pm-token-exchange-linux-lab-")
+                or not stat.S_ISDIR(root_stat.st_mode)
+                or root_stat.st_uid != os.geteuid()):
+            raise AssertionError(f"refusing cleanup outside owned lab root: {root} {root_stat}")
+        shutil.rmtree(root)
+    except BaseException as error:
+        error.add_note(f"token exchange cleanup directory: {root}")
+        errors.append(error)
+    if root.exists():
+        errors.append(AssertionError(f"owned lab directory remained after cleanup: {root}"))
+    if errors:
+        failures = ([primary_error] if primary_error is not None else []) + errors
+        raise BaseExceptionGroup("token exchange lab cleanup failed", failures) from None
+
+
 def start_attempt(cli, env, item, nonce, context="keycloak-exchange-lab"):
     now = str(int(time.time() * 1_000_000))
     args = ["--json", "auth", "start", "--credential-id", item,
@@ -183,6 +264,22 @@ def start_attempt(cli, env, item, nonce, context="keycloak-exchange-lab"):
             "--method", "token_exchange", "--destination", "keycloak-exchange-lab",
             "--context", context, "--issued-at", now, "--nonce", nonce * 32]
     return args, common.cli(AGENT_A, cli, env, args, check=False)
+
+
+def safe_process_diagnostic(result, *secrets):
+    """Return bounded process diagnostics with synthetic credentials redacted."""
+    sensitive = [value for value in secrets if value]
+
+    def redacted(value):
+        for secret in sensitive:
+            value = value.replace(secret, b"<REDACTED>")
+        return value[:2048].decode("utf-8", "backslashreplace")
+
+    return {
+        "returncode": result.returncode,
+        "stdout": redacted(result.stdout),
+        "stderr": redacted(result.stderr),
+    }
 
 
 def wait_terminal(cli, env, attempt):
@@ -233,6 +330,7 @@ def main():
     )
     root = pathlib.Path(tempfile.mkdtemp(prefix="pm-token-exchange-linux-lab-"))
     processes = []
+    paused_process = None
     try:
         root.chmod(0o711)
         auth_port = common.free_port()
@@ -377,7 +475,9 @@ def main():
         daemon = start_daemon(local_custody, bootstrap, runtime, vault, provider_socket); processes.append(daemon)
         common.wait_path(daemon, runtime / "agent.sock"); common.wait_path(daemon, runtime / "human.sock")
         _, denied_audience = start_attempt(local_cli, env, item, "6")
-        assert denied_audience.returncode == 0
+        assert denied_audience.returncode == 0, safe_process_diagnostic(
+            denied_audience, subject_token.encode(), CLIENT_SECRET.encode(), MASTER
+        )
         audience_terminal, audience_public = wait_terminal(local_cli, env, json.loads(denied_audience.stdout)["result"]["attempt_id"])
         assert audience_terminal["state"] == "FAILED" and audience_terminal["result"] is None, audience_terminal
         common.stop(daemon); processes.remove(daemon); common.stop(web); processes.remove(web)
@@ -415,17 +515,31 @@ def main():
             audience_public, cancellable.stdout, cancelled.stdout, paused.stdout, *hostile_outputs,
             provider_log.read_bytes()])
         assert subject_token.encode() not in combined and CLIENT_SECRET.encode() not in combined
-        for candidate in state.rglob("*"):
-            if candidate.is_file():
+        paused_process = daemon
+        pause_for_state_scan(paused_process)
+        scan_error = None
+        try:
+            state_files = sorted(candidate for candidate in state.rglob("*") if candidate.is_file())
+            assert state_files, "custodian state scan found no files"
+            for candidate in state_files:
                 persisted = candidate.read_bytes()
                 assert subject_token.encode() not in persisted and CLIENT_SECRET.encode() not in persisted
-        print("PASS token-exchange-p2 keycloak=26.7.3 exchange=standard-v2 A!=B subject+actor+audience+scope=bound tls=1.3")
-        print("PASS token-exchange-adversarial reflect=subject+auxiliary redirect=closed audience=real-denial public=redacted")
-        print("PASS token-exchange-controls credential=combined+custodied idempotency=stable context=closed cancel=terminal suspend=pre-post-denied result=token-B-only")
+        except BaseException as error:
+            scan_error = error
+        try:
+            resume_after_state_scan(paused_process)
+            paused_process = None
+        except BaseException as resume_error:
+            failures = ([scan_error] if scan_error is not None else []) + [resume_error]
+            raise BaseExceptionGroup("state scan or custodian resume failed", failures) from None
+        if scan_error is not None:
+            raise scan_error
     finally:
-        for process in reversed(processes):
-            common.stop(process)
-        shutil.rmtree(root, ignore_errors=True)
+        cleanup_owned_lab(processes, root, paused_process)
+
+    print("PASS token-exchange-p2 keycloak=26.7.3 exchange=standard-v2 A!=B subject+actor+audience+scope=bound tls=1.3")
+    print("PASS token-exchange-adversarial reflect=subject+auxiliary redirect=closed audience=real-denial public=redacted")
+    print("PASS token-exchange-controls credential=combined+custodied idempotency=stable context=closed cancel=terminal suspend=pre-post-denied result=token-B-only")
 
 
 if __name__ == "__main__":

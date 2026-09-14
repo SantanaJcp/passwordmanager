@@ -52,6 +52,12 @@ def counts(path):
     return result
 
 
+def assert_only_human_unlock_changed(before, after, unlocks):
+    assert after[:7] == before[:7], (before, after)
+    assert after[7] == before[7] + unlocks, (before, after)
+    assert after[8:] == before[8:], (before, after)
+
+
 def digest(path):
     state = hashlib.sha256()
     with path.open("rb") as source:
@@ -95,7 +101,7 @@ def main():
         daemon = start(binary, bootstrap, runtime, vault)
         observed = human(binary, "human-backup-exercise", human_key, human_profile,
             runtime/"human.sock", password, ("--output-dir", output))
-        assert observed.startswith(b"PASS backup-exercise types=7 "), observed
+        assert observed.startswith(b"PASS backup-exercise types=7 records=8 "), observed
         assert b"inventory=exact" in observed and b"confirmation=strong+one-use" in observed
         native, plaintext = output/"ticket21-backup.pmb1", output/"ticket21-export.jsonl"
         assert native.read_bytes()[:4] == b"PMB1"
@@ -110,7 +116,7 @@ def main():
         assert b"ticket21-stream-note-canary" in decoded
         assert b"ticket21-stream-note-canary" not in plaintext.read_bytes()
         durable = counts(vault)
-        assert durable[0] == 16 and durable[1] == 18
+        assert durable[0] == 18 and durable[1] == 20, durable
         assert durable[8:11] == (0, 0, 0)
         assert durable[11] > 0 and durable[12] == 0
 
@@ -120,10 +126,10 @@ def main():
         truncated = output/"truncated.pmb1"; truncated.write_bytes(data[:len(data)//3])
         os.chown(truncated,HUMAN,HUMAN); truncated.chmod(0o600)
         before = counts(vault)
-        for invalid in (corrupt, truncated):
+        for unlocks, invalid in enumerate((corrupt, truncated), start=1):
             human(binary, "human-backup-restore", human_key, human_profile,
                 runtime/"human.sock", password, ("--archive",invalid), ok=False)
-            assert counts(vault) == before
+            assert_only_human_unlock_changed(before, counts(vault), unlocks)
         assert digest(native) == original_hash
         agent_denied = as_uid(AGENT, [binary,"human-backup-restore","--profile",agent_profile,
             "--private",agent_key,"--socket",runtime/"agent.sock","--archive",native],
