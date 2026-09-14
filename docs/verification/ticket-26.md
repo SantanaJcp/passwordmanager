@@ -1567,6 +1567,17 @@ strict ledger. `seed_tui_content`, the real service and all stream helpers run
 before the first matrix `PASS`; no fixture setup failure is converted into a
 screen-only success.
 
+The first implementation slice is now test-only `run_tui_ticket23_matrix` in
+`crates/pm-custody/tests/macos_lab.py`, invoked after the existing core/expiry
+flow. It adds a wrong-master-password PTY case, walks the exact `human_fields`
+descriptor order for all seven kinds plus the exchange relationship, reveals
+one real synthetic field per descriptor family with expiry checks, verifies
+the AppKit copy/replacement-owner lease, and drives the existing `t`, `f`,
+`g`, `h`, `d`, `u`, `p` and `P` keyboard contracts. `TUI23_FIELD_CATALOG`
+mirrors the Rust descriptor ordering rather than relying on insertion order or
+an initial selection. This code has only static validation so far; its native
+execution and every durable result remain pending.
+
 The implementation order is fixed: (1) add only fixture construction and
 adapter assertions, (2) run a focused real-PTY content/access/operations
 scenario with the existing deadlines, (3) add the complete matrix runner, and

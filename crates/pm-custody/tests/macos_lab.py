@@ -38,6 +38,49 @@ PLIST = pathlib.Path(f"/Library/LaunchDaemons/{LABEL}.plist")
 PASSWORD = b"synthetic ticket 26 master password"
 TUI_PASSWORD_RECORD = b"ticket05-e2e-password-canary"
 TUI_EXTERNAL_REPLACEMENT = b"ticket26-tui-external-replacement"
+
+TUI23_BASE_FIELDS = (
+    "title",
+    "destination[0].label", "destination[0].value",
+    "tag[0]", "favorite", "notes",
+    "custom[0].id", "custom[0].label", "custom[0].text", "custom[0].concealed",
+    "source[0].path", "source[0].encoding", "source[0].value",
+)
+TUI23_ATTACHMENT_FIELDS = (
+    "attachment[0].id", "attachment[0].name", "attachment[0].mime",
+    "attachment[0].size", "attachment[0].sha256", "attachment[0].content",
+)
+TUI23_FIELD_CATALOG = {
+    "Password": TUI23_BASE_FIELDS + (
+        "auth[0].username", "auth[0].password", "auth[0].destination_refs",
+    ) + TUI23_ATTACHMENT_FIELDS,
+    "TOTP": TUI23_BASE_FIELDS + (
+        "auth[0].secret", "auth[0].algorithm", "auth[0].digits", "auth[0].period",
+        "auth[0].t0", "auth[0].issuer", "auth[0].account", "auth[0].destination_refs",
+    ),
+    "Passkey": TUI23_BASE_FIELDS + (
+        "auth[0].rp_id", "auth[0].user_handle", "auth[0].credential_id",
+        "auth[0].cose_alg", "auth[0].private_key", "auth[0].public_key",
+        "auth[0].user_name", "auth[0].display_name", "auth[0].sign_count",
+        "auth[0].backup_eligible", "auth[0].backup_state",
+    ),
+    "SSH": TUI23_BASE_FIELDS + (
+        "auth[0].private_format", "auth[0].private_key", "auth[0].public_key",
+        "auth[0].username", "auth[0].destination_refs",
+    ),
+    "Token": TUI23_BASE_FIELDS + (
+        "auth[0].secret", "auth[0].provider", "auth[0].profile_id",
+        "auth[0].destination_refs",
+    ),
+    "ticket05-e2e-search-canary": TUI23_BASE_FIELDS,
+    "File": TUI23_BASE_FIELDS + TUI23_ATTACHMENT_FIELDS,
+    "Exchange Relationship": (
+        "title", "destination[0].label", "destination[0].value", "tag[0]", "favorite", "notes",
+        "auth[0].subject_token", "auth[0].requester_client_id",
+        "auth[0].requester_client_secret", "auth[0].provider", "auth[0].profile_id",
+        "auth[0].destination_refs", "auth[0].expires_at",
+    ),
+}
 DIAGNOSTIC_ENV = "PM_MACOS_TICKET26_DIAGNOSTIC"
 DIAGNOSTIC_LOG = STATE / "ticket26-diagnostic.log"
 AGENT_MANAGER_COMMAND_TIMEOUT = 10
@@ -2293,6 +2336,150 @@ def select_tui_password_for_copy(session):
     return copy_start
 
 
+def select_tui_field(session, title, action, label, index):
+    tui_search(session, title)
+    start = session.mark()
+    session.send_key(action)
+    session.wait_text("Fields (explicit selection; values hidden)", since=start)
+    start = session.mark()
+    session.send_text("j" * index)
+    session.wait_selected(label, since=start)
+    selected = session.mark()
+    session.send_key("enter")
+    return selected
+
+
+def assert_tui_field_catalog(session, title, fields):
+    tui_search(session, title)
+    start = session.mark()
+    session.send_key("r")
+    session.wait_text("Fields (explicit selection; values hidden)", since=start)
+    for index, label in enumerate(fields):
+        if index:
+            move = session.mark()
+            session.send_key("j")
+            session.wait_selected(label, since=move)
+        else:
+            session.wait_selected(label, since=start)
+    escaped = session.mark()
+    session.send_key("escape")
+    session.wait_text("Exposure cancelled", since=escaped)
+
+
+def reveal_tui_field(session, title, label, index, expected):
+    revealed = select_tui_field(session, title, "r", label, index)
+    session.wait_text("Secret revealed temporarily", since=revealed)
+    if expected is not None:
+        assert expected in session.screen.application_text(), (
+            "TUI field reveal did not render the expected synthetic value", title, label,
+        )
+    session.wait_text("Reveal expired", since=revealed)
+    if expected is not None:
+        assert expected not in session.screen.application_text(), (
+            "TUI field reveal remained visible after expiry", title, label,
+        )
+
+
+def run_tui_ticket23_matrix(binary, profile, private, endpoint):
+    """Exercise Ticket 23 content contracts through the real macOS PTY."""
+    wrong = MacPtySession.start(
+        binary, profile, private, endpoint, idle=30, reveal=1, copy=2,
+    )
+    try:
+        wrong.wait_text("Password required")
+        wrong.send_text("synthetic-definitely-wrong", enter=True, hidden=True)
+        assert wrong.wait_exit(timeout=8) != 0
+        assert b"synthetic-definitely-wrong" not in bytes(wrong.output)
+    finally:
+        close_session_preserving_primary(wrong)
+
+    session = MacPtySession.start(
+        binary, profile, private, endpoint, idle=30, reveal=1, copy=2,
+    )
+    try:
+        session.wait_text("Password required")
+        session.send_text(PASSWORD.decode("ascii"), enter=True, hidden=True)
+        session.wait_text("Unlocked: selection never reveals secrets")
+        initial = session.screen.application_text()
+        for title in TUI23_FIELD_CATALOG:
+            assert title in initial, (
+                "TUI content seed omitted a Ticket 23 title", title,
+            )
+        for title, fields in TUI23_FIELD_CATALOG.items():
+            assert_tui_field_catalog(session, title, fields)
+
+        for title, label, index, expected in (
+            ("Password", "auth[0].password", 14, "ticket05-e2e-password-canary"),
+            ("TOTP", "auth[0].secret", 13, "ticket05-e2e-totp-canary"),
+            ("Passkey", "auth[0].private_key", 17, "<binary secret: 32 bytes>"),
+            ("SSH", "auth[0].private_key", 14, "ticket05-e2e-ssh-canary"),
+            ("Token", "auth[0].secret", 13, "ticket05-e2e-token-canary"),
+            ("ticket05-e2e-search-canary", "notes", 5, "note"),
+            ("File", "attachment[0].content", 18,
+             "ticket05-e2e-attachment-canary 🌎"),
+            ("Exchange Relationship", "auth[0].subject_token", 6,
+             "ticket11-e2e-subject-token-canary"),
+            ("Exchange Relationship", "auth[0].requester_client_secret", 8,
+             "ticket11-e2e-requester-secret-canary"),
+        ):
+            reveal_tui_field(session, title, label, index, expected)
+
+        copied = select_tui_field(session, "Password", "c", "auth[0].password", 14)
+        session.wait_text("Copied explicitly", since=copied)
+        assert read_appkit_pasteboard(session=session) == TUI_PASSWORD_RECORD
+        write_appkit_pasteboard(TUI_EXTERNAL_REPLACEMENT, session=session)
+        session.wait_text("Clipboard custody expired", since=copied)
+        assert read_appkit_pasteboard(session=session) == TUI_EXTERNAL_REPLACEMENT
+
+        tui_search(session, "ticket05-e2e-search-canary")
+        organized = session.mark()
+        session.send_key("t")
+        session.send_text("keyboard-ticket23", enter=True)
+        session.wait_text("Organization committed", since=organized)
+        favorite = session.mark()
+        session.send_key("f")
+        session.wait_text("Favorite committed", since=favorite)
+        assert "★" in session.screen.application_text()
+
+        generated = session.mark()
+        session.send_key("g")
+        session.send_text("24", enter=True)
+        session.wait_text("Generated secret revealed temporarily", since=generated)
+        session.wait_text("Reveal expired", since=generated)
+        assert "Exposure: <hidden>" in session.screen.application_text()
+
+        history = session.mark()
+        session.send_key("h")
+        history_text = session.wait_text("History:", since=history)
+        assert "lifecycle active" in history_text
+
+        purge_revisions = session.mark()
+        session.send_key("p")
+        session.send_text("PURGE", enter=True)
+        session.wait_text("Purged ", since=purge_revisions)
+        trashed = session.mark()
+        session.send_key("d")
+        session.wait_text("Moved to trash", since=trashed)
+        trash_history = session.mark()
+        session.send_key("h")
+        assert "lifecycle trash" in session.wait_text("History:", since=trash_history)
+        restored = session.mark()
+        session.send_key("u")
+        session.wait_text("Restored with a new revision", since=restored)
+        trashed_again = session.mark()
+        session.send_key("d")
+        session.wait_text("Moved to trash", since=trashed_again)
+        purged = session.mark()
+        session.send_key("P")
+        session.send_text("PURGE", enter=True)
+        session.wait_text("Item permanently purged", since=purged)
+
+        session.send_key("l")
+        assert session.wait_exit(timeout=8) == 0
+    finally:
+        close_session_preserving_primary(session)
+
+
 def run_shared_pasteboard_control(
     binary, profile, private, endpoint, *, pasteboard_observation,
 ):
@@ -2498,6 +2685,8 @@ def run_tui_core_lab(
     assert TUI_PASSWORD_RECORD not in bytes(expiry.output)
     assert b"\x1b]52;" not in bytes(expiry.output)
     require_agent_discovery(binary, agent_profile, agent_private, agent_endpoint)
+
+    run_tui_ticket23_matrix(binary, profile, private, endpoint)
 
 
 def probe(binary, user, profile, private, endpoint, *, allowed=True, diagnostic=False):
