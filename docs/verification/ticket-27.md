@@ -1055,6 +1055,14 @@ proceso. Ninguna ruta convierte una parada SCM fallida en éxito. Los
 procesos/servicio pertenecen a la raíz única del lab y la limpieza conserva su
 agregación de errores.
 
+La corrida nativa RED `34845264907` sobre el método congelado `3dd9d4f`
+confirmó ese discriminante: pasaron los cinco tests nativos y el contrato de
+pipe, pero SCM informó `NOT_STOPPABLE`; el primer error del cuerpo fue
+`RUNNING service did not advertise SERVICE_ACCEPT_STOP` y el fallo posterior
+de `Stop-Service` durante cleanup también quedó visible. El log preservado es
+`/tmp/pm-windows-stop-native-red.log`. Este resultado acredita la ausencia del
+contrato STOP anterior, no la implementación overlapped ni el ticket 27.
+
 La implementación propuesta usa un evento manual-reset de STOP, creado y
 cerrado por el runtime del servicio. El contexto estable registrado con
 `RegisterServiceCtrlHandlerExW` contiene únicamente ese evento y el status

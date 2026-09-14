@@ -8,7 +8,11 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        mpsc,
+    },
 };
 
 use aws_lc_rs::{
@@ -33,16 +37,19 @@ use rustls::{
     sign::CertifiedKey,
     version,
 };
+use windows_sys::Win32::Foundation::{ERROR_GEN_FAILURE, ERROR_SERVICE_CANNOT_ACCEPT_CTRL};
 use windows_sys::Win32::System::Services::{
-    RegisterServiceCtrlHandlerExW, SERVICE_RUNNING, SERVICE_STATUS, SERVICE_STOPPED,
-    SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus, StartServiceCtrlDispatcherW,
+    RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_STOP, SERVICE_CONTROL_INTERROGATE,
+    SERVICE_CONTROL_STOP, SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATUS,
+    SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_TABLE_ENTRYW,
+    SERVICE_WIN32_OWN_PROCESS, SetServiceStatus, StartServiceCtrlDispatcherW,
 };
 use zeroize::{Zeroize, Zeroizing};
 
 use pm_custody::{
     AuthenticatedHumanChannel, WindowsClientPipe, WindowsEndpoint, WindowsServerPipe,
 };
-use pm_native_channel::{dpapi_protect_machine, dpapi_unprotect};
+use pm_native_channel::{WindowsStopEvent, dpapi_protect_machine, dpapi_unprotect};
 use pm_vault::{
     AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome,
     AutonomousAuditVault, HumanCommitError, HumanVault, VaultError,
@@ -62,6 +69,26 @@ const MAX_FRAME: usize = 18 * 1024 * 1024;
 const HUMAN_MAGIC: &[u8; 5] = b"PMH1\n";
 const AGENT_MAGIC: &[u8; 5] = b"PMA1\n";
 static SERVICE_ARGUMENTS: std::sync::OnceLock<Vec<OsString>> = std::sync::OnceLock::new();
+static SERVICE_FAILED: AtomicBool = AtomicBool::new(false);
+
+struct ServiceControlContext {
+    stop: WindowsStopEvent,
+    status_handle: SERVICE_STATUS_HANDLE,
+    state: AtomicU32,
+}
+
+// SCM invokes the handler on a system-owned thread while `service_main` owns
+// the stable boxed context. Both fields are immutable after registration.
+unsafe impl Send for ServiceControlContext {}
+unsafe impl Sync for ServiceControlContext {}
+
+impl ServiceControlContext {
+    fn publish(&self, state: u32, controls: u32, exit_code: u32) -> Result<(), Failure> {
+        publish_service_status(self.status_handle, state, controls, exit_code)?;
+        self.state.store(state, Ordering::Release);
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Role {
@@ -240,7 +267,10 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("keygen") => keygen(&mut arguments),
         Some("provision-bootstrap") => provision_bootstrap(&mut arguments),
         Some("provision-profile") => provision_profile(&mut arguments),
-        Some("serve-vault") => serve_vault(&mut arguments),
+        Some("serve-vault") => {
+            let stop = WindowsStopEvent::create().map_err(|_| Failure::Unavailable)?;
+            serve_vault(&mut arguments, &stop, || Ok(()))
+        }
         Some("service") => service_dispatch(arguments.collect()),
         Some("probe") => probe(&mut arguments),
         Some("human-lock") => human_lock(&mut arguments),
@@ -249,6 +279,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
 }
 
 fn service_dispatch(arguments: Vec<OsString>) -> Result<(), Failure> {
+    SERVICE_FAILED.store(false, Ordering::Release);
     SERVICE_ARGUMENTS
         .set(arguments)
         .map_err(|_| Failure::Unavailable)?;
@@ -269,7 +300,11 @@ fn service_dispatch(arguments: Vec<OsString>) -> Result<(), Failure> {
     if unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) } == 0 {
         return Err(Failure::Unavailable);
     }
-    Ok(())
+    if SERVICE_FAILED.load(Ordering::Acquire) {
+        Err(Failure::Unavailable)
+    } else {
+        Ok(())
+    }
 }
 
 unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
@@ -277,43 +312,98 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
         .encode_utf16()
         .chain(Some(0))
         .collect::<Vec<_>>();
+    let stop = match WindowsStopEvent::create() {
+        Ok(stop) => stop,
+        Err(_) => {
+            SERVICE_FAILED.store(true, Ordering::Release);
+            return;
+        }
+    };
+    let mut context = Box::new(ServiceControlContext {
+        stop,
+        status_handle: std::ptr::null_mut(),
+        state: AtomicU32::new(SERVICE_START_PENDING),
+    });
     let status_handle = unsafe {
-        RegisterServiceCtrlHandlerExW(name.as_mut_ptr(), Some(service_control), std::ptr::null())
+        RegisterServiceCtrlHandlerExW(
+            name.as_mut_ptr(),
+            Some(service_control),
+            (&raw mut *context).cast(),
+        )
     };
     if status_handle.is_null() {
+        SERVICE_FAILED.store(true, Ordering::Release);
         return;
     }
-    let mut status = SERVICE_STATUS {
-        dwServiceType: SERVICE_WIN32_OWN_PROCESS,
-        dwCurrentState: SERVICE_RUNNING,
-        dwControlsAccepted: 0,
-        dwWin32ExitCode: 0,
-        dwServiceSpecificExitCode: 0,
-        dwCheckPoint: 0,
-        dwWaitHint: 0,
-    };
-    if unsafe { SetServiceStatus(status_handle, &raw const status) } == 0 {
+    context.status_handle = status_handle;
+    if context.publish(SERVICE_START_PENDING, 0, 0).is_err() {
+        SERVICE_FAILED.store(true, Ordering::Release);
         return;
     }
     let result = SERVICE_ARGUMENTS
         .get()
         .cloned()
         .ok_or(Failure::Unavailable)
-        .and_then(|arguments| serve_vault(&mut arguments.into_iter()));
-    status.dwCurrentState = SERVICE_STOPPED;
-    status.dwWin32ExitCode = u32::from(result.is_err());
-    unsafe { SetServiceStatus(status_handle, &raw const status) };
+        .and_then(|arguments| {
+            serve_vault(&mut arguments.into_iter(), &context.stop, || {
+                context.publish(SERVICE_RUNNING, SERVICE_ACCEPT_STOP, 0)
+            })
+        });
+    let exit_code = u32::from(result.is_err() || SERVICE_FAILED.load(Ordering::Acquire));
+    if result.is_err() || context.publish(SERVICE_STOPPED, 0, exit_code).is_err() {
+        SERVICE_FAILED.store(true, Ordering::Release);
+    }
 }
 
 unsafe extern "system" fn service_control(
-    _control: u32,
+    control: u32,
     _event_type: u32,
     _event_data: *mut core::ffi::c_void,
-    _context: *mut core::ffi::c_void,
+    context: *mut core::ffi::c_void,
 ) -> u32 {
-    // This service deliberately advertises no accepted controls. SCM restart
-    // tests terminate the service process and verify a fresh identity/handshake.
-    120
+    if context.is_null() {
+        return 120;
+    }
+    let context = unsafe { &*context.cast::<ServiceControlContext>() };
+    match control {
+        SERVICE_CONTROL_STOP => {
+            if context.state.load(Ordering::Acquire) != SERVICE_RUNNING {
+                return ERROR_SERVICE_CANNOT_ACCEPT_CTRL;
+            }
+            let pending = context.publish(SERVICE_STOP_PENDING, 0, 0);
+            let signalled = context.stop.signal().map_err(|_| Failure::Unavailable);
+            if pending.and(signalled).is_err() {
+                SERVICE_FAILED.store(true, Ordering::Release);
+                ERROR_GEN_FAILURE
+            } else {
+                0
+            }
+        }
+        SERVICE_CONTROL_INTERROGATE => 0,
+        _ => 120,
+    }
+}
+
+fn publish_service_status(
+    handle: SERVICE_STATUS_HANDLE,
+    state: u32,
+    controls: u32,
+    exit_code: u32,
+) -> Result<(), Failure> {
+    let status = SERVICE_STATUS {
+        dwServiceType: SERVICE_WIN32_OWN_PROCESS,
+        dwCurrentState: state,
+        dwControlsAccepted: controls,
+        dwWin32ExitCode: exit_code,
+        dwServiceSpecificExitCode: 0,
+        dwCheckPoint: u32::from(state == SERVICE_STOP_PENDING),
+        dwWaitHint: 0,
+    };
+    if unsafe { SetServiceStatus(handle, &raw const status) } == 0 {
+        Err(Failure::Unavailable)
+    } else {
+        Ok(())
+    }
 }
 
 fn keygen(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
@@ -393,7 +483,11 @@ fn provision_profile(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
     write_new(&path, &encoded)
 }
 
-fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+fn serve_vault(
+    arguments: &mut impl Iterator<Item = OsString>,
+    stop: &WindowsStopEvent,
+    ready: impl FnOnce() -> Result<(), Failure>,
+) -> Result<(), Failure> {
     let bootstrap_path = take_path(arguments, "--bootstrap")?;
     let vault_id = take_text(arguments, "--vault-id")?;
     let vault_path = take_path(arguments, "--vault")?;
@@ -431,17 +525,57 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
             audit_custody,
             diagnostics: diagnostics.clone(),
         });
+        let (ready_sender, ready_receiver) = mpsc::channel();
         let agent = {
             let bootstrap = Arc::clone(&bootstrap);
             let service = Arc::clone(&service);
             let vault_id = vault_id.clone();
-            std::thread::spawn(move || serve_role(Role::Agent, &vault_id, &bootstrap, &service))
+            let stop = stop.try_clone().map_err(|_| Failure::Unavailable)?;
+            let ready_sender = ready_sender.clone();
+            std::thread::spawn(move || {
+                serve_role(
+                    Role::Agent,
+                    &vault_id,
+                    &bootstrap,
+                    &service,
+                    &stop,
+                    ready_sender,
+                )
+            })
         };
-        let human =
-            std::thread::spawn(move || serve_role(Role::Human, &vault_id, &bootstrap, &service));
-        agent.join().map_err(|_| Failure::Unavailable)??;
-        human.join().map_err(|_| Failure::Unavailable)??;
-        Err(Failure::Unavailable)
+        let stop_for_human = stop.try_clone().map_err(|_| Failure::Unavailable)?;
+        let human = std::thread::spawn(move || {
+            serve_role(
+                Role::Human,
+                &vault_id,
+                &bootstrap,
+                &service,
+                &stop_for_human,
+                ready_sender,
+            )
+        });
+        let readiness = (|| {
+            for _ in 0..2 {
+                ready_receiver.recv().map_err(|_| Failure::Unavailable)??;
+            }
+            ready()
+        })();
+        let stop_result = if readiness.is_err() {
+            stop.signal().map_err(|_| Failure::Unavailable)
+        } else {
+            Ok(())
+        };
+        let agent_result = agent.join();
+        let human_result = human.join();
+        readiness?;
+        stop_result?;
+        agent_result.map_err(|_| Failure::Unavailable)??;
+        human_result.map_err(|_| Failure::Unavailable)??;
+        if stop.is_signalled().map_err(|_| Failure::Unavailable)? {
+            Ok(())
+        } else {
+            Err(Failure::Unavailable)
+        }
     })();
     if result.is_err() {
         if let Some(diagnostics) = diagnostics.as_ref() {
@@ -456,6 +590,8 @@ fn serve_role(
     vault_id: &str,
     bootstrap: &Bootstrap,
     service: &VaultService,
+    stop: &WindowsStopEvent,
+    ready: mpsc::Sender<Result<(), Failure>>,
 ) -> Result<(), Failure> {
     let (client_sid, client_spki) = match role {
         Role::Agent => (&bootstrap.agent_sid, &bootstrap.agent_spki),
@@ -468,25 +604,49 @@ fn serve_role(
             Role::Human => ServiceDiagnosticPhase::HumanTlsOk,
         })?;
     }
-    let mut pipe_reported = false;
-    loop {
-        let pipe = WindowsServerPipe::create(
-            role.endpoint(),
-            vault_id,
-            &bootstrap.service_sid,
-            client_sid,
-        )
-        .map_err(|_| Failure::Unavailable)?;
-        if !pipe_reported {
-            if let Some(diagnostics) = service.diagnostics.as_ref() {
-                diagnostics.record(match role {
-                    Role::Agent => ServiceDiagnosticPhase::AgentPipeOk,
-                    Role::Human => ServiceDiagnosticPhase::HumanPipeOk,
-                })?;
-            }
-            pipe_reported = true;
+    let first_pipe = WindowsServerPipe::create(
+        role.endpoint(),
+        vault_id,
+        &bootstrap.service_sid,
+        client_sid,
+        stop,
+    )
+    .map_err(|_| Failure::Unavailable);
+    let pipe = match first_pipe {
+        Ok(pipe) => pipe,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return Err(error);
         }
+    };
+    if let Some(diagnostics) = service.diagnostics.as_ref() {
+        let result = diagnostics.record(match role {
+            Role::Agent => ServiceDiagnosticPhase::AgentPipeOk,
+            Role::Human => ServiceDiagnosticPhase::HumanPipeOk,
+        });
+        if let Err(error) = result {
+            let _ = ready.send(Err(error));
+            return Err(error);
+        }
+    }
+    ready.send(Ok(())).map_err(|_| Failure::Unavailable)?;
+    let mut next_pipe = Some(pipe);
+    loop {
+        let pipe = next_pipe.take().ok_or(Failure::Unavailable)?;
         let _ = handle_server_connection(pipe, role, &config, service, client_spki);
+        if stop.is_signalled().map_err(|_| Failure::Unavailable)? {
+            return Ok(());
+        }
+        next_pipe = Some(
+            WindowsServerPipe::create(
+                role.endpoint(),
+                vault_id,
+                &bootstrap.service_sid,
+                client_sid,
+                stop,
+            )
+            .map_err(|_| Failure::Unavailable)?,
+        );
     }
 }
 
