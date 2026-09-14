@@ -54,9 +54,9 @@ use pm_vault::{
 };
 
 use crate::human_wire::{
-    encode_prepared, handle_native_backup_download, handle_native_backup_restore,
-    handle_native_recovery, handle_plaintext_backup_download, handle_recovery_rotation,
-    handle_stream_download, handle_stream_upload, read_frame, write_frame,
+    handle_native_backup_download, handle_native_backup_restore, handle_native_recovery,
+    handle_plaintext_backup_download, handle_recovery_rotation, handle_stream_download,
+    handle_stream_upload, read_frame, write_frame,
 };
 use crate::sync_job;
 use crate::{Failure, take_path};

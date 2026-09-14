@@ -1848,6 +1848,17 @@ resolverla y ejecutar la matriz nativa, el binario Windows no es aceptación.
 También quedan por acreditar DACL exacta de key/store, reemplazo atómico de
 status existente, firma del programa y publicación/backup reales.
 
+Verificación local del checkpoint de composición: el primer `cargo check`
+(`/tmp/pm27-sync-check1.log`) conservó dos RED de compilación, un `PathBuf`
+pasado sin préstamo al exchange común y una lifetime ambigua en el helper de
+argumentos TUI. Tras las correcciones mecánicas, `cargo check --workspace
+--all-targets --locked --offline` pasó (`/tmp/pm27-sync-check2.log`). También
+pasaron `pm-sync --all-targets` (1 unit + 6 E2E TLS reales), el parser TUI Unix
+en los dos targets y Clippy enfocado de `pm-sync`/`pm-custody`
+(`/tmp/pm27-sync-focused1.log`). Esto sólo verifica el cfg Linux; los argumentos
+SID, Named Pipe y deadline Windows siguen necesitando compilación y ejecución
+nativas.
+
 El método nativo crea servidor y cliente sync efímeros con SIDs distintos, hace
 pair por teclado en ConPTY, inicia el trabajo una sola vez y observa
 queued/pushing/pulling/terminal mediante 66. Debe probar lock e idle durante el

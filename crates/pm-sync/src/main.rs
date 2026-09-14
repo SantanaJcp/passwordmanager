@@ -520,7 +520,7 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
         _ => return Err(()),
     };
     let config = client_config(&key, &server)?;
-    let response = client_exchange(socket, config, json.as_bytes())?;
+    let response = client_exchange(&socket, config, json.as_bytes())?;
     let response = String::from_utf8(response).map_err(|_| ())?;
     if !response.starts_with("{\"ok\":true") {
         let code = if response.contains("\"code\":\"missing\"") {

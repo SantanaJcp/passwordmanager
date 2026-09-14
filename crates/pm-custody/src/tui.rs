@@ -2551,7 +2551,7 @@ const fn kind_label(kind: u8) -> &'static str {
 mod tests {
     use super::*;
 
-    fn arguments(values: &[&str]) -> impl Iterator<Item = OsString> + '_ {
+    fn arguments<'a>(values: &'a [&'a str]) -> impl Iterator<Item = OsString> + 'a {
         values.iter().map(OsString::from)
     }
 
