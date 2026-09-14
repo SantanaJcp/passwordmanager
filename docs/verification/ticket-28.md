@@ -462,3 +462,17 @@ válida `/tmp/pm28-red-storage-enospc-attempt2.log` terminó rc0 y observó ENOS
 real, rollback integral, canario ausente, `integrity_check=ok`, delta único de
 `HumanUnlock`, restart del mismo vault y cleanup verificado. Es cobertura GREEN
 de comportamiento existente, no un RED y no motivó cambios de producto.
+
+## Séptimo vertical: primer campo secreto en custodia
+
+El seam público es `pm-custody human-password-crud`. El fixture crea claves y
+perfil reales con UIDs separados, pero no necesita iniciar servidor: el comando
+lee su primer campo password antes de conectar. Un hijo con `RLIMIT_MEMLOCK=0`
+recibe únicamente el header wire de longitud 32 y mantiene abierto stdin sin
+entregar payload. Debe terminar rc4 `CUSTODY_UNAVAILABLE` dentro del plazo fijo
+del fixture, antes de leer un byte secreto, sin stdout ni socket/vault creado.
+La variante actual reserva `Vec<u8>` desbloqueado y queda esperando payload; ese
+timeout será el RED conductual. El GREEN mínimo reserva `ProtectedBytes` por la
+longitud pública después de validar el límite y antes de `read_exact`, y migra
+sólo el password de este comando; no convierte el owner protegido a `Vec`, no
+cambia otros campos ni atribuye cobertura a custodia/vault/adaptadores completos.
