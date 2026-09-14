@@ -175,6 +175,11 @@ pub struct WindowsServerPipe {
     client_pid: Option<u32>,
 }
 
+// The pipe owns its HANDLE and moves into exactly one service worker before
+// any accept or I/O. It is not Sync; duplicated handles remain confined to the
+// same worker while rustls and the human identity lease are composed.
+unsafe impl Send for WindowsServerPipe {}
+
 impl WindowsServerPipe {
     /// Creates the first, local-only instance with an explicit protected DACL.
     ///
@@ -1095,6 +1100,12 @@ mod tests {
 
     const CANARY: &[u8] = b"ticket27-synthetic-native-canary";
     static CLIPBOARD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn owned_server_pipe_can_move_to_one_service_worker() {
+        fn require_send<T: Send>() {}
+        require_send::<WindowsServerPipe>();
+    }
 
     struct OwnedTestPipe(Option<HANDLE>);
 

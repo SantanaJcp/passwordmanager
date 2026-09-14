@@ -1154,3 +1154,12 @@ la primera lectura diagnóstica posterior a `human-lock`, conservando las
 lecturas append-only posteriores. `rustfmt`, ambos checkers estáticos, `sh -n`
 y `git diff --check` pasan; Cargo y Windows siguen pendientes de una nueva
 ventana/ejecución.
+
+La composición mueve cada `WindowsServerPipe` preparado desde el hilo de
+arranque hacia un único worker. Como `HANDLE` es un puntero opaco y no obtiene
+`Send` automáticamente, el backend declara únicamente `Send`, no `Sync`: el
+objeto conserva ownership exclusivo, no ha iniciado I/O antes del movimiento y
+sus duplicados posteriores permanecen dentro del mismo worker para rustls y la
+lease humana. Una regresión de trait en el módulo Windows exige esta propiedad
+sin construir un handle sintético. La ejecución nativa sigue siendo necesaria
+para validar el contrato operativo.
