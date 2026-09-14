@@ -1132,3 +1132,25 @@ siguen los cinco tests nativos, pipe contract, DPAPI, ConPTY, clipboard, cleanup
 estricto y gates completos. Un RED posterior de auditoría vacía permanece un
 fallo independiente y no invalida el STOP ya observado, pero impide aceptar el
 ticket completo.
+
+El primer checkpoint GREEN estático `d9acde4` hizo pasar el checker de STOP,
+pero el primer `scripts/check.sh` posterior terminó antes de Cargo: el guard de
+orden del fixture escogía la última lectura diagnóstica de toda la historia,
+que ahora pertenece al reinicio posterior, en vez de la primera lectura entre
+`human-lock` y su aserción pública. Durante esa inspección también se detectó
+que el checkpoint todavía podía ocultar fallos de cierre/drain y dejar un
+worker separado en salidas tempranas; por tanto no se considera candidato
+nativo.
+
+La corrección mantiene un único evento STOP compartido por ownership `Arc` y
+lo cierra explícitamente sólo después de unir ambos workers y publicar siempre
+`STOPPED`. Cada evento de operación se cierra en todas las salidas y combina el
+error primario con un fallo de cierre; una falla del wait cancela y drena antes
+de devolver ambos errores. Los dos roles se preparan por completo antes de
+crear threads. Cualquier fallo posterior señala el evento y el padre intenta
+ambos `join`; ningún fallo del primer spawn puede dejar un worker y ningún
+fallo del segundo evita unir el primero. El guard del fixture ahora selecciona
+la primera lectura diagnóstica posterior a `human-lock`, conservando las
+lecturas append-only posteriores. `rustfmt`, ambos checkers estáticos, `sh -n`
+y `git diff --check` pasan; Cargo y Windows siguen pendientes de una nueva
+ventana/ejecución.

@@ -311,7 +311,9 @@ for phase in $human_phases; do
     require_literal "'phase=$phase'" "$lab"
 done
 human_run_line=$(grep -nF "@('human-lock', '--profile'" "$lab" | cut -d: -f1)
-human_diagnostic_line=$(grep -nF 'Write-ServiceSubphaseDiagnostics $diagnosticPath' "$lab" | tail -n1 | cut -d: -f1)
+human_diagnostic_line=$(awk -v operation="$human_run_line" '
+    NR > operation && index($0, "Write-ServiceSubphaseDiagnostics $diagnosticPath") { print NR; exit }
+' "$lab")
 human_assert_line=$(grep -nF "'human native channel failed: '" "$lab" | cut -d: -f1)
 test -n "$human_run_line" && test -n "$human_diagnostic_line" &&
     test -n "$human_assert_line" && test "$human_run_line" -lt "$human_diagnostic_line" &&

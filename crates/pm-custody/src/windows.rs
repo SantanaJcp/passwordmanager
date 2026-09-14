@@ -11,7 +11,6 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, Ordering},
-        mpsc,
     },
 };
 
@@ -78,7 +77,8 @@ struct ServiceControlContext {
 }
 
 // SCM invokes the handler on a system-owned thread while `service_main` owns
-// the stable boxed context. Both fields are immutable after registration.
+// the stable boxed context. The kernel handles are immutable after registration;
+// the atomic state is the only shared mutation.
 unsafe impl Send for ServiceControlContext {}
 unsafe impl Sync for ServiceControlContext {}
 
@@ -260,6 +260,15 @@ struct VaultService {
     diagnostics: Option<ServiceDiagnostics>,
 }
 
+struct PreparedRole {
+    role: Role,
+    pipe: WindowsServerPipe,
+    config: Arc<ServerConfig>,
+    peer_rpk: Vec<u8>,
+    service_sid: String,
+    client_sid: String,
+}
+
 pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
     let mut arguments = arguments.into_iter();
     let command = arguments.next().ok_or(Failure::Usage)?;
@@ -269,7 +278,9 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("provision-profile") => provision_profile(&mut arguments),
         Some("serve-vault") => {
             let stop = WindowsStopEvent::create().map_err(|_| Failure::Unavailable)?;
-            serve_vault(&mut arguments, &stop, || Ok(()))
+            let result = serve_vault(&mut arguments, &stop, || Ok(()));
+            let cleanup = stop.close().map_err(|_| Failure::Unavailable);
+            result.and(cleanup)
         }
         Some("service") => service_dispatch(arguments.collect()),
         Some("probe") => probe(&mut arguments),
@@ -350,7 +361,10 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
             })
         });
     let exit_code = u32::from(result.is_err() || SERVICE_FAILED.load(Ordering::Acquire));
-    if result.is_err() || context.publish(SERVICE_STOPPED, 0, exit_code).is_err() {
+    let stopped = context.publish(SERVICE_STOPPED, 0, exit_code);
+    let ServiceControlContext { stop, .. } = *context;
+    let closed = stop.close().map_err(|_| Failure::Unavailable);
+    if result.is_err() || stopped.is_err() || closed.is_err() {
         SERVICE_FAILED.store(true, Ordering::Release);
     }
 }
@@ -525,42 +539,36 @@ fn serve_vault(
             audit_custody,
             diagnostics: diagnostics.clone(),
         });
-        let (ready_sender, ready_receiver) = mpsc::channel();
-        let agent = {
-            let bootstrap = Arc::clone(&bootstrap);
-            let service = Arc::clone(&service);
-            let vault_id = vault_id.clone();
-            let stop = stop.try_clone().map_err(|_| Failure::Unavailable)?;
-            let ready_sender = ready_sender.clone();
-            std::thread::spawn(move || {
-                serve_role(
-                    Role::Agent,
-                    &vault_id,
-                    &bootstrap,
-                    &service,
-                    &stop,
-                    ready_sender,
-                )
+        let agent_role = prepare_role(Role::Agent, &vault_id, &bootstrap, &service, stop)?;
+        let human_role = prepare_role(Role::Human, &vault_id, &bootstrap, &service, stop)?;
+        let agent_stop = stop.clone();
+        let agent_service = Arc::clone(&service);
+        let agent_vault_id = vault_id.clone();
+        let agent = std::thread::Builder::new()
+            .name("pm-agent-pipe".to_owned())
+            .spawn(move || {
+                serve_role_and_signal(agent_role, &agent_vault_id, &agent_service, &agent_stop)
             })
-        };
-        let stop_for_human = stop.try_clone().map_err(|_| Failure::Unavailable)?;
-        let human = std::thread::spawn(move || {
-            serve_role(
-                Role::Human,
-                &vault_id,
-                &bootstrap,
-                &service,
-                &stop_for_human,
-                ready_sender,
-            )
-        });
-        let readiness = (|| {
-            for _ in 0..2 {
-                ready_receiver.recv().map_err(|_| Failure::Unavailable)??;
+            .map_err(|_| Failure::Unavailable)?;
+        let human_stop = stop.clone();
+        let human_service = Arc::clone(&service);
+        let human_vault_id = vault_id.clone();
+        let human = match std::thread::Builder::new()
+            .name("pm-human-pipe".to_owned())
+            .spawn(move || {
+                serve_role_and_signal(human_role, &human_vault_id, &human_service, &human_stop)
+            }) {
+            Ok(human) => human,
+            Err(_) => {
+                let signalled = stop.signal().map_err(|_| Failure::Unavailable);
+                let joined = agent.join().map_err(|_| Failure::Unavailable);
+                signalled?;
+                joined??;
+                return Err(Failure::Unavailable);
             }
-            ready()
-        })();
-        let stop_result = if readiness.is_err() {
+        };
+        let readiness = ready();
+        let signal_result = if readiness.is_err() {
             stop.signal().map_err(|_| Failure::Unavailable)
         } else {
             Ok(())
@@ -568,7 +576,7 @@ fn serve_vault(
         let agent_result = agent.join();
         let human_result = human.join();
         readiness?;
-        stop_result?;
+        signal_result?;
         agent_result.map_err(|_| Failure::Unavailable)??;
         human_result.map_err(|_| Failure::Unavailable)??;
         if stop.is_signalled().map_err(|_| Failure::Unavailable)? {
@@ -585,14 +593,13 @@ fn serve_vault(
     result
 }
 
-fn serve_role(
+fn prepare_role(
     role: Role,
     vault_id: &str,
     bootstrap: &Bootstrap,
     service: &VaultService,
     stop: &WindowsStopEvent,
-    ready: mpsc::Sender<Result<(), Failure>>,
-) -> Result<(), Failure> {
+) -> Result<PreparedRole, Failure> {
     let (client_sid, client_spki) = match role {
         Role::Agent => (&bootstrap.agent_sid, &bootstrap.agent_spki),
         Role::Human => (&bootstrap.human_sid, &bootstrap.human_spki),
@@ -604,48 +611,68 @@ fn serve_role(
             Role::Human => ServiceDiagnosticPhase::HumanTlsOk,
         })?;
     }
-    let first_pipe = WindowsServerPipe::create(
+    let pipe = WindowsServerPipe::create(
         role.endpoint(),
         vault_id,
         &bootstrap.service_sid,
         client_sid,
         stop,
     )
-    .map_err(|_| Failure::Unavailable);
-    let pipe = match first_pipe {
-        Ok(pipe) => pipe,
-        Err(error) => {
-            let _ = ready.send(Err(error));
-            return Err(error);
-        }
-    };
+    .map_err(|_| Failure::Unavailable)?;
     if let Some(diagnostics) = service.diagnostics.as_ref() {
-        let result = diagnostics.record(match role {
+        diagnostics.record(match role {
             Role::Agent => ServiceDiagnosticPhase::AgentPipeOk,
             Role::Human => ServiceDiagnosticPhase::HumanPipeOk,
-        });
-        if let Err(error) = result {
-            let _ = ready.send(Err(error));
-            return Err(error);
-        }
+        })?;
     }
-    ready.send(Ok(())).map_err(|_| Failure::Unavailable)?;
+    Ok(PreparedRole {
+        role,
+        pipe,
+        config,
+        peer_rpk: client_spki.clone(),
+        service_sid: bootstrap.service_sid.clone(),
+        client_sid: client_sid.to_owned(),
+    })
+}
+
+fn serve_role_and_signal(
+    prepared: PreparedRole,
+    vault_id: &str,
+    service: &VaultService,
+    stop: &WindowsStopEvent,
+) -> Result<(), Failure> {
+    let result = serve_role(prepared, vault_id, service, stop);
+    if result.is_err() {
+        let signalled = stop.signal().map_err(|_| Failure::Unavailable);
+        return result.and(signalled);
+    }
+    result
+}
+
+fn serve_role(
+    prepared: PreparedRole,
+    vault_id: &str,
+    service: &VaultService,
+    stop: &WindowsStopEvent,
+) -> Result<(), Failure> {
+    let PreparedRole {
+        role,
+        pipe,
+        config,
+        peer_rpk,
+        service_sid,
+        client_sid,
+    } = prepared;
     let mut next_pipe = Some(pipe);
     loop {
         let pipe = next_pipe.take().ok_or(Failure::Unavailable)?;
-        let _ = handle_server_connection(pipe, role, &config, service, client_spki);
+        let _ = handle_server_connection(pipe, role, &config, service, &peer_rpk);
         if stop.is_signalled().map_err(|_| Failure::Unavailable)? {
             return Ok(());
         }
         next_pipe = Some(
-            WindowsServerPipe::create(
-                role.endpoint(),
-                vault_id,
-                &bootstrap.service_sid,
-                client_sid,
-                stop,
-            )
-            .map_err(|_| Failure::Unavailable)?,
+            WindowsServerPipe::create(role.endpoint(), vault_id, &service_sid, &client_sid, stop)
+                .map_err(|_| Failure::Unavailable)?,
         );
     }
 }

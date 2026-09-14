@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::{io, ptr};
+use std::{io, ptr, sync::Arc};
 use windows_sys::Win32::{
     Foundation::{
         CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_IO_PENDING, ERROR_NOT_FOUND,
@@ -61,14 +61,25 @@ use crate::{ChannelAuthenticationError, WindowsEndpoint, windows_pipe_sddl};
 const PIPE_BUFFER: u32 = 1024 * 1024;
 
 /// Manual-reset event shared by the service control handler and server I/O.
-pub struct WindowsStopEvent {
+struct StopEventHandle {
     handle: HANDLE,
 }
 
-// Windows kernel handles may be used from either service worker. Ownership is
-// still unique: clones duplicate the underlying handle and each closes once.
-unsafe impl Send for WindowsStopEvent {}
-unsafe impl Sync for WindowsStopEvent {}
+unsafe impl Send for StopEventHandle {}
+unsafe impl Sync for StopEventHandle {}
+
+impl Drop for StopEventHandle {
+    fn drop(&mut self) {
+        if !self.handle.is_null() && unsafe { CloseHandle(self.handle) } == 0 {
+            std::process::abort();
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct WindowsStopEvent {
+    inner: Arc<StopEventHandle>,
+}
 
 impl WindowsStopEvent {
     /// Creates an unsignalled manual-reset event.
@@ -80,7 +91,9 @@ impl WindowsStopEvent {
         if handle.is_null() {
             Err(ChannelAuthenticationError)
         } else {
-            Ok(Self { handle })
+            Ok(Self {
+                inner: Arc::new(StopEventHandle { handle }),
+            })
         }
     }
 
@@ -89,37 +102,32 @@ impl WindowsStopEvent {
     /// # Errors
     /// Returns an opaque error if Windows rejects the signal.
     pub fn signal(&self) -> Result<(), ChannelAuthenticationError> {
-        if unsafe { SetEvent(self.handle) } == 0 {
+        if unsafe { SetEvent(self.inner.handle) } == 0 {
             Err(ChannelAuthenticationError)
         } else {
             Ok(())
         }
     }
 
-    /// Duplicates this event without sharing userspace ownership.
-    ///
-    /// # Errors
-    /// Returns an opaque error if Windows refuses the duplication.
-    pub fn try_clone(&self) -> Result<Self, ChannelAuthenticationError> {
-        Ok(Self {
-            handle: duplicate_handle(self.handle)?,
-        })
-    }
-
     #[must_use]
     pub fn is_signalled(&self) -> Result<bool, ChannelAuthenticationError> {
-        event_is_signalled(self.handle).map_err(|_| ChannelAuthenticationError)
+        event_is_signalled(self.inner.handle).map_err(|_| ChannelAuthenticationError)
     }
 
     #[must_use]
-    pub const fn raw_handle(&self) -> HANDLE {
-        self.handle
+    pub fn raw_handle(&self) -> HANDLE {
+        self.inner.handle
     }
-}
 
-impl Drop for WindowsStopEvent {
-    fn drop(&mut self) {
-        unsafe { CloseHandle(self.handle) };
+    /// Closes the event after every service worker and pipe has terminated.
+    ///
+    /// # Errors
+    /// Returns an opaque error for outstanding owners or a failed kernel close.
+    pub fn close(self) -> Result<(), ChannelAuthenticationError> {
+        let mut owned = Arc::try_unwrap(self.inner).map_err(|_| ChannelAuthenticationError)?;
+        let handle = owned.handle;
+        owned.handle = ptr::null_mut();
+        close_handle(handle)
     }
 }
 
@@ -162,7 +170,7 @@ fn event_is_signalled(event: HANDLE) -> io::Result<bool> {
 
 pub struct WindowsServerPipe {
     handle: HANDLE,
-    stop_event: HANDLE,
+    stop: WindowsStopEvent,
     expected_client_sid: String,
     client_pid: Option<u32>,
 }
@@ -202,16 +210,9 @@ impl WindowsServerPipe {
         let creation = create_pipe_instance(name.as_ptr(), &raw const security);
         unsafe { LocalFree(descriptor) };
         let handle = creation.map_err(|_| ChannelAuthenticationError)?;
-        let stop_event = match duplicate_handle(stop.handle) {
-            Ok(stop_event) => stop_event,
-            Err(error) => {
-                close_handle(handle)?;
-                return Err(error);
-            }
-        };
         Ok(Self {
             handle,
-            stop_event,
+            stop: stop.clone(),
             expected_client_sid: client_sid.to_owned(),
             client_pid: None,
         })
@@ -222,7 +223,7 @@ impl WindowsServerPipe {
     /// # Errors
     /// Returns an opaque error when either kernel identity check fails.
     pub fn accept(&mut self) -> Result<u32, ChannelAuthenticationError> {
-        overlapped_connect(self.handle, self.stop_event)?;
+        overlapped_connect(self.handle, self.stop.raw_handle())?;
         let mut pid = 0;
         if unsafe { GetNamedPipeClientProcessId(self.handle, &raw mut pid) } == 0 || pid == 0 {
             return Err(ChannelAuthenticationError);
@@ -268,7 +269,7 @@ impl WindowsServerPipe {
     /// Reports whether SCM has requested shutdown for this server instance.
     #[must_use]
     pub fn stop_requested(&self) -> Result<bool, ChannelAuthenticationError> {
-        event_is_signalled(self.stop_event).map_err(|_| ChannelAuthenticationError)
+        self.stop.is_signalled()
     }
 
     /// Duplicates the authenticated kernel handle for a TLS stream while the
@@ -277,17 +278,10 @@ impl WindowsServerPipe {
     /// # Errors
     /// Returns an opaque error when the kernel refuses a duplication or cleanup.
     pub fn try_clone(&self) -> Result<Self, ChannelAuthenticationError> {
-        let stop_event = duplicate_handle(self.stop_event)?;
-        let handle = match duplicate_handle(self.handle) {
-            Ok(handle) => handle,
-            Err(error) => {
-                close_handle(stop_event)?;
-                return Err(error);
-            }
-        };
+        let handle = duplicate_handle(self.handle)?;
         Ok(Self {
             handle,
-            stop_event,
+            stop: self.stop.clone(),
             expected_client_sid: self.expected_client_sid.clone(),
             client_pid: self.client_pid,
         })
@@ -331,19 +325,21 @@ fn overlapped_connect(pipe: HANDLE, stop_event: HANDLE) -> Result<(), ChannelAut
     } else {
         None
     };
-    let result = if connected != 0 || connect_error == Some(ERROR_PIPE_CONNECTED) {
-        if event_is_signalled(stop_event).map_err(|_| ChannelAuthenticationError)? {
-            Err(io::Error::from(io::ErrorKind::Interrupted))
+    let result = (|| {
+        if connected != 0 || connect_error == Some(ERROR_PIPE_CONNECTED) {
+            if event_is_signalled(stop_event)? {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                Ok(0)
+            }
+        } else if connect_error == Some(ERROR_IO_PENDING) {
+            await_overlapped(pipe, stop_event, &mut overlapped)
+        } else if let Some(code) = connect_error {
+            Err(io::Error::from_raw_os_error(code.cast_signed()))
         } else {
-            Ok(0)
+            unreachable!("failed ConnectNamedPipe always sets an error code")
         }
-    } else if connect_error == Some(ERROR_IO_PENDING) {
-        await_overlapped(pipe, stop_event, &mut overlapped)
-    } else if let Some(code) = connect_error {
-        Err(io::Error::from_raw_os_error(code.cast_signed()))
-    } else {
-        unreachable!("failed ConnectNamedPipe always sets an error code")
-    };
+    })();
     close_operation_event(operation_event, result)
         .map(|_| ())
         .map_err(|_| ChannelAuthenticationError)
@@ -428,7 +424,8 @@ fn await_overlapped(
     let handles = [stop_event, overlapped.hEvent];
     let waited = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
     if waited == WAIT_OBJECT_0 {
-        return cancel_and_drain(pipe, overlapped);
+        cancel_and_drain(pipe, overlapped)?;
+        return Err(io::Error::from(io::ErrorKind::Interrupted));
     }
     if waited != WAIT_OBJECT_0 + 1 {
         let wait_error = if waited == WAIT_FAILED {
@@ -436,8 +433,10 @@ fn await_overlapped(
         } else {
             io::Error::other("unexpected Windows wait result")
         };
-        let _ = cancel_and_drain(pipe, overlapped);
-        return Err(wait_error);
+        return match cancel_and_drain(pipe, overlapped) {
+            Ok(()) => Err(wait_error),
+            Err(cleanup_error) => Err(combine_io_errors(wait_error, cleanup_error)),
+        };
     }
     let mut transferred = 0;
     if unsafe { GetOverlappedResult(pipe, overlapped, &raw mut transferred, 0) } == 0 {
@@ -449,7 +448,7 @@ fn await_overlapped(
     }
 }
 
-fn cancel_and_drain(pipe: HANDLE, overlapped: &mut OVERLAPPED) -> io::Result<u32> {
+fn cancel_and_drain(pipe: HANDLE, overlapped: &mut OVERLAPPED) -> io::Result<()> {
     let cancelled = unsafe { CancelIoEx(pipe, overlapped) };
     let cancel_error = if cancelled == 0 {
         let code = unsafe { GetLastError() };
@@ -460,13 +459,22 @@ fn cancel_and_drain(pipe: HANDLE, overlapped: &mut OVERLAPPED) -> io::Result<u32
     let mut transferred = 0;
     let drained = unsafe { GetOverlappedResult(pipe, overlapped, &raw mut transferred, 1) };
     let drain_error = (drained == 0).then(|| unsafe { GetLastError() });
-    if let Some(code) = cancel_error {
-        return Err(io::Error::from_raw_os_error(code.cast_signed()));
+    let cancel_error = cancel_error.map(|code| io::Error::from_raw_os_error(code.cast_signed()));
+    let drain_error = match drain_error {
+        None | Some(ERROR_OPERATION_ABORTED) => None,
+        Some(code) => Some(io::Error::from_raw_os_error(code.cast_signed())),
+    };
+    match (cancel_error, drain_error) {
+        (None, None) => Ok(()),
+        (Some(error), None) | (None, Some(error)) => Err(error),
+        (Some(cancel), Some(drain)) => Err(combine_io_errors(cancel, drain)),
     }
-    match drain_error {
-        None | Some(ERROR_OPERATION_ABORTED) => Err(io::Error::from(io::ErrorKind::Interrupted)),
-        Some(code) => Err(io::Error::from_raw_os_error(code.cast_signed())),
-    }
+}
+
+fn combine_io_errors(primary: io::Error, cleanup: io::Error) -> io::Error {
+    io::Error::other(format!(
+        "Windows I/O failed: {primary}; cancellation/drain cleanup failed: {cleanup}"
+    ))
 }
 
 fn create_operation_event() -> io::Result<HANDLE> {
@@ -480,7 +488,11 @@ fn create_operation_event() -> io::Result<HANDLE> {
 
 fn close_operation_event(event: HANDLE, result: io::Result<u32>) -> io::Result<u32> {
     if unsafe { CloseHandle(event) } == 0 {
-        return Err(io::Error::last_os_error());
+        let cleanup = io::Error::last_os_error();
+        return match result {
+            Ok(_) => Err(cleanup),
+            Err(primary) => Err(combine_io_errors(primary, cleanup)),
+        };
     }
     result
 }
@@ -488,19 +500,18 @@ fn close_operation_event(event: HANDLE, result: io::Result<u32>) -> io::Result<u
 impl Drop for WindowsServerPipe {
     fn drop(&mut self) {
         unsafe { CloseHandle(self.handle) };
-        unsafe { CloseHandle(self.stop_event) };
     }
 }
 
 impl io::Read for WindowsServerPipe {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        overlapped_read(self.handle, self.stop_event, buffer)
+        overlapped_read(self.handle, self.stop.raw_handle(), buffer)
     }
 }
 
 impl io::Write for WindowsServerPipe {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        overlapped_write(self.handle, self.stop_event, buffer)
+        overlapped_write(self.handle, self.stop.raw_handle(), buffer)
     }
 
     fn flush(&mut self) -> io::Result<()> {
