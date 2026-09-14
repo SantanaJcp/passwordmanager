@@ -1,8 +1,8 @@
 # 25 — TUI de migración, recuperación, sync y auditoría
 
 Type: task
-Status: open
-Owner: unassigned
+Status: claimed
+Owner: sol-25
 Blocked by: 17,19,20,21,22,23
 Spec: ../spec.md
 Requirements: R01,R04,R05,R15,R18,R19
@@ -35,3 +35,5 @@ Pendiente de implementación y evidencia.
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-13 —23 integrado en `0b897c1` desbloquea esta tarea. Conservar cobertura de producto completo: la pantalla23 enumera adjuntos grandes pero todavía no acredita UX TUI de transferencia streaming; componer aquí las operaciones humanas de archivos/descarga/exportación sin imponer el límite de un frame ni usar CLI-only como sustituto. No declarar ese flujo probado por el catálogo de descriptores.
+
+2026-09-13 — Claimed por Sol medium para componer flujos humanos de migración/recuperación/sync/auditoría y transferencia streaming sin pérdida de datos;23 ya integrado. Worktree independiente de24.
