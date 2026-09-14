@@ -181,14 +181,14 @@ require_literal '@($stationSddl, $tuiCustody, '\''tui'\''' "$lab"
 require_literal 'TUI_CONPTY_READY' "$lab"
 for literal in CreateWindowStationW CWF_CREATE_ONLY CreateDesktopW CreatePseudoConsole \
     STARTUPINFOEXW PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE CreateProcessW \
-    'fixture.pseudo_console as *const c_void' OutputDrain VtScreen \
+    'fixture.pseudo_console as *const c_void' OutputDrain 'thread::Builder::new()' \
+    'MAX_CAPTURE_BYTES' 'require_keyboard_ready_observer' \
     'CloseHandle ceded ConPTY input' 'CloseHandle ceded ConPTY output' \
     'WaitForSingleObject(self.process, INFINITE)' \
-    'COORD { X: 42, Y: 12 }' 'COORD { X: 100, Y: 30 }' \
-    'WaitForSingleObject(fixture.process, 15_000)' TUI_CONPTY_RED TUI_CONPTY_READY; do
+    'WaitForSingleObject(process, 15_000)' TUI_CONPTY_RED TUI_CONPTY_READY; do
     require_literal "$literal" "$tui_fixture"
 done
-if grep -Eq 'TerminateProcess|Command::new|winsta0|OpenClipboard|PeekNamedPipe|&raw const fixture\.pseudo_console' "$tui_fixture"; then
+if grep -Eq 'TerminateProcess|Command::new|winsta0|OpenClipboard|PeekNamedPipe|&raw const fixture\.pseudo_console|mpsc::channel|VtScreen' "$tui_fixture"; then
     echo 'Windows TUI tracer contains a process/terminal/clipboard substitute' >&2
     exit 1
 fi

@@ -1496,13 +1496,13 @@ la cuenta humana sintética; no es un segundo binario de producto. El launcher:
 3. lanza el `pm-custody.exe` normal mediante `CreateProcessW`,
    `STARTUPINFOEXW`, `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` y el desktop propio;
 4. cierra inmediatamente los extremos host cedidos a ConPTY tras crear el
-   proceso y drena el output en un hilo dedicado hasta EOF; el hilo principal
-   aplica las secuencias VT a una pantalla `80x24`, sin imprimir captura, y
-   exige el título en celdas visibles antes de enviar una tecla;
-5. redimensiona a `42x12` y `100x30`, reinicia el modelo a cada tamaño y exige
-   un redraw posterior con el mismo título visible, no sólo el HRESULT de
-   `ResizePseudoConsole`; después envía `q` y exige salida normal;
-6. ante cualquier salida, cierra el input propio y llama una sola vez a
+   proceso y drena el output en un hilo dedicado hasta EOF. Este primer RED no
+   interpreta ni guarda VT: sólo cuenta hasta 1 MiB, continúa drenando si se
+   excede y convierte exceso o salida vacía en fallo explícito;
+5. exige que el proceso no salga antes de disponer de un observer verificable
+   de `keyboard-ready`. El binario actual debe salir por el subcomando `tui`
+   ausente; permanecer vivo 15 segundos tampoco se acepta como pantalla lista;
+6. ante cualquier resultado, cierra el input propio y llama una sola vez a
    `ClosePseudoConsole` mientras el hilo sigue drenando. Conserva el handle del
    proceso hasta comprobar su terminación, une el drainer y sólo entonces
    cierra process/thread/pipes/desktop/window station. `ClosePseudoConsole` es
@@ -1525,13 +1525,17 @@ La corrida RED autorizada usa el mismo Windows 11 ARM64 efímero y prerequisitos
 del lab base, con un switch explícito `-TuiConPtyRed`. Debe cruzar primero los
 seis tests nativos, pipe contract, servicio y probes existentes. Después el
 launcher debe llegar al `CreateProcessW` del binario normal y el lab debe fallar
-porque `pm-custody.exe tui` aún no presenta el marcador, no por herramienta,
-ACL, estación, ConPTY o proceso ausentes. El log no puede contener la contraseña
-sintética ni captura VT. La limpieza y comprobación de ausencia existentes se
-ejecutan incluso en RED.
+porque `pm-custody.exe tui` sale antes de un observer `keyboard-ready`, con
+output ConPTY presente pero no expuesto, no por herramienta, ACL, estación,
+ConPTY o proceso ausentes. El log no puede contener la contraseña sintética ni
+captura VT. La limpieza y comprobación de ausencia existentes se ejecutan
+incluso en RED.
 
-Este primer tracer no acredita todavía todos los flujos 23–25, clipboard ni
-aislamiento negativo del agente. Tras observar el RED correcto, el siguiente
-tracer amplía la misma estación con lector/interloper humanos y un proceso
-agente que debe fallar al abrirla; nunca usa la estación interactiva real. No se
-escribe código de producto hasta preservar ese RED nativo.
+Este primer tracer no acredita pantalla, teclado, resize, flujos 23–25,
+clipboard ni aislamiento negativo del agente. Tras observar el RED correcto,
+el siguiente tracer añade un observer test-only verificable; sólo entonces
+espera `keyboard-ready`, envía `q` y exige salida, y un tracer posterior exige
+redraw real de `42x12`/`100x30`. La misma estación se ampliará con
+lector/interloper humanos y un proceso agente que debe fallar al abrirla; nunca
+usa la estación interactiva real. No se escribe código de producto hasta
+preservar este RED nativo.
