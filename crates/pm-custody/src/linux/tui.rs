@@ -1792,4 +1792,29 @@ mod tests {
         assert_eq!(fields, ["/tmp/a|b", "chrome", "keep"]);
         assert!(split_exact::<2>(r"dangling\").is_err());
     }
+
+    #[test]
+    fn clipboard_cleanup_attempts_kill_and_wait_once_after_failures() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = stop_clipboard_with(
+            || { calls.borrow_mut().push("try-wait"); Ok(false) },
+            || { calls.borrow_mut().push("kill"); Err(()) },
+            || { calls.borrow_mut().push("wait"); Err(()) },
+        );
+        assert!(result.is_err());
+        assert_eq!(*calls.borrow(), ["try-wait", "kill", "wait"]);
+    }
+
+    #[test]
+    fn terminal_cleanup_attempts_every_active_restoration() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = restore_terminal_with(
+            TerminalState { raw: true, alternate: true, cursor_hidden: true },
+            || { calls.borrow_mut().push("alternate"); Err(()) },
+            || { calls.borrow_mut().push("cursor"); Err(()) },
+            || { calls.borrow_mut().push("raw"); Err(()) },
+        );
+        assert!(result.is_err());
+        assert_eq!(*calls.borrow(), ["alternate", "cursor", "raw"]);
+    }
 }

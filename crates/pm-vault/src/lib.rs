@@ -736,3 +736,41 @@ fn create_temporary(parent: &Path, target: &Path) -> Result<(PathBuf, File), Vau
         "could not allocate vault temporary file",
     )))
 }
+
+#[cfg(test)]
+mod cleanup_error_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_distinguishes_optional_absence_and_attempts_every_artifact() {
+        let paths = PersistArtifacts::synthetic("/synthetic/temp");
+        let mut attempted = Vec::new();
+        let errors = cleanup_persist_artifacts(&paths, |path| {
+            attempted.push(path.to_owned());
+            if path == paths.temporary {
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "synthetic"))
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "synthetic"))
+            }
+        });
+        assert_eq!(attempted.len(), 3);
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn published_cleanup_failure_retains_operation_and_publication_state() {
+        let original = VaultError::InvalidFormat;
+        let error = combine_persist_result(
+            Err(original),
+            PersistPublication::Published,
+            vec![std::io::Error::new(std::io::ErrorKind::PermissionDenied, "synthetic")],
+        )
+        .unwrap_err();
+        let VaultError::Cleanup(cleanup) = error else {
+            panic!("cleanup failure was discarded")
+        };
+        assert_eq!(cleanup.publication(), PersistPublication::Published);
+        assert_eq!(cleanup.failure_count(), 1);
+        assert!(matches!(cleanup.operation(), Some(VaultError::InvalidFormat)));
+    }
+}
