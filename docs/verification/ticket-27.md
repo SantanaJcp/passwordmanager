@@ -1640,3 +1640,24 @@ cardinalidad y el byte final ASCII. El parser seguirá rechazando el opcode: el
 diagnóstico no lo ignora ni lo incorpora a la pantalla. Una regresión fija debe
 comprobar esa gramática pública cerrada. La siguiente corrida clasificará el
 modo concreto antes de decidir si su semántica debe implementarse.
+
+La corrida
+[`34863382975`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34863382975)
+sobre `10558e2a75c8a25fdaa83b056aa98f7f90b2c7e5` pasó 8/8 tests nativos,
+1/1 del contrato pipe, 4/4 del observer y 1/1 de `pm-sync`. El discriminante
+nativo fue exactamente `modes=[9001] count=1 final=0x68`, es decir,
+`CSI ? 9001 h`; no se alcanzó todavía un oráculo de pantalla del producto.
+El cleanup y el chequeo de ausencia no agregaron otro error. El log está en
+`/tmp/pm-windows-conpty-private-csi-run23-failed.log`.
+
+La especificación primaria de Microsoft Terminal define
+[`CSI ? 9001 h/l` y el wire de `KEY_EVENT_RECORD`](https://github.com/microsoft/terminal/blob/main/doc/specs/%234999%20-%20Improved%20keyboard%20handling%20in%20Conpty.md):
+virtual key, scan code, unidad Unicode UTF-16, down/up, estado de control y
+repeat count. Su parser clasifica la reinyección requerida por ConPTY como
+[`W32IM`](https://github.com/microsoft/terminal/blob/main/src/terminal/parser/stateMachine.hpp).
+El observer modela `9001 h/l` como estado de input sin alterar las celdas y el
+writer test-only consulta ese estado antes de cada input. En modo activo emite
+pares down/up completos; en modo inactivo emite el UTF-8 normal. No hay
+fallthrough tras un error de codificación o mapeo. Los tests verifican
+activación/desactivación, pantalla inalterada, campos de tecla y que otros modos
+privados continúen rechazados.

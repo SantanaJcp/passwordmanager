@@ -10,7 +10,7 @@ fn main() {
 mod windows_fixture {
     use std::{
         ffi::c_void,
-        io::{self, Read},
+        io::{self, Read, Write},
         ptr,
         sync::{
             Arc, Condvar, Mutex,
@@ -45,7 +45,10 @@ mod windows_fixture {
                 UpdateProcThreadAttribute, WaitForSingleObject,
             },
         },
-        UI::WindowsAndMessaging::{CWF_CREATE_ONLY, WINSTA_ALL_ACCESS},
+        UI::{
+            Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC, MapVirtualKeyW},
+            WindowsAndMessaging::{CWF_CREATE_ONLY, WINSTA_ALL_ACCESS},
+        },
     };
 
     const DESKTOP_ALL_ACCESS: u32 = 0x000f_01ff;
@@ -67,6 +70,7 @@ mod windows_fixture {
         column: usize,
         saved_row: usize,
         saved_column: usize,
+        win32_input: bool,
         parse: ParseState,
         csi: Vec<u8>,
         utf8: Vec<u8>,
@@ -90,6 +94,7 @@ mod windows_fixture {
                 column: 0,
                 saved_row: 0,
                 saved_column: 0,
+                win32_input: false,
                 parse: ParseState::Ground,
                 csi: Vec::new(),
                 utf8: Vec::new(),
@@ -228,7 +233,7 @@ mod windows_fixture {
                     || parameters.is_empty()
                     || parameters
                         .iter()
-                        .any(|value| !matches!(value, 25 | 1049 | 2026))
+                        .any(|value| !matches!(value, 25 | 1049 | 2026 | 9001))
                 {
                     self.fail(format!(
                         "unsupported private ConPTY CSI modes={parameters:?} count={} final=0x{command:02x}",
@@ -238,6 +243,9 @@ mod windows_fixture {
                     self.cells.fill(' ');
                     self.row = 0;
                     self.column = 0;
+                }
+                if parameters.contains(&9001) {
+                    self.win32_input = command == b'h';
                 }
                 return;
             }
@@ -391,6 +399,13 @@ mod windows_fixture {
                     ));
                 }
             }
+        }
+
+        fn win32_input(&self) -> Result<bool, String> {
+            self.state
+                .lock()
+                .map(|state| state.win32_input)
+                .map_err(|_| "ConPTY screen observer lock poisoned".to_owned())
         }
 
         fn rejects(&self, forbidden: &[u8]) -> Result<(), String> {
@@ -958,6 +973,50 @@ mod windows_fixture {
         Ok(())
     }
 
+    fn encode_win32_key_events(text: &str) -> io::Result<zeroize::Zeroizing<Vec<u8>>> {
+        let mut encoded = zeroize::Zeroizing::new(Vec::new());
+        for character in text.chars() {
+            let (virtual_key, scan_code) = match character {
+                'a'..='z' => {
+                    let virtual_key = u32::from(character.to_ascii_uppercase());
+                    let scan_code = unsafe { MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC) };
+                    if scan_code == 0 {
+                        return Err(io::Error::other("MapVirtualKeyW returned no scan code"));
+                    }
+                    (virtual_key, scan_code)
+                }
+                '0'..='9' | ' ' | '\r' => {
+                    let virtual_key = u32::from(character);
+                    let scan_code = unsafe { MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC) };
+                    if scan_code == 0 {
+                        return Err(io::Error::other("MapVirtualKeyW returned no scan code"));
+                    }
+                    (virtual_key, scan_code)
+                }
+                _ => (0, 0),
+            };
+            let mut units = [0_u16; 2];
+            for unit in character.encode_utf16(&mut units) {
+                for down in [1, 0] {
+                    write!(encoded, "\x1b[{virtual_key};{scan_code};{unit};{down};0;1_")?;
+                }
+            }
+        }
+        Ok(encoded)
+    }
+
+    fn write_keyboard_input(fixture: &Fixture, bytes: &[u8]) -> io::Result<()> {
+        let input = if fixture.observer.win32_input().map_err(io::Error::other)? {
+            encode_win32_key_events(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| io::Error::other("synthetic keyboard input is not UTF-8"))?,
+            )?
+        } else {
+            zeroize::Zeroizing::new(bytes.to_vec())
+        };
+        write_conpty_input(fixture.input_write, &input)
+    }
+
     fn read_synthetic_password() -> io::Result<zeroize::Zeroizing<Vec<u8>>> {
         let mut password = zeroize::Zeroizing::new(Vec::new());
         std::io::stdin().take(1025).read_to_end(&mut password)?;
@@ -984,14 +1043,14 @@ mod windows_fixture {
         let (first, rest) = password
             .split_first()
             .ok_or_else(|| io::Error::other("synthetic TUI password is empty"))?;
-        write_conpty_input(fixture.input_write, std::slice::from_ref(first))?;
+        write_keyboard_input(fixture, std::slice::from_ref(first))?;
         fixture
             .observer
             .wait_for("Password required (input hidden)")
             .map_err(io::Error::other)?;
         let mut input = zeroize::Zeroizing::new(rest.to_vec());
         input.push(b'\r');
-        write_conpty_input(fixture.input_write, &input)?;
+        write_keyboard_input(fixture, &input)?;
         fixture
             .observer
             .wait_for("Unlocked: selection never reveals secrets")
@@ -1004,7 +1063,7 @@ mod windows_fixture {
             .observer
             .rejects(password)
             .map_err(io::Error::other)?;
-        write_conpty_input(fixture.input_write, b"q")?;
+        write_keyboard_input(fixture, b"q")?;
         require_tui_exit(fixture.process)
     }
 
@@ -1123,6 +1182,30 @@ mod windows_fixture {
                 "unsupported private ConPTY CSI modes=[9001, 1004] count=2 final=0x68"
             );
             assert!(!error.contains("secret-not-reported"));
+        }
+
+        #[test]
+        fn observer_tracks_conpty_win32_input_mode_without_changing_screen() {
+            let observer = TerminalObserver::new();
+            observer.feed(b"visible\x1b[?9001h").unwrap();
+            observer.wait_for("visible").unwrap();
+            assert!(observer.state.lock().unwrap().win32_input);
+            observer.feed(b"\x1b[?9001l").unwrap();
+            let state = observer.state.lock().unwrap();
+            assert!(!state.win32_input);
+            assert!(state.contains("visible"));
+        }
+
+        #[test]
+        fn win32_input_encoder_preserves_key_fields_and_press_release() {
+            let encoded = encode_win32_key_events("a\ré").unwrap();
+            let text = std::str::from_utf8(&encoded).unwrap();
+            assert!(text.starts_with("\x1b[65;"));
+            assert!(text.contains(";97;1;0;1_\x1b[65;"));
+            assert!(text.contains(";97;0;0;1_"));
+            assert!(text.contains(";13;1;0;1_"));
+            assert!(text.contains(";13;0;0;1_"));
+            assert!(text.ends_with("\x1b[0;0;233;0;0;1_"));
         }
 
         #[test]
