@@ -3246,79 +3246,15 @@ impl<'a> SshCursor<'a> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn handle_1pux_import(
     vault: &mut HumanVault,
     tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
     request: &[u8],
 ) -> Result<(), Failure> {
-    let replace_candidates = match request {
-        [0] => false,
-        [1] => true,
-        _ => return Err(Failure::Unavailable),
-    };
     write_frame(tls, &[0])?;
     let source = receive_file_descriptor(&tls.sock)?;
-    let preview = vault
-        .preview_1pux_file(source)
-        .map_err(|_| Failure::Unavailable)?;
-    let mut decisions = Vec::with_capacity(preview.total());
-    let mut offset = 0;
-    while offset < preview.total() {
-        let page = preview
-            .page(offset, 100)
-            .map_err(|_| Failure::Unavailable)?;
-        for row in page {
-            decisions.push(match row.status() {
-                CsvRowStatus::New => CsvImportDecision::ImportNew,
-                CsvRowStatus::ExactDuplicate => CsvImportDecision::SkipExact,
-                CsvRowStatus::CandidateDuplicate if replace_candidates => {
-                    CsvImportDecision::Replace(*row.duplicate_item().ok_or(Failure::Unavailable)?)
-                }
-                CsvRowStatus::CandidateDuplicate => CsvImportDecision::KeepBoth,
-            });
-        }
-        offset += page.len();
-    }
-    let prepared = vault
-        .prepare_1pux_import(preview, decisions)
-        .map_err(|_| Failure::Unavailable)?;
-    let signature = vault
-        .sign(prepared.prepared())
-        .map_err(|_| Failure::Unavailable)?;
-    let report = prepared.report();
-    let mut response = vec![0];
-    for value in [
-        report.total(),
-        report.new_items(),
-        report.replaced(),
-        report.skipped_exact(),
-        report.excluded(),
-        report.preserved_fields(),
-        report.event_pages(),
-    ] {
-        response.extend_from_slice(
-            &u64::try_from(value)
-                .map_err(|_| Failure::Unavailable)?
-                .to_be_bytes(),
-        );
-    }
-    response.extend_from_slice(
-        &u32::try_from(prepared.item_ids().len())
-            .map_err(|_| Failure::Unavailable)?
-            .to_be_bytes(),
-    );
-    for item in prepared.item_ids() {
-        response.extend_from_slice(item);
-    }
-    response.extend_from_slice(prepared.prepared().transaction_id());
-    response.extend_from_slice(prepared.prepared().item_id());
-    push_bytes(&mut response, prepared.prepared().command())?;
-    push_bytes(&mut response, prepared.prepared().body())?;
-    response.extend_from_slice(&signature);
-    write_frame(tls, &response)
+    crate::human_wire::handle_1pux_file(vault, tls, request, source)
 }
-
 #[allow(clippy::too_many_lines)]
 fn handle_human_request(
     vault: &mut HumanVault,
