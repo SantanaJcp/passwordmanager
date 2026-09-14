@@ -382,6 +382,17 @@ require_literal 'takeown.exe' "$lab"
 require_literal '[IO.FileAttributes]::ReparsePoint' "$lab"
 require_literal 'Remove-Item -LiteralPath $Path -Force -ErrorAction Stop' "$lab"
 require_literal 'if ($cleanupErrors.Count -gt 0)' "$lab"
+require_literal 'function Assert-OwnedResourcesAbsent' "$lab"
+require_literal 'Get-CimInstance Win32_Service -Filter "Name=' "$lab"
+require_literal '$users = @(Get-LocalUser -ErrorAction Stop)' "$lab"
+require_literal 'Test-Path -LiteralPath $RootPath -ErrorAction Stop' "$lab"
+require_literal 'cleanup absence verification failed:' "$lab"
+cleanup_root_line=$(grep -nF 'Remove-OwnedTree $root $ownedPaths' "$lab" | cut -d: -f1)
+absence_call_line=$(grep -nF 'Assert-OwnedResourcesAbsent $serviceOwned' "$lab" | cut -d: -f1)
+test "$cleanup_root_line" -lt "$absence_call_line" || {
+    echo 'Windows fixture must verify absence only after attempting owned cleanup' >&2
+    exit 1
+}
 
 if grep -Eq 'Remove-Item[^\n]*-Recurse|takeown\.exe[^\n]*(/R|/r)|Get-ChildItem[^\n]*-Recurse' "$lab"; then
     echo 'Windows fixture cleanup must not recurse opaquely or follow reparse trees' >&2

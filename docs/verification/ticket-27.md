@@ -1353,3 +1353,32 @@ por eso el run acredita que las operaciones de cleanup se alcanzaron y
 retornaron éxito, pero no una comprobación independiente de ausencia final.
 El resultado global permanece FAIL por auditoría; no se declara ticket 27 ni
 STOP completo.
+
+### Composición STOP + apertura auditada (checkpoint estático)
+
+El merge `c71cee1` tiene exactamente los padres STOP/evidencia
+`f47affea8f4da50d7ddbac8f944cb54454d92c0b` y API/custodia auditada
+`360f5b33abee46130db363fe56385b3f2b8ed313`. Conserva Named Pipe overlapped,
+evento STOP, `CancelIoEx` con drain, estados SCM y los escenarios STOP/crash
+del primer padre; del segundo conserva una sola API pública
+`HumanVault::unlock` con custodia estable explícita y la rotación humana
+autenticada que abre una generación enlazada. La apertura autónoma con custodia
+incorrecta continúa fallando y no rota.
+
+Sin ejecutar Cargo, el checker Windows, `rustfmt --check` directo y
+`git diff --check` pasaron. Esta composición es sólo candidato para la próxima
+corrida nativa: siguen pendientes el lock auditado sobre bóveda vacía, STOP
+posterior a tráfico, sustitución cross-role, reinicio/crash, comprobación final
+de ausencia de recursos y la composición TUI 23–25. No se declara completo el
+ticket 27.
+
+Antes de esa corrida se extiende el harness, sin cambiar cómo elimina recursos:
+después de intentar todo el cleanup propio, una consulta SCM con errores
+terminantes debe confirmar que no queda el nombre exacto del servicio; una
+enumeración exitosa de usuarios locales debe confirmar la ausencia de los dos
+usuarios exactos; y `Test-Path -ErrorAction Stop` debe confirmar que no queda la
+raíz propia. Cada error de consulta o presencia residual se agrega a
+`cleanupErrors`, junto con el error primario si existe. No se reintenta, no se
+fuerza otro borrado y no se inspecciona ni modifica un recurso ajeno. El checker
+estático exige la función y su llamada posterior al cleanup, pero sólo Windows
+nativo acredita las tres ausencias.

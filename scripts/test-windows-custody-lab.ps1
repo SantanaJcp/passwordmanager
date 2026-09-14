@@ -52,6 +52,36 @@ function Start-OwnedServiceWithNewPid([string]$Name, [int]$PreviousProcessId) {
     return $current
 }
 
+function Assert-OwnedResourcesAbsent(
+    [bool]$ServiceWasOwned,
+    [string]$ServiceName,
+    [bool]$AgentWasOwned,
+    [string]$AgentName,
+    [bool]$HumanWasOwned,
+    [string]$HumanName,
+    [bool]$RootWasOwned,
+    [string]$RootPath
+) {
+    if ($ServiceWasOwned) {
+        $service = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop
+        Assert-True ($null -eq $service) 'owned service remains after cleanup'
+    }
+    if ($AgentWasOwned -or $HumanWasOwned) {
+        $users = @(Get-LocalUser -ErrorAction Stop)
+        if ($AgentWasOwned) {
+            $agentMatches = @($users | Where-Object { [string]$_.Name -ceq $AgentName })
+            Assert-True ($agentMatches.Count -eq 0) 'owned agent user remains after cleanup'
+        }
+        if ($HumanWasOwned) {
+            $humanMatches = @($users | Where-Object { [string]$_.Name -ceq $HumanName })
+            Assert-True ($humanMatches.Count -eq 0) 'owned human user remains after cleanup'
+        }
+    }
+    if ($RootWasOwned) {
+        Assert-True (-not (Test-Path -LiteralPath $RootPath -ErrorAction Stop)) 'owned fixture root remains after cleanup'
+    }
+}
+
 function Write-ServiceDiagnostic([string]$Phase, [string]$Name) {
     if (-not $ServiceDiagnostics) { return }
     $stateCategory = 'query-error'
@@ -617,6 +647,10 @@ finally {
         try { Pop-Location -ErrorAction Stop }
         catch { $cleanupErrors.Add("location cleanup failed: $($_.Exception.Message)") }
     }
+    try {
+        Assert-OwnedResourcesAbsent $serviceOwned $serviceName $agentOwned $agentName $humanOwned $humanName $rootOwned $root
+    }
+    catch { $cleanupErrors.Add("cleanup absence verification failed: $($_.Exception.Message)") }
 }
 
 if ($cleanupErrors.Count -gt 0) {
