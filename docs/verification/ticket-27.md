@@ -1481,3 +1481,45 @@ explícita.
 HPCON, handles, window station, servicio, cuentas y raíz. Luego se repiten los
 tests nativos, checker, build/check completo y el lab Windows. No se declara
 TUI ni ticket 27 por tests unitarios de las primitivas.
+
+### Primer RED nativo de la composición TUI
+
+Antes de extraer código de producto se añade un único tracer del seam público:
+el binario normal `pm-custody.exe tui`. El fixture se compila como `example` de
+test de `pm-native-channel`, se copia a la raíz humana propia y se ejecuta con
+la cuenta humana sintética; no es un segundo binario de producto. El launcher:
+
+1. crea dos pipes anónimos propios y una `ConPTY(80x24)` real;
+2. crea con `CWF_CREATE_ONLY` una window station privada para ese logon y un
+   desktop propio, ambos con DACL protegida que sólo concede `SYSTEM` y el SID
+   humano, y falla ante colisión o si no puede recuperar/validar su nombre;
+3. lanza el `pm-custody.exe` normal mediante `CreateProcessW`,
+   `STARTUPINFOEXW`, `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` y el desktop propio;
+4. captura VT por el pipe de salida sin imprimirlo, exige el marcador fijo de
+   la pantalla bloqueada antes de enviar una tecla, redimensiona a `42x12` y
+   `100x30`, envía `q` y exige salida normal;
+5. cierra de forma comprobada proceso/thread/pipes/desktop/window station; no
+   mata el proceso, no lo vuelve a lanzar y no sustituye ConPTY por redirección.
+
+Microsoft documenta que los atributos extendidos de proceso requieren
+`STARTUPINFOEX` y `EXTENDED_STARTUPINFO_PRESENT`, y que una pseudoconsola debe
+publicarse mediante `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`. También documenta
+que una window station creada sin descriptor concede acceso amplio; por eso el
+fixture no admite descriptor nulo ni reutiliza `winsta0`:
+<https://learn.microsoft.com/windows/console/creating-a-pseudoconsole-session>,
+<https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-createwindowstationw>.
+
+La corrida RED autorizada usa el mismo Windows 11 ARM64 efímero y prerequisitos
+del lab base, con un switch explícito `-TuiConPtyRed`. Debe cruzar primero los
+seis tests nativos, pipe contract, servicio y probes existentes. Después el
+launcher debe llegar al `CreateProcessW` del binario normal y el lab debe fallar
+porque `pm-custody.exe tui` aún no presenta el marcador, no por herramienta,
+ACL, estación, ConPTY o proceso ausentes. El log no puede contener la contraseña
+sintética ni captura VT. La limpieza y comprobación de ausencia existentes se
+ejecutan incluso en RED.
+
+Este primer tracer no acredita todavía todos los flujos 23–25, clipboard ni
+aislamiento negativo del agente. Tras observar el RED correcto, el siguiente
+tracer amplía la misma estación con lector/interloper humanos y un proceso
+agente que debe fallar al abrirla; nunca usa la estación interactiva real. No se
+escribe código de producto hasta preservar ese RED nativo.
