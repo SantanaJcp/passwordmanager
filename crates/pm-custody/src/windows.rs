@@ -957,6 +957,13 @@ fn encode_commit_request(
     Ok(request)
 }
 
+fn expect_success_payload(response: &[u8]) -> Result<Vec<u8>, Failure> {
+    if response.first() != Some(&0) || response.len() < 2 {
+        return Err(Failure::Unavailable);
+    }
+    Ok(response[1..].to_vec())
+}
+
 pub(super) fn rpc_commit(
     tls: &mut rustls::StreamOwned<ClientConnection, WindowsClientPipe>,
     prepared: &WirePrepared,

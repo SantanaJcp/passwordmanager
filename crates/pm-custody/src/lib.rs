@@ -17,8 +17,12 @@ pub use pm_native_channel::{WindowsClientPipe, WindowsEndpoint, WindowsServerPip
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod failure;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod human_wire;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod tui;
 #[cfg(target_os = "windows")]
 mod windows;
 

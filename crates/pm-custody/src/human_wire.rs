@@ -26,7 +26,7 @@ pub(crate) fn handle_request_slice(
     opcode: u8,
     request: &[u8],
 ) -> Option<Result<Vec<u8>, Failure>> {
-    if !matches!(opcode, 2..=13 | 15..=16 | 19..=30 | 33 | 40..=41 | 43 | 45..=46 | 49..=53) {
+    if !matches!(opcode, 2..=13 | 15..=16 | 19..=30 | 33 | 40..=41 | 43 | 45..=46 | 49..=58) {
         return None;
     }
     let rest = request;
@@ -589,6 +589,103 @@ pub(crate) fn handle_request_slice(
             let mut response = vec![0];
             response.extend_from_slice(generated.expose());
             Ok(response)
+        }
+        54 => {
+            if !rest.is_empty() {
+                return Err(Failure::Unavailable);
+            }
+            let overview = vault.access_overview().map_err(|_| Failure::Unavailable)?;
+            let mut response = vec![0, u8::from(overview.suspended())];
+            response.extend_from_slice(
+                &u16::try_from(overview.agents().len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            for agent in overview.agents() {
+                response.extend_from_slice(agent.subject());
+                response.extend_from_slice(&agent.generation().to_be_bytes());
+                response.push(match agent.status() {
+                    "active" => 1,
+                    "revoked" => 2,
+                    "superseded" => 3,
+                    _ => return Err(Failure::Unavailable),
+                });
+                push_bytes(&mut response, agent.label().as_bytes())?;
+                push_bytes(&mut response, agent.environment().as_bytes())?;
+            }
+            response.extend_from_slice(
+                &u16::try_from(overview.credentials().len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            for credential in overview.credentials() {
+                response.extend_from_slice(credential.item());
+                response.push(u8::from(credential.enabled()));
+                push_bytes(&mut response, credential.title().as_bytes())?;
+            }
+            Ok(response)
+        }
+        55 => {
+            let mut cursor = Cursor::new(rest);
+            let subject = cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            let request = cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            let rpk = cursor.fixed(SPKI_BYTES)?;
+            let label = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+            let environment =
+                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+            cursor.finish()?;
+            let enrollment = AgentEnrollment::new(subject, request, rpk, &label, &environment)
+                .map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_agent_enrollment(&enrollment)
+                .map_err(|_| Failure::Unavailable)?;
+            commit_authority(vault, prepared.prepared())?;
+            Ok(vec![0])
+        }
+        56 => {
+            let subject = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_agent_revocation(subject, AuthorizationReason::OwnerRequest)
+                .map_err(|_| Failure::Unavailable)?;
+            commit_authority(vault, &prepared)?;
+            Ok(vec![0])
+        }
+        57 => {
+            let prepared = match rest {
+                [0] => vault.prepare_delegated_resume(),
+                [1] => vault.prepare_delegated_suspend(AuthorizationReason::OwnerRequest),
+                _ => return Err(Failure::Unavailable),
+            }
+            .map_err(|_| Failure::Unavailable)?;
+            commit_authority(vault, &prepared)?;
+            Ok(vec![0])
+        }
+        58 => {
+            let mut cursor = Cursor::new(rest);
+            let item = cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            let enable = match cursor.fixed(1)? {
+                [0] => false,
+                [1] => true,
+                _ => return Err(Failure::Unavailable),
+            };
+            cursor.finish()?;
+            let prepared = if enable {
+                vault.prepare_enable(item)
+            } else {
+                vault.prepare_disable(item)
+            }
+            .map_err(|_| Failure::Unavailable)?;
+            commit_authority(vault, &prepared)?;
+            Ok(vec![0])
         }
         46 | 49 => {
             if !request.is_empty() {
