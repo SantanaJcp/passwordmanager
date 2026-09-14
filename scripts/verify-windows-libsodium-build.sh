@@ -202,7 +202,7 @@ human_phases='human-accepted human-magic-alpn human-unlock-request human-unlock-
 for phase in $human_phases; do
     require_literal "b\"phase=$phase\\n\"" "$windows_service"
 done
-unlock_calls=$(grep -Fc 'HumanVault::unlock_with_audit_custody(' "$windows_service")
+unlock_calls=$(grep -Fc 'HumanVault::unlock(' "$windows_service")
 test "$unlock_calls" -eq 1 || {
     echo "Windows human diagnostic must preserve one unlock operation, got $unlock_calls" >&2
     exit 1

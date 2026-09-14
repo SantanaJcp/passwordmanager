@@ -442,7 +442,7 @@ fn open_human(path: &Path) -> (HumanVault, UnixStream) {
     let (socket, peer) = UnixStream::pair().unwrap();
     let channel = HumanChannel::authenticate(socket, unsafe { libc::geteuid() }).unwrap();
     (
-        HumanVault::unlock_with_audit_custody(
+        HumanVault::unlock(
             path,
             MASTER,
             DEVICE,

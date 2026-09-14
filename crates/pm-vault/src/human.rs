@@ -768,34 +768,18 @@ impl HumanVault {
         )
     }
 
-    /// Opens an existing vault and retains `K_H`/`SK_H` only in this human session.
+    /// Opens an existing vault with explicit device audit custody and retains
+    /// `K_H`/`SK_H` only in this human session.
+    ///
+    /// Reusing the device's stable custody continues its current audit generation.
+    /// Supplying an intentional replacement while the human root is authenticated opens
+    /// the next linked generation; autonomous audit access cannot do that.
     ///
     /// # Errors
     ///
-    /// Returns an error for a wrong channel, password, root, or storage format.
+    /// Returns an error for a wrong channel, password, root, custody, audit write, or
+    /// storage format. The session is not returned unless its `HumanUnlock` event commits.
     pub fn unlock(
-        path: &Path,
-        password: &[u8],
-        device: [u8; 16],
-        channel: HumanChannel,
-    ) -> Result<Self, HumanCommitError> {
-        Self::unlock_with_audit_custody(
-            path,
-            password,
-            device,
-            channel,
-            Arc::new(AuditDeviceCustody::generate()?),
-        )
-    }
-
-    /// Opens a human session attached to stable device audit custody. Sharing
-    /// this opaque handle with the custodian permits later audit writes after KH
-    /// and the human session have been dropped.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a wrong channel, password, root, custody, or storage format.
-    pub fn unlock_with_audit_custody(
         path: &Path,
         password: &[u8],
         device: [u8; 16],
@@ -803,9 +787,28 @@ impl HumanVault {
         audit_custody: Arc<AuditDeviceCustody>,
     ) -> Result<Self, HumanCommitError> {
         channel.verify()?;
-        let connection = open_connection(path)?;
+        let mut connection = open_connection(path)?;
         let root = unlock_root(&connection, password)?;
         let trusted_root = root.trusted_root();
+        channel.verify()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let frontier = audit::current_frontier(&transaction)?;
+        audit::append_event(
+            &transaction,
+            &trusted_root,
+            Some(&root),
+            device,
+            &audit_custody,
+            &AuditEvent::new(
+                AuditActorKind::Human,
+                None,
+                AuditAction::HumanUnlock,
+                AuditOutcome::Succeeded,
+            ),
+            now_us()?,
+            frontier,
+        )?;
+        transaction.commit()?;
         Ok(Self {
             path: path.to_owned(),
             device,

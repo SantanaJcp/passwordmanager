@@ -922,7 +922,7 @@ fn open_human(
     let (server, peer) = UnixStream::pair().unwrap();
     let channel = HumanChannel::authenticate(server, unsafe { libc::geteuid() }).unwrap();
     (
-        HumanVault::unlock_with_audit_custody(path, MASTER, device, channel, custody).unwrap(),
+        HumanVault::unlock(path, MASTER, device, channel, custody).unwrap(),
         peer,
     )
 }

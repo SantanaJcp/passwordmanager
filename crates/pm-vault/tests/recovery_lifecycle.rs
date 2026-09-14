@@ -25,9 +25,10 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn external_key_recovers_into_fresh_lineage_without_the_source_keyring() {
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new();
     let (source_path, source_recovery) = persist(&dir.0.join("source.sqlite3"), SOURCE_PASSWORD);
-    let (mut source, _peer) = open_human(&source_path, SOURCE_PASSWORD);
+    let (mut source, _peer) = open_human(&source_path, SOURCE_PASSWORD, &audit_custody);
     let created = source
         .prepare_create(
             &PasswordRecord::new(
@@ -54,7 +55,7 @@ fn external_key_recovers_into_fresh_lineage_without_the_source_keyring() {
         .unwrap()
         .trusted_root();
     assert_ne!(source_root, target_root);
-    let (mut target, _peer) = open_human(&target_path, TARGET_PASSWORD);
+    let (mut target, _peer) = open_human(&target_path, TARGET_PASSWORD, &audit_custody);
     let prepared = target
         .prepare_native_recovery(
             &mut Cursor::new(&archive),
@@ -79,9 +80,10 @@ fn external_key_recovers_into_fresh_lineage_without_the_source_keyring() {
 
 #[test]
 fn recovery_into_existing_vault_preserves_current_revocations_and_rejects_damage_atomically() {
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new();
     let (source_path, source_recovery) = persist(&dir.0.join("source.sqlite3"), SOURCE_PASSWORD);
-    let (mut source, _peer) = open_human(&source_path, SOURCE_PASSWORD);
+    let (mut source, _peer) = open_human(&source_path, SOURCE_PASSWORD, &audit_custody);
     let created = source
         .prepare_create(
             &PasswordRecord::new(
@@ -99,7 +101,7 @@ fn recovery_into_existing_vault_preserves_current_revocations_and_rejects_damage
     source.write_native_backup(&mut archive).unwrap();
 
     let (target_path, _) = persist(&dir.0.join("target.sqlite3"), TARGET_PASSWORD);
-    let (mut target, _peer) = open_human(&target_path, TARGET_PASSWORD);
+    let (mut target, _peer) = open_human(&target_path, TARGET_PASSWORD, &audit_custody);
     let enrollment =
         AgentEnrollment::new([0x41; 16], [0x42; 16], &[0x43; 44], "revoked", "synthetic").unwrap();
     let prepared = target.prepare_agent_enrollment(&enrollment).unwrap();
@@ -132,10 +134,11 @@ fn recovery_into_existing_vault_preserves_current_revocations_and_rejects_damage
 #[test]
 #[allow(clippy::too_many_lines)]
 fn signed_atomic_master_and_recovery_rotation_keep_access_and_invalidate_current_old_paths() {
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new();
     let (path, old_recovery) = persist(&dir.0.join("vault.sqlite3"), TARGET_PASSWORD);
     let trusted = *open_vault(&path, TARGET_PASSWORD).unwrap().trusted_root();
-    let (mut vault, _peer) = open_human(&path, TARGET_PASSWORD);
+    let (mut vault, _peer) = open_human(&path, TARGET_PASSWORD, &audit_custody);
     let mut historical_backup = Vec::new();
     vault.write_native_backup(&mut historical_backup).unwrap();
     let stale_recovery = vault.begin_recovery_rotation().unwrap();
@@ -258,9 +261,10 @@ fn signed_atomic_master_and_recovery_rotation_keep_access_and_invalidate_current
 
 #[test]
 fn backup_rejects_a_malformed_existing_authority_frontier_instead_of_substituting_zero() {
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new();
     let (path, _) = persist(&dir.0.join("vault.sqlite3"), TARGET_PASSWORD);
-    let (mut vault, _peer) = open_human(&path, TARGET_PASSWORD);
+    let (mut vault, _peer) = open_human(&path, TARGET_PASSWORD, &audit_custody);
     let enrollment =
         AgentEnrollment::new([0x51; 16], [0x52; 16], &[0x53; 44], "agent", "synthetic").unwrap();
     let prepared = vault.prepare_agent_enrollment(&enrollment).unwrap();
@@ -320,12 +324,29 @@ fn persist(path: &Path, password: &[u8]) -> (PathBuf, String) {
     (path.to_owned(), recovery)
 }
 
-fn open_human(path: &Path, password: &[u8]) -> (HumanVault, UnixStream) {
+fn open_human(
+    path: &Path,
+    password: &[u8],
+    audit_custody: &std::sync::Arc<pm_vault::AuditDeviceCustody>,
+) -> (HumanVault, UnixStream) {
     let (server, peer) = UnixStream::pair().unwrap();
     let channel = HumanChannel::authenticate(server, unsafe { libc::geteuid() }).unwrap();
     (
-        HumanVault::unlock(path, password, DEVICE, channel).unwrap(),
+        HumanVault::unlock(
+            path,
+            password,
+            DEVICE,
+            channel,
+            std::sync::Arc::clone(audit_custody),
+        )
+        .unwrap(),
         peer,
+    )
+}
+
+fn test_audit_custody() -> std::sync::Arc<pm_vault::AuditDeviceCustody> {
+    std::sync::Arc::new(
+        pm_vault::AuditDeviceCustody::generate().expect("synthetic device audit custody"),
     )
 }
 

@@ -741,7 +741,7 @@ fn serve_human(
     if let Some(diagnostics) = service.diagnostics.as_ref() {
         diagnostics.record(ServiceDiagnosticPhase::HumanUnlockRequest)?;
     }
-    let vault_result = HumanVault::unlock_with_audit_custody(
+    let vault_result = HumanVault::unlock(
         &service.path,
         &password,
         service.device,

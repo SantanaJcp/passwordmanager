@@ -176,7 +176,7 @@ fn duplicate_decisions_pagination_and_audit_failure_are_atomic() {
         .unwrap();
     let db = Connection::open(&path).unwrap();
     assert_eq!(count(&db, "authority_events"), 70);
-    assert_eq!(count(&db, "encrypted_audit_records"), 1);
+    assert_eq!(count(&db, "encrypted_audit_records"), 2);
     drop(db);
     assert_eq!(vault.receipt(*prepared.transaction_id()).unwrap(), receipt);
     assert_eq!(
@@ -341,10 +341,7 @@ fn commit(v: &mut HumanVault, p: &pm_vault::PreparedHumanCommand) {
 fn open_human(path: &Path, c: Arc<AuditDeviceCustody>) -> (HumanVault, UnixStream) {
     let (s, p) = UnixStream::pair().unwrap();
     let ch = HumanChannel::authenticate(s, unsafe { libc::geteuid() }).unwrap();
-    (
-        HumanVault::unlock_with_audit_custody(path, MASTER, DEVICE, ch, c).unwrap(),
-        p,
-    )
+    (HumanVault::unlock(path, MASTER, DEVICE, ch, c).unwrap(), p)
 }
 fn persist(path: &Path) {
     let p = PendingVault::new(MASTER, KdfProfile::confirmed(64, 3).unwrap()).unwrap();

@@ -967,7 +967,8 @@ sin otra autenticación ni operación de bóveda:
    `human-unlock-request`, `human-unlock-ok`, `human-unlock-ack`,
    `human-lock-request`, `human-audit-open`, `human-audit-append` y
    `human-lock-ack`.
-2. Si la única llamada a `unlock_with_audit_custody` falla, registra exactamente
+2. Si la única llamada a `HumanVault::unlock` con custodia explícita falla,
+   registra exactamente
    una categoría terminal derivada de la variante ya disponible, nunca de su
    texto: `human-unlock-wrong-channel`, `human-unlock-storage-io`,
    `human-unlock-vault-crypto`, `human-unlock-vault-format` o
@@ -1005,6 +1006,154 @@ refactor semántico. También se corrigió la ubicación de
 comprobó simultáneamente rol humano, ALPN y el MAGIC humano exacto, por lo que
 el marcador no puede afirmar un MAGIC inválido. El checker y
 `git diff --check` permanecieron verdes; no se ejecutó Cargo ni Windows.
+
+### Bóveda vacía y primer paquete de auditoría (método antes del arreglo)
+
+La corrida diagnóstica Windows 16
+[`34841947088`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34841947088)
+sobre `9878bc6` observó, en orden, `human-accepted`, `human-magic-alpn`,
+`human-unlock-request`, `human-unlock-ok`, `human-unlock-ack` y
+`human-lock-request`, pero no `human-audit-open`. Por tanto el canal, MAGIC y
+ALPN humanos, la contraseña/KDF y el root ya habían sido aceptados; el fallo
+está después de recibir lock y antes de abrir la auditoría autónoma. Esto no es
+evidencia de un fallo de I/O o KDF.
+
+La causa común está en el motor, no en Named Pipe. Una bóveda recién persistida
+no contiene fila en `audit_keys`. La apertura humana anterior
+verifica el canal, abre SQLite y KH, pero no provisiona KAUD ni registra
+`human_unlock`. Al soltar esa sesión, tanto Windows como Linux llaman
+`AutonomousAuditVault::open`; esta exige una fila coincidente mediante
+`load_matching_package` y devuelve `AuditKeyUnavailable` si falta. La primera
+operación humana que usa `append_event` sí crearía el paquete porque conserva
+KH, pero fabricar contenido antes de lock sólo ocultaría el defecto y no es
+parte del laboratorio.
+
+La regresión pública y portable parte de una bóveda realmente vacía. Con la
+misma `AuditDeviceCustody` estable debe comprobar:
+
+1. contraseña incorrecta: unlock falla y `audit_keys`, `audit_state`,
+   `audit_segments` y `encrypted_audit_records` siguen vacías;
+2. contraseña correcta: antes de devolver la sesión se publica atómicamente un
+   único paquete y un registro `human_unlock/succeeded` para el dispositivo;
+3. tras soltar KH, `AutonomousAuditVault::open` puede registrar
+   `human_lock/succeeded`; un desbloqueo posterior permite consultar la
+   secuencia `human_unlock`, `human_lock`, `human_unlock`;
+4. un fallo sintético de inserción del primer registro hace fallar unlock y
+   revierte también paquete, estado y segmento. No se permite una sesión
+   desbloqueada sin su evento ni una fila KAUD parcial;
+5. después de crear la generación inicial, la apertura autónoma con otra
+   custodia falla cerrada y no crea una generación; una custodia de reemplazo
+   proporcionada explícitamente a una apertura humana autenticada por KH sí
+   conserva la rotación histórica y abre una generación enlazada.
+
+El seam compartido por Linux, macOS y Windows es la única API pública
+`HumanVault::unlock(path, password, device, channel, audit_custody)`. Después de abrir KH y revalidar
+el canal humano, inicia una transacción SQLite `IMMEDIATE`, obtiene la frontera
+de autoridad y llama una sola vez a `append_event` con el root humano,
+`HumanUnlock/Succeeded` y la custodia estable entregada por el servicio. Para
+el servicio instalado, la transacción debe distinguir ausencia inicial real de
+la custodia suministrada. `ensure_package` continúa la generación si coincide;
+si la apertura humana autenticada entrega deliberadamente una custodia de
+reemplazo, crea la siguiente generación enlazada conforme a
+`security-operations.md` §4. Esto no autoriza a la apertura autónoma a rotar:
+sin KH, una custodia que no coincide devuelve `AuditKeyUnavailable`. La misma
+transacción confirma paquete, evento, estado, segmento y manifiesto antes de
+construir la sesión. Cualquier error revierte y mantiene el fallo cerrado. La
+contraseña incorrecta no llega a esa transacción y no produce un evento.
+
+El usuario autorizó hacer explícita la custodia estable en la API pública. Se
+elimina la variante que generaba custodia aleatoria por llamada y no queda un
+alias, cache global, valor sustituto ni ruta sin auditoría. Cada consumidor
+mantiene la custodia de su dispositivo y la pasa en todas las reaperturas. La
+regresión histórica
+`replacing_device_custody_opens_a_linked_audit_generation` permanece positiva:
+es reemplazo humano explícito respaldado por KH, no rotación autónoma o
+accidental.
+
+Primero se añade el test de estas observaciones a la superficie pública de
+`pm-vault`; queda preparado para observar su RED contra el comportamiento
+previo cuando se conceda la ventana de ejecución. Sólo
+después se implementará el cambio común y se actualizarán las expectativas de
+secuencia existentes que ahora empiezan con la primera apertura humana. Los
+gates enfocados deberán incluir auditoría, transacciones humanas y el lock
+compartido Linux; los gates completos y otra corrida Windows normal siguen
+siendo obligatorios. En este checkpoint de método/test estático no se ejecuta
+Cargo ni se presenta un GREEN de producto. Los casos nuevos usan una raíz de
+fixture propia cuya eliminación se comprueba; no reutilizan ni cambian el
+`TestDir::drop` heredado que suprime errores de cleanup.
+
+Con la ventana Linux exclusiva concedida, ambos casos nuevos observaron RED
+contra el comportamiento previo. El caso vacío llegó a `query_audit` y recibió
+`Storage(QueryReturnedNoRows)` porque no existía paquete; el trigger del primer
+registro dejó que unlock devolviera una sesión, incumpliendo el fallo cerrado.
+Ambos procesos terminaron 101 y sus salidas se conservaron en
+`/tmp/pm27-audit-first-unlock-red-{empty,rollback}.log`.
+
+La primera implementación del plan hizo GREEN esos dos casos. Una corrida
+transitoria de `audit_lifecycle` quedó 8/8 sólo después de convertir la
+expectativa heredada de rotación implícita en una negativa; ese cambio no
+estaba autorizado y se revirtió, por lo que no constituye un GREEN aceptable.
+Al ampliar a todo `pm-vault` apareció además un RED distinto y verificable: los
+helpers antiguos llaman
+la antigua `HumanVault::unlock`, que generaba una custodia nueva en cada llamada. Una segunda
+apertura del mismo dispositivo ya no puede coincidir con el paquete estable y
+`backup_lifecycle` falla con `AuditKeyUnavailable`. El producto Linux/Windows
+ya conservaba custodia estable. La autorización posterior reemplaza ambas
+variantes por una sola firma explícita y migra fixtures/consumidores; no se
+añade cache, custodia sustituta ni ruta sin auditoría. Hasta ejecutar los gates
+enfocados y completos de este candidato, el gate completo sigue sin ser GREEN.
+
+La verificación posterior a la migración se ejecutará en ventana Linux
+exclusiva y conservará cada intento por separado. Primero:
+
+1. `cargo test -p pm-vault --test audit_lifecycle` debe cubrir creación inicial,
+   reapertura estable, rechazo autónomo de custodia incorrecta, rollback del
+   primer evento y la rotación humana enlazada original;
+2. `cargo test -p pm-vault --test human_transactions` y
+   `cargo test -p pm-vault --test backup_lifecycle` deben probar reaperturas con
+   la custodia del fixture sin cambiar la atomicidad de commits/restore;
+3. todos los tests de `pm-vault` y `e2ee_replication` deben verificar que la
+   firma pública única fue migrada y que no queda un consumidor que genere una
+   custodia nueva al reabrir el mismo dispositivo;
+4. `scripts/check.sh`, `scripts/clean-offline-build.sh` y los laboratorios TUI
+   de contenido/acceso/operaciones deben permanecer verdes para acreditar los
+   consumidores CLI/TUI y el canal humano compartido. La corrida Windows STOP
+   se repite sólo después de integrar el seam, porque el GREEN Linux no acredita
+   SCM, Named Pipe ni DPAPI.
+
+Antes de esa ventana sólo se ejecutan `rustfmt` directo, `git diff --check`, el
+checker estático Windows y una comprobación sintáctica de que cada llamada a
+`HumanVault::unlock` tiene los cinco argumentos explícitos. Ninguno de esos
+checks se presenta como evidencia conductual.
+
+La ejecución enfocada posterior confirmó `audit_lifecycle` 8/8 (incluida la
+rotación humana enlazada original), `human_transactions` 4/4 y
+`backup_lifecycle` 5/5 en el primer intento. La primera barrida de todos los
+tests de `pm-vault` conservada en
+`/tmp/pm27-audit-api-pm-vault-tests-attempt1.log` encontró un único RED
+conductual: `csv_import` todavía esperaba un solo registro tras el commit y
+ahora existen el `HumanUnlock` obligatorio más `Import`. Se corrigió sólo ese
+contador 1→2; el test enfocado pasó 3/3 y la segunda barrida completa pasó. El
+`e2ee_replication` migrado a custodias estables por dispositivo pasó 5/5. Las
+salidas enfocadas están en `/tmp/pm27-audit-api-{audit-lifecycle-attempt1,human-transactions-attempt1,backup-lifecycle-attempt1,csv-import-attempt2,e2ee-replication-attempt1}.log` y la barrida completa verde en
+`/tmp/pm27-audit-api-pm-vault-tests-attempt2.log`. Estos resultados son Linux;
+no acreditan todavía el servicio Windows nativo.
+
+`scripts/check.sh` conservó dos intentos RED de integración antes del GREEN:
+el primero encontró `too_many_lines`/orden de items en fixtures y una closure
+redundante; el segundo encontró únicamente dos declaraciones locales colocadas
+después de la nueva custodia. Se corrigieron mecánicamente sin cambiar las
+aserciones y el tercer intento terminó 0. Los logs son
+`/tmp/pm27-audit-api-check-attempt{1,2,3}.log`.
+`scripts/clean-offline-build.sh` terminó 0 y está conservado en
+`/tmp/pm27-audit-api-clean-offline-attempt1.log`.
+
+Los tres laboratorios TUI enumerados por el método no existen en la base
+histórica de esta rama Windows (`266b088`): `crates/pm-custody/tests` aún no
+contiene `tui_content_lab.py`, `tui_access_lab.py` ni `tui_operations_lab.py`.
+No se sustituyeron por otros labs ni se copiaron desde otro worktree. Deben
+ejecutarse después de componer este cambio común sobre la rama unificada que sí
+contiene TUI 23–25; hasta entonces esa regresión observable queda pendiente.
 
 ## Déficit contractual de parada SCM (plan, no implementación)
 
