@@ -72,6 +72,24 @@ revocation. An injected audit trigger makes public start fail while attempt and
 audit publication roll back together. Raw state scans reject the credential
 secret canary.
 
+## Authorized asynchronous observation method
+
+The state assertions use only the existing public `get` operation for the same
+attempt. A worker may legitimately expose `RUNNING` with no reason while a new
+request settles, or `RUNNING` + `reason=provider-challenge-ref` while a trusted
+challenge settles. After `recover_inflight`, reconciliation may expose
+`RUNNING` + `reason=INDETERMINATE`; the observer polls within the laboratory's
+existing command bound until the operation-specific terminal snapshot is
+visible. Any other state or reason fails. It never calls `start`, resends
+provider credentials, or changes the one-call journal assertion. Fixed sleeps
+are not used as readiness evidence; the final state and `result` remain the
+contract being asserted.
+
+The historical diagnostic found this race in the worker-extraction baseline
+(one `RUNNING/INDETERMINATE` read in eight attempts runs). The modified lab must
+retain that red evidence and then show the same single-lease/no-blind-retry
+contract green, without changing the attempts engine.
+
 ## Regression evidence and limits
 
 The exact final commands were:

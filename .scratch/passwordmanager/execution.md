@@ -74,3 +74,49 @@ preflight 5/5 y aceptación macOS todavía fallida:
 
 La autorización no elimina gates, no cambia el modelo de seguridad y no
 adelanta la revisión formal de Astra: continúa al final de todos los tickets.
+
+## Método concreto de observación asíncrona autorizado
+
+El 2026-09-13 el usuario autorizó ajustar únicamente el método de observación y
+los tres laboratorios que tenían carreras de asentamiento; no se autoriza tocar
+el motor productivo, reautenticar, repetir una operación del proveedor ni
+ampliar sus plazos. Primero se conserva la corrida base roja y su diagnóstico;
+después cada laboratorio debe ejecutar la misma operación sobre el mismo
+`attempt_id` hasta observar el estado contractual final. La espera se hace por
+la consulta pública de estado ya existente, con los límites ya definidos por
+cada laboratorio, y no por un `sleep` fijo que anuncie éxito. Un estado o razón
+fuera de la lista permitida falla inmediatamente; tampoco se convierte un
+error de proceso en éxito.
+
+Las únicas transiciones intermedias admitidas son:
+
+* **Intentos (ticket 08):** el mismo `get` puede observar `RUNNING` sin razón
+  mientras el worker ejecuta una solicitud nueva, o `RUNNING` con razón
+  `provider-challenge-ref` mientras asienta un desafío. Después de reiniciar el
+  custodio, también puede observar `RUNNING` con razón `INDETERMINATE` mientras
+  el worker reclama la reconciliación; solo el estado terminal esperado
+  satisface cada comprobación (`WAITING_FOR_HUMAN`, `SUCCEEDED`, `FAILED` o
+  `INDETERMINATE`, según la operación). La consulta no vuelve a enviar
+  credenciales y el journal debe conservar una única llamada del proveedor.
+* **Passkey expirada (ticket 14):** después de que la confirmación TTY
+  rechazada devuelve el código existente, el mismo estado puede observar
+  `RUNNING` con razón `PASSKEY_HUMAN_CONFIRMATION` mientras se asienta en
+  `WAITING_FOR_HUMAN`; el resultado debe seguir siendo nulo y no se envía otra
+  confirmación ni reautenticación. La cancelación se mantiene como operación
+  posterior separada y terminal.
+* **Token exchange (ticket 11):** se conserva la aserción final de audiencia
+  no autorizada (`FAILED`, sin resultado). Si el `auth start` inicial retorna
+  error antes de publicar el intento, el laboratorio conserva su código,
+  `stdout` y `stderr` en un diagnóstico acotado y sintético, sustituyendo el
+  token de sujeto, secreto de requester y contraseña maestra por
+  `<REDACTED>` antes de mostrarlo. No se reintenta el `start` ni el POST.
+
+El diagnóstico base registró: en el laboratorio de intentos, la rama con el
+worker extraído llegó a reproducir una lectura `RUNNING/INDETERMINATE` en 1 de
+8 corridas después del restart; en passkey la ventana
+`RUNNING/PASSKEY_HUMAN_CONFIRMATION` fue legítima y no reprodujo un fallo
+adicional; en token exchange la negativa de audiencia original retornó un
+código distinto de cero sin `stdout`/`stderr`, sin reproducción en nueve
+corridas posteriores. Estos hechos no cierran gates 08/11/14 ni gates 26--32:
+la corrida modificada debe conservar la evidencia roja, demostrar la espera
+contractual y volver a terminar con las aserciones finales intactas.

@@ -191,13 +191,17 @@ def cli(uid,binary,env,args,check=True):
  if check:assert r.returncode==0,(r.stdout,r.stderr)
  return r
 
-def attempt_status(uid,binary,env,attempt,terminal=False,timeout=35):
+def attempt_status(uid,binary,env,attempt,terminal=False,timeout=35,allowed_intermediates=None):
  end=time.monotonic()+timeout;value=None
  while time.monotonic()<end:
   result=cli(uid,binary,env,["--json","auth","status","--attempt",attempt],check=False)
   if result.returncode!=0:return None,result
   value=json.loads(result.stdout)["result"]
+  assert value["attempt_id"]==attempt,(attempt,value)
   if (terminal and value["state"] in ("SUCCEEDED","FAILED","INDETERMINATE")) or (not terminal and value["state"]=="WAITING_FOR_HUMAN"):return value,result
+  if allowed_intermediates is not None:
+   observed=(value["state"],value.get("reason") or "")
+   if observed not in allowed_intermediates:raise AssertionError((attempt,value))
   time.sleep(.05)
  raise AssertionError((attempt,value))
 
@@ -325,7 +329,7 @@ def main():
   assert expired_request
   db=sqlite3.connect(vault);db.execute("update passkey_requests set created_at_us=-2,expires_at_us=-1 where request_id=?",(bytes.fromhex(expired_request),));db.commit();db.close()
   tty_confirm(HUMAN,[custody,"human-passkey-confirm","--profile",hprof,"--private",hk,"--socket",run/"human.sock","--request",expired_request,"--verification","verified"],"APPROVE "+expired_request,expected=4)
-  expired_observed=json.loads(cli(BRIDGE,cli_bin,env,["--json","auth","status","--attempt",expired]).stdout)["result"]
+  expired_observed,_=attempt_status(BRIDGE,cli_bin,env,expired,allowed_intermediates={("RUNNING","PASSKEY_HUMAN_CONFIRMATION")})
   assert expired_observed["state"]=="WAITING_FOR_HUMAN" and expired_observed["result"] is None,expired_observed
   cancelled=json.loads(cli(BRIDGE,cli_bin,env,["--json","auth","cancel","--attempt",expired]).stdout)["result"]
   assert cancelled["state"]=="CANCELLED" and cancelled["result"] is None,cancelled

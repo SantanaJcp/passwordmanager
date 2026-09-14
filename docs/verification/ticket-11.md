@@ -101,6 +101,22 @@ cancel, and human suspension before an observed POST are exercised publicly;
 the vault integration test covers individual agent revocation after lease and
 before the provider-use closure.
 
+## Authorized asynchronous diagnostic method
+
+The unauthorized-audience assertion keeps its final contract unchanged:
+`auth start` is still required to publish an attempt that settles to `FAILED`
+with a null result. If it fails before publication, the existing precondition
+remains red; the lab does not accept that path as a green result. It now reports
+only a bounded diagnostic containing the return code, `stdout` and `stderr`.
+The diagnostic replaces the synthetic subject token, requester secret and
+master password with `<REDACTED>` before any assertion context is shown. It
+performs no retry and does not alter the subsequent terminal-state assertion
+when an attempt was published.
+
+The baseline diagnostic had observed a non-zero return code with empty
+`stdout`/`stderr`; nine additional runs did not reproduce it. This remains
+evidence to preserve, not a reason to weaken the final failure assertion.
+
 ## Exact limits
 
 - This is the single installed Keycloak 26.7.3 Standard-v2 profile. It is not a

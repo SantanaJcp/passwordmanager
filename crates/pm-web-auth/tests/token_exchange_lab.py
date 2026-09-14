@@ -185,6 +185,22 @@ def start_attempt(cli, env, item, nonce, context="keycloak-exchange-lab"):
     return args, common.cli(AGENT_A, cli, env, args, check=False)
 
 
+def safe_process_diagnostic(result, *secrets):
+    """Return bounded process diagnostics with synthetic credentials redacted."""
+    sensitive = [value for value in secrets if value]
+
+    def redacted(value):
+        for secret in sensitive:
+            value = value.replace(secret, b"<REDACTED>")
+        return value[:2048].decode("utf-8", "backslashreplace")
+
+    return {
+        "returncode": result.returncode,
+        "stdout": redacted(result.stdout),
+        "stderr": redacted(result.stderr),
+    }
+
+
 def wait_terminal(cli, env, attempt):
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -377,7 +393,9 @@ def main():
         daemon = start_daemon(local_custody, bootstrap, runtime, vault, provider_socket); processes.append(daemon)
         common.wait_path(daemon, runtime / "agent.sock"); common.wait_path(daemon, runtime / "human.sock")
         _, denied_audience = start_attempt(local_cli, env, item, "6")
-        assert denied_audience.returncode == 0
+        assert denied_audience.returncode == 0, safe_process_diagnostic(
+            denied_audience, subject_token.encode(), CLIENT_SECRET.encode(), MASTER
+        )
         audience_terminal, audience_public = wait_terminal(local_cli, env, json.loads(denied_audience.stdout)["result"]["attempt_id"])
         assert audience_terminal["state"] == "FAILED" and audience_terminal["result"] is None, audience_terminal
         common.stop(daemon); processes.remove(daemon); common.stop(web); processes.remove(web)
