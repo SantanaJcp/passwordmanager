@@ -83,3 +83,11 @@ probar. Se condiciona el trigger para aceptar sólo ese primer registro y
 rechazar el siguiente; siguen exigidos staging/challenge de la operación,
 rollback completo de sus tablas y conteos separados de un unlock más tres
 mutaciones exitosas. No se cambió producto ni se rebajó una aserción a cero.
+
+El primer rerun enfocado de esos cuatro labs dejó 1PUX y backup verdes, y los
+dos wrappers de `linux_lab.py` fallaron sólo en el conteo final 5. La lectura
+del flujo real explica el sexto registro: queda el `HumanUnlock` del intento
+con commit inyectado fallido; el cliente CRUD exitoso registra un unlock
+inicial, reconecta y registra otro para recuperar el recibo perdido, y después
+confirma sus tres mutaciones. La expectativa exacta es por tanto `1+2+3=6`;
+no se infiere del deseo de verde ni se elimina la reconexión que el lab prueba.

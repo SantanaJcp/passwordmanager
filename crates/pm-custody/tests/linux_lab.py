@@ -356,7 +356,10 @@ def main():
             assert database.execute("select count(*) from human_receipts").fetchone() == (3,)
             assert database.execute("select count(*) from authority_events").fetchone() == (3,)
             assert database.execute("select count(*) from outbox").fetchone() == (3,)
-            assert database.execute("select count(*) from encrypted_audit_records").fetchone() == (5,)
+            # One unlock survived the injected failure. The successful CRUD
+            # client unlocks once before create and once after reconnecting for
+            # the lost-response receipt, then commits three item mutations.
+            assert database.execute("select count(*) from encrypted_audit_records").fetchone() == (6,)
             assert database.execute("select count(*) from human_challenges where consumed=1").fetchone() == (3,)
             assert database.execute("select count(*) from human_challenges where consumed=0").fetchone() == (1,)
             assert database.execute("select count(*) from human_staging").fetchone() == (1,)
