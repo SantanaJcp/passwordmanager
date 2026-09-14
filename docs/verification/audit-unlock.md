@@ -57,3 +57,16 @@ check y clean, `count=20 failures=0`, cero procesos/residuos propios y root
 limpio después del commit de evidencia. Este resultado será únicamente Linux
 x86_64 de integración: no será revisión formal, ejecución Windows, publicación
 ni resolución del ticket nativo.
+
+## Evidencia de composición en curso
+
+El primer `scripts/check.sh` de root se conserva en
+`/tmp/pm-audit-unlock-root-check.log` y terminó rc101. No fue un RED del motor:
+la composición detectó que el test de retiro causal añadido en root después del
+baseline fuente aún llamaba dos veces al helper migrado sin entregar custodia.
+El compilador señaló exactamente las líneas 442–443 de
+`e2ee_replication.rs`; no hubo otro fallo. La corrección de integración crea una
+custodia sintética estable por cada uno de esos dos dispositivos y la pasa al
+helper, igual que los demás fixtures migrados. No cambia producto, aserciones,
+retiro causal ni la fuente importada. Los siguientes gates se registrarán como
+intentos separados, no se sobrescribe este log.

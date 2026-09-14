@@ -436,11 +436,13 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn human_retirement_commits_every_observed_prefix_for_the_exact_device() {
+    let owner_custody = test_audit_custody();
+    let remote_custody = test_audit_custody();
     let dir = TestDir::new();
     let vault = dir.path("retire.sqlite3");
     persist(&vault);
-    let (mut owner, _owner_peer) = human(&vault, [0xa1; 16]);
-    let (remote, _remote_peer) = human(&vault, [0xb2; 16]);
+    let (mut owner, _owner_peer) = human(&vault, [0xa1; 16], &owner_custody);
+    let (remote, _remote_peer) = human(&vault, [0xb2; 16], &remote_custody);
     let event = remote
         .sign_causal_event(&revision([0x31; 16], [0x32; 16], 1))
         .unwrap();
