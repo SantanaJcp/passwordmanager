@@ -96,8 +96,12 @@ def main():
             stdin=child_input, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env={}, preexec_fn=lambda: child_identity(128 * 1024),
         )
-        writer.sendall((1).to_bytes(4, "big") + b"x" +
-                       (512 * 1024).to_bytes(4, "big") + CANARY)
+        public_prefix = (
+            (1).to_bytes(4, "big") + b"x" +
+            (1).to_bytes(4, "big") + b"t" +
+            (1).to_bytes(4, "big") + b"u"
+        )
+        writer.sendall(public_prefix + (512 * 1024).to_bytes(4, "big") + CANARY)
         try:
             child.wait(timeout=3)
         except subprocess.TimeoutExpired as error:
@@ -109,8 +113,8 @@ def main():
         assert stdout == b"", stdout
         assert stderr == b"CUSTODY_UNAVAILABLE\n", stderr
         remaining = queued_bytes(child_input)
-        assert remaining >= len(CANARY), (
-            "custody prefetched the second secret before protected allocation",
+        assert remaining == len(CANARY), (
+            "custody did not consume the first secret, public fields and second header",
             remaining,
         )
         assert not socket_path.exists()
