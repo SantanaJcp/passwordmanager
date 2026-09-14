@@ -1163,3 +1163,13 @@ sus duplicados posteriores permanecen dentro del mismo worker para rustls y la
 lease humana. Una regresión de trait en el módulo Windows exige esta propiedad
 sin construir un handle sintético. La ejecución nativa sigue siendo necesaria
 para validar el contrato operativo.
+
+Sobre `5d64bc2`, `scripts/check.sh` y `scripts/clean-offline-build.sh` pasaron
+con salida cero; sus logs son `/tmp/pm27-windows-stop-check-5d64bc2.log` y
+`/tmp/pm27-windows-stop-clean-5d64bc2.log`. Esos gates compilaron únicamente el
+`cfg` Linux y no acreditan el backend Windows. La corrida nativa
+`34848390243`, publicada sobre ese checkpoint, fue cancelada al detectarse por
+inspección el trait `Send` ausente, antes de obtener un log que demostrara un
+RED de compilación o comportamiento; no se registra como tal. La siguiente
+corrida debe identificar exactamente `0a0ec3d`, que añade el contrato de
+movimiento único, y volver a ejecutar todo el método nativo.
