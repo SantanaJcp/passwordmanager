@@ -1700,6 +1700,14 @@ GENERIC_WRITE`, `BACKUP_SEMANTICS | OPEN_REPARSE_POINT`, verifica tipo e
 identidad y sólo entonces hace `sync_all`. Un handle de sólo lectura no acredita
 `FlushFileBuffers` y queda excluido.
 
+La comprobación nativa `native_directory_flush_reports_the_real_kernel_result`
+crea un directorio sintético propio, invoca el seam público y conserva por
+separado el resultado del kernel y la limpieza. Debe quedar RED si el handle se
+abre sin el derecho requerido; `AccessDenied` nunca se transforma en éxito. La
+corrección sólo puede seguir después de conservar ese RED Windows y debe volver
+a ejecutar además la publicación sync y el backup/restore reales que dependen
+de persistencia durable; el test directo no los sustituye.
+
 ### Método de transferencia 1PUX por handle en Windows
 
 La transferencia Windows no reabre un path ni concede derechos sobre el

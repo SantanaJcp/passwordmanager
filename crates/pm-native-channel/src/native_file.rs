@@ -326,6 +326,19 @@ mod tests {
         remove_owned(&root, &[&path]);
     }
 
+    #[test]
+    fn native_directory_flush_reports_the_real_kernel_result() {
+        let root = owned_root("directory-flush");
+        std::fs::create_dir(&root).unwrap();
+        let result = sync_directory(&root);
+        let cleanup = std::fs::remove_dir(&root);
+        assert!(
+            cleanup.is_ok(),
+            "owned fixture root cleanup failed: {cleanup:?}"
+        );
+        assert!(result.is_ok(), "native directory flush failed: {result:?}");
+    }
+
     #[cfg(windows)]
     #[test]
     fn regular_open_rejects_a_final_reparse_component() {
