@@ -63,6 +63,11 @@ $osArch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString(
 $processArch = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
 Assert-True ($osArch -eq $processArch) "native process required: OS=$osArch process=$processArch"
 Assert-True ($osArch -in @('Arm64', 'X64')) "unsupported native CPU $osArch"
+Assert-True (-not [string]::IsNullOrWhiteSpace($env:SODIUM_LIB_DIR)) 'Prepared SODIUM_LIB_DIR is required'
+Assert-True (Test-Path -LiteralPath (Join-Path $env:SODIUM_LIB_DIR 'libsodium.lib') -PathType Leaf) 'Prepared libsodium.lib is absent'
+foreach ($name in @('SODIUM_SHARED', 'SODIUM_USE_PKG_CONFIG', 'SODIUM_DIST_DIR')) {
+    Assert-True (-not (Test-Path "Env:$name")) "Forbidden libsodium selection variable is present: $name"
+}
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $gitCommon = (& git -C $repo rev-parse --path-format=absolute --git-common-dir).Trim()
@@ -102,7 +107,6 @@ try {
 
     Push-Location $repo
     $locationPushed = $true
-    Invoke-Checked 'cargo' @('fetch', '--locked')
 
     New-Item -ItemType Directory -Path $root | Out-Null
     $rootOwned = $true

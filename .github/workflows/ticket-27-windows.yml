@@ -34,6 +34,9 @@ jobs:
         run: |
           cargo fetch --locked
           if ($LASTEXITCODE -ne 0) { throw "Locked fetch failed with exit code $LASTEXITCODE" }
+      - name: Build authenticated libsodium source with native MSVC
+        shell: pwsh
+        run: ./scripts/prepare-windows-libsodium.ps1 -EphemeralCI
       - name: Run native custody product lab
         shell: pwsh
         run: ./scripts/test-windows-custody-lab.ps1 -EphemeralCI
