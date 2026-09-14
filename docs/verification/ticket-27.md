@@ -843,11 +843,13 @@ API y a una regresión nativa real:
    `CreateFileW` mantiene
    `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`; no se sustituye el pipe,
    no se relaja autenticación local y no se introduce fallback.
-3. Si la creación del servidor devuelve `INVALID_HANDLE_VALUE`, capturar
-   `GetLastError` inmediatamente, antes de `LocalFree(descriptor)`. La captura
-   evita que liberar el descriptor opaque el diagnóstico interno; la API pública
-   conserva `ChannelAuthenticationError` opaco y no imprime código Win32,
-   ruta, SID ni otro dato dinámico.
+3. Si la creación del servidor devuelve `INVALID_HANDLE_VALUE`, leer
+   `GetLastError` inmediatamente, antes de `LocalFree(descriptor)`, y conservar
+   únicamente la indicación de que la creación falló para la decisión local.
+   El código numérico se descarta después de esa comprobación: no se persiste ni
+   se expone como diagnóstico. La API pública conserva
+   `ChannelAuthenticationError` opaco y no imprime código Win32, ruta, SID ni
+   otro dato dinámico; liberar el descriptor no participa en la decisión.
 
 La regresión textual del checker se ejecutó antes de la corrección y dio RED
 con `CreateNamedPipeW server mode must not contain client SQOS flags`. Después
@@ -860,3 +862,9 @@ job Windows debe ejecutar la regresión contra el API real y el laboratorio
 normal; cualquier ejecución con diagnósticos sigue siendo observación y no
 aceptación. El ticket permanece sin aceptar hasta que la corrida normal con
 `service_diagnostics=false` y los demás gates nativos pasen.
+
+La validación estática adicional usó directamente el `rustfmt` de Rust 1.98.1
+(`rustfmt --edition 2024 --check`) y pasó. La inspección del binding local
+`windows-sys 0.61.2` confirmó `OpenProcessToken` bajo
+`Win32::System::Threading` y `TOKEN_QUERY` bajo `Win32::Security`; los imports
+del test siguen esas ubicaciones. No se ejecutaron Cargo ni una prueba Windows.

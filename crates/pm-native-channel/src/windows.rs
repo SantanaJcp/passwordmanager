@@ -39,7 +39,7 @@ use windows_sys::Win32::{
             SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
             SERVICE_STATUS_PROCESS,
         },
-        Threading::{GetCurrentProcess, GetCurrentThread, OpenThreadToken},
+        Threading::{GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken},
     },
     UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE},
 };
@@ -789,12 +789,10 @@ fn write_handle(handle: HANDLE, buffer: &[u8]) -> io::Result<usize> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use windows_sys::Win32::{
-        Foundation::CloseHandle,
-        Security::{OpenProcessToken, TOKEN_QUERY},
-        System::Threading::GetCurrentProcess,
-    };
     use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::{
+        Foundation::CloseHandle, Security::TOKEN_QUERY, System::Threading::GetCurrentProcess,
+    };
 
     const CANARY: &[u8] = b"ticket27-synthetic-native-canary";
     static CLIPBOARD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
