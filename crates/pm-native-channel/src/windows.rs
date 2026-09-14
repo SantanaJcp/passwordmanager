@@ -789,6 +789,7 @@ mod tests {
     use windows_sys::Win32::System::Pipes::CreatePipe;
 
     const CANARY: &[u8] = b"ticket27-synthetic-native-canary";
+    static CLIPBOARD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn dpapi_machine_roundtrip_uses_a_distinct_blob() {
@@ -800,6 +801,7 @@ mod tests {
 
     #[test]
     fn clipboard_sequence_never_clears_a_newer_owner() {
+        let _exclusive_clipboard = CLIPBOARD_TEST.lock().unwrap();
         let first = OwnedClipboard::copy(CANARY).unwrap();
         let second = OwnedClipboard::copy(b"ticket27-new-owner").unwrap();
         assert!(!first.clear_if_owned().unwrap());
@@ -809,6 +811,7 @@ mod tests {
 
     #[test]
     fn clipboard_copy_fails_if_ownership_changes_before_sequence_capture() {
+        let _exclusive_clipboard = CLIPBOARD_TEST.lock().unwrap();
         let replacement = std::cell::RefCell::new(None);
         let lost = OwnedClipboard::copy_then(CANARY, || {
             replacement.replace(Some(OwnedClipboard::copy(b"ticket27-new-owner").unwrap()));

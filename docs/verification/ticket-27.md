@@ -270,6 +270,20 @@ RUSTFLAGS='--cfg target_os="windows" -Aexplicit_builtin_cfgs_in_flags' \
 Ambos tests nuevos siguen pendientes de ejecución real Windows ARM64; este
 resultado local no convierte el ticket en aceptado.
 
+La sexta ejecución,
+[run 34799143030](https://github.com/SantanaJcp/passwordmanager/actions/runs/34799143030),
+pasó DPAPI, ConPTY y la carrera clipboard original. El nuevo caso de pérdida de
+ownership falló al crear su writer interloper, mientras el otro caso clipboard
+seguía ejecutándose en paralelo en el mismo binario de tests. Ambos casos usan
+el único clipboard de la misma window station y `OpenClipboard` excluye otros
+writers; por tanto no son fixtures independientes. La corrección de método
+serializa **solo esos dos casos** con un `Mutex` test-only compartido. La
+concurrencia adversaria intencional dentro del segundo caso permanece en la
+frontera exacta publish/capture; no se usa `--test-threads=1`, retry, timeout ni
+cambio de producto. El siguiente Windows ARM64 debe pasar ambos casos juntos
+con el runner paralelo normal para confirmar el diagnóstico; un fallo seguiría
+siendo RED y requeriría nuevo análisis.
+
 ## Regresión Linux del checkpoint
 
 Después de extraer el motor wire compartido, `./scripts/check.sh` terminó con
