@@ -35,3 +35,16 @@ Pendiente de implementación y evidencia.
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-13 — Claimed tras integración y resolución23 en `0b897c1`, con18/18labs de merger. Sol medium por composición de autoridad, suspensión y confirmación UP/UV humana; no adelanta revisión formal ni modifica modelo de seguridad.
+
+2026-09-14 — RED de integración del merger: el candidato `36934b3` se integró
+sin conflictos como `77a5198`; `git diff --check`, `scripts/check.sh`, clean
+locked/offline (44.43 s) y los 19 cuerpos funcionales terminaron en PASS. Sin
+embargo, el nuevo lab TUI oculta el error de su cleanup mediante
+`shutil.rmtree(root, ignore_errors=True)` y la corrida dejó el directorio real
+`/tmp/pm-tui-access-linux-lab-c4d1o_6i` con subdirectorios/fixtures sintéticos
+de UIDs mapeados 100002–100005. El proceso devolvió 0, por lo que el gate no
+propaga todos sus fallos y su `count=19 failures=0` no basta para resolver el
+ticket bajo la prohibición de fallbacks/errores ocultos. La resolución
+provisional `0c1e656` se revirtió de forma no destructiva en `3205ae9`; ticket
+permanece claimed a la espera de una corrección del autor y nueva verificación
+independiente. No se atribuye fallo funcional al motor ni se repiten los labs.

@@ -152,3 +152,15 @@ Candidato `f1c375e` integrado sin conflictos como `c74aba0`, resolución23 en `0
 ## Composición25: sync observable sin ampliar plazos
 
 La implementación encontró read-timeout humano de15s frente al backoff idempotente ya aprobado de sync. No se autorizó el timeout propuesto de75s: no cubre request30s por intento ni múltiples hashes/páginas, y puede dejar UI fallida con publicación todavía activa.25 debe separar inicio autorizado de trabajo cifrado observable por ID/estado/progreso en el motor único, preservando outbox/backoff y lock/idle sin retener HumanVault/KH tras bloqueo. Consultar estado no repite autenticaciones ni operaciones. Este ajuste de implementación satisface los contratos existentes; no reabre el backoff de [G5](../../docs/design/synchronization.md) ni crea gestión de sesiones de negocio. Exige método y pruebas de indisponibilidad durante sync, estado final y bloqueo/reinicio sin éxito inventado antes de aceptar25.
+
+## TUI24 — RED de cleanup en integración
+
+El merger separado integró `36934b3` sin conflicto como `77a5198` y obtuvo PASS
+en `git diff --check`, `scripts/check.sh`, clean locked/offline (44.43 s) y los
+19 cuerpos funcionales Linux en una única barrida. El gate no se acepta: el
+nuevo `tui_access_lab.py` usa `shutil.rmtree(root, ignore_errors=True)` y ocultó
+un fallo real, dejando `/tmp/pm-tui-access-linux-lab-c4d1o_6i` con fixtures
+sintéticos de UIDs mapeados aunque devolvió 0. La resolución provisional se
+revirtió en `3205ae9`; 24 permanece claimed hasta corregir el lab y volver a
+verificar sin convertir cleanup fallido en éxito. No se repitió la barrida ni
+se atribuye este hallazgo al motor productivo.

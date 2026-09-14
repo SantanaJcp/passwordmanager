@@ -80,3 +80,16 @@ PASS complete-linux-labs count=19
 La barrida final fue una sola ejecución ordenada 19/19 después del clean build.
 Los límites emitidos por los labs siguen vigentes: no se ejecutaron navegador
 de producto, reinicio/FDE de host ni los targets nativos pendientes.
+
+## RED de integración pendiente
+
+El merger separado integró `36934b3` como `77a5198`. `git diff --check`,
+`scripts/check.sh` y clean locked/offline (44.43 s) pasaron; una sola barrida
+ejecutó los 19 labs y todos sus cuerpos funcionales retornaron 0. El gate no se
+acepta todavía: `tui_access_lab.py` suprime cualquier excepción del cleanup con
+`shutil.rmtree(root, ignore_errors=True)`, y la corrida dejó observable
+`/tmp/pm-tui-access-linux-lab-c4d1o_6i` con archivos y directorios sintéticos de
+UIDs mapeados 100002–100005 pese al exit 0. La supresión convierte un fallo real
+de laboratorio en éxito aparente, contrario al método de propagación exigido.
+No se ejecutó retry. Se requiere corregir el lab y repetir la verificación antes
+de resolver 24; esta evidencia no cambia los límites nativos ya declarados.
