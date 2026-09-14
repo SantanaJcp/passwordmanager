@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 set -euo pipefail
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]
+test -x /usr/bin/tmux
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)";cd "$root"
 kc="${PM_KEYCLOAK_DIST:-$root/.scratch/lab-artifacts/keycloak/keycloak-26.7.3}"
 cft="${PM_CFT_DIR:-$root/.scratch/lab-artifacts/cft/chrome-linux64}"

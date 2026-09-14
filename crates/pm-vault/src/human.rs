@@ -360,6 +360,85 @@ pub struct HumanCatalogEntry {
     lifecycle: ItemLifecycle,
 }
 
+/// Secret-free materialized authority state for the human access screen.
+#[derive(Debug, Eq, PartialEq)]
+pub struct HumanAccessOverview {
+    suspended: bool,
+    agents: Vec<HumanAgentAccess>,
+    credentials: Vec<HumanCredentialAccess>,
+}
+
+impl HumanAccessOverview {
+    #[must_use]
+    pub const fn suspended(&self) -> bool {
+        self.suspended
+    }
+    #[must_use]
+    pub fn agents(&self) -> &[HumanAgentAccess] {
+        &self.agents
+    }
+    #[must_use]
+    pub fn credentials(&self) -> &[HumanCredentialAccess] {
+        &self.credentials
+    }
+}
+
+/// One RPK-bound agent generation, without private or credential material.
+#[derive(Debug, Eq, PartialEq)]
+pub struct HumanAgentAccess {
+    subject: [u8; 16],
+    generation: u64,
+    label: String,
+    environment: String,
+    status: String,
+}
+
+impl HumanAgentAccess {
+    #[must_use]
+    pub const fn subject(&self) -> &[u8; 16] {
+        &self.subject
+    }
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    #[must_use]
+    pub fn environment(&self) -> &str {
+        &self.environment
+    }
+    #[must_use]
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+}
+
+/// One content item and whether it belongs to the common delegated set.
+#[derive(Debug, Eq, PartialEq)]
+pub struct HumanCredentialAccess {
+    item: [u8; 16],
+    title: String,
+    enabled: bool,
+}
+
+impl HumanCredentialAccess {
+    #[must_use]
+    pub const fn item(&self) -> &[u8; 16] {
+        &self.item
+    }
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
 impl HumanCatalogEntry {
     #[must_use]
     pub const fn item_id(&self) -> &[u8; 16] {
@@ -388,6 +467,116 @@ impl HumanCatalogEntry {
 }
 
 impl HumanVault {
+    /// Returns the materialized, secret-free human view of delegated authority.
+    ///
+    /// # Errors
+    /// Fails closed for a malformed status, identifier, or generation.
+    pub fn access_overview(&self) -> Result<HumanAccessOverview, HumanCommitError> {
+        self.channel.verify()?;
+        let connection = open_connection(&self.path)?;
+        let global: Option<String> = connection
+            .query_row(
+                "SELECT status FROM delegated_state WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let suspended = match global.as_deref() {
+            None | Some("suspended") => true,
+            Some("resumed") => false,
+            Some(_) => return Err(HumanCommitError::Integrity),
+        };
+        let mut statement = connection.prepare(
+            "SELECT subject_id,generation,label,environment_binding,status
+             FROM agent_authorizations ORDER BY subject_id,generation",
+        )?;
+        let agents = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .map(|row| {
+                let (subject, generation, label, environment, status) = row?;
+                if !matches!(status.as_str(), "active" | "revoked" | "superseded") {
+                    return Err(HumanCommitError::Integrity);
+                }
+                Ok(HumanAgentAccess {
+                    subject: bytes::<16>(&subject)?,
+                    generation: u64::try_from(generation)
+                        .map_err(|_| HumanCommitError::Integrity)?,
+                    label,
+                    environment,
+                    status,
+                })
+            })
+            .collect::<Result<Vec<_>, HumanCommitError>>()?;
+        drop(statement);
+        let mut statement = connection.prepare(
+            "SELECT item_id,visible_revision,kind FROM vault_items
+             WHERE status='active' ORDER BY item_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut credentials = Vec::new();
+        for (item, revision, kind) in rows {
+            let item = bytes::<16>(&item)?;
+            let record =
+                self.read_revision_from(&connection, item, bytes::<16>(&revision)?, Some(&kind))?;
+            if record.auth().is_empty() {
+                continue;
+            }
+            let enabled: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM credential_authorizations
+                 WHERE item_id=?1 AND status='enabled')",
+                [item.as_slice()],
+                |row| row.get(0),
+            )?;
+            credentials.push(HumanCredentialAccess {
+                item,
+                title: record.human().title.clone(),
+                enabled,
+            });
+        }
+        Ok(HumanAccessOverview {
+            suspended,
+            agents,
+            credentials,
+        })
+    }
+
+    pub(crate) fn verify_attempt_access(
+        &self,
+        path: &Path,
+        vault: &[u8; 16],
+        device: &[u8; 16],
+    ) -> Result<(), crate::AttemptError> {
+        self.channel
+            .verify()
+            .map_err(|_| crate::AttemptError::Integrity)?;
+        if self.path != path || self.root.vault_id() != vault || &self.device != device {
+            return Err(crate::AttemptError::Integrity);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn attempt_title(&self, item: [u8; 16]) -> Result<String, crate::AttemptError> {
+        self.read_record(item)
+            .map(|record| record.human().title.clone())
+            .map_err(|_| crate::AttemptError::Integrity)
+    }
     /// Lists authenticated, secret-free human metadata for active and trashed items.
     ///
     /// # Errors
@@ -1186,6 +1375,37 @@ impl HumanVault {
             &body,
             Some(&control_package),
             Some(&staged_grant),
+        )
+        .map_err(AuthorizationError::from)
+    }
+
+    /// Stages removal of one credential from the common delegated set.
+    ///
+    /// # Errors
+    /// Rejects an item that is not currently enabled or unavailable storage.
+    pub fn prepare_disable(
+        &mut self,
+        item: [u8; 16],
+    ) -> Result<PreparedHumanCommand, AuthorizationError> {
+        let connection = open_connection(&self.path).map_err(AuthorizationError::from)?;
+        let enabled: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM credential_authorizations
+             WHERE item_id=?1 AND status='enabled')",
+            [item.as_slice()],
+            |row| row.get(0),
+        )?;
+        if !enabled {
+            return Err(AuthorizationError::CredentialUnavailable);
+        }
+        drop(connection);
+        self.prepare_authority(
+            "availability_change",
+            "disable",
+            item,
+            1,
+            &encode_reason_body(AuthorizationReason::OwnerRequest),
+            None,
+            None,
         )
         .map_err(AuthorizationError::from)
     }
@@ -5040,6 +5260,16 @@ fn validate_staged(
                 && staged.package.is_some()
                 && staged.staged_grant.is_some()
         }
+        "disable" => {
+            staged.operation == "availability_change"
+                && staged.subject_generation == Some(1)
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .is_some_and(|value| decode_reason_body(value).is_ok())
+                && staged.package.is_none()
+                && staged.staged_grant.is_none()
+        }
         _ => false,
     };
     let event_manifest = encode_event_manifest(
@@ -6222,7 +6452,7 @@ fn authority_specific_parents(
     let kinds: &[&str] = match staged.event_kind.as_str() {
         "agent-grant" => &["agent-grant", "agent-revoke"],
         "resume" => &["suspend"],
-        "enable" => &[
+        "enable" | "disable" => &[
             "enable",
             "disable",
             "trash",
