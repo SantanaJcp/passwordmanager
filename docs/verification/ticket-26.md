@@ -599,11 +599,35 @@ complete `./scripts/check.sh`, the macOS static checker, and
 classified as portable `-O2`; that confirms the Cargo/cc seam locally but does
 not predict either native macOS result.
 
+Native run [`34811375717`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34811375717)
+on `634ac8a` completed GREEN on both authorized architectures. The exact current
+libsodium build classified as `optimized` on both. Apple silicon measured the
+existing root creation at 599 ms, the service KDF at 605 ms and the whole
+unlock at 609 ms. Intel measured creation at 1,803 ms, the service KDF at
+1,362 ms and the whole unlock at 1,371 ms. Both jobs retained the unchanged
+Argon2id parameters and deadline and passed the live LaunchDaemon identity,
+bilateral `getpeereid`, TLS 1.3/RPK, ACL/wrong-UID rejection, durable suspension
+across a real launchd restart, `/dev/tty`, AppKit clipboard ownership and
+queried fullfsync assertions. Each job printed all four product PASS lines and
+the workflow concluded successfully.
+
+This result verifies that the bounded portable package optimization removed the
+observed KDF deadline failure on both native runners without changing the KDF
+contract. It is not complete Ticket 26 acceptance. Authorization remains
+pending for the inherited cleanup behavior identified separately; the normal
+non-diagnostic binary/TUI composition, reboot plus FileVault coverage, and
+signing/notarization gates also remain outstanding. The diagnostic build and CI
+runner do not substitute for those requirements.
+
 ## Remaining acceptance work
 
-- Rerun the repaired checkpoint on both authorized ephemeral macOS
-  architectures; the first run stopped at the native compile RED and did not
-  reach the product assertions.
+- Resolve and verify the inherited cleanup behavior only after its separate
+  authorization decision; do not treat the two successful jobs as approval to
+  change that path.
+- Verify the normal non-diagnostic binary and complete keyboard TUI composition
+  rather than treating the diagnostic custody flow as the daily human UI.
+- Complete the separately scoped reboot/FileVault and signing/notarization
+  gates.
 - Execute or recover the intended pre-port behavioral red if the acceptance
   record requires it; the observed compile RED does not substitute for that
   behavioral evidence.
