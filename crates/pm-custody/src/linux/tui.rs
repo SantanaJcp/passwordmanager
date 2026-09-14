@@ -30,7 +30,7 @@ use crossterm::{
 use pm_vault::PasskeyStatus;
 use ratatui::{
     Terminal,
-    backend::CrosstermBackend,
+    backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -566,7 +566,10 @@ fn run_terminal(
         execute!(guard.writer, crossterm::cursor::Hide).map_err(|_| Failure::Unavailable)?;
         let backend = CrosstermBackend::new(writer);
         let mut terminal = Terminal::new(backend).map_err(|_| Failure::Unavailable)?;
-        terminal.clear().map_err(|_| Failure::Unavailable)?;
+        terminal
+            .backend_mut()
+            .clear()
+            .map_err(|_| Failure::Unavailable)?;
         let mut app = App::new(
             Duration::from_secs(idle),
             Duration::from_secs(reveal),
@@ -635,7 +638,10 @@ fn run_authenticated_session(
             if let Some(tls) = tls.as_mut() {
                 (|| {
                     lock_human_channel(tls)?;
-                    terminal.clear().map_err(|_| Failure::Unavailable)
+                    terminal
+                        .backend_mut()
+                        .clear()
+                        .map_err(|_| Failure::Unavailable)
                 })()
             } else {
                 Err(Failure::Unavailable)

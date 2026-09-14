@@ -782,6 +782,9 @@ def start_macos_tui(binary, profile, private, endpoint, *, idle, reveal, copy):
     )
     try:
         session.wait_text("Password required")
+        assert b"\x1b[6n" not in bytes(session.output), (
+            "TUI PTY startup must not require a terminal-emulator cursor response"
+        )
         session.send_text(PASSWORD.decode("ascii"), enter=True, hidden=True)
         session.wait_text("Unlocked: selection never reveals secrets")
         return session
@@ -855,6 +858,9 @@ def run_tui_core_lab(
 
         first.send_key("l")
         assert first.wait_exit(timeout=8) == 0
+        assert b"\x1b[6n" not in bytes(first.output), (
+            "TUI PTY exit must not require a terminal-emulator cursor response"
+        )
     finally:
         first.close()
     assert TUI_PASSWORD_RECORD not in bytes(first.output)
@@ -867,6 +873,9 @@ def run_tui_core_lab(
     try:
         idle_start = second.mark()
         assert second.wait_exit(timeout=8) == 0
+        assert b"\x1b[6n" not in bytes(second.output), (
+            "TUI PTY idle exit must not require a terminal-emulator cursor response"
+        )
         idle_text = second.text(idle_start)
         assert "Locked after 5 minutes without human input" in idle_text, idle_text[-4096:]
     finally:

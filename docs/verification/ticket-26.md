@@ -951,6 +951,43 @@ acceptance result. Checkpoint `a247340` replaces those assertions with static
 panic closures, preserving the non-`Debug` product error and the test's
 failure behavior; native redispatch remains pending.
 
+Native run 21
+[`34848148030`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34848148030)
+on `a247340` compiled the ordinary binaries and applicable native tests on both
+authorized architectures, then reached the normal TUI core laboratory. The
+first real PTY child exited with the public `CUSTODY_UNAVAILABLE` result before
+rendering `Password required`; the Intel and Apple-silicon jobs reported the
+same outcome. This is a behavioral RED, not native acceptance. The traceback
+shows the failure at `start_macos_tui` after content seeding and normal human
+authorization setup, but the public custody error does not identify its
+internal stage.
+
+Static source inspection provides a bounded, source-supported diagnosis while
+native confirmation remains pending. `run_terminal` calls Ratatui's
+`Terminal::clear` before the first application draw and again on the final
+successful lock/exit path. Ratatui 0.30's fullscreen `Terminal::clear`
+unconditionally asks its backend for the current cursor position before
+clearing. The pinned Crossterm 0.29 Unix implementation answers that request by
+writing the terminal status query `ESC[6n` and waiting for a cursor-position
+reply. The laboratory's `forkpty` child has a kernel PTY, not a terminal
+emulator, and `MacPtySession` only resizes, reads and writes it; it never
+answers that query. Therefore the initial draw cannot run and the resulting
+`Failure::Unavailable` is rendered only as `CUSTODY_UNAVAILABLE`. The buffered
+Python stdout explains why the short adjacent log timestamps do not measure
+the internal wait.
+
+The bounded repair changes only those two sites to the backend's direct
+fullscreen clear operation, which writes and flushes the clear command while
+propagating its I/O error; it does not emulate a terminal, add a retry, extend
+a deadline, relax a guard or select a fallback. At startup Ratatui's buffers
+are empty, and after final lock/idle exit no later frame relies on the buffer,
+so the direct operation does not require a cursor-preserving query at either
+site. The real normal PTY harness now records raw bytes and rejects `ESC[6n`
+during startup and exit, proving that the fixture does not conceal a future
+cursor-query dependency. This static regression method and the repair require
+the unchanged normal two-architecture native run; neither this diagnosis nor
+the local source checks is a GREEN or acceptance claim.
+
 Before native dispatch, static verification must establish that the new
 harness parses, its command/fixture inventory is closed, its PTY driver waits
 for visible input before Enter, and the workflow still invokes only the normal
