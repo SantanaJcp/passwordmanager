@@ -70,3 +70,16 @@ custodia sintética estable por cada uno de esos dos dispositivos y la pasa al
 helper, igual que los demás fixtures migrados. No cambia producto, aserciones,
 retiro causal ni la fuente importada. Los siguientes gates se registrarán como
 intentos separados, no se sobrescribe este log.
+
+La primera barrida completa de labs se conserva en
+`/tmp/pm-audit-unlock-root-labs-summary.log`: ejecutó los 20 scripts una vez y
+terminó `count=20 failures=4`. Los fallos 1PUX/backup comparaban todos los
+conteos con el snapshot anterior aunque cada comando humano autenticado ahora
+confirma legítimamente un `HumanUnlock`; se mantienen iguales todas las tablas
+no audit y se exige un delta audit exacto de uno por unlock. Los fallos content
+y human-transaction vienen del mismo `linux_lab.py`: su trigger incondicional
+abortaba el nuevo `HumanUnlock` antes de alcanzar el commit CRUD que pretendía
+probar. Se condiciona el trigger para aceptar sólo ese primer registro y
+rechazar el siguiente; siguen exigidos staging/challenge de la operación,
+rollback completo de sus tablas y conteos separados de un unlock más tres
+mutaciones exitosas. No se cambió producto ni se rebajó una aserción a cero.

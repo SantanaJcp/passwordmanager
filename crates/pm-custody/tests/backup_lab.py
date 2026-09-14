@@ -52,6 +52,12 @@ def counts(path):
     return result
 
 
+def assert_only_human_unlock_changed(before, after, unlocks):
+    assert after[:7] == before[:7], (before, after)
+    assert after[7] == before[7] + unlocks, (before, after)
+    assert after[8:] == before[8:], (before, after)
+
+
 def digest(path):
     state = hashlib.sha256()
     with path.open("rb") as source:
@@ -120,10 +126,10 @@ def main():
         truncated = output/"truncated.pmb1"; truncated.write_bytes(data[:len(data)//3])
         os.chown(truncated,HUMAN,HUMAN); truncated.chmod(0o600)
         before = counts(vault)
-        for invalid in (corrupt, truncated):
+        for unlocks, invalid in enumerate((corrupt, truncated), start=1):
             human(binary, "human-backup-restore", human_key, human_profile,
                 runtime/"human.sock", password, ("--archive",invalid), ok=False)
-            assert counts(vault) == before
+            assert_only_human_unlock_changed(before, counts(vault), unlocks)
         assert digest(native) == original_hash
         agent_denied = as_uid(AGENT, [binary,"human-backup-restore","--profile",agent_profile,
             "--private",agent_key,"--socket",runtime/"agent.sock","--archive",native],
