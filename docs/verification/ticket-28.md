@@ -476,3 +476,11 @@ timeout será el RED conductual. El GREEN mínimo reserva `ProtectedBytes` por l
 longitud pública después de validar el límite y antes de `read_exact`, y migra
 sólo el password de este comando; no convierte el owner protegido a `Vec`, no
 cambia otros campos ni atribuye cobertura a custodia/vault/adaptadores completos.
+
+La ejecución RED `/tmp/pm28-red-custody-protected-input.log` terminó rc1 en
+4 s: tras recibir sólo el header, el proceso siguió esperando payload durante
+los 3 s del fixture. El GREEN mínimo usa `ProtectedBytes::zeroed` después del
+límite y antes de `read_exact`; `/tmp/pm28-green-custody-protected-input.log`
+terminó rc0 en 1 s, con rc4 exacto y cleanup verificado. Esta evidencia cubre
+sólo el primer password de `human-password-crud`; el resto del inventario
+custodia/vault/adaptadores continúa abierto.

@@ -165,3 +165,9 @@ se registra como cobertura GREEN y no se fabricó un RED. El primer intento no
 alcanzó producto por permisos `0700` del home fixture; tras corregir sólo esa
 precondición, `/tmp/pm28-red-storage-enospc-attempt2.log` terminó rc0 con ENOSPC
 real, rollback integral, canario ausente, integridad/restart y cleanup verificados.
+
+2026-09-14 — RED público de primer secreto custodia reproducido: con memlock=0
+y sólo el header wire, `human-password-crud` esperó payload en un `Vec`
+desbloqueado (`/tmp/pm28-red-custody-protected-input.log`, rc1). GREEN acotado
+reserva `ProtectedBytes` antes de leer payload y terminó rc0; no se atribuye al
+resto de buffers plaintext ni se cierra G7.

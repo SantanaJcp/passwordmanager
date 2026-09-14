@@ -43,7 +43,7 @@ use rustls::{
 use signature::Signer as _;
 use zeroize::{Zeroize, Zeroizing};
 
-use pm_crypto::{KdfProfile, RecoveryCode};
+use pm_crypto::{KdfProfile, ProtectedBytes, RecoveryCode};
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
 use pm_vault::{
     AgentEnrollment, AgentPeer, Attachment, AttachmentReader, AttemptOutcome, AttemptState,
@@ -1979,7 +1979,7 @@ fn human_password_crud(arguments: &mut impl Iterator<Item = OsString>) -> Result
     }
     let key = read_key(&private_path, current_uid())?;
     let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let title = read_wire_string(&mut input, 1024)?;
     let username = read_wire_string(&mut input, 1024 * 1024)?;
     let secret_one = Zeroizing::new(read_wire_field(&mut input, 1024 * 1024)?);
@@ -5367,6 +5367,25 @@ fn read_wire_field(input: &mut impl Read, maximum: usize) -> Result<Vec<u8>, Fai
         return Err(Failure::Unavailable);
     }
     let mut value = vec![0_u8; length];
+    input
+        .read_exact(&mut value)
+        .map_err(|_| Failure::Unavailable)?;
+    Ok(value)
+}
+
+fn read_protected_wire_field(
+    input: &mut impl Read,
+    maximum: usize,
+) -> Result<ProtectedBytes, Failure> {
+    let mut length = [0_u8; 4];
+    input
+        .read_exact(&mut length)
+        .map_err(|_| Failure::Unavailable)?;
+    let length = usize::try_from(u32::from_be_bytes(length)).map_err(|_| Failure::Unavailable)?;
+    if length > maximum {
+        return Err(Failure::Unavailable);
+    }
+    let mut value = ProtectedBytes::zeroed(length).map_err(|_| Failure::Unavailable)?;
     input
         .read_exact(&mut value)
         .map_err(|_| Failure::Unavailable)?;
