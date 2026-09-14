@@ -129,6 +129,8 @@ Comprobaciones locales, que **no sustituyen ejecución Windows**:
 # PASS tras conectar fetch -> fuente autenticada -> lab offline; exit 0
 # RED posterior al exigir rustup-which y cardinalidad segura: contrato ausente; exit 1
 # PASS tras fijar la ruta de Cargo y materializar ambos Select-String con @(...); exit 0
+# RED tras exigir checkout byte-estable: .gitattributes ausente; exit 1
+# PASS con ambos inputs autenticados -text y git check-attr text=unset; exit 0
 
 ./scripts/cargo-local.sh run -p pm-build-input-verifier --locked --offline -- \
   third_party/libsodium/LATEST.tar.gz third_party/libsodium/LATEST.tar.gz.minisig
@@ -165,6 +167,13 @@ preflight corregido `34763094631` pasó 5/5 y observó Windows 11 Enterprise
 10.0.26200, imagen `win11-vs2026-arm64 20260907.151.1`, PowerShell/PE ARM64 y
 Rust 1.98.1 host `aarch64-pc-windows-msvc`; `EnableLUA=1` y el token del runner
 pasó la comprobación de administrador. Fue solo entorno, no ejecutó producto.
+La primera corrida del producto `34796411705` falló antes de MSBuild porque el
+checkout convirtió el `.minisig` textual de LF a CRLF: el repositorio no tenía
+atributo que preservara sus bytes. El hash del blob LF comprometido sigue
+siendo el fijado y su transformación CRLF produce otro hash; no se cambió el
+hash ni se normaliza el input al verificar. `.gitattributes` marca el tarball y
+su firma como `-text`, y el checker exige `git check-attr text=unset` para ambos
+antes de una nueva corrida. Este resultado no acredita el build nativo.
 Además,
 `libsodium-sys-stable 1.24.0` contiene en su `build.rs` un fallback existente:
 si falla `install_from_source()` en MSVC, activa

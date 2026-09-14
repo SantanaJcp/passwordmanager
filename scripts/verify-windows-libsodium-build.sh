@@ -7,8 +7,9 @@ workflow="$root/.github/workflows/ticket-27-windows.yml"
 prepare="$root/scripts/prepare-windows-libsodium.ps1"
 lab="$root/scripts/test-windows-custody-lab.ps1"
 verifier="$root/crates/pm-build-input-verifier/src/main.rs"
+attributes="$root/.gitattributes"
 
-for file in "$workflow" "$prepare" "$lab" "$verifier"; do
+for file in "$workflow" "$prepare" "$lab" "$verifier" "$attributes"; do
     test -f "$file" || {
         echo "required Windows source-build file is absent: $file" >&2
         exit 1
@@ -36,6 +37,19 @@ require_literal '$foreignObjects = @($headers | Select-String' "$prepare"
 require_literal 'SODIUM_LIB_DIR=' "$prepare"
 require_literal 'SODIUM_LIB_DIR' "$lab"
 require_literal 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3' "$verifier"
+require_literal 'third_party/libsodium/LATEST.tar.gz -text' "$attributes"
+require_literal 'third_party/libsodium/LATEST.tar.gz.minisig -text' "$attributes"
+
+for input in third_party/libsodium/LATEST.tar.gz third_party/libsodium/LATEST.tar.gz.minisig; do
+    attribute=$(git -C "$root" check-attr text -- "$input")
+    case "$attribute" in
+        *': text: unset') ;;
+        *)
+            echo "authenticated build input is not checkout-byte-stable: $attribute" >&2
+            exit 1
+            ;;
+    esac
+done
 
 fetch_line=$(grep -nF 'cargo fetch --locked' "$workflow" | cut -d: -f1)
 prepare_line=$(grep -nF './scripts/prepare-windows-libsodium.ps1 -EphemeralCI' "$workflow" | cut -d: -f1)
