@@ -803,11 +803,32 @@ mod tests {
     const CANARY: &[u8] = b"ticket27-synthetic-native-canary";
     static CLIPBOARD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    struct OwnedTestPipe(HANDLE);
+    struct OwnedTestPipe(Option<HANDLE>);
+
+    impl OwnedTestPipe {
+        fn close(mut self) -> Result<(), u32> {
+            self.close_once()
+        }
+
+        fn close_once(&mut self) -> Result<(), u32> {
+            let Some(handle) = self.0.take() else {
+                return Ok(());
+            };
+            if unsafe { CloseHandle(handle) } == 0 {
+                return Err(unsafe { GetLastError() });
+            }
+            Ok(())
+        }
+    }
 
     impl Drop for OwnedTestPipe {
         fn drop(&mut self) {
-            unsafe { CloseHandle(self.0) };
+            if let Err(error) = self.close_once() {
+                if std::thread::panicking() {
+                    std::process::abort();
+                }
+                panic!("owned test pipe cleanup failed with GetLastError={error}");
+            }
         }
     }
 
@@ -849,7 +870,7 @@ mod tests {
         };
         let result = create_pipe_instance(name.as_ptr(), &raw const security);
         unsafe { LocalFree(descriptor) };
-        result.map(OwnedTestPipe)
+        result.map(|handle| OwnedTestPipe(Some(handle)))
     }
 
     #[test]
@@ -891,7 +912,9 @@ mod tests {
             Some(ERROR_ACCESS_DENIED),
             "second named pipe creation returned an unexpected GetLastError"
         );
-        drop(first);
+        first.close().unwrap_or_else(|error| {
+            panic!("first named pipe cleanup failed with GetLastError={error}")
+        });
     }
 
     #[test]

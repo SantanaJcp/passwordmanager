@@ -921,3 +921,20 @@ las ACE canónicas, que informa `GetLastError` y que mantiene el error exacto de
 segunda instancia. En este host solo se ejecutan el checker, `rustfmt` directo,
 `sh -n` y `git diff --check`; no se ejecuta Cargo ni se simula Windows. El
 laboratorio nativo normal sigue siendo obligatorio después de este diagnóstico.
+
+### Cierre del handle del fixture (método antes del código)
+
+El wrapper `OwnedTestPipe` no puede ignorar el resultado de `CloseHandle`: la
+regresión debe acreditar también que no deja una instancia con nombre viva.
+Antes del ajuste se fija este ciclo:
+
+1. El wrapper guarda el handle en `Option<HANDLE>`. El camino normal llama una
+   sola vez a `close`, extrae el handle y exige que `CloseHandle` devuelva éxito;
+   el error devuelve el código fijo de Win32 al test y no se reintenta.
+2. `Drop` intenta ese mismo cierre solo si el handle todavía está presente. Si
+   falla sin que el hilo esté desenrollando, hace fallar el test con el código;
+   si ya hay unwinding, aborta en vez de provocar un segundo panic. De esta
+   forma el resultado no queda ignorado y el cierre se intenta una sola vez.
+3. El `Drop` heredado de `WindowsServerPipe` no se modifica: esta corrección
+   está limitada al fixture `#[cfg(test)]`. No cambia producción, permisos,
+   fallback ni la semántica del canal.
