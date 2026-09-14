@@ -19,6 +19,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use pm_vault::PasskeyStatus;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -33,7 +34,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::{
     Cursor, HUMAN_MAGIC, KeyMaterial, Profile, Role, connect, decode_prepared_response,
-    finish_arguments, push_bytes, read_frame, read_key, read_profile, rpc_commit, rpc_history,
+    finish_arguments, hex, push_bytes, read_frame, read_key, read_profile, rpc_commit, rpc_history,
     rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore, rpc_unlock,
     write_frame,
 };
@@ -64,6 +65,56 @@ enum Mode {
     SelectField,
     ConfirmPurgeRevisions,
     ConfirmPurgeItem,
+    EnrollAgent,
+    ConfirmPasskeyApproval,
+    ConfirmPasskeyPassword,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Screen {
+    Content,
+    Access,
+    Pending,
+}
+
+#[derive(Clone)]
+enum AccessEntry {
+    Agent {
+        subject: [u8; 16],
+        generation: u64,
+        label: String,
+        environment: String,
+        status: String,
+    },
+    Credential {
+        item: [u8; 16],
+        title: String,
+        enabled: bool,
+    },
+}
+
+#[derive(Clone)]
+struct PendingEntry {
+    attempt: [u8; 16],
+    title: String,
+    integration: String,
+    state: String,
+    reason: String,
+    expires_at_us: i64,
+    owner: [u8; 16],
+    generation: u64,
+    agent_status: String,
+    passkey: Option<PasskeyConfirmation>,
+}
+
+#[derive(Clone)]
+struct PasskeyConfirmation {
+    request: [u8; 16],
+    verification: u8,
+    rp: String,
+    account: String,
+    origin: String,
+    document: String,
 }
 
 struct App {
@@ -82,6 +133,12 @@ struct App {
     fields: Vec<FieldDescriptor>,
     field_selected: usize,
     field_copy: bool,
+    screen: Screen,
+    access: Vec<AccessEntry>,
+    suspended: bool,
+    pending: Vec<PendingEntry>,
+    passkey_confirmation: Option<PasskeyConfirmation>,
+    reauthentication: Option<(PasskeyConfirmation, Zeroizing<Vec<u8>>)>,
 }
 
 struct FieldDescriptor {
@@ -107,6 +164,12 @@ impl App {
             fields: Vec::new(),
             field_selected: 0,
             field_copy: false,
+            screen: Screen::Content,
+            access: Vec::new(),
+            suspended: true,
+            pending: Vec::new(),
+            passkey_confirmation: None,
+            reauthentication: None,
         }
     }
 
@@ -283,19 +346,35 @@ fn run_terminal(
     app.mode = Mode::Browse;
     app.status = "Unlocked: selection never reveals secrets".into();
     app.idle_at = Instant::now();
-    let outcome = event_loop(&mut terminal, &mut app, &mut tls);
+    loop {
+        event_loop(&mut terminal, &mut app, &mut tls)?;
+        let Some((confirmation, password)) = app.reauthentication.take() else {
+            break;
+        };
+        lock_human_channel(&mut tls)?;
+        drop(tls);
+        tls = connect(profile, key, socket)?;
+        tls.write_all(HUMAN_MAGIC)
+            .map_err(|_| Failure::Unavailable)?;
+        rpc_unlock(&mut tls, &password)?;
+        let verification = confirmation.verification;
+        confirm_passkey(&mut tls, &confirmation)?;
+        show_pending(&mut app, &mut tls)?;
+        app.status = if verification == 2 {
+            "Passkey confirmed with fresh UP+UV".into()
+        } else {
+            "Passkey confirmed with fresh UP".into()
+        };
+    }
     app.clear_exposure();
     let clipboard = app
         .clipboard
         .take()
         .map_or(Ok(()), |mut lease| lease.stop_if_owner());
-    write_frame(&mut tls, &[14])?;
-    if read_frame(&mut tls)? != [0] {
-        return Err(Failure::Unavailable);
-    }
+    lock_human_channel(&mut tls)?;
     terminal.clear().map_err(|_| Failure::Unavailable)?;
     clipboard?;
-    outcome
+    Ok(())
 }
 
 fn event_loop(
@@ -321,6 +400,9 @@ fn event_loop(
                 if handle_key(app, tls, key)? {
                     return Ok(());
                 }
+                if app.reauthentication.is_some() {
+                    return Ok(());
+                }
             }
             _ => {}
         }
@@ -333,6 +415,12 @@ fn handle_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result<bool, 
     }
     if app.mode != Mode::Browse {
         return handle_prompt_key(app, tls, key).map(|()| false);
+    }
+    if app.screen == Screen::Access {
+        return handle_access_key(app, tls, key).map(|()| false);
+    }
+    if app.screen == Screen::Pending {
+        return handle_pending_key(app, tls, key).map(|()| false);
     }
     match key.code {
         KeyCode::Char('q' | 'l') => return Ok(true),
@@ -357,6 +445,8 @@ fn handle_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result<bool, 
         ),
         KeyCode::Char('r') => select_exposure_field(app, tls, false)?,
         KeyCode::Char('c') => select_exposure_field(app, tls, true)?,
+        KeyCode::Char('a') => show_access(app, tls)?,
+        KeyCode::Char('w') => show_pending(app, tls)?,
         _ => {}
     }
     Ok(false)
@@ -390,21 +480,375 @@ fn handle_prompt_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result
 
 fn submit_prompt(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
     let mode = app.mode;
-    let value = app.input.to_string();
+    let value = Zeroizing::new(app.input.to_string());
     app.input.zeroize();
     app.mode = Mode::Browse;
     match mode {
         Mode::Search => search(app, tls, &value),
-        Mode::Tag => organize(app, tls, Some(value)),
+        Mode::Tag => organize(app, tls, Some(value.to_string())),
         Mode::Generate => generate(app, tls, &value),
-        Mode::ConfirmPurgeRevisions if value == "PURGE" => purge_revisions(app, tls),
-        Mode::ConfirmPurgeItem if value == "PURGE" => purge_item(app, tls),
+        Mode::ConfirmPurgeRevisions if value.as_str() == "PURGE" => purge_revisions(app, tls),
+        Mode::ConfirmPurgeItem if value.as_str() == "PURGE" => purge_item(app, tls),
         Mode::ConfirmPurgeRevisions | Mode::ConfirmPurgeItem => {
             app.status = "Confirmation mismatch; nothing changed".into();
             Ok(())
         }
+        Mode::EnrollAgent => enroll_agent(app, tls, &value),
+        Mode::ConfirmPasskeyApproval => confirm_passkey_approval(app, &value),
+        Mode::ConfirmPasskeyPassword => {
+            let confirmation = app
+                .passkey_confirmation
+                .take()
+                .ok_or(Failure::Unavailable)?;
+            app.reauthentication = Some((confirmation, Zeroizing::new(value.as_bytes().to_vec())));
+            Ok(())
+        }
         Mode::Unlock | Mode::Browse | Mode::SelectField => Ok(()),
     }
+}
+
+fn show_access(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
+    write_frame(tls, &[54])?;
+    let response = read_frame(tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    app.suspended = match cursor.fixed(1)? {
+        [0] => false,
+        [1] => true,
+        _ => return Err(Failure::Unavailable),
+    };
+    let agent_count = usize::from(u16::from_be_bytes(
+        cursor
+            .fixed(2)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    ));
+    let mut access = Vec::with_capacity(agent_count);
+    for _ in 0..agent_count {
+        let subject = cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?;
+        let generation = cursor.u64()?;
+        let status = match cursor.fixed(1)? {
+            [1] => "active",
+            [2] => "revoked",
+            [3] => "superseded",
+            _ => return Err(Failure::Unavailable),
+        }
+        .to_owned();
+        let label = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        let environment = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        access.push(AccessEntry::Agent {
+            subject,
+            generation,
+            label,
+            environment,
+            status,
+        });
+    }
+    let credential_count = usize::from(u16::from_be_bytes(
+        cursor
+            .fixed(2)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    ));
+    access.reserve(credential_count);
+    for _ in 0..credential_count {
+        let item = cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?;
+        let enabled = match cursor.fixed(1)? {
+            [0] => false,
+            [1] => true,
+            _ => return Err(Failure::Unavailable),
+        };
+        let title = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        access.push(AccessEntry::Credential {
+            item,
+            title,
+            enabled,
+        });
+    }
+    cursor.finish()?;
+    app.access = access;
+    app.selected = 0;
+    app.screen = Screen::Access;
+    app.status = format!(
+        "Delegated access: {}",
+        if app.suspended {
+            "SUSPENDED"
+        } else {
+            "RESUMED"
+        }
+    );
+    Ok(())
+}
+
+fn handle_access_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result<(), Failure> {
+    match key.code {
+        KeyCode::Esc => {
+            app.screen = Screen::Content;
+            app.selected = 0;
+            app.status = "Content view".into();
+        }
+        KeyCode::Down | KeyCode::Char('j') if app.selected + 1 < app.access.len() => {
+            app.selected += 1;
+        }
+        KeyCode::Up | KeyCode::Char('k') => app.selected = app.selected.saturating_sub(1),
+        KeyCode::Char('n') => begin_prompt(
+            app,
+            Mode::EnrollAgent,
+            "Enroll subject|request|SPKI|label|environment:",
+        ),
+        KeyCode::Char('s') => {
+            write_frame(tls, &[57, u8::from(!app.suspended)])?;
+            if read_frame(tls)? != [0] {
+                return Err(Failure::Unavailable);
+            }
+            show_access(app, tls)?;
+        }
+        KeyCode::Char('x') => {
+            let Some(AccessEntry::Agent {
+                subject, status, ..
+            }) = app.access.get(app.selected)
+            else {
+                return Ok(());
+            };
+            if status != "active" {
+                app.status = "Only an active generation can be revoked".into();
+                return Ok(());
+            }
+            let mut request = vec![56];
+            request.extend_from_slice(subject);
+            write_frame(tls, &request)?;
+            if read_frame(tls)? != [0] {
+                return Err(Failure::Unavailable);
+            }
+            show_access(app, tls)?;
+        }
+        KeyCode::Char('e') => {
+            let Some(AccessEntry::Credential { item, enabled, .. }) = app.access.get(app.selected)
+            else {
+                return Ok(());
+            };
+            let mut request = vec![58];
+            request.extend_from_slice(item);
+            request.push(u8::from(!enabled));
+            write_frame(tls, &request)?;
+            if read_frame(tls)? != [0] {
+                return Err(Failure::Unavailable);
+            }
+            show_access(app, tls)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn enroll_agent(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let mut fields = value.split('|');
+    let subject = decode_fixed_hex::<16>(fields.next().ok_or(Failure::Unavailable)?)?;
+    let request_id = decode_fixed_hex::<16>(fields.next().ok_or(Failure::Unavailable)?)?;
+    let rpk = decode_fixed_hex::<44>(fields.next().ok_or(Failure::Unavailable)?)?;
+    let label = fields.next().ok_or(Failure::Unavailable)?;
+    let environment = fields.next().ok_or(Failure::Unavailable)?;
+    if fields.next().is_some() || label.is_empty() || environment.is_empty() {
+        return Err(Failure::Unavailable);
+    }
+    let mut request = vec![55];
+    request.extend_from_slice(&subject);
+    request.extend_from_slice(&request_id);
+    request.extend_from_slice(&rpk);
+    push_bytes(&mut request, label.as_bytes())?;
+    push_bytes(&mut request, environment.as_bytes())?;
+    write_frame(tls, &request)?;
+    if read_frame(tls)? != [0] {
+        return Err(Failure::Unavailable);
+    }
+    show_access(app, tls)
+}
+
+fn show_pending(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
+    write_frame(tls, &[59, 0])?;
+    let response = read_frame(tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let count = usize::from(u16::from_be_bytes(
+        cursor
+            .fixed(2)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    ));
+    let mut pending = Vec::with_capacity(count);
+    for _ in 0..count {
+        let attempt = cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?;
+        let _credential = cursor.fixed(16)?;
+        let owner = cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?;
+        let generation = cursor.u64()?;
+        let agent_status = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        let title = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        let integration = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        let state = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        let reason = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        let expires_at_us = i64::from_be_bytes(
+            cursor
+                .fixed(8)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?,
+        );
+        let passkey = match cursor.fixed(1)? {
+            [0] => None,
+            [1] => Some(PasskeyConfirmation {
+                request: cursor
+                    .fixed(16)?
+                    .try_into()
+                    .map_err(|_| Failure::Unavailable)?,
+                verification: match cursor.fixed(1)? {
+                    [1] => 1,
+                    [2] => 2,
+                    _ => return Err(Failure::Unavailable),
+                },
+                rp: String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+                account: String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+                origin: String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+                document: String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+            }),
+            _ => return Err(Failure::Unavailable),
+        };
+        pending.push(PendingEntry {
+            attempt,
+            title,
+            integration,
+            state,
+            reason,
+            expires_at_us,
+            owner,
+            generation,
+            agent_status,
+            passkey,
+        });
+    }
+    cursor.finish()?;
+    app.pending = pending;
+    app.selected = 0;
+    app.screen = Screen::Pending;
+    app.status = format!("Pending and recent attempts: {}", app.pending.len());
+    Ok(())
+}
+
+fn handle_pending_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result<(), Failure> {
+    match key.code {
+        KeyCode::Esc => {
+            app.screen = Screen::Content;
+            app.selected = 0;
+            app.status = "Content view".into();
+        }
+        KeyCode::Down | KeyCode::Char('j') if app.selected + 1 < app.pending.len() => {
+            app.selected += 1;
+        }
+        KeyCode::Up | KeyCode::Char('k') => app.selected = app.selected.saturating_sub(1),
+        KeyCode::Char('x') => {
+            let Some(entry) = app.pending.get(app.selected) else {
+                return Ok(());
+            };
+            let mut request = vec![59, 1];
+            request.extend_from_slice(&entry.attempt);
+            write_frame(tls, &request)?;
+            let response = read_frame(tls)?;
+            let mut cursor = Cursor::new(&response);
+            cursor.expect(&[0])?;
+            let state = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+            cursor.finish()?;
+            show_pending(app, tls)?;
+            app.status = format!("Attempt {state}");
+        }
+        KeyCode::Char('v') => {
+            let Some(confirmation) = app
+                .pending
+                .get(app.selected)
+                .and_then(|entry| entry.passkey.clone())
+            else {
+                app.status = "Selected attempt has no valid passkey prompt".into();
+                return Ok(());
+            };
+            app.passkey_confirmation = Some(confirmation.clone());
+            begin_prompt(
+                app,
+                Mode::ConfirmPasskeyApproval,
+                &format!(
+                    "RP {} account {} origin {} document {}; type APPROVE {}:",
+                    sanitize_text(&confirmation.rp),
+                    sanitize_text(&confirmation.account),
+                    sanitize_text(&confirmation.origin),
+                    sanitize_text(&confirmation.document),
+                    hex(&confirmation.request)
+                ),
+            );
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn confirm_passkey_approval(app: &mut App, value: &str) -> Result<(), Failure> {
+    let confirmation = app
+        .passkey_confirmation
+        .as_ref()
+        .ok_or(Failure::Unavailable)?;
+    if value != format!("APPROVE {}", hex(&confirmation.request)) {
+        app.passkey_confirmation = None;
+        app.mode = Mode::Browse;
+        app.status = "Approval mismatch; nothing changed".into();
+        return Ok(());
+    }
+    app.mode = Mode::ConfirmPasskeyPassword;
+    app.status = "Master password (fresh reauthentication; input hidden):".into();
+    Ok(())
+}
+
+fn confirm_passkey(tls: &mut HumanTls, confirmation: &PasskeyConfirmation) -> Result<(), Failure> {
+    let mut request = vec![59, 2];
+    request.extend_from_slice(&confirmation.request);
+    request.push(confirmation.verification);
+    write_frame(tls, &request)?;
+    let response = read_frame(tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let status = PasskeyStatus::from_bytes(&cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+    cursor.finish()?;
+    if matches!(status, PasskeyStatus::Waiting(_)) {
+        return Err(Failure::Unavailable);
+    }
+    Ok(())
+}
+
+fn lock_human_channel(tls: &mut HumanTls) -> Result<(), Failure> {
+    write_frame(tls, &[14])?;
+    if read_frame(tls)? == [0] {
+        Ok(())
+    } else {
+        Err(Failure::Unavailable)
+    }
+}
+
+fn decode_fixed_hex<const N: usize>(value: &str) -> Result<[u8; N], Failure> {
+    if value.len() != N * 2 {
+        return Err(Failure::Unavailable);
+    }
+    let mut output = [0_u8; N];
+    for (index, byte) in output.iter_mut().enumerate() {
+        let at = index * 2;
+        *byte = u8::from_str_radix(&value[at..at + 2], 16).map_err(|_| Failure::Unavailable)?;
+    }
+    Ok(output)
 }
 
 fn read_prompt(
@@ -851,7 +1295,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
             .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
             .block(Block::default().borders(Borders::ALL));
         frame.render_widget(title, chunks[0]);
-        let rows: Vec<ListItem> = app.visible.iter().filter_map(|index| app.entries.get(*index)).map(|entry| {
+        let content_rows: Vec<ListItem> = app.visible.iter().filter_map(|index| app.entries.get(*index)).map(|entry| {
             let marker = if entry.trash { "trash" } else { "active" };
             ListItem::new(Line::from(vec![
                 Span::raw(if entry.favorite { "★ " } else { "  " }),
@@ -863,16 +1307,51 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
             let fields = app.fields.iter().map(|field| ListItem::new(format!("{} ({} bytes)", sanitize_text(&field.label), field.size))).collect();
             (fields, app.field_selected, "Fields (explicit selection; values hidden)")
         } else {
-            (rows, app.selected, "Items (selection is metadata only)")
+            match app.screen {
+                Screen::Content => (content_rows, app.selected, "Items (selection is metadata only)"),
+                Screen::Access => {
+                    let rows = app.access.iter().map(|entry| match entry {
+                        AccessEntry::Agent { subject, generation, label, environment, status } => ListItem::new(format!(
+                            "[agent {status}] {} generation={generation} environment={} subject={}",
+                            sanitize_text(label), sanitize_text(environment), hex(subject),
+                        )),
+                        AccessEntry::Credential { item, title, enabled } => ListItem::new(format!(
+                            "[credential {}] {} item={}", if *enabled { "enabled" } else { "disabled" }, sanitize_text(title), hex(item),
+                        )),
+                    }).collect();
+                    (rows, app.selected, "Delegated authority (metadata only)")
+                }
+                Screen::Pending => {
+                    let rows = app.pending.iter().map(|entry| {
+                        let passkey = entry.passkey.as_ref().map_or("", |_| " passkey-confirmation");
+                        ListItem::new(format!(
+                            "[{}] {} integration={} reason={} expires={} agent={}/{} status={} attempt={}{}",
+                            sanitize_text(&entry.state), sanitize_text(&entry.title), sanitize_text(&entry.integration),
+                            sanitize_text(&entry.reason), entry.expires_at_us, hex(&entry.owner), entry.generation,
+                            sanitize_text(&entry.agent_status), hex(&entry.attempt), passkey,
+                        ))
+                    }).collect();
+                    (rows, app.selected, "Attempts (safe context only)")
+                }
+            }
         };
         let mut state = ListState::default(); if !rows.is_empty() { state.select(Some(selected)); }
         frame.render_stateful_widget(List::new(rows).highlight_symbol("› ").block(Block::default().title(list_title).borders(Borders::ALL)), chunks[1], &mut state);
-        let prompt = if app.mode == Mode::Unlock { "•".repeat(app.input.chars().count()) } else { sanitize_text(&app.input) };
+        let prompt = if matches!(app.mode, Mode::Unlock | Mode::ConfirmPasskeyPassword) {
+            "•".repeat(app.input.chars().count())
+        } else {
+            sanitize_text(&app.input)
+        };
         let exposure = app.reveal.as_ref().map_or_else(|| "<hidden>".into(), |(secret, _)| display_secret(secret));
+        let controls = match app.screen {
+            Screen::Content => "↑↓/jk select  / search  t tag  f favorite  g generate  h history  d trash  u restore  p/P purge  r reveal  c copy  a access  w pending  l lock  q quit",
+            Screen::Access => "↑↓/jk select  n enroll  s suspend/resume  x revoke agent  e enable/disable credential  Esc content",
+            Screen::Pending => "↑↓/jk select  x cancel  v confirm passkey  Esc content",
+        };
         let footer = Paragraph::new(vec![
             Line::from(sanitize_text(&app.status)), Line::from(format!("Input: {prompt}")),
             Line::from(format!("Exposure: {exposure}")),
-            Line::from("↑↓/jk select  / search  t tag  f favorite  g generate  h history  d trash  u restore  p/P purge  r reveal  c copy  l lock  q quit"),
+            Line::from(controls),
         ]).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, chunks[2]);
     }).map(|_| ()).map_err(|_| Failure::Unavailable)

@@ -17,7 +17,7 @@ mod reducer;
 
 pub use attempts::{
     AttemptError, AttemptLease, AttemptOutcome, AttemptSnapshot, AttemptState, AttemptVault,
-    IdempotencyKey, SshLease, StartAttempt, TotpLease,
+    HumanPendingAttempt, IdempotencyKey, SshLease, StartAttempt, TotpLease,
 };
 pub use audit::{
     AuditAction, AuditActorKind, AuditDeviceCustody, AuditDiscontinuity, AuditEvent, AuditOutcome,
@@ -35,8 +35,9 @@ pub use content::{
 };
 pub use history::{HistoryEntry, ItemHistory, ItemPurgeScope, PreparedItemPurge};
 pub use human::{
-    AttachmentReader, HumanCatalogEntry, HumanChannel, HumanCommitError, HumanReceipt, HumanVault,
-    PasswordRecord, PendingRecoveryChange, PreparedHumanCommand,
+    AttachmentReader, HumanAccessOverview, HumanAgentAccess, HumanCatalogEntry, HumanChannel,
+    HumanCommitError, HumanCredentialAccess, HumanReceipt, HumanVault, PasswordRecord,
+    PendingRecoveryChange, PreparedHumanCommand,
 };
 pub use migration::{
     CsvDelimiter, CsvEncoding, CsvField, CsvImportDecision, CsvImportPreview, CsvImportProfile,
