@@ -2,7 +2,7 @@
 
 //! Human vault bootstrap and delegated CLI/MCP presentation adapters.
 
-use pm_crypto::{KdfProfile, RecoveryCode};
+use pm_crypto::{KdfProfile, NativeStdin, ProtectedBytes, RecoveryCode};
 use pm_custody::agent_rpc;
 use pm_interface::{
     Engine, ErrorCode, Json, Request, capabilities_result, dispatch, encode_json,
@@ -43,6 +43,8 @@ impl std::error::Error for CliError {}
 /// # Errors
 /// Returns a category-safe error for invalid arguments or unavailable custody.
 pub fn run(arguments: &[OsString]) -> Result<(), CliError> {
+    #[cfg(unix)]
+    pm_crypto::harden_unix_process().map_err(|_| CliError::new("RESOURCE_UNAVAILABLE", 5))?;
     match arguments {
         [flag] if flag == "--version" => {
             println!(
@@ -768,24 +770,24 @@ fn error_response(request: &Request, code: ErrorCode) -> Json {
 }
 
 fn create(path: &Path) -> Result<(), String> {
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
     prompt("Master password (read from stdin):")?;
-    let password = read_limited_line(&mut input, 1024)?;
+    let mut input = NativeStdin::open().map_err(|error| error.to_string())?;
+    let password = read_protected_line(&mut input, 1024)?;
     prompt("Confirm master password:")?;
-    let confirmation = read_limited_line(&mut input, 1024)?;
-    if password != confirmation {
+    let confirmation = read_protected_line(&mut input, 1024)?;
+    if password.as_ref() != confirmation.as_ref() {
         return Err("master password confirmation does not match".into());
     }
-    let pending = PendingVault::new(&password, KdfProfile::DEFAULT).map_err(|e| e.to_string())?;
+    let pending = PendingVault::new(password.as_ref(), KdfProfile::DEFAULT)
+        .map_err(|error| error.to_string())?;
     let trusted_root = *pending.trusted_root();
     println!(
         "Recovery code (store externally): {}",
         pending.recovery_code()
     );
     prompt("Reintroduce recovery code to confirm the external copy:")?;
-    let reintroduced = read_limited_line(&mut input, 512)?;
-    let reintroduced: RecoveryCode = std::str::from_utf8(&reintroduced)
+    let reintroduced = read_protected_line(&mut input, 512)?;
+    let reintroduced: RecoveryCode = std::str::from_utf8(reintroduced.as_ref())
         .map_err(|_| "recovery code is not UTF-8".to_owned())?
         .parse()
         .map_err(|_| "recovery code is invalid".to_owned())?;
@@ -796,11 +798,10 @@ fn create(path: &Path) -> Result<(), String> {
     Ok(())
 }
 fn open(path: &Path) -> Result<(), String> {
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
     prompt("Master password (read from stdin):")?;
-    let password = read_limited_line(&mut input, 1024)?;
-    let opened = open_vault(path, &password).map_err(|e| e.to_string())?;
+    let mut input = NativeStdin::open().map_err(|error| error.to_string())?;
+    let password = read_protected_line(&mut input, 1024)?;
+    let opened = open_vault(path, password.as_ref()).map_err(|e| e.to_string())?;
     println!("Vault opened: {}", hex(opened.trusted_root().vault_id()));
     Ok(())
 }
@@ -810,26 +811,42 @@ fn prompt(message: &str) -> Result<(), String> {
     writeln!(output, "{message}").map_err(|e| e.to_string())?;
     output.flush().map_err(|e| e.to_string())
 }
-fn read_limited_line(input: &mut impl BufRead, maximum: usize) -> Result<Vec<u8>, String> {
-    let mut value = Vec::with_capacity(maximum.min(128));
-    let mut limited = Read::by_ref(input)
-        .take(u64::try_from(maximum + 2).map_err(|_| "input limit overflow".to_owned())?);
-    let bytes = limited
-        .read_until(b'\n', &mut value)
-        .map_err(|e| e.to_string())?;
-    if bytes == 0 {
-        return Err("unexpected end of input".into());
-    }
-    if value.last() == Some(&b'\n') {
-        value.pop();
-        if value.last() == Some(&b'\r') {
-            value.pop();
+fn read_protected_line(input: &mut impl Read, maximum: usize) -> Result<ProtectedBytes, String> {
+    let capacity = maximum
+        .checked_add(2)
+        .ok_or_else(|| "input limit overflow".to_owned())?;
+    let mut value = ProtectedBytes::zeroed(capacity).map_err(|error| error.to_string())?;
+    let mut len = 0;
+    loop {
+        let bytes = input
+            .read(&mut value[len..=len])
+            .map_err(|error| error.to_string())?;
+        if bytes == 0 {
+            if len == 0 {
+                return Err("unexpected end of input".into());
+            }
+            if len > maximum {
+                return Err(format!("input exceeds {maximum} bytes"));
+            }
+            value.truncate(len);
+            return Ok(value);
+        }
+        if value[len] == b'\n' {
+            let mut content_len = len;
+            if content_len != 0 && value[content_len - 1] == b'\r' {
+                content_len -= 1;
+            }
+            if content_len > maximum {
+                return Err(format!("input exceeds {maximum} bytes"));
+            }
+            value.truncate(content_len);
+            return Ok(value);
+        }
+        len += 1;
+        if len == capacity {
+            return Err(format!("input exceeds {maximum} bytes"));
         }
     }
-    if value.len() > maximum {
-        return Err(format!("input exceeds {maximum} bytes"));
-    }
-    Ok(value)
 }
 fn hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -841,8 +858,36 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{params_for_cli, start_request};
-    use std::ffi::OsString;
+    use super::{params_for_cli, read_protected_line, start_request};
+    use std::{ffi::OsString, io::Cursor};
+
+    #[test]
+    fn protected_line_preserves_public_line_parsing() {
+        let lf = read_protected_line(&mut Cursor::new(b"ticket28-lf\n"), 32).unwrap();
+        assert!(matches!(lf.as_ref(), b"ticket28-lf"));
+
+        let crlf = read_protected_line(&mut Cursor::new(b"ticket28-crlf\r\n"), 32).unwrap();
+        assert!(matches!(crlf.as_ref(), b"ticket28-crlf"));
+
+        let eof_after_bytes = read_protected_line(&mut Cursor::new(b"ticket28-eof"), 32).unwrap();
+        assert!(matches!(eof_after_bytes.as_ref(), b"ticket28-eof"));
+
+        let lone_cr = read_protected_line(&mut Cursor::new(b"ticket28-cr\r"), 32).unwrap();
+        assert!(matches!(lone_cr.as_ref(), b"ticket28-cr\r"));
+
+        let exact_limit = read_protected_line(&mut Cursor::new(b"1234\n"), 4).unwrap();
+        assert!(matches!(exact_limit.as_ref(), b"1234"));
+
+        let Err(empty) = read_protected_line(&mut Cursor::new(b""), 32) else {
+            panic!("empty input was accepted");
+        };
+        assert!(matches!(empty.as_str(), "unexpected end of input"));
+
+        let Err(over_limit) = read_protected_line(&mut Cursor::new(b"12345\n"), 4) else {
+            panic!("over-limit input was accepted");
+        };
+        assert!(matches!(over_limit.as_str(), "input exceeds 4 bytes"));
+    }
 
     #[test]
     fn github_cli_builds_the_closed_typed_query_context() {
