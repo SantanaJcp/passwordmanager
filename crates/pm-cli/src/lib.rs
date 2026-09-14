@@ -43,6 +43,8 @@ impl std::error::Error for CliError {}
 /// # Errors
 /// Returns a category-safe error for invalid arguments or unavailable custody.
 pub fn run(arguments: &[OsString]) -> Result<(), CliError> {
+    #[cfg(unix)]
+    pm_crypto::harden_unix_process().map_err(|_| CliError::new("RESOURCE_UNAVAILABLE", 5))?;
     match arguments {
         [flag] if flag == "--version" => {
             println!(

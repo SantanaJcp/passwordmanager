@@ -20,6 +20,32 @@ pub use root::{
     verify_human_command, verify_human_event, verify_passkey_signature,
 };
 
+/// Applies the Unix process-level controls required before accepting secrets.
+///
+/// # Errors
+///
+/// Returns [`CryptoError::ResourceUnavailable`] if core dumps cannot be
+/// disabled or, on Linux, the process cannot make itself non-dumpable.
+#[cfg(unix)]
+pub fn harden_unix_process() -> Result<(), CryptoError> {
+    let limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a valid immutable rlimit value for this process.
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &raw const limit) } != 0 {
+        return Err(CryptoError::ResourceUnavailable);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: PR_SET_DUMPABLE consumes the scalar argument and no pointers.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+            return Err(CryptoError::ResourceUnavailable);
+        }
+    }
+    Ok(())
+}
+
 /// Returns the version reported by the linked libsodium C artifact.
 #[must_use]
 pub fn linked_libsodium_version() -> &'static CStr {

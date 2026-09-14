@@ -10,6 +10,13 @@ mod linux;
 const CUSTODY_UNAVAILABLE: &str = "CUSTODY_UNAVAILABLE";
 
 fn main() -> ExitCode {
+    #[cfg(unix)]
+    {
+        if pm_crypto::harden_unix_process().is_err() {
+            eprintln!("{CUSTODY_UNAVAILABLE}");
+            return ExitCode::from(4);
+        }
+    }
     match run(std::env::args_os().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Usage) => {

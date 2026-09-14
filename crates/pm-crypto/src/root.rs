@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::{fmt, str::FromStr, sync::OnceLock};
+use std::{
+    fmt,
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+    str::FromStr,
+    sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use minicbor::{Decoder, Encoder, data::Type};
 
@@ -14,6 +23,8 @@ const SUITE: u64 = 1;
 const MAX_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 4 * 1024;
 const FILE_CHUNK_BYTES: usize = 1024 * 1024;
+const LOCKED_SECRET_BUDGET: usize = 32 * 1024 * 1024;
+static LOCKED_SECRET_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 /// Errors exposed by the typed cryptographic boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,25 +85,97 @@ impl KdfProfile {
     }
 }
 
-#[derive(Eq, PartialEq)]
-struct Secret([u8; KEY_BYTES]);
+struct LockedKey(NonNull<u8>);
+
+impl LockedKey {
+    fn new(mut value: [u8; KEY_BYTES]) -> Result<Self, CryptoError> {
+        sodium()?;
+        LOCKED_SECRET_BYTES
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(KEY_BYTES)
+                    .filter(|next| *next <= LOCKED_SECRET_BUDGET)
+            })
+            .map_err(|_| CryptoError::ResourceUnavailable)?;
+        // SAFETY: sodium is initialized; a non-null allocation is owned here
+        // until it is either freed on failure or transferred into `Self`.
+        let pointer = unsafe { libsodium_sys::sodium_malloc(KEY_BYTES) }.cast::<u8>();
+        let Some(pointer) = NonNull::new(pointer) else {
+            LOCKED_SECRET_BYTES.fetch_sub(KEY_BYTES, Ordering::AcqRel);
+            return Err(CryptoError::ResourceUnavailable);
+        };
+        // SAFETY: the allocation is valid for KEY_BYTES and `value` has the
+        // same exact length. Failure leaves no usable unlocked secret.
+        if unsafe { libsodium_sys::sodium_mlock(pointer.as_ptr().cast(), KEY_BYTES) } != 0 {
+            unsafe { libsodium_sys::sodium_free(pointer.as_ptr().cast()) };
+            LOCKED_SECRET_BYTES.fetch_sub(KEY_BYTES, Ordering::AcqRel);
+            return Err(CryptoError::ResourceUnavailable);
+        }
+        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), pointer.as_ptr(), KEY_BYTES) };
+        // SAFETY: `value` is valid for its exact length and is not read again.
+        unsafe { libsodium_sys::sodium_memzero(value.as_mut_ptr().cast(), value.len()) };
+        Ok(Self(pointer))
+    }
+}
+
+impl Deref for LockedKey {
+    type Target = [u8; KEY_BYTES];
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: `self.0` owns an initialized allocation of exactly KEY_BYTES.
+        unsafe { &*self.0.as_ptr().cast::<[u8; KEY_BYTES]>() }
+    }
+}
+
+impl DerefMut for LockedKey {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: `&mut self` uniquely owns the allocation.
+        unsafe { &mut *self.0.as_ptr().cast::<[u8; KEY_BYTES]>() }
+    }
+}
+
+impl Drop for LockedKey {
+    fn drop(&mut self) {
+        // SAFETY: the allocation remains valid and uniquely owned until free.
+        unsafe {
+            libsodium_sys::sodium_memzero(self.0.as_ptr().cast(), KEY_BYTES);
+            libsodium_sys::sodium_free(self.0.as_ptr().cast());
+        }
+        LOCKED_SECRET_BYTES.fetch_sub(KEY_BYTES, Ordering::AcqRel);
+    }
+}
+
+// SAFETY: ownership moves with the allocation and shared access exposes only
+// immutable bytes; mutation still requires unique `&mut` access.
+unsafe impl Send for LockedKey {}
+unsafe impl Sync for LockedKey {}
+
+struct Secret(LockedKey);
 
 impl Secret {
+    fn new(value: [u8; KEY_BYTES]) -> Result<Self, CryptoError> {
+        LockedKey::new(value).map(Self)
+    }
+
+    fn zeroed() -> Result<Self, CryptoError> {
+        Self::new([0_u8; KEY_BYTES])
+    }
+
     fn random() -> Result<Self, CryptoError> {
-        sodium()?;
-        let mut value = [0_u8; KEY_BYTES];
+        let mut value = Self::zeroed()?;
         // SAFETY: sodium is initialized and `value` is a valid writable buffer.
-        unsafe { libsodium_sys::randombytes_buf(value.as_mut_ptr().cast(), value.len()) };
-        Ok(Self(value))
+        unsafe { libsodium_sys::randombytes_buf(value.0.as_mut_ptr().cast(), value.0.len()) };
+        Ok(value)
     }
 }
 
-impl Drop for Secret {
-    fn drop(&mut self) {
-        // SAFETY: the array is valid for its exact length and is not used after drop.
-        unsafe { libsodium_sys::sodium_memzero(self.0.as_mut_ptr().cast(), self.0.len()) };
+impl PartialEq for Secret {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_slice() == other.0.as_slice()
     }
 }
+
+impl Eq for Secret {}
 
 struct SecretStreamState(libsodium_sys::crypto_secretstream_xchacha20poly1305_state);
 
@@ -230,7 +313,7 @@ impl SyncPairing {
             .unwrap()
             .bytes(&self.server_pin)
             .unwrap()
-            .bytes(&self.key.0)
+            .bytes(&*self.key.0)
             .unwrap()
             .bytes(&self.human_signature)
             .unwrap();
@@ -251,7 +334,7 @@ impl SyncPairing {
         let vault = decode_bytes(&mut d)?;
         let namespace = decode_bytes(&mut d)?;
         let server_pin = decode_bytes(&mut d)?;
-        let key = Secret(decode_bytes(&mut d)?);
+        let key = Secret::new(decode_bytes(&mut d)?)?;
         let human_signature = decode_bytes(&mut d)?;
         let value = Self {
             vault,
@@ -373,7 +456,7 @@ impl SyncPairing {
             .unwrap()
             .bytes(&self.server_pin)
             .unwrap()
-            .bytes(&sha256(&self.key.0))
+            .bytes(&sha256(&*self.key.0))
             .unwrap();
         e.into_writer()
     }
@@ -527,7 +610,7 @@ impl PartialEq for RecoveryCode {
     fn eq(&self, other: &Self) -> bool {
         self.vault == other.vault
             && self.generation == other.generation
-            && constant_time_equal(&self.key.0, &other.key.0)
+            && constant_time_equal(&*self.key.0, &*other.key.0)
     }
 }
 
@@ -564,7 +647,7 @@ impl FromStr for RecoveryCode {
         let parsed = Self {
             vault,
             generation,
-            key: Secret(key),
+            key: Secret::new(key)?,
         };
         let supplied: [u8; 4] = decode_hex_array(fields[11])?;
         if supplied != recovery_checksum(&parsed) {
@@ -1019,7 +1102,7 @@ impl UnlockedRoot {
         let (manifest_key, manifest_target) =
             open_key(&self.human_root, &package.manifest_key_envelope)?;
         if manifest_target != package.manifest_ciphertext.header
-            || !constant_time_equal(&content_key.0, &manifest_key.0)
+            || !constant_time_equal(&*content_key.0, &*manifest_key.0)
         {
             return Err(CryptoError::Authentication);
         }
@@ -1292,7 +1375,7 @@ fn validate_rotation_source(root: &UnlockedRoot, bundle: &RootBundle) -> Result<
     }
     let (seed, target) = open_key(&root.human_root, &bundle.authority_envelope)?;
     if target.purpose != Purpose::Control
-        || !constant_time_equal(&seed.0, &root.human_signing_seed.0)
+        || !constant_time_equal(&*seed.0, &*root.human_signing_seed.0)
     {
         return Err(CryptoError::Authentication);
     }
@@ -1438,7 +1521,7 @@ impl PasskeyKeyPair {
     /// Returns an error if native Ed25519 key derivation fails.
     pub fn from_seed(seed: [u8; KEY_BYTES]) -> Result<Self, CryptoError> {
         sodium()?;
-        let seed = Secret(seed);
+        let seed = Secret::new(seed)?;
         let mut public_key = [0_u8; KEY_BYTES];
         let mut expanded = [0_u8; 64];
         let result = unsafe {
@@ -1464,8 +1547,8 @@ impl PasskeyKeyPair {
 
     /// Copies the seed for immediate encrypted persistence by `pm-vault`.
     #[must_use]
-    pub const fn seed(&self) -> [u8; KEY_BYTES] {
-        self.seed.0
+    pub fn seed(&self) -> [u8; KEY_BYTES] {
+        *self.seed.0
     }
 
     /// Signs the exact `WebAuthn` authenticator-data/client-data hash sequence.
@@ -1494,7 +1577,7 @@ impl AuditDeviceKeyPair {
     pub fn generate() -> Result<Self, CryptoError> {
         sodium()?;
         let mut encryption_public_key = [0_u8; KEY_BYTES];
-        let mut encryption_private_key = Secret([0_u8; KEY_BYTES]);
+        let mut encryption_private_key = Secret::zeroed()?;
         if unsafe {
             // SAFETY: crypto_box key buffers have their documented exact lengths.
             libsodium_sys::crypto_box_keypair(
@@ -1535,9 +1618,9 @@ impl AuditDeviceKeyPair {
         let mut bytes = Vec::with_capacity(133);
         bytes.extend_from_slice(b"PMAD1");
         bytes.extend_from_slice(&self.encryption_public_key);
-        bytes.extend_from_slice(&self.encryption_private_key.0);
+        bytes.extend_from_slice(&*self.encryption_private_key.0);
         bytes.extend_from_slice(&self.signing_public_key);
-        bytes.extend_from_slice(&self.signing_seed.0);
+        bytes.extend_from_slice(&*self.signing_seed.0);
         bytes
     }
 
@@ -1554,19 +1637,19 @@ impl AuditDeviceKeyPair {
         let encryption_public_key = bytes[5..37]
             .try_into()
             .map_err(|_| CryptoError::InvalidFormat)?;
-        let encryption_private_key = Secret(
+        let encryption_private_key = Secret::new(
             bytes[37..69]
                 .try_into()
                 .map_err(|_| CryptoError::InvalidFormat)?,
-        );
+        )?;
         let signing_public_key = bytes[69..101]
             .try_into()
             .map_err(|_| CryptoError::InvalidFormat)?;
-        let signing_seed = Secret(
+        let signing_seed = Secret::new(
             bytes[101..133]
                 .try_into()
                 .map_err(|_| CryptoError::InvalidFormat)?,
-        );
+        )?;
         let mut derived_encryption = [0_u8; KEY_BYTES];
         if unsafe {
             // SAFETY: X25519 public/private buffers have their documented exact lengths.
@@ -2691,7 +2774,7 @@ impl BackupOpener {
         header.extend_from_slice(&payload);
         Ok(Self {
             stream: FileOpener::new(human_root, roots.vault, backup_id, backup_id, &header)?,
-            source_human_root: Secret(human_root.0),
+            source_human_root: Secret::new(*human_root.0)?,
             source_vault: roots.vault,
         })
     }
@@ -3017,7 +3100,7 @@ impl DeviceKeyPair {
     pub fn generate() -> Result<Self, CryptoError> {
         sodium()?;
         let mut public_key = [0_u8; 32];
-        let mut private_key = Secret([0_u8; 32]);
+        let mut private_key = Secret::zeroed()?;
         let result = unsafe {
             // SAFETY: buffers are the exact crypto_box key sizes.
             libsodium_sys::crypto_box_keypair(public_key.as_mut_ptr(), private_key.0.as_mut_ptr())
@@ -3564,7 +3647,7 @@ fn derive_password(
         .checked_mul(1024 * 1024)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or(CryptoError::InvalidKdf)?;
-    let mut key = Secret([0_u8; KEY_BYTES]);
+    let mut key = Secret::zeroed()?;
     // SAFETY: output, password, and salt point to valid buffers; limits were validated.
     let result = unsafe {
         libsodium_sys::crypto_pwhash(
@@ -4066,7 +4149,7 @@ fn encode_wrapped_key(key: &Secret, target: &Header) -> Vec<u8> {
     let mut encoder = Encoder::new(Vec::new());
     encoder.map(2).expect("Vec writes cannot fail");
     encoder.str("key").expect("Vec writes cannot fail");
-    encoder.bytes(&key.0).expect("Vec writes cannot fail");
+    encoder.bytes(&*key.0).expect("Vec writes cannot fail");
     encoder
         .str("target_header")
         .expect("Vec writes cannot fail");
@@ -4078,7 +4161,7 @@ fn decode_wrapped_key(bytes: &[u8]) -> Result<(Secret, Header), CryptoError> {
     let mut decoder = Decoder::new(bytes);
     expect_map(&mut decoder, 2)?;
     expect_key(&mut decoder, "key")?;
-    let key = Secret(decode_bytes(&mut decoder)?);
+    let key = Secret::new(decode_bytes(&mut decoder)?)?;
     expect_key(&mut decoder, "target_header")?;
     let target = decode_header(&mut decoder)?;
     if decoder.position() != bytes.len() || encode_wrapped_key(&key, &target) != bytes {
@@ -4096,7 +4179,7 @@ fn encode_sealed_key(
     let mut encoder = Encoder::new(Vec::new());
     encoder.map(4).expect("Vec writes cannot fail");
     encoder.str("key").expect("Vec writes cannot fail");
-    encoder.bytes(&key.0).expect("Vec writes cannot fail");
+    encoder.bytes(&*key.0).expect("Vec writes cannot fail");
     encoder.str("recipient").expect("Vec writes cannot fail");
     encoder.bytes(recipient).expect("Vec writes cannot fail");
     encoder
@@ -4131,7 +4214,7 @@ fn decode_sealed_audit_key(bytes: &[u8]) -> Result<(Secret, Header, [u8; 16], u6
     let mut decoder = Decoder::new(bytes);
     expect_map(&mut decoder, 4)?;
     expect_key(&mut decoder, "key")?;
-    let key = Secret(decode_bytes(&mut decoder)?);
+    let key = Secret::new(decode_bytes(&mut decoder)?)?;
     expect_key(&mut decoder, "recipient")?;
     let recipient = decode_bytes(&mut decoder)?;
     expect_key(&mut decoder, "target_header")?;
@@ -5004,7 +5087,7 @@ fn recovery_checksum(code: &RecoveryCode) -> [u8; 4] {
     encoder
         .u64(code.generation)
         .expect("Vec writes cannot fail");
-    encoder.bytes(&code.key.0).expect("Vec writes cannot fail");
+    encoder.bytes(&*code.key.0).expect("Vec writes cannot fail");
     let digest = sha256(&encoder.into_writer());
     digest[..4].try_into().expect("fixed digest size")
 }

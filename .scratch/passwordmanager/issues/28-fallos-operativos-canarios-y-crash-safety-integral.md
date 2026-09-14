@@ -35,3 +35,29 @@ Pendiente de implementación y evidencia.
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-14 — Astra: dependencias 09–25 requeridas verificadas como resueltas e integradas; ticket reclamado para Sol medium en worktree aislado. Preparación estática en paralelo; toda ejecución Cargo/build/labs espera ventana Linux exclusiva explícita.
+
+2026-09-14 — Método integral escrito antes de código en
+[`docs/verification/ticket-28.md`](../../../docs/verification/ticket-28.md).
+Primer tracer RED preparado, todavía **no ejecutado** por exclusión de ventana:
+observa sobre el proceso humano real core=0, dumpability, memoria propia
+bloqueada, denegación con memlock=0 y ausencia del canario en argv/env/salidas.
+No existe implementación productiva anticipada. Los fallbacks de cleanup
+heredados encontrados se registraron en el método y se informaron; no se
+modifican sin autorización. `persist_new` pertenece al cambio separado ya
+autorizado y se compondrá antes del gate integral, no se duplica aquí.
+
+2026-09-14 — Cleanup-errors `1412185` compuesto por merge normal `05902c7`.
+RED conductual inicial reproducido en `/tmp/pm28-red-process-security-2.log`:
+tras probar attach/detach positivo sobre el hijo control, el proceso humano real
+llegó al prompt y falló porque su core soft/hard no era `0/0`. El intento previo
+fue un defecto de cleanup del harness y no cuenta como RED de producto. Ventana
+Linux liberada inmediatamente; GREEN de guardas/memoria se prepara estático
+hasta nueva concesión.
+
+2026-09-14 — Primer vertical Unix GREEN: claves propias centrales usan
+`sodium_malloc`+`sodium_mlock`, presupuesto agregado 32 MiB y cleanup nativo;
+cliente humano/custodio fijan core=0 y dumpable=0 antes de secretos. El tracer
+con control ptrace positivo y UID no privilegiado terminó rc0, seguido de
+pm-crypto, check y clean offline verdes. Cobertura expresamente incompleta:
+faltan buffers plaintext, Windows/macOS y los recorridos de fault/crash/canarios;
+ningún criterio de 28 se marca cerrado todavía.

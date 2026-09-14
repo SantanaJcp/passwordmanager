@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+libc.workspace = true
 libsodium-sys-stable.workspace = true
 minicbor.workspace = true
 

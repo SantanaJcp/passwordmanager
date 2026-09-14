@@ -1606,6 +1606,7 @@ dependencies = [
 name = "pm-crypto"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "libsodium-sys-stable",
  "minicbor",
 ]
