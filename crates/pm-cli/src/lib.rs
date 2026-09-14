@@ -135,7 +135,10 @@ fn read_windows_raw(
     handle: windows_sys::Win32::Foundation::HANDLE,
     buffer: &mut [u8],
 ) -> io::Result<usize> {
-    use windows_sys::Win32::Storage::FileSystem::ReadFile;
+    use windows_sys::Win32::{
+        Foundation::ERROR_BROKEN_PIPE,
+        Storage::FileSystem::ReadFile,
+    };
 
     let requested = u32::try_from(buffer.len()).map_err(|_| {
         io::Error::new(
@@ -156,7 +159,14 @@ fn read_windows_raw(
         )
     };
     if result == 0 {
-        Err(io::Error::last_os_error())
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == i32::try_from(ERROR_BROKEN_PIPE).ok() {
+            // Windows reports a closed pipe as BrokenPipe; `std::io::Stdin`
+            // has always exposed this condition as EOF.
+            Ok(0)
+        } else {
+            Err(error)
+        }
     } else {
         usize::try_from(bytes).map_err(|_| io::Error::other("invalid native stdin length"))
     }

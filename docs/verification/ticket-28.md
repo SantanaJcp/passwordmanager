@@ -276,6 +276,72 @@ debe confirmar el proceso completo. La API de líneas inyectable sigue usando
 GREEN, y un PASS Linux no acreditará terminales macOS/Windows ni sus builds
 nativos.
 
+La comparación de compatibilidad queda fijada contra el código fuente de
+`std` 1.98.1, no contra una inferencia de `ReadFile`. El caller de create/open
+es el único lector humano durante esa invocación; `NativeStdin` toma prestado el
+fd/handle actual, no lo duplica, cierra ni transfiere, y no se mezcla con el
+`BufReader` global de `std`. En pipe/file, `ERROR_BROKEN_PIPE` conserva el EOF
+que expone `std`; los demás errores I/O se propagan. En consola se pasa a
+`ReadConsoleW` la máscara de wakeup de Ctrl-Z: Ctrl-Z terminal no se entrega
+como byte secreto, Ctrl-C/Break (`ERROR_OPERATION_ABORTED` sin unidades) vuelve
+a esperar como `std`, y un surrogate alto sólo se conserva en memoria locked
+hasta la siguiente unidad. Una pareja válida se convierte a UTF-8; un surrogate
+aislado o pareja inválida falla `InvalidData`, sin reemplazo silencioso.
+
+La prueba nativa Windows pendiente debe ejercer por proceso real y consola
+real: ASCII y Unicode suplementario en password/confirmación; CRLF; Ctrl-Z
+antes de bytes (mismo rc5 `unexpected end of input`, sin vault) y después de
+bytes (EOF que entrega esos bytes al parser); Ctrl-C seguido de entrada válida;
+surrogate aislado alto y bajo (fallo explícito, sin vault); pipe con dos líneas;
+pipe cerrado antes de bytes (mismo rc5); handle nulo (mismo rc5); y un error de
+handle no nulo inválido propagado, nunca reinterpretado como EOF. Debe comprobar
+que el handle original continúa abierto y que ningún caso activa `StdinLock`,
+`ReadFile` para consola, reemplazo Unicode o una segunda ruta. Linux sólo cubre
+el caso pipe/socket y el límite de prefetch; macOS debe repetir terminal/pipe en
+su ticket nativo.
+
+## Quinto vertical preparado: cuatro cleanups autorizados
+
+Este vertical empieza sólo después del GREEN nativo de stdin. Sus RED son
+fallos reales del filesystem, no callbacks que devuelven errores inventados:
+
+1. `pm-process-runner`: una evidencia real conserva un subdirectorio owned que
+   el UID de la prueba no puede retirar. Se captura su path, se deja vivir la
+   evidencia hasta terminar todas las observaciones y luego se exige una
+   finalización checked que devuelva el único `remove_dir_all` fallido. La
+   variante actual carece de esa finalización y Drop retorna normalmente tras
+   descartar el error. El fixture restaura permisos por un owner separado y
+   elimina/verifica el path exacto aun cuando falle la aserción. El GREEN no
+   acorta la vida de `ProcessEvidence`: añade cierre explícito consumiendo la
+   evidencia; Drop sólo cubre salidas no gestionadas, no reintenta después de un
+   cierre checked y emite un diagnóstico fijo no secreto si su único intento
+   falla.
+2. `keygen`: se precrea la pública para causar el error primario real después
+   de publicar la privada. Un interposer `unlink`/`unlinkat`, limitado al PID y
+   path privado exactos, falla una vez con `EIO` y registra contador. El RED
+   actual devuelve sólo `CUSTODY_UNAVAILABLE`, dejando la privada y ocultando el
+   cleanup; el GREEN debe conservar la indisponibilidad primaria y añadir una
+   categoría fija de cleanup, con contador exactamente uno.
+3. `rpc_download_atomic`: el servidor TLS/RPK del fixture corta una descarga
+   sólo después de que exista y tenga bytes el `.partial`. El mismo interposer,
+   limitado al PID/path `.partial`, falla su único unlink. Se conservan tanto el
+   fallo de protocolo/escritura como el de cleanup; el destino final nunca
+   aparece y no hay reconexión, retry o descarga sustituta.
+4. `write_new`: el interposer localiza el fd por `/proc/self/fd`, falla una sola
+   llamada `fsync` del archivo nuevo exacto y después falla una sola retirada de
+   ese mismo path. El RED actual conserva sólo `Unavailable`; el GREEN agrega el
+   fallo de cleanup sin perder el fallo fsync primario, sin publicar otro path.
+
+El interposer escribe únicamente eventos no secretos (`pid`, operación,
+contador y basename sintético) a un pipe owned por el lab; aborta el caso si el
+path/PID o los conteos no coinciden. Cada caso usa raíz y proceso nuevos. El
+resultado público mantiene rc4 y `CUSTODY_UNAVAILABLE`, y agrega sólo el
+diagnóstico fijo de cleanup requerido para que la propagación sea observable;
+no imprime paths ni errores del SO. Cleanup del fixture corre fuera del proceso
+inyectado, restaura permisos si aplica, retira cada path exacto y falla si queda
+residuo. No se ejecutará ni implementará GREEN antes de conservar cada RED
+conductual.
+
 ## Verticales de fault/crash pendientes de RED
 
 El seam de almacenamiento será un lab público separado, no una colección de

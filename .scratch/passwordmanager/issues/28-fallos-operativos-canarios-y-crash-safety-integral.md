@@ -115,8 +115,17 @@ con `GetConsoleMode`, usa `ReadConsoleW`→UTF-8 con buffers locked, y reserva
 `ReadFile` para pipe/file. Handle nulo conserva EOF público rc5; no éxito. Sigue
 pendiente evidencia Windows real.
 
+Compatibilidad Windows se fijó contra `std` 1.98.1: pipe roto equivale a EOF;
+la consola conserva wakeup Ctrl-Z, reintento Ctrl-C/Break, Unicode suplementario
+y fallo explícito de surrogates inválidos. La futura prueba nativa cubrirá esos
+casos, CRLF, handle nulo/inválido, pipe y conservación del handle prestado; un
+PASS Linux no los acredita.
+
 2026-09-14 — Usuario autorizó de forma explícita sólo los cuatro cleanups antes
 pendientes: `TemporaryDirectory::drop/remove_dir_all` y los unlink de privada
 tras keygen, `.partial` de download y archivo incompleto de `write_new`. Se
 implementarán test-first después del vertical stdin, preservando error primario
 más cleanup, path owned y un intento; no es autorización global de cleanup.
+El método ya fija REDs conductuales mediante permisos reales e interposer de
+syscalls limitado por PID/path/contador, además de la vida checked de
+`ProcessEvidence`; todavía no se ejecutaron ni se escribió su GREEN.
