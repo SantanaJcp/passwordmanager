@@ -47,5 +47,4 @@ ratatui = { version = "=0.30.2", default-features = false, features = ["crosster
 tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO"] }
 zeroize = "=1.9.0"
-windows-sys = { version = "=0.61.2" }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }

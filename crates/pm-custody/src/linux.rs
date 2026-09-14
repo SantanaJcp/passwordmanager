@@ -43,7 +43,7 @@ use rustls::{
 use signature::Signer as _;
 use zeroize::{Zeroize, Zeroizing};
 
-use pm_crypto::{KdfProfile, NativeStdin, ProtectedBytes, RecoveryCode};
+use pm_crypto::{NativeStdin, ProtectedBytes};
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
 use pm_vault::{
     Attachment, AttemptOutcome, AttemptVault, AuditAction, AuditActorKind, AuditDeviceCustody,

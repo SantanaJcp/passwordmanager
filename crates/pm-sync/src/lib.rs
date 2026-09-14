@@ -779,37 +779,6 @@ fn publish_staged_file(
     std::fs::rename(temporary, output).map_err(|_| SyncError::Unavailable)
 }
 
-#[cfg(test)]
-mod native_file_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-
-    #[test]
-    fn staged_output_is_flushed_before_atomic_publication() {
-        let root = std::env::temp_dir().join(format!(
-            "pm-sync-publish-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&root).unwrap();
-        let temporary = root.join("object.part");
-        let output = root.join("object");
-        let mut file = pm_native_channel::create_private_file(&temporary, true, true).unwrap();
-        file.write_all(b"synthetic ciphertext only").unwrap();
-        assert!(!output.exists());
-        publish_staged_file(file, &temporary, &output).unwrap();
-        assert!(!temporary.exists());
-        assert_eq!(
-            std::fs::read(&output).unwrap(),
-            b"synthetic ciphertext only"
-        );
-        std::fs::remove_file(&output).unwrap();
-        std::fs::remove_dir(&root).unwrap();
-    }
-}
-
 fn encode_object_page(entries: &[BlockRef]) -> Vec<u8> {
     let mut e = Encoder::new(Vec::new());
     e.array(2)
@@ -1175,4 +1144,35 @@ fn mark_root_seen(path: &Path, root: [u8; 32]) -> Result<(), SyncError> {
         [root.as_slice()],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod native_file_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn staged_output_is_flushed_before_atomic_publication() {
+        let root = std::env::temp_dir().join(format!(
+            "pm-sync-publish-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let temporary = root.join("object.part");
+        let output = root.join("object");
+        let mut file = pm_native_channel::create_private_file(&temporary, true, true).unwrap();
+        file.write_all(b"synthetic ciphertext only").unwrap();
+        assert!(!output.exists());
+        publish_staged_file(file, &temporary, &output).unwrap();
+        assert!(!temporary.exists());
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"synthetic ciphertext only"
+        );
+        std::fs::remove_file(&output).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+    }
 }

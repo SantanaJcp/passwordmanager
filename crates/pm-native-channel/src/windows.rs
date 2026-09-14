@@ -719,6 +719,33 @@ pub struct ProcessHandleTransferLease {
 
 static PROCESS_HANDLE_TRANSFER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+struct ProcessHandleTransferReservation {
+    active: bool,
+}
+
+impl ProcessHandleTransferReservation {
+    fn acquire() -> Result<Self, ProcessHandleTransferBeginError> {
+        PROCESS_HANDLE_TRANSFER_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| Self { active: true })
+            .map_err(|_| ProcessHandleTransferBeginError {
+                cleanup_failed: false,
+            })
+    }
+
+    fn transfer(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for ProcessHandleTransferReservation {
+    fn drop(&mut self) {
+        if self.active {
+            PROCESS_HANDLE_TRANSFER_ACTIVE.store(false, Ordering::Release);
+        }
+    }
+}
+
 /// Failure to start a process-handle transfer lease, including whether
 /// restoring a partially-installed process DACL also failed.
 #[derive(Debug)]
@@ -744,22 +771,12 @@ impl ProcessHandleTransferLease {
     /// Returns an opaque error if SID resolution, DACL query/install, or
     /// post-install verification fails.
     pub fn begin() -> Result<Self, ProcessHandleTransferBeginError> {
-        if PROCESS_HANDLE_TRANSFER_ACTIVE
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(ProcessHandleTransferBeginError {
-                cleanup_failed: false,
-            });
-        }
-        let lease = Self::begin_unique();
-        if lease.is_err() {
-            PROCESS_HANDLE_TRANSFER_ACTIVE.store(false, Ordering::Release);
-        }
-        lease
+        Self::begin_unique(ProcessHandleTransferReservation::acquire()?)
     }
 
-    fn begin_unique() -> Result<Self, ProcessHandleTransferBeginError> {
+    fn begin_unique(
+        mut reservation: ProcessHandleTransferReservation,
+    ) -> Result<Self, ProcessHandleTransferBeginError> {
         let sid = installed_service_sid().map_err(|_| ProcessHandleTransferBeginError {
             cleanup_failed: false,
         })?;
@@ -816,7 +833,8 @@ impl ProcessHandleTransferLease {
                 cleanup_failed: first.is_err() || second.is_err(),
             });
         }
-        let mut lease = Self {
+        reservation.transfer();
+        let lease = Self {
             original_descriptor,
             original_dacl,
             installed_dacl,
