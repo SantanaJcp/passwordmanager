@@ -152,3 +152,10 @@ retirada. `ProcessEvidence::close` consume tras observación, retorna su intento
 único y Drop no reintenta; Drop no gestionado reporta su propio intento. Check
 final rc0, clean offline rc0 en 35.78 s y barrida final 23/23 rc0 en 603 s.
 Ticket 28 sigue parcial por sus demás verticales y por evidencia nativa.
+
+2026-09-14 — Sexto vertical ENOSPC preparado sin ejecución. El lab público
+pausa el custodio por PID sólo tras observar >1 MiB en WAL durante el stream,
+llena hasta ENOSPC un tmpfs privado del namespace y exige rc4, rollback integral,
+canario ausente, `integrity_check=ok` y restart sin reintentar la mutación. El
+método fija delta separado de HumanUnlock y cleanup resume/unmount/path exactos.
+No se escribió GREEN ni se ejecutó Cargo/build/lab.

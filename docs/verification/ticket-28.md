@@ -419,3 +419,37 @@ audit y outbox; (d) `SIGKILL` después de observar staging/WAL, seguido de resta
 y consulta del mismo ID. Cada RED debe fallar por parcialidad, categoría falsa
 o retransmisión observable, no por falta del compilador/interposer. Ninguno se
 ejecuta hasta terminar el vertical anterior y recibir ventana exclusiva.
+
+## Sexto vertical preparado: ENOSPC durante staging/WAL real
+
+El siguiente seam público es `pm-custody human-streaming-file` contra un
+`serve-vault` real. Estado, DB, WAL y SHM viven en un `tmpfs` de 64 MiB montado
+dentro del user+mount namespace del lab; binarios, perfiles y artefactos de
+build quedan fuera de ese volumen. No se cambia el host ni se usa un error
+SQLite simulado.
+
+El lab parte de una bóveda nueva, guarda conteos independientes de items,
+revisiones, streams/chunks, authority, outbox, receipts y auditoría, y lanza el
+stream de 16 MiB. Sólo cuando el WAL real supera 1 MiB —evidencia de staging
+material, no un sleep— envía `SIGSTOP` al PID custodio exacto y confirma estado
+stopped dentro del plazo de fixture. Un filler owned consume los bloques libres
+del mismo `tmpfs` hasta observar `ENOSPC`; el lab confirma cero bloques
+disponibles, reanuda exactamente el mismo PID y exige fallo público rc4
+`CUSTODY_UNAVAILABLE`, sin `PASS` ni canario en salida.
+
+Antes de retirar el filler, el custodio se vuelve a pausar si sigue vivo y se
+escanean DB/WAL/SHM y todos los archivos del volumen: el canario plaintext fijo
+del stream no puede aparecer. En `finally`, cualquier PID detenido se reanuda,
+se termina sólo cada hijo owned, se elimina el filler por su path exacto, se
+desmonta sólo el mount registrado y se retira la raíz estrictamente. Tras liberar
+espacio, SQLite debe abrir e informar `integrity_check=ok`; items, revisiones,
+streams/chunks, authority, outbox y receipts quedan exactamente como antes,
+staging queda vacío y sólo se permite el delta de una auditoría
+`HumanUnlock` ya durable antes del intento. Un restart del mismo custodio debe
+volver a publicar ambos sockets; no se reintenta la mutación.
+
+El RED se acepta sólo si falla por parcialidad durable, canario, categoría
+pública incorrecta, falta de `ENOSPC` real o imposibilidad de recuperar el mismo
+vault. Un fallo de mount, build, UID map, deadline de fixture o detector WAL no
+es RED de producto. El test queda preparado sin ejecución ni GREEN hasta la
+siguiente ventana Linux exclusiva.
