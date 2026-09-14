@@ -103,6 +103,74 @@ test "$build_line" -lt "$first_dumpbin_line" &&
     exit 1
 }
 
+# The Windows custody fixture must stage all data while the elevated installer
+# is the only non-SYSTEM trustee, then seal each runtime tree before SCM starts.
+# Keep this regression textual and order-sensitive: Linux has no PowerShell or
+# Windows ACL provider, so the native job is the executable verification.
+require_literal '$installerName = [Security.Principal.WindowsIdentity]::GetCurrent().Name' "$lab"
+require_literal 'Set-ExactTreeAcl $root @(' "$lab"
+require_literal '$harnessDir = Join-Path $root' "$lab"
+require_literal 'Set-ExactTreeAcl $harnessDir @(' "$lab"
+require_literal '/reset' "$lab"
+require_literal 'function Add-OwnedPath' "$lab"
+require_literal 'Add-OwnedPath $ownedPaths $auditPath' "$lab"
+require_literal 'function Assert-ExactNodeAcl' "$lab"
+require_literal 'AreAccessRulesProtected' "$lab"
+require_literal 'IsInherited' "$lab"
+require_literal 'function Repair-OwnedCleanupAcl' "$lab"
+require_literal 'function Remove-OwnedTree' "$lab"
+require_literal 'refusing unplanned cleanup path' "$lab"
+require_literal 'takeown.exe' "$lab"
+require_literal '[IO.FileAttributes]::ReparsePoint' "$lab"
+require_literal 'Remove-Item -LiteralPath $Path -Force -ErrorAction Stop' "$lab"
+require_literal 'if ($cleanupErrors.Count -gt 0)' "$lab"
+
+if grep -Eq 'Remove-Item[^\n]*-Recurse|takeown\.exe[^\n]*(/R|/r)|Get-ChildItem[^\n]*-Recurse' "$lab"; then
+    echo 'Windows fixture cleanup must not recurse opaquely or follow reparse trees' >&2
+    exit 1
+fi
+
+staging_line=$(grep -nF 'Set-ExactTreeAcl $root @(' "$lab" | cut -d: -f1 | head -n1)
+mkdirs_line=$(grep -nF 'New-Item -ItemType Directory -Path $serviceDir, $agentDir, $humanDir' "$lab" | cut -d: -f1)
+directory_staging_line=$(grep -nF 'Set-ExactTreeAcl $serviceDir @(' "$lab" | grep -F 'installerName' | cut -d: -f1 | head -n1)
+agent_directory_staging_line=$(grep -nF 'Set-ExactTreeAcl $agentDir @(' "$lab" | grep -F 'installerName' | cut -d: -f1 | head -n1)
+human_directory_staging_line=$(grep -nF 'Set-ExactTreeAcl $humanDir @(' "$lab" | grep -F 'installerName' | cut -d: -f1 | head -n1)
+harness_staging_line=$(grep -nF 'Set-ExactTreeAcl $harnessDir @(' "$lab" | grep -F 'installerName' | cut -d: -f1 | head -n1)
+keygen_line=$(grep -nF "Invoke-Checked \$custody @('keygen'" "$lab" | cut -d: -f1 | head -n1)
+vault_line=$(grep -nF '$vault = Join-Path $serviceDir' "$lab" | cut -d: -f1 | head -n1)
+service_final_line=$(grep -nF 'Set-ExactTreeAcl $serviceDir @(' "$lab" | grep -vF 'installerName' | cut -d: -f1 | tail -n1)
+agent_final_line=$(grep -nF 'Set-ExactTreeAcl $agentDir @(' "$lab" | grep -vF 'installerName' | cut -d: -f1 | tail -n1)
+human_final_line=$(grep -nF 'Set-ExactTreeAcl $humanDir @(' "$lab" | grep -vF 'installerName' | cut -d: -f1 | tail -n1)
+harness_file_line=$(grep -nF '[IO.File]::WriteAllBytes($emptyInput' "$lab" | cut -d: -f1)
+scm_config_line=$(grep -nF "Invoke-Checked 'sc.exe' @('config', \$serviceName" "$lab" | cut -d: -f1)
+test "$(grep -nF 'Set-ExactTreeAcl $serviceDir @(' "$lab" | grep -vF 'installerName' | wc -l)" -eq 1 &&
+    test "$(grep -nF 'Set-ExactTreeAcl $agentDir @(' "$lab" | grep -vF 'installerName' | wc -l)" -eq 1 &&
+    test "$(grep -nF 'Set-ExactTreeAcl $humanDir @(' "$lab" | grep -vF 'installerName' | wc -l)" -eq 1 || {
+    echo 'Windows fixture must have one role-only seal for each custody tree' >&2
+    exit 1
+}
+test -n "$staging_line" && test -n "$mkdirs_line" && test -n "$keygen_line" &&
+    test -n "$directory_staging_line" && test -n "$agent_directory_staging_line" &&
+    test -n "$human_directory_staging_line" && test -n "$harness_staging_line" &&
+    test -n "$vault_line" &&
+    test -n "$harness_file_line" && test -n "$service_final_line" &&
+    test -n "$agent_final_line" && test -n "$human_final_line" &&
+    test -n "$scm_config_line" || {
+    echo 'Windows fixture ACL phase markers are incomplete' >&2
+    exit 1
+}
+test "$staging_line" -lt "$mkdirs_line" && test "$mkdirs_line" -lt "$directory_staging_line" &&
+    test "$directory_staging_line" -lt "$agent_directory_staging_line" &&
+    test "$agent_directory_staging_line" -lt "$human_directory_staging_line" &&
+    test "$human_directory_staging_line" -lt "$harness_staging_line" &&
+    test "$harness_staging_line" -lt "$keygen_line" &&
+    test "$vault_line" -lt "$harness_file_line" && test "$harness_file_line" -lt "$service_final_line" &&
+    test "$service_final_line" -lt "$agent_final_line" && test "$agent_final_line" -lt "$human_final_line" &&
+    test "$human_final_line" -lt "$scm_config_line" || {
+    echo 'Windows fixture ACL order must be stage -> provision/vault -> seal -> SCM' >&2
+    exit 1
+}
+
 for input in third_party/libsodium/LATEST.tar.gz third_party/libsodium/LATEST.tar.gz.minisig; do
     attribute=$(git -C "$root" check-attr text -- "$input")
     case "$attribute" in

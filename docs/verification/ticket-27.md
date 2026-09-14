@@ -299,6 +299,68 @@ el laboratorio completo; cualquier error de `dumpbin` mantiene el job en RED.
 Linux solo puede comprobar el contrato estático y el balance de scripts porque
 no tiene `pwsh`, MSVC, `dumpbin` ni target Windows.
 
+## Corrección acotada de ACL del fixture y método TDD (escrito antes de implementar)
+
+La corrida nativa `34804746619` pasó la compilación, `linked_version`, los
+checks del canal y la creación/SID del servicio, pero terminó en
+`CUSTODY_UNAVAILABLE` y después en `Access denied` al limpiar. El laboratorio
+sellaba `service`, `agent` y `human` antes de terminar el provisionado y de
+crear la bóveda; además, el runner intentaba escribir y leer archivos de
+redirección dentro de árboles que ya solo le permitían acceso a la cuenta de
+runtime. La salida de `icacls` también se ejecutaba con `/c`, que podía dejar
+errores por archivo sin convertirlos en un fallo del comando.
+
+El seam verificable es la frontera de staging/sellado y el cleanup del único
+árbol efímero creado por el laboratorio. Antes del cambio, el checker debe dar
+RED si no encuentra este método:
+
+1. Resolver el nombre del instalador desde el token elevado actual. Crear la
+   raíz y los cuatro subárboles (`service`, `agent`, `human` y un `harness` de
+   redirección sintética) y aplicar inmediatamente DACL explícita `SYSTEM` +
+   instalador. No se escribe ningún secreto real ni se concede acceso a las
+   cuentas runtime.
+2. Generar las claves, provisionar bootstrap/perfiles, crear la bóveda y
+   preparar antes del sellado todos los archivos de entrada/salida del
+   harness. El harness solo contiene el master y argumentos sintéticos del
+   ticket y permanece `SYSTEM` + instalador; no contiene datos de custodia.
+3. Sellar después esas operaciones `service` como `SYSTEM` + cuenta virtual,
+   `agent` como `SYSTEM` + agent y `human` como `SYSTEM` + human, sin ACE del
+   instalador y antes de configurar/arrancar SCM. Las aserciones de salida leen
+   únicamente el harness sintético; los procesos runtime conservan solo sus
+   derechos de su propio árbol y del canal contractual.
+4. Detener/eliminar el servicio y reparar ACL solo sobre el árbol propio
+   previamente creado y su registro de rutas planificadas, nodo por nodo con
+   `takeown.exe`/`icacls.exe`. Enumerar un nivel cada vez, rechazar cualquier
+   `ReparsePoint`, no usar `-Recurse` ni `/R`, borrar solo después de recorrer
+   los nodos regulares y propagar cada error. Si aparece un nodo no registrado
+   o reparse, el cleanup queda en RED; no se atraviesan enlaces ni se borran
+   recursos ajenos.
+
+`icacls /grant:r` solo reemplaza el grant del trustee que se nombra y
+`/inheritance:r` solo quita ACE heredadas; ninguno elimina por sí solo un ACE
+explícito del instalador. Por eso `Set-ExactTreeAcl` aplica `/reset`, protege y
+concede los trustees finales por nodo, de abajo hacia arriba, y no usa `/c`.
+La semántica está documentada por
+[Microsoft `icacls`](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/icacls).
+
+La regresión estática comprueba el orden staging → provisionado/bóveda/harness
+→ sellado → SCM, que el sellado sea role-only y que cleanup no use traversal
+recursivo opaco. No cambia el motor, el modelo RPK/SID, las cuentas virtuales,
+permisos runtime, plazos ni fallback. La comprobación Linux se limita al
+checker, balance/sintaxis disponible y `git diff --check`; PowerShell real,
+ACL, `takeown`, SCM y los procesos ARM64 siguen requiriendo el runner nativo.
+El ticket permanece sin aceptar hasta repetir la corrida completa allí.
+
+La regresión se ejecutó primero contra el estado anterior y dio RED por faltar el
+identificador del instalador/staging. Después de implementar, el checker
+`./scripts/verify-windows-libsodium-build.sh`, `sh -n
+scripts/verify-windows-libsodium-build.sh` y `git diff --check` dieron exit 0.
+No se ejecutó `check.sh`, `clean-offline-build.sh` ni los labs Cargo de Linux en
+este checkpoint porque otra integración tenía la ventana exclusiva del
+workspace; esas verificaciones previas de `6434449`/`8e22acd` no se presentan
+como evidencia de la nueva ruta ACL. `pwsh`, ACL, `takeown`, SCM y el lab
+Windows continúan sin ejecutarse en este host.
+
 ## Pendiente que bloquea aceptación
 
 Falta compilar y ejecutar el producto y el script en Windows 11 ARM64. El

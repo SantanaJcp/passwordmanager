@@ -28,11 +28,85 @@ function Get-Sid([string]$Name) {
     return ([Security.Principal.NTAccount]$Name).Translate([Security.Principal.SecurityIdentifier]).Value
 }
 
+function Assert-ExactNodeAcl([string]$Path, [string[]]$Trustees) {
+    $security = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    Assert-True $security.AreAccessRulesProtected "ACL inheritance remains enabled: $Path"
+    $expectedSids = @($Trustees | ForEach-Object { Get-Sid $_ })
+    $rules = @($security.Access)
+    Assert-True ($rules.Count -eq $expectedSids.Count) "unexpected ACL entry count for $Path"
+    $actualSids = @()
+    foreach ($rule in $rules) {
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        $actualSids += $sid
+        Assert-True ($expectedSids -contains $sid) "unexpected ACL trustee on ${Path}: $sid"
+        Assert-True ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow) "deny ACL entry on ${Path}: $sid"
+        Assert-True (-not $rule.IsInherited) "inherited ACL entry on ${Path}: $sid"
+        Assert-True (($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl) "non-full ACL entry on ${Path}: $sid"
+    }
+    foreach ($sid in $expectedSids) {
+        $matching = @($actualSids | Where-Object { $_ -eq $sid })
+        Assert-True ($matching.Count -eq 1) "missing ACL trustee on ${Path}: $sid"
+    }
+}
+
 function Set-ExactTreeAcl([string]$Path, [string[]]$Trustees) {
-    Invoke-Checked 'icacls.exe' @($Path, '/inheritance:r')
-    $grants = @('/grant:r')
-    foreach ($trustee in $Trustees) { $grants += "${trustee}:(OI)(CI)F" }
-    Invoke-Checked 'icacls.exe' (@($Path) + $grants + @('/t', '/c'))
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Assert-True (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "refusing reparse ACL path: $Path"
+    if ($item.PSIsContainer) {
+        # Walk children first so the installer still reaches each child through
+        # the parent while that child is being sealed. Never follow reparse
+        # points or ask icacls to recurse opaquely.
+        $children = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)
+        foreach ($child in $children) {
+            Set-ExactTreeAcl $child.FullName $Trustees
+        }
+    }
+    $permission = if ($item.PSIsContainer) { '(OI)(CI)F' } else { 'F' }
+    # /reset removes prior explicit entries and restores only the parent's
+    # staging ACL. That keeps the installer able to reach this node while the
+    # next operation protects it and installs only the requested trustees.
+    Invoke-Checked 'icacls.exe' @($Path, '/reset')
+    # /inheritance:r then protects this node, while /grant:r installs only the
+    # requested trustees. Omitting /c makes any per-node icacls failure fail the
+    # fixture.
+    $arguments = @($Path, '/inheritance:r', '/grant:r')
+    foreach ($trustee in $Trustees) { $arguments += "${trustee}:$permission" }
+    Invoke-Checked 'icacls.exe' $arguments
+    Assert-ExactNodeAcl $Path $Trustees
+}
+
+function Add-OwnedPath([hashtable]$Owned, [string]$Path) {
+    $Owned[[IO.Path]::GetFullPath($Path)] = $true
+}
+
+function Repair-OwnedCleanupAcl([string]$Path, [string]$Installer, [hashtable]$Owned) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Assert-True ($Owned.ContainsKey([IO.Path]::GetFullPath($Path))) "refusing unplanned cleanup path: $Path"
+    Assert-True (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "refusing reparse cleanup path: $Path"
+    Invoke-Checked 'takeown.exe' @('/F', $Path, '/A')
+    Invoke-Checked 'icacls.exe' @($Path, '/reset')
+    $permission = if ($item.PSIsContainer) { '(OI)(CI)F' } else { 'F' }
+    Invoke-Checked 'icacls.exe' @($Path, '/inheritance:r', '/grant:r', "${Installer}:$permission", "SYSTEM:$permission")
+    Assert-ExactNodeAcl $Path @($Installer, 'SYSTEM')
+    if ($item.PSIsContainer) {
+        $children = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)
+        foreach ($child in $children) {
+            Repair-OwnedCleanupAcl $child.FullName $Installer $Owned
+        }
+    }
+}
+
+function Remove-OwnedTree([string]$Path, [hashtable]$Owned) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Assert-True ($Owned.ContainsKey([IO.Path]::GetFullPath($Path))) "refusing unplanned cleanup path: $Path"
+    Assert-True (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "refusing reparse cleanup path: $Path"
+    if ($item.PSIsContainer) {
+        $children = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)
+        foreach ($child in $children) {
+            Remove-OwnedTree $child.FullName $Owned
+        }
+    }
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
 }
 
 function Start-AsUser(
@@ -103,12 +177,14 @@ $root = Join-Path $env:ProgramData ("PasswordManager-ticket27-" + [Guid]::NewGui
 $serviceDir = Join-Path $root 'service'
 $agentDir = Join-Path $root 'agent'
 $humanDir = Join-Path $root 'human'
+$harnessDir = Join-Path $root 'harness'
 $agentName = 'pm27agent'
 $humanName = 'pm27human'
 $serviceName = 'PasswordManager'
 $syntheticPassword = ConvertTo-SecureString 'T27!Synthetic-Only-8472a' -AsPlainText -Force
 $agentCredential = [PSCredential]::new("$env:COMPUTERNAME\$agentName", $syntheticPassword)
 $humanCredential = [PSCredential]::new("$env:COMPUTERNAME\$humanName", $syntheticPassword)
+$installerName = $null
 $rootOwned = $false
 $agentOwned = $false
 $humanOwned = $false
@@ -116,11 +192,14 @@ $serviceOwned = $false
 $locationPushed = $false
 $bodyError = $null
 $cleanupErrors = [System.Collections.Generic.List[string]]::new()
+$ownedPaths = @{}
 $passMessage = $null
 
 try {
     $runnerPrincipal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
     Assert-True ($runnerPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 'lab requires an elevated ephemeral runner'
+    $installerName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    Assert-True (-not [string]::IsNullOrWhiteSpace($installerName)) 'elevated installer identity unavailable'
 
     # Refuse every collision before creating or changing a fixture. The fixed
     # names are deliberate so the test also exercises the installed names.
@@ -134,12 +213,21 @@ try {
 
     New-Item -ItemType Directory -Path $root | Out-Null
     $rootOwned = $true
+    Add-OwnedPath $ownedPaths $root
+    Set-ExactTreeAcl $root @('SYSTEM', $installerName)
     New-LocalUser -Name $agentName -Password $syntheticPassword -PasswordNeverExpires | Out-Null
     $agentOwned = $true
     New-LocalUser -Name $humanName -Password $syntheticPassword -PasswordNeverExpires | Out-Null
     $humanOwned = $true
     Assert-True (-not ((Get-LocalGroupMember Administrators).Name -contains "$env:COMPUTERNAME\$agentName")) 'agent must not be administrator'
-    New-Item -ItemType Directory -Path $serviceDir, $agentDir, $humanDir | Out-Null
+    New-Item -ItemType Directory -Path $serviceDir, $agentDir, $humanDir, $harnessDir | Out-Null
+    foreach ($path in @($serviceDir, $agentDir, $humanDir, $harnessDir)) {
+        Add-OwnedPath $ownedPaths $path
+    }
+    Set-ExactTreeAcl $serviceDir @('SYSTEM', $installerName)
+    Set-ExactTreeAcl $agentDir @('SYSTEM', $installerName)
+    Set-ExactTreeAcl $humanDir @('SYSTEM', $installerName)
+    Set-ExactTreeAcl $harnessDir @('SYSTEM', $installerName)
 
     Invoke-Checked 'cargo' @('test', '-p', 'pm-native-channel', '--all-targets', '--locked', '--offline')
     Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
@@ -159,31 +247,33 @@ try {
     Invoke-Checked 'sc.exe' @('sidtype', $serviceName, 'unrestricted')
     $serviceSid = Get-Sid "NT SERVICE\$serviceName"
 
-    Set-ExactTreeAcl $serviceDir @('SYSTEM', "NT SERVICE\$serviceName")
-    Set-ExactTreeAcl $agentDir @('SYSTEM', "$env:COMPUTERNAME\$agentName")
-    Set-ExactTreeAcl $humanDir @('SYSTEM', "$env:COMPUTERNAME\$humanName")
-
     $serverPrivate = Join-Path $serviceDir 'server.key'
     $serverPublic = Join-Path $serviceDir 'server.rpk'
     $agentPrivate = Join-Path $agentDir 'agent.key'
     $agentPublic = Join-Path $agentDir 'agent.rpk'
     $humanPrivate = Join-Path $humanDir 'human.key'
     $humanPublic = Join-Path $humanDir 'human.rpk'
+    foreach ($path in @($serverPrivate, $serverPublic, $agentPrivate, $agentPublic, $humanPrivate, $humanPublic)) {
+        Add-OwnedPath $ownedPaths $path
+    }
     Invoke-Checked $custody @('keygen', '--private', $serverPrivate, '--public', $serverPublic)
     Invoke-Checked $custody @('keygen', '--private', $agentPrivate, '--public', $agentPublic)
     Invoke-Checked $custody @('keygen', '--private', $humanPrivate, '--public', $humanPublic)
     $bootstrap = Join-Path $serviceDir 'bootstrap.dpapi'
+    Add-OwnedPath $ownedPaths $bootstrap
     Invoke-Checked $custody @('provision-bootstrap', '--path', $bootstrap, '--server-private', $serverPrivate, '--server-public', $serverPublic, '--service-sid', $serviceSid, '--agent-public', $agentPublic, '--agent-sid', $agentSid, '--human-public', $humanPublic, '--human-sid', $humanSid)
     $agentProfile = Join-Path $agentDir 'profile'
     $humanProfile = Join-Path $humanDir 'profile'
+    Add-OwnedPath $ownedPaths $agentProfile
+    Add-OwnedPath $ownedPaths $humanProfile
     Invoke-Checked $custody @('provision-profile', '--path', $agentProfile, '--server-public', $serverPublic, '--role', 'agent')
     Invoke-Checked $custody @('provision-profile', '--path', $humanProfile, '--server-public', $serverPublic, '--role', 'human')
-    Set-ExactTreeAcl $serviceDir @('SYSTEM', "NT SERVICE\$serviceName")
-    Set-ExactTreeAcl $agentDir @('SYSTEM', "$env:COMPUTERNAME\$agentName")
-    Set-ExactTreeAcl $humanDir @('SYSTEM', "$env:COMPUTERNAME\$humanName")
-
     # Create a synthetic vault without ever printing its recovery code.
     $vault = Join-Path $serviceDir 'vault.sqlite3'
+    $auditPath = "${vault}.audit-custody"
+    Add-OwnedPath $ownedPaths $vault
+    Add-OwnedPath $ownedPaths $auditPath
+    $master = 'synthetic ticket 27 master only'
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = [Diagnostics.ProcessStartInfo]::new($cli, "vault create `"$vault`"")
     $process.StartInfo.UseShellExecute = $false
@@ -191,7 +281,6 @@ try {
     $process.StartInfo.RedirectStandardOutput = $true
     $process.StartInfo.RedirectStandardError = $true
     Assert-True $process.Start() 'pm-cli did not start'
-    $master = 'synthetic ticket 27 master only'
     $process.StandardInput.WriteLine($master)
     $process.StandardInput.WriteLine($master)
     $null = $process.StandardOutput.ReadLine()
@@ -202,7 +291,28 @@ try {
     $process.StandardInput.Close()
     $process.WaitForExit()
     Assert-True ($process.ExitCode -eq 0) ('vault create failed: ' + $process.StandardError.ReadToEnd())
+
+    # Start-Process owns the redirection handles in the elevated installer.
+    # Keep all input/output in a non-custodial synthetic harness that retains
+    # only SYSTEM and installer access; role directories are sealed below.
+    $emptyInput = Join-Path $harnessDir 'empty.in'
+    $agentOut = Join-Path $harnessDir 'probe.out'; $agentErr = Join-Path $harnessDir 'probe.err'
+    $humanInput = Join-Path $harnessDir 'master.in'
+    $humanOut = Join-Path $harnessDir 'human.out'; $humanErr = Join-Path $harnessDir 'human.err'
+    $badOut = Join-Path $harnessDir 'bad.out'; $badErr = Join-Path $harnessDir 'bad.err'
+    foreach ($path in @($emptyInput, $agentOut, $agentErr, $humanInput, $humanOut, $humanErr, $badOut, $badErr)) {
+        Add-OwnedPath $ownedPaths $path
+    }
+    [IO.File]::WriteAllBytes($emptyInput, [byte[]]@())
+    [IO.File]::WriteAllText($humanInput, $master + [Environment]::NewLine)
+    foreach ($path in @($agentOut, $agentErr, $humanOut, $humanErr, $badOut, $badErr)) {
+        [IO.File]::WriteAllText($path, [string]::Empty)
+    }
+
+    # The installer is intentionally removed before any runtime process starts.
     Set-ExactTreeAcl $serviceDir @('SYSTEM', "NT SERVICE\$serviceName")
+    Set-ExactTreeAcl $agentDir @('SYSTEM', "$env:COMPUTERNAME\$agentName")
+    Set-ExactTreeAcl $humanDir @('SYSTEM', "$env:COMPUTERNAME\$humanName")
 
     $vaultId = '27aa27aa27aa27aa27aa27aa27aa27aa'
     $device = '27272727272727272727272727272727'
@@ -212,19 +322,14 @@ try {
     Start-Sleep -Seconds 2
     Assert-True ((Get-Service $serviceName).Status -eq 'Running') 'custody service did not reach RUNNING'
 
-    $emptyInput = Join-Path $agentDir 'empty.in'; [IO.File]::WriteAllBytes($emptyInput, @())
-    $agentOut = Join-Path $agentDir 'probe.out'; $agentErr = Join-Path $agentDir 'probe.err'
     $p = Start-AsUser $agentCredential $custody @('probe', '--profile', $agentProfile, '--private', $agentPrivate, '--vault-id', $vaultId) $emptyInput $agentOut $agentErr
     Assert-True ($p.ExitCode -eq 0) ('agent native probe failed: ' + (Get-Content $agentErr -Raw))
     Assert-True ((Get-Content $agentOut -Raw) -match 'tls=1.3 rpk=pinned named-pipe=bilateral') 'agent did not prove pinned transport'
 
-    $humanInput = Join-Path $humanDir 'master.in'; [IO.File]::WriteAllText($humanInput, $master + "`n")
-    $humanOut = Join-Path $humanDir 'human.out'; $humanErr = Join-Path $humanDir 'human.err'
     $p = Start-AsUser $humanCredential $custody @('human-lock', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $humanInput $humanOut $humanErr
     Assert-True ($p.ExitCode -eq 0) ('human native channel failed: ' + (Get-Content $humanErr -Raw))
 
     # Cross-role RPK/SID substitution must fail before vault operation.
-    $badOut = Join-Path $agentDir 'bad.out'; $badErr = Join-Path $agentDir 'bad.err'
     $p = Start-AsUser $agentCredential $custody @('probe', '--profile', $humanProfile, '--private', $agentPrivate, '--vault-id', $vaultId) $emptyInput $badOut $badErr
     Assert-True ($p.ExitCode -ne 0) 'cross-role identity substitution unexpectedly succeeded'
 
@@ -263,7 +368,13 @@ finally {
         catch { $cleanupErrors.Add("human user cleanup failed: $($_.Exception.Message)") }
     }
     if ($rootOwned) {
-        try { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop }
+        try {
+            # Runtime DACLs deliberately exclude the installer after sealing;
+            # recover access only for this collision-checked owned tree, one
+            # non-reparse node at a time, then remove it without -Recurse.
+            Repair-OwnedCleanupAcl $root $installerName $ownedPaths
+            Remove-OwnedTree $root $ownedPaths
+        }
         catch { $cleanupErrors.Add("fixture cleanup failed: $($_.Exception.Message)") }
     }
     if ($locationPushed) {
