@@ -1753,6 +1753,19 @@ rechaza `--socket` allí; la forma Unix conserva `--socket`. En futuros fallos
 previos a pantalla, el fixture puede informar estado real del child y categorías
 cerradas del observer, nunca bytes/celdas, contraseña, título ni metadatos.
 
+La corrida nativa posterior sobre
+`6a8c6316719e549610bf6d94c1b969fb06ab1e63` confirmó que los argumentos ya
+alcanzan el TUI: child `running`, parser `ground`, fila 0/columna 80, 80 celdas
+no vacías y un título. El observer falló al recibir el carácter posterior al
+margen. Esto identifica una carencia del modelo de pantalla, no del render del
+producto. El modelo corregido implementa delayed wrap: la última columna deja
+wrap pendiente y el siguiente glyph avanza de fila; CR, LF,
+movimiento/posicionamiento y erase cancelan el estado, y LF/wrap en la fila 24
+desplaza una línea. La regresión cubre ancho exacto+glyph siguiente, CR y erase
+en margen y scroll inferior. Unicode fuera del repertorio de una celda
+ejercitado por el fixture falla explícitamente; no cuenta silenciosamente un
+wide/combining como una celda.
+
 ### Método de transferencia 1PUX por handle en Windows
 
 La transferencia Windows no reabre un path ni concede derechos sobre el
@@ -1840,6 +1853,11 @@ terminar; se hace join antes de cerrar el evento. No hay sleep/retry, endpoint
 alternativo ni segundo dispatch. Fallo del worker, señal, peer revalidation o
 cleanup del evento produce `SYNC_UNAVAILABLE`/`SYNC_REQUEST_FAILED`, no éxito.
 El servidor conserva concurrencia con ownership recuperable si falla el spawn.
+El primer listener exige `FILE_FLAG_FIRST_PIPE_INSTANCE`; después de cada
+accept crea y conserva el siguiente instance antes de entregar el conectado al
+worker. Los adicionales omiten sólo ese flag y usan el límite Win32
+`PIPE_UNLIMITED_INSTANCES`. Así nunca queda el nombre sin una instancia propia
+entre requests y un proceso ajeno no puede ocupar la ventana de handoff.
 
 Este vertical reutiliza todavía el `Drop` heredado de `WindowsServerPipe` y
 `WindowsClientPipe`, cuyo `CloseHandle` no comprueba el retorno. Esa limitación

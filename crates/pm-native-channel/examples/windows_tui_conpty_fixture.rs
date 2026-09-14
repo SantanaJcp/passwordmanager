@@ -72,6 +72,7 @@ mod windows_fixture {
         column: usize,
         saved_row: usize,
         saved_column: usize,
+        wrap_pending: bool,
         win32_input: bool,
         focus_reporting: bool,
         window_title_updates: u64,
@@ -102,6 +103,7 @@ mod windows_fixture {
                 column: 0,
                 saved_row: 0,
                 saved_column: 0,
+                wrap_pending: false,
                 win32_input: false,
                 focus_reporting: false,
                 window_title_updates: 0,
@@ -155,6 +157,7 @@ mod windows_fixture {
                         b'8' => {
                             self.row = self.saved_row;
                             self.column = self.saved_column;
+                            self.wrap_pending = false;
                             self.parse = ParseState::Ground;
                         }
                         value => self.fail(format!(
@@ -257,21 +260,50 @@ mod windows_fixture {
             }
             match byte {
                 0x1b => self.parse = ParseState::Escape,
-                b'\r' => self.column = 0,
-                b'\n' => self.row = (self.row + 1).min(SCREEN_ROWS - 1),
-                0x08 => self.column = self.column.saturating_sub(1),
+                b'\r' => {
+                    self.column = 0;
+                    self.wrap_pending = false;
+                }
+                b'\n' => {
+                    self.advance_row();
+                    self.wrap_pending = false;
+                }
+                0x08 => {
+                    self.wrap_pending = false;
+                    self.column = self.column.saturating_sub(1);
+                }
                 0x20..=0x7e => self.put(char::from(byte)),
                 value => self.fail(format!("unsupported ConPTY control byte: 0x{value:02x}")),
             }
         }
 
         fn put(&mut self, character: char) {
-            if character.is_control() || self.row >= SCREEN_ROWS || self.column >= SCREEN_COLUMNS {
-                self.fail("ConPTY character was outside the observable screen");
+            if character.is_control()
+                || (!character.is_ascii() && !matches!(character, '—' | '›' | '★' | '•' | '�'))
+            {
+                self.fail("unsupported Unicode cell width in ConPTY output");
                 return;
             }
+            if self.wrap_pending {
+                self.column = 0;
+                self.advance_row();
+                self.wrap_pending = false;
+            }
             self.cells[self.row * SCREEN_COLUMNS + self.column] = character;
-            self.column += 1;
+            if self.column == SCREEN_COLUMNS - 1 {
+                self.wrap_pending = true;
+            } else {
+                self.column += 1;
+            }
+        }
+
+        fn advance_row(&mut self) {
+            if self.row == SCREEN_ROWS - 1 {
+                self.cells.copy_within(SCREEN_COLUMNS.., 0);
+                self.cells[(SCREEN_ROWS - 1) * SCREEN_COLUMNS..].fill(' ');
+            } else {
+                self.row += 1;
+            }
         }
 
         fn apply_csi(&mut self, bytes: &[u8], command: u8) {
@@ -322,6 +354,7 @@ mod windows_fixture {
                     self.cells.fill(' ');
                     self.row = 0;
                     self.column = 0;
+                    self.wrap_pending = false;
                 }
                 if parameters.contains(&9001) {
                     self.win32_input = command == b'h';
@@ -343,17 +376,24 @@ mod windows_fixture {
                     } else {
                         self.row = row;
                         self.column = column;
+                        self.wrap_pending = false;
                     }
                 }
-                b'A' if parameters.len() <= 1 => self.row = self.row.saturating_sub(distance()),
+                b'A' if parameters.len() <= 1 => {
+                    self.row = self.row.saturating_sub(distance());
+                    self.wrap_pending = false;
+                }
                 b'B' if parameters.len() <= 1 => {
                     self.row = (self.row + distance()).min(SCREEN_ROWS - 1);
+                    self.wrap_pending = false;
                 }
                 b'C' if parameters.len() <= 1 => {
                     self.column = (self.column + distance()).min(SCREEN_COLUMNS - 1);
+                    self.wrap_pending = false;
                 }
                 b'D' if parameters.len() <= 1 => {
                     self.column = self.column.saturating_sub(distance());
+                    self.wrap_pending = false;
                 }
                 b'G' if parameters.len() <= 1 => {
                     let column = distance() - 1;
@@ -361,6 +401,7 @@ mod windows_fixture {
                         self.fail("ConPTY horizontal cursor position outside screen");
                     } else {
                         self.column = column;
+                        self.wrap_pending = false;
                     }
                 }
                 b'd' if parameters.len() <= 1 => {
@@ -369,9 +410,11 @@ mod windows_fixture {
                         self.fail("ConPTY vertical cursor position outside screen");
                     } else {
                         self.row = row;
+                        self.wrap_pending = false;
                     }
                 }
                 b'J' if parameters.len() <= 1 && matches!(first, 0 | 2 | 3) => {
+                    self.wrap_pending = false;
                     if first == 2 || first == 3 {
                         self.cells.fill(' ');
                     } else {
@@ -381,6 +424,7 @@ mod windows_fixture {
                     }
                 }
                 b'K' if parameters.len() <= 1 && matches!(first, 0 | 1 | 2) => {
+                    self.wrap_pending = false;
                     let start = self.row * SCREEN_COLUMNS;
                     let (from, through) = match first {
                         0 => (start + self.column, start + SCREEN_COLUMNS),
@@ -397,6 +441,7 @@ mod windows_fixture {
                 b'u' if parameters.is_empty() => {
                     self.row = self.saved_row;
                     self.column = self.saved_column;
+                    self.wrap_pending = false;
                 }
                 _ => self.fail(format!("unsupported ConPTY CSI command: 0x{command:02x}")),
             }
@@ -504,9 +549,10 @@ mod windows_fixture {
             };
             let nonblank = state.cells.iter().filter(|cell| **cell != ' ').count();
             Ok(format!(
-                "observer parser={parser} row={} column={} nonblank={nonblank} title-updates={} markers=manager:{},rpk:{},password:{},unavailable:{}",
+                "observer parser={parser} row={} column={} wrap={} nonblank={nonblank} title-updates={} markers=manager:{},rpk:{},password:{},unavailable:{}",
                 state.row,
                 state.column,
+                state.wrap_pending,
                 state.window_title_updates,
                 state.contains("Password Manager"),
                 state.contains("human TLS-RPK"),
@@ -1283,6 +1329,39 @@ mod windows_fixture {
             observer
                 .wait_for("Password required (input hidden)")
                 .unwrap();
+        }
+
+        #[test]
+        fn observer_models_delayed_wrap_margin_controls_and_bottom_scroll() {
+            let observer = TerminalObserver::new();
+            observer.feed(&[b'x'; SCREEN_COLUMNS]).unwrap();
+            {
+                let state = observer.state.lock().unwrap();
+                assert_eq!((state.row, state.column, state.wrap_pending), (0, 79, true));
+            }
+            observer.feed(b"y").unwrap();
+            {
+                let state = observer.state.lock().unwrap();
+                assert_eq!((state.row, state.column, state.wrap_pending), (1, 1, false));
+                assert_eq!(state.cells[SCREEN_COLUMNS], 'y');
+            }
+
+            observer.feed(b"\x1b[1;80Hz\rR").unwrap();
+            {
+                let state = observer.state.lock().unwrap();
+                assert_eq!(state.cells[0], 'R');
+                assert_eq!(state.row, 0);
+            }
+            observer.feed(b"\x1b[1;80Hq\x1b[2KE").unwrap();
+            {
+                let state = observer.state.lock().unwrap();
+                assert_eq!(state.cells[79], 'E');
+                assert!(state.wrap_pending);
+            }
+            observer.feed(b"\x1b[24;80Hb\np").unwrap();
+            let state = observer.state.lock().unwrap();
+            assert_eq!(state.row, 23);
+            assert_eq!(state.cells[23 * SCREEN_COLUMNS + 79], 'p');
         }
 
         #[test]
