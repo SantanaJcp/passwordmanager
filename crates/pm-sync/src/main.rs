@@ -4,7 +4,9 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use pm_crypto::digest;
 #[cfg(windows)]
-use pm_native_channel::{WindowsClientPipe, WindowsServerPipe, WindowsStopEvent};
+use pm_native_channel::{
+    WindowsClientPipe, WindowsServerPipe, WindowsStopEvent, WindowsSyncPipeInstance,
+};
 use pm_sync::{OpaqueSyncStore, SyncError};
 use rustls::{
     CertificateError, DigitallySignedStruct, DistinguishedName, Error as TlsError, SignatureScheme,
@@ -179,16 +181,29 @@ fn serve(
         store.authorize(namespace, rpk).map_err(|_| ())?;
     }
     let config = server_config(certified(key)?, clients)?;
+    let mut listener = create_sync_listener(
+        name,
+        server_sid,
+        &client_sids,
+        WindowsSyncPipeInstance::First,
+    )?;
     loop {
-        let stop = WindowsStopEvent::create().map_err(|_| ())?;
-        let mut pipe = match WindowsServerPipe::create_sync(name, server_sid, &client_sids, &stop) {
-            Ok(pipe) => pipe,
-            Err(_) => {
+        let (mut pipe, stop) = listener;
+        let accepted = pipe.accept();
+        listener = match create_sync_listener(
+            name,
+            server_sid,
+            &client_sids,
+            WindowsSyncPipeInstance::Additional,
+        ) {
+            Ok(listener) => listener,
+            Err(()) => {
+                drop(pipe);
                 stop.close().map_err(|_| ())?;
                 return Err(());
             }
         };
-        if pipe.accept().is_err() {
+        if accepted.is_err() {
             drop(pipe);
             stop.close().map_err(|_| ())?;
             continue;
@@ -224,6 +239,23 @@ fn serve(
             drop(pipe);
             stop.close().map_err(|_| ())?;
             return Err(());
+        }
+    }
+}
+
+#[cfg(windows)]
+fn create_sync_listener(
+    name: &str,
+    server_sid: &str,
+    client_sids: &[String],
+    instance: WindowsSyncPipeInstance,
+) -> Result<(WindowsServerPipe, WindowsStopEvent), ()> {
+    let stop = WindowsStopEvent::create().map_err(|_| ())?;
+    match WindowsServerPipe::create_sync(name, server_sid, client_sids, &stop, instance) {
+        Ok(pipe) => Ok((pipe, stop)),
+        Err(_) => {
+            stop.close().map_err(|_| ())?;
+            Err(())
         }
     }
 }

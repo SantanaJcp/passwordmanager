@@ -47,7 +47,8 @@ use windows_sys::Win32::{
         Pipes::{
             ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId,
             GetNamedPipeServerProcessId, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE,
-            PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
+            PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+            PeekNamedPipe, WaitNamedPipeW,
         },
         Services::{
             CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx,
@@ -241,6 +242,12 @@ pub struct WindowsServerPipe {
     client_pid: Option<u32>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowsSyncPipeInstance {
+    First,
+    Additional,
+}
+
 // The pipe owns its HANDLE and moves into exactly one service worker before
 // any accept or I/O. It is not Sync; duplicated handles remain confined to the
 // same worker while rustls and the human identity lease are composed.
@@ -298,13 +305,14 @@ impl WindowsServerPipe {
         server_sid: &str,
         client_sids: &[String],
         stop: &WindowsStopEvent,
+        instance: WindowsSyncPipeInstance,
     ) -> Result<Self, ChannelAuthenticationError> {
         validate_sync_pipe_name(name)?;
         if current_process_sid()? != server_sid {
             return Err(ChannelAuthenticationError);
         }
         let sddl = sync_pipe_sddl(server_sid, client_sids)?;
-        Self::create_sync_named(name, &sddl, client_sids.to_vec(), stop)
+        Self::create_sync_named(name, &sddl, client_sids.to_vec(), stop, instance)
     }
 
     fn create_sync_named(
@@ -312,6 +320,7 @@ impl WindowsServerPipe {
         sddl: &str,
         client_sids: Vec<String>,
         stop: &WindowsStopEvent,
+        instance: WindowsSyncPipeInstance,
     ) -> Result<Self, ChannelAuthenticationError> {
         let name = wide(name);
         let sddl = wide(sddl);
@@ -334,7 +343,7 @@ impl WindowsServerPipe {
             lpSecurityDescriptor: descriptor,
             bInheritHandle: 0,
         };
-        let creation = create_pipe_instance(name.as_ptr(), &raw const security);
+        let creation = create_sync_pipe_instance(name.as_ptr(), &raw const security, instance);
         let released = free_local(descriptor);
         let handle = match (creation, released) {
             (Ok(handle), Ok(())) => handle,
@@ -517,6 +526,34 @@ fn create_pipe_instance(
         return Err(unsafe { GetLastError() });
     }
     Ok(handle)
+}
+
+fn create_sync_pipe_instance(
+    name: *const u16,
+    security: *const SECURITY_ATTRIBUTES,
+    instance: WindowsSyncPipeInstance,
+) -> Result<HANDLE, u32> {
+    let first = match instance {
+        WindowsSyncPipeInstance::First => FILE_FLAG_FIRST_PIPE_INSTANCE,
+        WindowsSyncPipeInstance::Additional => 0,
+    };
+    let handle = unsafe {
+        CreateNamedPipeW(
+            name,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | first,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_UNLIMITED_INSTANCES,
+            PIPE_BUFFER,
+            PIPE_BUFFER,
+            0,
+            security,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        Err(unsafe { GetLastError() })
+    } else {
+        Ok(handle)
+    }
 }
 
 fn overlapped_connect(pipe: HANDLE, stop_event: HANDLE) -> Result<(), ChannelAuthenticationError> {
