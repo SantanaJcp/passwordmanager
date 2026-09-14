@@ -43,9 +43,15 @@ La preparación autorizada es un único camino explícito:
    `builds/msvc/vs2026/libsodium/libsodium.vcxproj`, toolset `v145`,
    configuración `ReleaseLIB|ARM64` y runtime estático `/MT`.
 3. Resuelve una única instalación Visual Studio 2026 `[18.0,19.0)` mediante el
-   `vswhere.exe` fijo del instalador y exige los ejecutables ARM64-host/ARM64-
-   target de MSBuild y Dumpbin en esa instalación. La ausencia o ambigüedad de
-   cualquier prerrequisito falla; no busca otra versión, host o herramienta.
+   `vswhere.exe` fijo del instalador. Enumera como diagnóstico únicamente los
+   nombres de metadata `Microsoft.VCToolsVersion*.txt`, y lee el archivo
+   estándar `Microsoft.VCToolsVersion.default.txt` documentado por Microsoft;
+   exige que su versión sea v145 y la fija también como `VCToolsVersion` de
+   MSBuild. Después exige los ejecutables ARM64-host/ARM64-target de MSBuild y
+   Dumpbin bajo esa versión. La ausencia o ambigüedad de cualquier prerrequisito
+   falla; no busca otra versión, host o herramienta. Referencias primarias:
+   [Microsoft Learn](https://learn.microsoft.com/en-us/cpp/overview/acquire-msvc)
+   y [vswhere Find VC](https://github.com/microsoft/vswhere/wiki/Find-VC).
 4. Compila `ReleaseLIB|ARM64`, exige exactamente `libsodium.lib` en el output
    esperado, verifica con Dumpbin que sus objetos son ARM64 y publica solo ese
    directorio mediante `SODIUM_LIB_DIR`. El lab vuelve a exigir el directorio,
@@ -174,6 +180,12 @@ siendo el fijado y su transformación CRLF produce otro hash; no se cambió el
 hash ni se normaliza el input al verificar. `.gitattributes` marca el tarball y
 su firma como `-text`, y el checker exige `git check-attr text=unset` para ambos
 antes de una nueva corrida. Este resultado no acredita el build nativo.
+La segunda corrida `34796755222` pasó ambos hashes y la verificación Minisign
+nativa, pero se detuvo antes de MSBuild porque la preparación había supuesto el
+nombre inexistente `Microsoft.VCToolsVersion.VC.14.50.default.txt`. La corrección
+usa únicamente el nombre estándar documentado, registra la metadata observada y
+fija explícitamente la versión v145 leída; no prueba nombres alternativos ni
+selecciona otro toolset.
 Además,
 `libsodium-sys-stable 1.24.0` contiene en su `build.rs` un fallback existente:
 si falla `install_from_source()` en MSVC, activa

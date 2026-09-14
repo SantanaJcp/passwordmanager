@@ -29,6 +29,9 @@ require_literal '2162883303fb903068519916871476b192d5cf31d5e412378db8ae05a0c0589
 require_literal 'ReleaseLIB' "$prepare"
 require_literal 'v145' "$prepare"
 require_literal 'Hostarm64\arm64' "$prepare"
+require_literal "Microsoft.VCToolsVersion.default.txt'" "$prepare"
+require_literal "'/p:VCToolsVersion=' + \$toolVersion" "$prepare"
+require_literal '$versionFiles = @(' "$prepare"
 require_literal "rustup which --toolchain \$env:RUSTUP_TOOLCHAIN cargo" "$prepare"
 require_literal "Join-Path \$env:RUSTUP_HOME \"toolchains\\\$env:RUSTUP_TOOLCHAIN\\bin\\cargo.exe\"" "$prepare"
 require_literal "Join-Path \$env:SystemRoot 'System32\\tar.exe'" "$prepare"
@@ -65,6 +68,7 @@ if grep -Eiq 'libsodium-1\.0\.22-stable-msvc\.zip|SODIUM_DIST_DIR[[:space:]]*=|G
 fi
 
 if grep -Fq 'Join-Path $env:CARGO_HOME' "$prepare" ||
+   grep -Fq 'Microsoft.VCToolsVersion.VC.14.50.default.txt' "$prepare" ||
    grep -Eq '\(\$headers[[:space:]]*\|[[:space:]]*Select-String[^)]*\)\.Count' "$prepare"; then
     echo 'Windows source preparation uses an uninstalled Cargo proxy or StrictMode-unsafe scalar Count' >&2
     exit 1

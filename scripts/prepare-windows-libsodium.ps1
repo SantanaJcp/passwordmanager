@@ -109,11 +109,20 @@ $installations = @($installations | Where-Object { -not [string]::IsNullOrWhiteS
 Assert-True ($installations.Count -eq 1) "Expected exactly one Visual Studio 2026 installation, got $($installations.Count)"
 $installation = $installations[0].Trim()
 $msbuild = Join-Path $installation 'MSBuild\Current\Bin\arm64\MSBuild.exe'
-$toolVersionFile = Join-Path $installation 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.VC.14.50.default.txt'
+$auxiliaryBuild = Join-Path $installation 'VC\Auxiliary\Build'
+Assert-True (Test-Path -LiteralPath $auxiliaryBuild -PathType Container) 'VC auxiliary build metadata directory is absent'
+$versionFiles = @(
+    Get-ChildItem -LiteralPath $auxiliaryBuild -Filter 'Microsoft.VCToolsVersion*.txt' -File |
+        Sort-Object -Property Name
+)
+$versionNames = @($versionFiles | ForEach-Object { $_.Name })
+Write-Output "MSVC tool metadata count=$($versionNames.Count) files=$($versionNames -join ',')"
+$toolVersionFile = Join-Path $auxiliaryBuild 'Microsoft.VCToolsVersion.default.txt'
 Assert-True (Test-Path -LiteralPath $msbuild -PathType Leaf) 'ARM64-host MSBuild is absent'
 Assert-True (Test-Path -LiteralPath $toolVersionFile -PathType Leaf) 'Pinned v145 tool-version file is absent'
 $toolVersion = (Get-Content -LiteralPath $toolVersionFile -Raw).Trim()
 Assert-True ($toolVersion -match '^14\.5[0-9]\.[0-9]+$') "Unexpected v145 tool version: $toolVersion"
+Write-Output "MSVC selected tool-version=$toolVersion platform-toolset=v145"
 $nativeToolBin = Join-Path $installation "VC\Tools\MSVC\$toolVersion\bin\Hostarm64\arm64"
 $dumpbin = Join-Path $nativeToolBin 'dumpbin.exe'
 Assert-True (Test-Path -LiteralPath $dumpbin -PathType Leaf) 'ARM64-host/ARM64-target Dumpbin is absent'
@@ -122,7 +131,7 @@ Assert-True ((Get-PeMachine $dumpbin) -eq 0xaa64) 'Dumpbin host PE is not ARM64'
 
 Invoke-Checked $msbuild @(
     $project, '/m:1', '/t:Rebuild', '/p:Configuration=ReleaseLIB',
-    '/p:Platform=ARM64', '/p:PlatformToolset=v145'
+    '/p:Platform=ARM64', '/p:PlatformToolset=v145', ('/p:VCToolsVersion=' + $toolVersion)
 )
 $libDir = Join-Path $source 'bin\ARM64\Release\v145\static'
 $library = Join-Path $libDir 'libsodium.lib'
