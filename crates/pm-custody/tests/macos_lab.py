@@ -135,7 +135,7 @@ class VtScreen:
     @staticmethod
     def _render_cells(cells):
         return "\n".join(
-            "".join(" " if cell is None else cell for cell in row)
+            "".join("" if cell is None else cell for cell in row)
             for row in cells
         )
 
@@ -254,21 +254,22 @@ class VtScreen:
             raise UnsupportedVtSequence("erase-display-mode")
         changed = False
         if mode == 0:
-            ranges = [(self._cursor_row, self.rows - 1)]
-            first_start = self._cursor_column
+            row_ranges = [
+                (self._cursor_row, self._cursor_column, self.columns),
+                *[(row, 0, self.columns) for row in range(self._cursor_row + 1, self.rows)],
+            ]
         elif mode == 1:
-            ranges = [(0, self._cursor_row)]
-            first_start = 0
+            row_ranges = [
+                *[(row, 0, self.columns) for row in range(self._cursor_row)],
+                (self._cursor_row, 0, self._cursor_column + 1),
+            ]
         else:
-            ranges = [(0, self.rows - 1)]
-            first_start = 0
-        for row_start, row_end in ranges:
-            for row in range(row_start, row_end + 1):
-                start = first_start if row == self._cursor_row and mode in (0, 1) else 0
-                for column in range(start, self.columns):
-                    if self._cells[row][column] != " ":
-                        self._cells[row][column] = " "
-                        changed = True
+            row_ranges = [(row, 0, self.columns) for row in range(self.rows)]
+        for row, start, end in row_ranges:
+            for column in range(start, end):
+                if self._cells[row][column] != " ":
+                    self._cells[row][column] = " "
+                    changed = True
         self._reset_cursor_state()
         if changed:
             self._changed()
@@ -336,6 +337,8 @@ class VtScreen:
             amount = self._one(values, 1)
             if amount < 0:
                 raise UnsupportedVtSequence("csi-range")
+            if amount == 0:
+                amount = 1
             delta_row = amount if final == "B" else -amount if final == "A" else 0
             delta_column = amount if final == "C" else -amount if final == "D" else 0
             self._move_cursor(
@@ -679,6 +682,29 @@ def assert_screen_observer_regression():
     )
     assert "cafe\u0301" in rendered, (
         "cursor-positioned screen regression: combining mark was not retained"
+    )
+    wide = VtScreen(6, 2)
+    wide.feed("a界b".encode("utf-8"), final=True)
+    assert wide.text().splitlines()[0] == "a界b  ", (
+        "cursor-positioned screen regression: wide-cell continuation became text"
+    )
+    erased = VtScreen(8, 3)
+    erased.feed(b"\x1b[1;1Hprior0\x1b[2;1Hprior1\x1b[3;1Hcurrent\x1b[3;4H\x1b[1J", final=True)
+    erased_rows = erased.text().splitlines()
+    assert erased_rows[0] == "        " and erased_rows[1] == "        " \
+        and erased_rows[2] == "    ent ", (
+            "cursor-positioned screen regression: CSI 1J erased the wrong cells"
+        )
+    movement = VtScreen(5, 3)
+    movement.feed(
+        b"\x1b[2;2H\x1b[0AY\x1b[2;2H\x1b[0BZ"
+        b"\x1b[2;2H\x1b[0CD\x1b[2;2H\x1b[0DL\x1b[2;2HX",
+        final=True,
+    )
+    movement_rows = movement.text().splitlines()
+    assert movement_rows[0] == " Y   " and movement_rows[1] == "LXD  " \
+        and movement_rows[2] == " Z   ", (
+        "cursor-positioned screen regression: CSI zero movement was not defaulted"
     )
     screen.resize(12, 4)
     screen.feed(b"\x1b[1;1Hwide\xe7\x95\x8c")
