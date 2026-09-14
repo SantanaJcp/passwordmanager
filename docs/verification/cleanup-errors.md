@@ -2,7 +2,7 @@
 
 ## Scope and preserved behavior
 
-This method covers only two previously reported cleanup suppressions authorized
+The initial method below covers two previously reported cleanup suppressions authorized
 under `Engram authorization/cleanup-and-canary`: Linux keyboard TUI clipboard
 and terminal restoration, and `pm-vault::persist_new` temporary SQLite artifact
 removal. It does not change clipboard ownership, secret exposure, vault
@@ -174,9 +174,19 @@ error. The process-runner `close()` boundary performs one checked removal;
 `Drop` reports a fixed marker only when no explicit close was attempted. The
 fault labs inject one exact Linux syscall failure and use only synthetic data;
 the RPC lab cuts a real peer after partial output and verifies the owned
-partial file remains visible. These are cleanup propagation checks, not a new
-behavioral RED claim; the candidate's earlier compile/harness-only checkpoint
-remains classified above as non-behavioral.
+partial file remains visible.
+
+Unlike the earlier, separate `4400ffb` candidate described above, this
+four-cleanup candidate has behavioral RED evidence at test-first checkpoint
+`7969d5ec7d88fd1278eab5c5c77c3d5848c73aca`: failed owned-directory removal
+was silent (test exit 101); keygen/write-new failures exposed only the primary
+`CUSTODY_UNAVAILABLE` (lab exit 1); and a real RPC peer cut plus failed partial
+unlink also omitted `CLEANUP_FAILED` (lab exit 1). The corresponding author
+logs are `/tmp/pm28-red-cleanup-process-runner-final.log`,
+`/tmp/pm28-red-cleanup-custody-keygen-write-final.log`, and
+`/tmp/pm28-red-cleanup-rpc-download.log`. Earlier fixture compilation/setup
+failures are not behavioral RED. The merger checks below verify the final
+composition; they do not claim a second RED execution.
 
 Verification order in the exclusive Linux window was: formatting, path and
 conflict scans; focused `pm-process-runner`, `pm-cli`, and `pm-custody` tests;
@@ -200,6 +210,10 @@ scripts/check.sh: exit 0;
 scripts/clean-offline-build.sh: exit 0;
 sequential lab sweep: SUMMARY count=22 failures=0.
 ```
+
+The two `ignored` process-runner cases are subprocess entrypoints: their
+parent regression tests explicitly launch them with `--ignored`. Both parent
+tests passed; these are not omitted acceptance checks.
 
 The current-run logs are `/tmp/pm-four-cleanups-root-check.log`,
 `/tmp/pm-four-cleanups-root-clean.log`,
