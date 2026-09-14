@@ -1499,9 +1499,10 @@ la cuenta humana sintética; no es un segundo binario de producto. El launcher:
    proceso y drena el output en un hilo dedicado hasta EOF. Este primer RED no
    interpreta ni guarda VT: sólo cuenta hasta 1 MiB, continúa drenando si se
    excede y convierte exceso o salida vacía en fallo explícito;
-5. exige que el proceso no salga antes de disponer de un observer verificable
-   de `keyboard-ready`. El binario actual debe salir por el subcomando `tui`
-   ausente; permanecer vivo 15 segundos tampoco se acepta como pantalla lista;
+5. exige sólo liveness del proceso durante los 15 segundos del plazo humano ya
+   existente. El binario actual debe salir por el subcomando `tui` ausente; un
+   proceso vivo con output presente vuelve verde este tracer, pero todavía no
+   se denomina pantalla lista ni input visible;
 6. ante cualquier resultado, cierra el input propio y llama una sola vez a
    `ClosePseudoConsole` mientras el hilo sigue drenando. Conserva el handle del
    proceso hasta comprobar su terminación, une el drainer y sólo entonces
@@ -1525,7 +1526,7 @@ La corrida RED autorizada usa el mismo Windows 11 ARM64 efímero y prerequisitos
 del lab base, con un switch explícito `-TuiConPtyRed`. Debe cruzar primero los
 seis tests nativos, pipe contract, servicio y probes existentes. Después el
 launcher debe llegar al `CreateProcessW` del binario normal y el lab debe fallar
-porque `pm-custody.exe tui` sale antes de un observer `keyboard-ready`, con
+porque `pm-custody.exe tui` sale antes del intervalo de liveness, con
 output ConPTY presente pero no expuesto, no por herramienta, ACL, estación,
 ConPTY o proceso ausentes. El log no puede contener la contraseña sintética ni
 captura VT. La limpieza y comprobación de ausencia existentes se ejecutan

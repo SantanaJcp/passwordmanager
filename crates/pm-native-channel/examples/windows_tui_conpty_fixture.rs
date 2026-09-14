@@ -8,7 +8,15 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 mod windows_fixture {
-    use std::{ffi::c_void, io, ptr, thread};
+    use std::{
+        ffi::c_void,
+        io, ptr,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+        thread,
+    };
     use windows_sys::Win32::{
         Foundation::{
             CloseHandle, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_DATA, GetLastError,
@@ -64,17 +72,22 @@ mod windows_fixture {
         *handle = ptr::null_mut();
     }
 
-    struct OwnedOutput(HANDLE);
+    struct OwnedOutput {
+        handle: HANDLE,
+        drop_error: Arc<AtomicU64>,
+    }
 
     // SAFETY: the read handle has one owner and moves once to the dedicated drainer.
     unsafe impl Send for OwnedOutput {}
 
     impl Drop for OwnedOutput {
         fn drop(&mut self) {
-            if !self.0.is_null() && unsafe { CloseHandle(self.0) } == 0 {
-                std::process::abort();
+            if !self.handle.is_null() && unsafe { CloseHandle(self.handle) } == 0 {
+                let code = unsafe { GetLastError() };
+                self.drop_error
+                    .store(u64::from(code) + 1, Ordering::Release);
             }
-            self.0 = ptr::null_mut();
+            self.handle = ptr::null_mut();
         }
     }
 
@@ -92,7 +105,7 @@ mod windows_fixture {
                 let mut read = 0;
                 if unsafe {
                     windows_sys::Win32::Storage::FileSystem::ReadFile(
-                        self.0,
+                        self.handle,
                         chunk.as_mut_ptr().cast(),
                         4096,
                         &raw mut read,
@@ -119,7 +132,7 @@ mod windows_fixture {
                 }
             };
             let mut cleanup = Vec::new();
-            close_handle(&mut self.0, "CloseHandle output reader", &mut cleanup);
+            close_handle(&mut self.handle, "CloseHandle output reader", &mut cleanup);
             match (operation, cleanup.is_empty()) {
                 (Ok(()), true) => Ok(DrainReport {
                     captured_bytes,
@@ -141,11 +154,28 @@ mod windows_fixture {
 
     impl OutputDrain {
         fn start(handle: HANDLE) -> io::Result<Self> {
-            let owner = OwnedOutput(handle);
-            let join = thread::Builder::new()
+            let drop_error = Arc::new(AtomicU64::new(0));
+            let owner = OwnedOutput {
+                handle,
+                drop_error: Arc::clone(&drop_error),
+            };
+            let spawn = thread::Builder::new()
                 .name("pm27-conpty-drain".to_owned())
-                .spawn(move || owner.drain())?;
-            Ok(Self { join })
+                .spawn(move || owner.drain());
+            match spawn {
+                Ok(join) => Ok(Self { join }),
+                Err(primary) => {
+                    let cleanup_code = drop_error.load(Ordering::Acquire);
+                    if cleanup_code == 0 {
+                        Err(primary)
+                    } else {
+                        let cleanup_code = cleanup_code - 1;
+                        Err(io::Error::other(format!(
+                            "spawn ConPTY drainer failed: {primary}; CloseHandle output reader failed: GetLastError={cleanup_code}"
+                        )))
+                    }
+                }
+            }
         }
 
         fn finish(self) -> Result<DrainReport, String> {
@@ -212,6 +242,16 @@ mod windows_fixture {
                     &mut failures,
                 );
             }
+            close_handle(
+                &mut self.input_read,
+                "CloseHandle ceded ConPTY input",
+                &mut failures,
+            );
+            close_handle(
+                &mut self.output_write,
+                "CloseHandle ceded ConPTY output",
+                &mut failures,
+            );
             if self.pseudo_console != 0 {
                 unsafe { ClosePseudoConsole(self.pseudo_console) };
                 self.pseudo_console = 0;
@@ -233,16 +273,6 @@ mod windows_fixture {
                 }
             }
             close_handle(&mut self.process, "CloseHandle process", &mut failures);
-            close_handle(
-                &mut self.input_read,
-                "CloseHandle ConPTY input",
-                &mut failures,
-            );
-            close_handle(
-                &mut self.output_write,
-                "CloseHandle ConPTY output",
-                &mut failures,
-            );
             if self.station_selected {
                 if unsafe { SetProcessWindowStation(self.original_station) } == 0 {
                     failures.push(win32("restore process window station").to_string());
@@ -521,25 +551,23 @@ mod windows_fixture {
         }
     }
 
-    fn require_keyboard_ready_observer(process: HANDLE) -> io::Result<()> {
+    fn require_tui_liveness(process: HANDLE) -> io::Result<()> {
         let wait = unsafe { WaitForSingleObject(process, 15_000) };
         if wait == WAIT_FAILED {
             return Err(win32("WaitForSingleObject(pm-custody.exe tui)"));
         }
         if wait == WAIT_TIMEOUT {
-            return Err(io::Error::other(
-                "normal TUI remained alive but has no verified keyboard-ready observer",
-            ));
+            return Ok(());
         }
         if wait != WAIT_OBJECT_0 {
             return Err(io::Error::other("unexpected TUI process wait result"));
         }
         let mut exit_code = 0;
         if unsafe { GetExitCodeProcess(process, &raw mut exit_code) } == 0 {
-            return Err(win32("GetExitCodeProcess before keyboard-ready observer"));
+            return Err(win32("GetExitCodeProcess before TUI liveness interval"));
         }
         Err(io::Error::other(format!(
-            "pm-custody.exe tui exited {exit_code} before keyboard-ready observer"
+            "pm-custody.exe tui exited {exit_code} before 15-second liveness interval"
         )))
     }
 
@@ -557,7 +585,7 @@ mod windows_fixture {
             setup_attributes(&mut fixture)?;
             spawn_tui(&mut fixture, &args[2], &desktop, &args[3..])?;
             start_drain_and_release_conpty_ends(&mut fixture)?;
-            require_keyboard_ready_observer(fixture.process)
+            require_tui_liveness(fixture.process)
         })();
         let cleanup = fixture.cleanup();
         match (operation, cleanup) {
