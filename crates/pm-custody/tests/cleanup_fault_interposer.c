@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 static int unlink_failed;
+static int second_unlink_failed;
 static int fsync_failed;
 
 static void record_event(const char *event) {
@@ -27,27 +28,30 @@ static int exact_target(const char *actual, const char *variable) {
     return actual != NULL && expected != NULL && strcmp(actual, expected) == 0;
 }
 
+static int fail_unlink(const char *path) {
+    if (!unlink_failed && exact_target(path, "PM_FAIL_UNLINK_PATH")) {
+        unlink_failed = 1;
+    } else if (!second_unlink_failed && exact_target(path, "PM_FAIL_UNLINK_PATH_2")) {
+        second_unlink_failed = 1;
+    } else {
+        return 0;
+    }
+    record_event("unlink\n");
+    errno = EIO;
+    return 1;
+}
+
 int unlink(const char *path) {
     static int (*real_unlink)(const char *);
     if (real_unlink == NULL) real_unlink = dlsym(RTLD_NEXT, "unlink");
-    if (!unlink_failed && exact_target(path, "PM_FAIL_UNLINK_PATH")) {
-        unlink_failed = 1;
-        record_event("unlink\n");
-        errno = EIO;
-        return -1;
-    }
+    if (fail_unlink(path)) return -1;
     return real_unlink(path);
 }
 
 int unlinkat(int directory, const char *path, int flags) {
     static int (*real_unlinkat)(int, const char *, int);
     if (real_unlinkat == NULL) real_unlinkat = dlsym(RTLD_NEXT, "unlinkat");
-    if (!unlink_failed && path[0] == '/' && exact_target(path, "PM_FAIL_UNLINK_PATH")) {
-        unlink_failed = 1;
-        record_event("unlink\n");
-        errno = EIO;
-        return -1;
-    }
+    if (path[0] == '/' && fail_unlink(path)) return -1;
     return real_unlinkat(directory, path, flags);
 }
 

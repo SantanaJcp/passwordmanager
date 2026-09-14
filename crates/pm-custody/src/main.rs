@@ -4,8 +4,11 @@
 
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
+mod failure;
 #[cfg(target_os = "linux")]
 mod linux;
+
+use failure::{CleanupFailureKind, Failure, PrimaryFailure};
 
 const CUSTODY_UNAVAILABLE: &str = "CUSTODY_UNAVAILABLE";
 
@@ -19,21 +22,29 @@ fn main() -> ExitCode {
     }
     match run(std::env::args_os().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(Failure::Usage) => {
-            eprintln!("INVALID_ARGUMENT");
-            ExitCode::from(2)
-        }
-        Err(Failure::Unavailable) => {
-            eprintln!("{CUSTODY_UNAVAILABLE}");
-            ExitCode::from(4)
+        Err(failure) => {
+            let code = match failure.primary() {
+                PrimaryFailure::Usage => {
+                    eprintln!("INVALID_ARGUMENT");
+                    2
+                }
+                PrimaryFailure::Unavailable => {
+                    eprintln!("{CUSTODY_UNAVAILABLE}");
+                    4
+                }
+            };
+            if !failure.cleanups().is_empty() {
+                for cleanup in failure.cleanups() {
+                    match cleanup.kind {
+                        CleanupFailureKind::OwnedPathRemoval => {}
+                    }
+                    let _ = cleanup.source.kind();
+                }
+                eprintln!("CLEANUP_FAILED");
+            }
+            ExitCode::from(code)
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum Failure {
-    Usage,
-    Unavailable,
 }
 
 fn run(arguments: Vec<OsString>) -> Result<(), Failure> {

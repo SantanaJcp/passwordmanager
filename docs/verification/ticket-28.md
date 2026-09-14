@@ -373,6 +373,41 @@ no RED; el primer helper ProcessEvidence reveló una omisión de cleanup del
 propio test, se retiró exactamente ese path y el helper final usa
 `catch_unwind` para garantizar limpieza aun con la aserción RED.
 
+El GREEN conserva el fallo operacional y cada `std::io::Error` de cleanup en
+una representación tipada agregada; el renderer deriva rc2/rc4 exclusivamente
+del primario y emite una sola línea fija `CLEANUP_FAILED` cuando la lista no
+está vacía. Una regresión con syscalls reales acumula dos errores distintos:
+`write_new(public)` falla `fsync`, falla el unlink de la pública, y keygen
+intenta y falla además el unlink de la privada. Ambos `io::Error` permanecen en
+la lista interna, los tres eventos del interposer tienen conteo exacto y la
+salida pública sigue siendo rc4 con un solo marcador no secreto. El focused
+final pasó (`/tmp/pm28-green-cleanup-aggregate-focused-attempt2.log`); su
+intento anterior no compiló por una anotación de tipo ausente y no cuenta como
+evidencia conductual (`/tmp/pm28-green-cleanup-aggregate-focused.log`).
+
+`ProcessEvidence::close` consume la evidencia sólo después de que el caller
+termina de observarla y devuelve el error del único intento. El estado interno
+impide que Drop reintente después de `close`; si no hubo cierre explícito, Drop
+hace exactamente un intento y emite el marcador fijo ante fallo. Los consumers
+de tests usan cierre checked en sus retornos normales; dos helpers marcados
+`ignored` sólo son entrypoints de subprocess que las regresiones padre ejecutan
+explícitamente para capturar stderr y no representan casos omitidos.
+
+El primer check completo de este vertical alcanzó clippy y terminó rc101 por
+`needless_pass_by_value` en el helper inicial; se conserva en
+`/tmp/pm28-green-cleanup-check.log`. Tras corregir ese lint, check pasó, pero
+una inspección estática detectó que un segundo cleanup anidado podía descartarse;
+la barrida 23/23 previa se conserva en
+`/tmp/pm28-green-cleanup-labs-summary.log` pero no se acepta como final. Con la
+agregación corregida, `scripts/check.sh` pasó
+(`/tmp/pm28-green-cleanup-check-final.log`), clean offline pasó en 35.78 s
+(`/tmp/pm28-green-cleanup-clean-final.log`) y la única barrida final separada
+terminó `SUMMARY count=23 failures=0 elapsed=603s`
+(`/tmp/pm28-green-cleanup-labs-final-summary.log`). Los 23 logs individuales
+usan prefijo `/tmp/pm28-green-cleanup-final-test-linux-`; no quedaron procesos,
+roots ni caches propios. Esta evidencia sigue sin cerrar ticket 28 ni acreditar
+los puertos nativos de estos cleanups.
+
 ## Verticales de fault/crash pendientes de RED
 
 El seam de almacenamiento será un lab público separado, no una colección de

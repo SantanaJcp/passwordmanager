@@ -74,6 +74,32 @@ def write_new_cleanup_red(binary, interposer, home):
     return surfaced, result.stderr
 
 
+def nested_cleanup_green(binary, interposer, home):
+    private = home / "nested-private"
+    public = home / "nested-public"
+    events = home / "nested.events"
+    events.write_bytes(b"")
+    os.chown(events, HUMAN, HUMAN)
+    environment = {
+        "LD_PRELOAD": str(interposer),
+        "PM_FAIL_FSYNC_PATH": str(public),
+        "PM_FAIL_UNLINK_PATH": str(public),
+        "PM_FAIL_UNLINK_PATH_2": str(private),
+        "PM_INTERPOSE_LOG": str(events),
+    }
+    result = as_human(
+        [binary, "keygen", "--private", private, "--public", public], environment
+    )
+    surfaced = expect_cleanup_surface(
+        result, events, ["fsync", "unlink", "unlink"], private
+    )
+    assert public.is_file(), "the first failed cleanup must remain observable"
+    private.unlink()
+    public.unlink()
+    events.unlink()
+    return surfaced, result.stderr
+
+
 def main():
     assert os.geteuid() == 0 and len(sys.argv) == 3
     source_binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
@@ -94,13 +120,22 @@ def main():
         os.chown(home, HUMAN, HUMAN)
         keygen_ok, keygen_stderr = keygen_cleanup_red(binary, interposer, home)
         write_ok, write_stderr = write_new_cleanup_red(binary, interposer, home)
+        nested_ok, nested_stderr = nested_cleanup_green(binary, interposer, home)
         print(f"OBSERVED keygen-cleanup-surfaced={int(keygen_ok)} stderr={keygen_stderr!r}")
         print(f"OBSERVED write-new-cleanup-surfaced={int(write_ok)} stderr={write_stderr!r}")
+        print(
+            f"OBSERVED nested-cleanups-surfaced={int(nested_ok)} "
+            f"stderr={nested_stderr!r}"
+        )
         assert keygen_ok, ("keygen cleanup failure was discarded", keygen_stderr)
         assert write_ok, ("write_new cleanup failure was discarded", write_stderr)
+        assert nested_ok, ("nested cleanup failures were discarded", nested_stderr)
     finally:
         shutil.rmtree(root)
-    print("PASS cleanup-errors keygen=propagated write-new=propagated cleanup=verified")
+    print(
+        "PASS cleanup-errors keygen=propagated write-new=propagated "
+        "nested=two-typed cleanup=verified"
+    )
 
 
 if __name__ == "__main__":

@@ -143,3 +143,12 @@ sólo imprimieron `CUSTODY_UNAVAILABLE`; rpc-download rc1 cortó el peer despué
 de bytes `.partial`, falló su unlink exacto y también ocultó cleanup. Todos los
 fixtures finales verificaron ausencia de procesos y retiraron sus paths owned.
 No se escribió GREEN.
+
+2026-09-14 — GREEN acotado de los cuatro cleanups: el error primario y todos
+los `io::Error` de cleanup quedan tipados y agregados, rc4 se conserva y se
+emite un único `CLEANUP_FAILED`. La regresión anidada probó fsync pública,
+unlink pública y unlink privada, conservando internamente ambos errores de
+retirada. `ProcessEvidence::close` consume tras observación, retorna su intento
+único y Drop no reintenta; Drop no gestionado reporta su propio intento. Check
+final rc0, clean offline rc0 en 35.78 s y barrida final 23/23 rc0 en 603 s.
+Ticket 28 sigue parcial por sus demás verticales y por evidencia nativa.
