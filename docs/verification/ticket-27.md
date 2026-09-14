@@ -1827,6 +1827,27 @@ servidor en TLS. No se acepta `Everyone`, `Authenticated Users`, aliases ni dos
 SIDs duplicados. El adaptador todavía no es evidencia de pm-sync Windows hasta
 componer deadline de 30 s, framing y lifecycle del binario en el fixture real.
 
+El vertical del binario conserva un único protocolo `pm-sync/1`, TLS 1.3/RPK,
+framing de 1 MiB y dispatch opaco. En Windows, `serve` exige el SID explícito
+del servidor y pares ordenados `--client-pub`/`--client-sid`; no admite una RPK
+sin identidad kernel ni un SID sin RPK. Cada conexión aceptada vuelve a validar
+PID/SID antes y después del request. El cliente fija y revalida el PID del
+servidor, mientras la RPK fijada sigue siendo la autenticación criptográfica.
+
+Read/write Windows son overlapped y comparten un evento de deadline por request.
+Un worker monotónico señala ese evento a los 30 s y se cancela por condición al
+terminar; se hace join antes de cerrar el evento. No hay sleep/retry, endpoint
+alternativo ni segundo dispatch. Fallo del worker, señal, peer revalidation o
+cleanup del evento produce `SYNC_UNAVAILABLE`/`SYNC_REQUEST_FAILED`, no éxito.
+El servidor conserva concurrencia con ownership recuperable si falla el spawn.
+
+Este vertical reutiliza todavía el `Drop` heredado de `WindowsServerPipe` y
+`WindowsClientPipe`, cuyo `CloseHandle` no comprueba el retorno. Esa limitación
+está reportada y pendiente de autorización; no se cambió en este trabajo. Hasta
+resolverla y ejecutar la matriz nativa, el binario Windows no es aceptación.
+También quedan por acreditar DACL exacta de key/store, reemplazo atómico de
+status existente, firma del programa y publicación/backup reales.
+
 El método nativo crea servidor y cliente sync efímeros con SIDs distintos, hace
 pair por teclado en ConPTY, inicia el trabajo una sola vez y observa
 queued/pushing/pulling/terminal mediante 66. Debe probar lock e idle durante el

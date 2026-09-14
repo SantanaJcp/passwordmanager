@@ -731,6 +731,12 @@ impl io::Write for WindowsServerPipe {
 pub struct WindowsClientPipe {
     handle: HANDLE,
     expected_server_pid: u32,
+    io_mode: WindowsClientIoMode,
+}
+
+enum WindowsClientIoMode {
+    Installed,
+    Sync(WindowsStopEvent),
 }
 
 impl WindowsClientPipe {
@@ -764,6 +770,7 @@ impl WindowsClientPipe {
         let channel = Self {
             handle,
             expected_server_pid,
+            io_mode: WindowsClientIoMode::Installed,
         };
         channel.verify()?;
         Ok(channel)
@@ -774,7 +781,10 @@ impl WindowsClientPipe {
     ///
     /// # Errors
     /// Rejects invalid names and any connect/PID/liveness failure.
-    pub fn connect_sync(name: &str) -> Result<Self, ChannelAuthenticationError> {
+    pub fn connect_sync(
+        name: &str,
+        deadline: &WindowsStopEvent,
+    ) -> Result<Self, ChannelAuthenticationError> {
         validate_sync_pipe_name(name)?;
         let name = wide(name);
         let handle = unsafe {
@@ -807,6 +817,7 @@ impl WindowsClientPipe {
         Ok(Self {
             handle,
             expected_server_pid,
+            io_mode: WindowsClientIoMode::Sync(deadline.clone()),
         })
     }
 
@@ -1225,13 +1236,23 @@ impl Drop for WindowsClientPipe {
 
 impl io::Read for WindowsClientPipe {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        read_handle(self.handle, buffer)
+        match &self.io_mode {
+            WindowsClientIoMode::Installed => read_handle(self.handle, buffer),
+            WindowsClientIoMode::Sync(deadline) => {
+                overlapped_read(self.handle, deadline.raw_handle(), buffer)
+            }
+        }
     }
 }
 
 impl io::Write for WindowsClientPipe {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        write_handle(self.handle, buffer)
+        match &self.io_mode {
+            WindowsClientIoMode::Installed => write_handle(self.handle, buffer),
+            WindowsClientIoMode::Sync(deadline) => {
+                overlapped_write(self.handle, deadline.raw_handle(), buffer)
+            }
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {

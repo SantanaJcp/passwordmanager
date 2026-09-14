@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "windows"))]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use pm_crypto::digest;
+#[cfg(windows)]
+use pm_native_channel::{WindowsClientPipe, WindowsServerPipe, WindowsStopEvent};
 use pm_sync::{OpaqueSyncStore, SyncError};
 use rustls::{
     CertificateError, DigitallySignedStruct, DistinguishedName, Error as TlsError, SignatureScheme,
@@ -22,14 +24,17 @@ use rustls::{
     sign::CertifiedKey,
     version,
 };
+#[cfg(target_os = "linux")]
+use std::os::unix::{
+    fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    net::{UnixListener, UnixStream},
+};
+#[cfg(windows)]
+use std::sync::{Condvar, Mutex};
 use std::{
     fmt::Write as _,
     fs,
     io::{Read, Write},
-    os::unix::{
-        fs::{FileTypeExt, MetadataExt, PermissionsExt},
-        net::{UnixListener, UnixStream},
-    },
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -59,18 +64,52 @@ fn run() -> Result<(), ()> {
             let socket = take(&mut a, "--socket")?;
             let key = read_key(&take(&mut a, "--server-key")?)?;
             let namespace = hex32(&take(&mut a, "--namespace")?)?;
+            #[cfg(windows)]
+            let server_sid = take_string(&mut a, "--server-sid")?;
             let mut clients = Vec::new();
+            #[cfg(windows)]
+            let mut client_sids = Vec::new();
             while let Some(flag) = a.next() {
                 if flag != "--client-pub" {
                     return Err(());
                 }
                 clients.push(read_public(&PathBuf::from(a.next().ok_or(())?))?);
+                #[cfg(windows)]
+                {
+                    if a.next().as_deref() != Some(std::ffi::OsStr::new("--client-sid")) {
+                        return Err(());
+                    }
+                    client_sids.push(a.next().ok_or(())?.into_string().map_err(|_| ())?);
+                }
             }
-            serve(&db, &socket, &key, namespace, clients)
+            #[cfg(target_os = "linux")]
+            {
+                serve(&db, &socket, &key, namespace, clients)
+            }
+            #[cfg(windows)]
+            {
+                serve(
+                    &db,
+                    &socket,
+                    &key,
+                    namespace,
+                    clients,
+                    &server_sid,
+                    client_sids,
+                )
+            }
         }
         Some(method @ ("put" | "get" | "publish" | "list" | "delete")) => client(method, &mut a),
         _ => Err(()),
     }
+}
+
+#[cfg(windows)]
+fn take_string(a: &mut impl Iterator<Item = std::ffi::OsString>, flag: &str) -> Result<String, ()> {
+    take(a, flag)?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| ())
 }
 fn take(a: &mut impl Iterator<Item = std::ffi::OsString>, flag: &str) -> Result<PathBuf, ()> {
     if a.next().as_deref() != Some(std::ffi::OsStr::new(flag)) {
@@ -79,6 +118,7 @@ fn take(a: &mut impl Iterator<Item = std::ffi::OsString>, flag: &str) -> Result<
     a.next().map(PathBuf::from).ok_or(())
 }
 
+#[cfg(target_os = "linux")]
 fn serve(
     db: &Path,
     socket: &Path,
@@ -110,18 +150,146 @@ fn serve(
         let store_path = db.to_owned();
         let config = Arc::clone(&config);
         std::thread::spawn(move || {
-            let _ = serve_one(stream, &store_path, config);
+            let _ = serve_one_unix(stream, &store_path, config);
         });
     }
     Ok(())
 }
-fn serve_one(stream: UnixStream, db: &Path, config: Arc<ServerConfig>) -> Result<(), ()> {
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn serve(
+    db: &Path,
+    socket: &Path,
+    key: &Key,
+    namespace: [u8; 32],
+    clients: Vec<Vec<u8>>,
+    server_sid: &str,
+    client_sids: Vec<String>,
+) -> Result<(), ()> {
+    if clients.is_empty()
+        || clients.len() != client_sids.len()
+        || clients.iter().any(|value| value.len() != 44)
+    {
+        return Err(());
+    }
+    let name = socket.to_str().ok_or(())?;
+    let store = OpaqueSyncStore::create(db).map_err(|_| ())?;
+    for rpk in &clients {
+        store.authorize(namespace, rpk).map_err(|_| ())?;
+    }
+    let config = server_config(certified(key)?, clients)?;
+    loop {
+        let stop = WindowsStopEvent::create().map_err(|_| ())?;
+        let mut pipe = match WindowsServerPipe::create_sync(name, server_sid, &client_sids, &stop) {
+            Ok(pipe) => pipe,
+            Err(_) => {
+                stop.close().map_err(|_| ())?;
+                return Err(());
+            }
+        };
+        if pipe.accept().is_err() {
+            drop(pipe);
+            stop.close().map_err(|_| ())?;
+            continue;
+        }
+        let pending = Arc::new(Mutex::new(Some((pipe, stop))));
+        let worker_pending = Arc::clone(&pending);
+        let store_path = db.to_owned();
+        let worker_config = Arc::clone(&config);
+        let spawned = std::thread::Builder::new()
+            .name("pm-sync-windows-request".to_owned())
+            .spawn(move || {
+                let pending = match worker_pending.lock() {
+                    Ok(mut slot) => slot.take(),
+                    Err(_) => {
+                        eprintln!("SYNC_REQUEST_FAILED");
+                        return;
+                    }
+                };
+                let Some((pipe, stop)) = pending else {
+                    eprintln!("SYNC_REQUEST_FAILED");
+                    return;
+                };
+                let result = run_with_deadline(&stop, || {
+                    serve_one_windows(pipe, &store_path, worker_config)
+                });
+                let closed = stop.close().map_err(|_| ());
+                if result.is_err() || closed.is_err() {
+                    eprintln!("SYNC_REQUEST_FAILED");
+                }
+            });
+        if spawned.is_err() {
+            let (pipe, stop) = pending.lock().map_err(|_| ())?.take().ok_or(())?;
+            drop(pipe);
+            stop.close().map_err(|_| ())?;
+            return Err(());
+        }
+    }
+}
+
+#[cfg(windows)]
+fn serve_one_windows(
+    mut pipe: WindowsServerPipe,
+    db: &Path,
+    config: Arc<ServerConfig>,
+) -> Result<(), ()> {
+    pipe.verify().map_err(|_| ())?;
+    let result = serve_one(&mut pipe, db, config);
+    let peer = pipe.verify().map_err(|_| ());
+    match (result, peer) {
+        (Ok(()), Ok(())) => Ok(()),
+        _ => Err(()),
+    }
+}
+
+#[cfg(windows)]
+fn run_with_deadline(
+    stop: &WindowsStopEvent,
+    operation: impl FnOnce() -> Result<(), ()>,
+) -> Result<(), ()> {
+    let completed = Arc::new((Mutex::new(false), Condvar::new()));
+    let waiter = Arc::clone(&completed);
+    let signal = stop.clone();
+    let worker = std::thread::Builder::new()
+        .name("pm-sync-request-deadline".to_owned())
+        .spawn(move || {
+            let (lock, changed) = &*waiter;
+            let finished = lock.lock().map_err(|_| ())?;
+            let (finished, timeout) = changed
+                .wait_timeout_while(finished, Duration::from_secs(30), |done| !*done)
+                .map_err(|_| ())?;
+            if timeout.timed_out() && !*finished {
+                signal.signal().map_err(|_| ())?;
+            }
+            Ok(())
+        })
+        .map_err(|_| ())?;
+    let result = operation();
+    let completion = (|| {
+        let (lock, changed) = &*completed;
+        *lock.lock().map_err(|_| ())? = true;
+        changed.notify_all();
+        worker.join().map_err(|_| ())?
+    })();
+    match (result, completion) {
+        (Ok(()), Ok(())) => Ok(()),
+        _ => Err(()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn serve_one_unix(stream: UnixStream, db: &Path, config: Arc<ServerConfig>) -> Result<(), ()> {
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|_| ())?;
     stream
         .set_write_timeout(Some(Duration::from_secs(30)))
         .map_err(|_| ())?;
+    serve_one(stream, db, config)
+}
+
+fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) -> Result<(), ()> {
     let conn = ServerConnection::new(config).map_err(|_| ())?;
     let mut tls = rustls::StreamOwned::new(conn, stream);
     let request = read_frame(&mut tls)?;
@@ -351,16 +519,8 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
         ),
         _ => return Err(()),
     };
-    let stream = UnixStream::connect(socket).map_err(|_| ())?;
     let config = client_config(&key, &server)?;
-    let conn = ClientConnection::new(
-        Arc::new(config),
-        ServerName::try_from("passwordmanager.invalid").map_err(|_| ())?,
-    )
-    .map_err(|_| ())?;
-    let mut tls = rustls::StreamOwned::new(conn, stream);
-    write_frame(&mut tls, json.as_bytes())?;
-    let response = read_frame(&mut tls)?;
+    let response = client_exchange(socket, config, json.as_bytes())?;
     let response = String::from_utf8(response).map_err(|_| ())?;
     if !response.starts_with("{\"ok\":true") {
         let code = if response.contains("\"code\":\"missing\"") {
@@ -376,6 +536,44 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
     }
     println!("{response}");
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Result<Vec<u8>, ()> {
+    let stream = UnixStream::connect(socket).map_err(|_| ())?;
+    let conn = ClientConnection::new(
+        Arc::new(config),
+        ServerName::try_from("passwordmanager.invalid").map_err(|_| ())?,
+    )
+    .map_err(|_| ())?;
+    let mut tls = rustls::StreamOwned::new(conn, stream);
+    write_frame(&mut tls, request)?;
+    read_frame(&mut tls)
+}
+
+#[cfg(windows)]
+fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Result<Vec<u8>, ()> {
+    let name = socket.to_str().ok_or(())?;
+    let stop = WindowsStopEvent::create().map_err(|_| ())?;
+    let mut response = None;
+    let result = run_with_deadline(&stop, || {
+        let pipe = WindowsClientPipe::connect_sync(name, &stop).map_err(|_| ())?;
+        let conn = ClientConnection::new(
+            Arc::new(config),
+            ServerName::try_from("passwordmanager.invalid").map_err(|_| ())?,
+        )
+        .map_err(|_| ())?;
+        let mut tls = rustls::StreamOwned::new(conn, pipe);
+        write_frame(&mut tls, request)?;
+        response = Some(read_frame(&mut tls)?);
+        tls.sock.verify().map_err(|_| ())?;
+        Ok(())
+    });
+    let closed = stop.close().map_err(|_| ());
+    match (result, closed, response) {
+        (Ok(()), Ok(()), Some(response)) => Ok(response),
+        _ => Err(()),
+    }
 }
 
 fn provider() -> CryptoProvider {
@@ -538,15 +736,30 @@ fn raw(
     verify_tls13_signature_with_raw_key(m, &SubjectPublicKeyInfoDer::from(c.as_ref()), d, a)
 }
 fn read_key(path: &Path) -> Result<Key, ()> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| ())?;
-    if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o777 != 0o400
-    {
-        return Err(());
-    }
-    let b = fs::read(path).map_err(|_| ())?;
+    #[cfg(target_os = "linux")]
+    let b = {
+        let metadata = fs::symlink_metadata(path).map_err(|_| ())?;
+        if !metadata.file_type().is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o777 != 0o400
+        {
+            return Err(());
+        }
+        fs::read(path).map_err(|_| ())?
+    };
+    #[cfg(windows)]
+    let b = {
+        let mut file = pm_native_channel::open_regular_file(path).map_err(|_| ())?;
+        let length = usize::try_from(file.metadata().map_err(|_| ())?.len()).map_err(|_| ())?;
+        let mut bytes = vec![0; length];
+        file.read_exact(&mut bytes).map_err(|_| ())?;
+        let mut trailing = [0_u8; 1];
+        if file.read(&mut trailing).map_err(|_| ())? != 0 {
+            return Err(());
+        }
+        bytes
+    };
     if !b.starts_with(MAGIC) || b.len() < 4 + 4 + 44 {
         return Err(());
     }
@@ -560,15 +773,32 @@ fn read_key(path: &Path) -> Result<Key, ()> {
     })
 }
 fn read_public(path: &Path) -> Result<Vec<u8>, ()> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| ())?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Err(());
+    #[cfg(target_os = "linux")]
+    {
+        let metadata = fs::symlink_metadata(path).map_err(|_| ())?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(());
+        }
+        let bytes = fs::read(path).map_err(|_| ())?;
+        if bytes.len() != 44 {
+            return Err(());
+        }
+        Ok(bytes)
     }
-    let bytes = fs::read(path).map_err(|_| ())?;
-    if bytes.len() != 44 {
-        return Err(());
+    #[cfg(windows)]
+    {
+        let mut file = pm_native_channel::open_regular_file(path).map_err(|_| ())?;
+        if file.metadata().map_err(|_| ())?.len() != 44 {
+            return Err(());
+        }
+        let mut bytes = vec![0; 44];
+        file.read_exact(&mut bytes).map_err(|_| ())?;
+        let mut trailing = [0_u8; 1];
+        if file.read(&mut trailing).map_err(|_| ())? != 0 {
+            return Err(());
+        }
+        Ok(bytes)
     }
-    Ok(bytes)
 }
 fn write_frame(w: &mut impl Write, b: &[u8]) -> Result<(), ()> {
     if b.len() > MAX_FRAME {
