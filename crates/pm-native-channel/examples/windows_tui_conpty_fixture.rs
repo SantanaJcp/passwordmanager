@@ -67,8 +67,46 @@ mod windows_fixture {
         OscEscape,
     }
 
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    enum ScreenCell {
+        #[default]
+        Empty,
+        Glyph(String),
+        WideContinuation,
+    }
+
+    struct FixedMarkerProbe {
+        pattern: &'static [u8],
+        matched: usize,
+        found: bool,
+    }
+
+    impl FixedMarkerProbe {
+        const fn new(pattern: &'static [u8]) -> Self {
+            Self {
+                pattern,
+                matched: 0,
+                found: false,
+            }
+        }
+
+        fn feed(&mut self, byte: u8) {
+            if self.found {
+                return;
+            }
+            if self.pattern.get(self.matched) == Some(&byte) {
+                self.matched += 1;
+                if self.matched == self.pattern.len() {
+                    self.found = true;
+                }
+            } else {
+                self.matched = usize::from(self.pattern.first() == Some(&byte));
+            }
+        }
+    }
+
     struct ScreenState {
-        cells: Vec<char>,
+        cells: Vec<ScreenCell>,
         row: usize,
         column: usize,
         saved_row: usize,
@@ -77,6 +115,14 @@ mod windows_fixture {
         win32_input: bool,
         focus_reporting: bool,
         window_title_updates: u64,
+        cursor_positions: u64,
+        line_feeds: u64,
+        delayed_wraps: u64,
+        bottom_scrolls: u64,
+        escape_sequences: u64,
+        csi_sequences: u64,
+        osc_sequences: u64,
+        raw_markers: [FixedMarkerProbe; 4],
         parse: ParseState,
         csi: Vec<u8>,
         osc_command: Vec<u8>,
@@ -88,7 +134,11 @@ mod windows_fixture {
 
     impl Drop for ScreenState {
         fn drop(&mut self) {
-            self.cells.fill('\0');
+            for cell in &mut self.cells {
+                if let ScreenCell::Glyph(value) = cell {
+                    value.clear();
+                }
+            }
             self.csi.fill(0);
             self.osc_command.fill(0);
             self.osc_title.fill(0);
@@ -99,7 +149,7 @@ mod windows_fixture {
     impl ScreenState {
         fn new() -> Self {
             Self {
-                cells: vec![' '; SCREEN_COLUMNS * SCREEN_ROWS],
+                cells: vec![ScreenCell::Empty; SCREEN_COLUMNS * SCREEN_ROWS],
                 row: 0,
                 column: 0,
                 saved_row: 0,
@@ -108,6 +158,19 @@ mod windows_fixture {
                 win32_input: false,
                 focus_reporting: false,
                 window_title_updates: 0,
+                cursor_positions: 0,
+                line_feeds: 0,
+                delayed_wraps: 0,
+                bottom_scrolls: 0,
+                escape_sequences: 0,
+                csi_sequences: 0,
+                osc_sequences: 0,
+                raw_markers: [
+                    FixedMarkerProbe::new(b"Password Manager"),
+                    FixedMarkerProbe::new(b"human TLS-RPK"),
+                    FixedMarkerProbe::new(b"Password required"),
+                    FixedMarkerProbe::new(b"CUSTODY_UNAVAILABLE"),
+                ],
                 parse: ParseState::Ground,
                 csi: Vec::new(),
                 osc_command: Vec::new(),
@@ -119,9 +182,29 @@ mod windows_fixture {
         }
 
         fn contains(&self, expected: &str) -> bool {
-            self.cells
-                .chunks(SCREEN_COLUMNS)
-                .any(|row| row.iter().collect::<String>().contains(expected))
+            self.cells.chunks(SCREEN_COLUMNS).any(|row| {
+                let mut rendered = String::new();
+                for cell in row {
+                    match cell {
+                        ScreenCell::Empty => rendered.push(' '),
+                        ScreenCell::Glyph(value) => rendered.push_str(value),
+                        ScreenCell::WideContinuation => {}
+                    }
+                }
+                rendered.contains(expected)
+            })
+        }
+
+        fn contains_flat(&self, expected: &str) -> bool {
+            let mut rendered = String::new();
+            for cell in &self.cells {
+                match cell {
+                    ScreenCell::Empty => rendered.push(' '),
+                    ScreenCell::Glyph(value) => rendered.push_str(value),
+                    ScreenCell::WideContinuation => {}
+                }
+            }
+            rendered.contains(expected)
         }
 
         fn fail(&mut self, message: impl Into<String>) {
@@ -138,14 +221,27 @@ mod windows_fixture {
                 if self.error.is_some() {
                     return;
                 }
+                for marker in &mut self.raw_markers {
+                    marker.feed(*byte);
+                }
                 match self.parse {
                     ParseState::Ground => self.feed_ground(*byte),
                     ParseState::Escape => match *byte {
                         b'[' => {
+                            let Some(next) = self.csi_sequences.checked_add(1) else {
+                                self.fail("ConPTY CSI counter overflow");
+                                return;
+                            };
+                            self.csi_sequences = next;
                             self.csi.clear();
                             self.parse = ParseState::Csi;
                         }
                         b']' => {
+                            let Some(next) = self.osc_sequences.checked_add(1) else {
+                                self.fail("ConPTY OSC counter overflow");
+                                return;
+                            };
+                            self.osc_sequences = next;
                             self.osc_command.clear();
                             self.osc_title.clear();
                             self.parse = ParseState::Osc;
@@ -260,12 +356,24 @@ mod windows_fixture {
                 return;
             }
             match byte {
-                0x1b => self.parse = ParseState::Escape,
+                0x1b => {
+                    let Some(next) = self.escape_sequences.checked_add(1) else {
+                        self.fail("ConPTY escape counter overflow");
+                        return;
+                    };
+                    self.escape_sequences = next;
+                    self.parse = ParseState::Escape;
+                }
                 b'\r' => {
                     self.column = 0;
                     self.wrap_pending = false;
                 }
                 b'\n' => {
+                    let Some(next) = self.line_feeds.checked_add(1) else {
+                        self.fail("ConPTY line-feed counter overflow");
+                        return;
+                    };
+                    self.line_feeds = next;
                     self.advance_row();
                     self.wrap_pending = false;
                 }
@@ -279,27 +387,98 @@ mod windows_fixture {
         }
 
         fn put(&mut self, character: char) {
-            if character.is_control() || character.width() != Some(1) {
+            if character.is_control() {
+                self.fail("unsupported Unicode control in ConPTY output");
+                return;
+            }
+            let Some(width) = character.width() else {
+                self.fail("unclassified Unicode cell width in ConPTY output");
+                return;
+            };
+            if width == 0 {
+                self.combine(character);
+                return;
+            }
+            if width > 2 {
                 self.fail("unsupported Unicode cell width in ConPTY output");
                 return;
             }
             if self.wrap_pending {
+                let Some(next) = self.delayed_wraps.checked_add(1) else {
+                    self.fail("ConPTY delayed-wrap counter overflow");
+                    return;
+                };
+                self.delayed_wraps = next;
                 self.column = 0;
                 self.advance_row();
                 self.wrap_pending = false;
             }
-            self.cells[self.row * SCREEN_COLUMNS + self.column] = character;
-            if self.column == SCREEN_COLUMNS - 1 {
+            if width == 2 && self.column == SCREEN_COLUMNS - 1 {
+                self.column = 0;
+                self.advance_row();
+            }
+            let index = self.row * SCREEN_COLUMNS + self.column;
+            self.erase_cell_footprint(index);
+            self.cells[index] = ScreenCell::Glyph(character.to_string());
+            if width == 2 {
+                self.erase_cell_footprint(index + 1);
+                self.cells[index + 1] = ScreenCell::WideContinuation;
+            }
+            if self.column + width == SCREEN_COLUMNS {
+                self.column = SCREEN_COLUMNS - 1;
                 self.wrap_pending = true;
             } else {
-                self.column += 1;
+                self.column += width;
             }
+        }
+
+        fn combine(&mut self, character: char) {
+            let row_start = self.row * SCREEN_COLUMNS;
+            let mut index = row_start + self.column;
+            if self.wrap_pending {
+                index = row_start + self.column;
+            } else if index > row_start {
+                index -= 1;
+            } else {
+                self.fail("combining Unicode has no preceding glyph");
+                return;
+            }
+            if matches!(self.cells[index], ScreenCell::WideContinuation) {
+                if index == row_start {
+                    self.fail("invalid wide-cell continuation at row start");
+                    return;
+                }
+                index -= 1;
+            }
+            if let ScreenCell::Glyph(value) = &mut self.cells[index] {
+                value.push(character);
+            } else {
+                self.fail("combining Unicode has no preceding glyph");
+            }
+        }
+
+        fn erase_cell_footprint(&mut self, index: usize) {
+            if matches!(self.cells[index], ScreenCell::WideContinuation) && index > 0 {
+                self.cells[index - 1] = ScreenCell::Empty;
+            }
+            if matches!(self.cells[index], ScreenCell::Glyph(_))
+                && index + 1 < self.cells.len()
+                && matches!(self.cells[index + 1], ScreenCell::WideContinuation)
+            {
+                self.cells[index + 1] = ScreenCell::Empty;
+            }
+            self.cells[index] = ScreenCell::Empty;
         }
 
         fn advance_row(&mut self) {
             if self.row == SCREEN_ROWS - 1 {
-                self.cells.copy_within(SCREEN_COLUMNS.., 0);
-                self.cells[(SCREEN_ROWS - 1) * SCREEN_COLUMNS..].fill(' ');
+                let Some(next) = self.bottom_scrolls.checked_add(1) else {
+                    self.fail("ConPTY bottom-scroll counter overflow");
+                    return;
+                };
+                self.bottom_scrolls = next;
+                self.cells.rotate_left(SCREEN_COLUMNS);
+                self.cells[(SCREEN_ROWS - 1) * SCREEN_COLUMNS..].fill(ScreenCell::Empty);
             } else {
                 self.row += 1;
             }
@@ -350,7 +529,7 @@ mod windows_fixture {
                         parameters.len()
                     ));
                 } else if command == b'h' && parameters.contains(&1049) {
-                    self.cells.fill(' ');
+                    self.cells.fill(ScreenCell::Empty);
                     self.row = 0;
                     self.column = 0;
                     self.wrap_pending = false;
@@ -373,6 +552,11 @@ mod windows_fixture {
                     if row >= SCREEN_ROWS || column >= SCREEN_COLUMNS {
                         self.fail("ConPTY absolute cursor position outside screen");
                     } else {
+                        let Some(next) = self.cursor_positions.checked_add(1) else {
+                            self.fail("ConPTY cursor-position counter overflow");
+                            return;
+                        };
+                        self.cursor_positions = next;
                         self.row = row;
                         self.column = column;
                         self.wrap_pending = false;
@@ -415,10 +599,10 @@ mod windows_fixture {
                 b'J' if parameters.len() <= 1 && matches!(first, 0 | 2 | 3) => {
                     self.wrap_pending = false;
                     if first == 2 || first == 3 {
-                        self.cells.fill(' ');
+                        self.cells.fill(ScreenCell::Empty);
                     } else {
                         for cell in &mut self.cells[self.row * SCREEN_COLUMNS + self.column..] {
-                            *cell = ' ';
+                            *cell = ScreenCell::Empty;
                         }
                     }
                 }
@@ -431,7 +615,7 @@ mod windows_fixture {
                         2 => (start, start + SCREEN_COLUMNS),
                         _ => unreachable!(),
                     };
-                    self.cells[from..through].fill(' ');
+                    self.cells[from..through].fill(ScreenCell::Empty);
                 }
                 b's' if parameters.is_empty() => {
                     self.saved_row = self.row;
@@ -546,17 +730,44 @@ mod windows_fixture {
                 ParseState::Osc => "osc",
                 ParseState::OscEscape => "osc-escape",
             };
-            let nonblank = state.cells.iter().filter(|cell| **cell != ' ').count();
+            let nonblank = state
+                .cells
+                .iter()
+                .filter(|cell| matches!(cell, ScreenCell::Glyph(_)))
+                .count();
+            let row_counts = state
+                .cells
+                .chunks(SCREEN_COLUMNS)
+                .map(|row| {
+                    row.iter()
+                        .filter(|cell| matches!(cell, ScreenCell::Glyph(_)))
+                        .count()
+                })
+                .collect::<Vec<_>>();
             Ok(format!(
-                "observer parser={parser} row={} column={} wrap={} nonblank={nonblank} title-updates={} markers=manager:{},rpk:{},password:{},unavailable:{}",
+                "observer parser={parser} row={} column={} wrap={} nonblank={nonblank} title-updates={} escapes={} csi={} osc={} cursor-positions={} line-feeds={} delayed-wraps={} bottom-scrolls={} row-nonblank={row_counts:?} markers=manager:{}/flat:{}/raw:{},rpk:{}/flat:{}/raw:{},password:{}/flat:{}/raw:{},unavailable:{}/raw:{}",
                 state.row,
                 state.column,
                 state.wrap_pending,
                 state.window_title_updates,
+                state.escape_sequences,
+                state.csi_sequences,
+                state.osc_sequences,
+                state.cursor_positions,
+                state.line_feeds,
+                state.delayed_wraps,
+                state.bottom_scrolls,
                 state.contains("Password Manager"),
+                state.contains_flat("Password Manager"),
+                state.raw_markers[0].found,
                 state.contains("human TLS-RPK"),
+                state.contains_flat("human TLS-RPK"),
+                state.raw_markers[1].found,
                 state.contains("Password required"),
+                state.contains_flat("Password required"),
+                state.raw_markers[2].found,
                 state.contains("CUSTODY_UNAVAILABLE"),
+                state.raw_markers[3].found,
             ))
         }
 
@@ -1169,6 +1380,54 @@ mod windows_fixture {
         write_conpty_input(fixture.input_write, &input)
     }
 
+    fn press(fixture: &Fixture, key: &str) -> io::Result<()> {
+        write_keyboard_input(fixture, key.as_bytes())
+    }
+
+    fn type_visible_and_submit(
+        fixture: &Fixture,
+        value: &str,
+        visible_suffix: &str,
+    ) -> io::Result<()> {
+        press(fixture, value)?;
+        fixture
+            .observer
+            .wait_for(visible_suffix)
+            .map_err(io::Error::other)?;
+        press(fixture, "\r")
+    }
+
+    fn visible_path_name(path: &str) -> io::Result<&str> {
+        std::path::Path::new(path)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| io::Error::other("fixture path has no visible UTF-8 file name"))
+    }
+
+    fn open_menu(fixture: &Fixture, key: &str, expected: &str) -> io::Result<()> {
+        press(fixture, key)?;
+        fixture
+            .observer
+            .wait_for(expected)
+            .map_err(io::Error::other)
+    }
+
+    fn search(fixture: &Fixture, query: &str) -> io::Result<()> {
+        open_menu(fixture, "/", "Search (engine-decrypted):")?;
+        type_visible_and_submit(fixture, query, query)?;
+        fixture
+            .observer
+            .wait_for("Search returned")
+            .map_err(io::Error::other)
+    }
+
+    struct MatrixPaths<'a> {
+        csv: &'a str,
+        onepux: &'a str,
+        backup: &'a str,
+        plaintext: &'a str,
+    }
+
     fn read_synthetic_password() -> io::Result<zeroize::Zeroizing<Vec<u8>>> {
         let mut password = zeroize::Zeroizing::new(Vec::new());
         std::io::stdin().take(1025).read_to_end(&mut password)?;
@@ -1187,7 +1446,11 @@ mod windows_fixture {
         Ok(password)
     }
 
-    fn exercise_keyboard_screen(fixture: &Fixture, password: &[u8]) -> io::Result<()> {
+    fn exercise_keyboard_screen(
+        fixture: &Fixture,
+        password: &[u8],
+        paths: MatrixPaths<'_>,
+    ) -> io::Result<()> {
         if let Err(primary) = fixture.observer.wait_for("Password required") {
             let observer = fixture.observer.diagnostic().map_err(io::Error::other)?;
             let child = child_diagnostic(fixture.process)?;
@@ -1215,6 +1478,181 @@ mod windows_fixture {
         fixture
             .observer
             .rejects(password)
+            .map_err(io::Error::other)?;
+
+        // Ticket 25 migration is driven through the real keyboard and common
+        // human handler. The service result is awaited before the next input;
+        // no operation is retried by the fixture.
+        open_menu(fixture, "m", "Migration:")?;
+        open_menu(fixture, "1", "CSV source")?;
+        let csv_request = format!("{}|chrome|keep", paths.csv);
+        type_visible_and_submit(fixture, &csv_request, "|chrome|keep")?;
+        fixture
+            .observer
+            .wait_for("Preview values hidden")
+            .map_err(io::Error::other)?;
+        type_visible_and_submit(fixture, "IMPORT", "IMPORT")?;
+        fixture
+            .observer
+            .wait_for("Import committed transactionally")
+            .map_err(io::Error::other)?;
+
+        open_menu(fixture, "m", "Migration:")?;
+        open_menu(fixture, "2", "1PUX source")?;
+        let onepux_request = format!("{}|keep", paths.onepux);
+        type_visible_and_submit(fixture, &onepux_request, "|keep")?;
+        fixture
+            .observer
+            .wait_for("Preview values hidden")
+            .map_err(io::Error::other)?;
+        type_visible_and_submit(fixture, "IMPORT", "IMPORT")?;
+        fixture
+            .observer
+            .wait_for("Import committed transactionally")
+            .map_err(io::Error::other)?;
+        search(fixture, "Keyboard 1PUX")?;
+        fixture
+            .observer
+            .wait_for("Search returned 1 active items")
+            .map_err(io::Error::other)?;
+
+        search(fixture, "Keyboard Windows")?;
+        open_menu(fixture, "t", "Tag (replaces tags):")?;
+        type_visible_and_submit(fixture, "windows-keyboard", "windows-keyboard")?;
+        fixture
+            .observer
+            .wait_for("Organization committed")
+            .map_err(io::Error::other)?;
+        press(fixture, "f")?;
+        fixture
+            .observer
+            .wait_for("Favorite committed")
+            .map_err(io::Error::other)?;
+        press(fixture, "h")?;
+        fixture
+            .observer
+            .wait_for("History:")
+            .map_err(io::Error::other)?;
+
+        // Exact-field reveal/copy always crosses the selection screen; merely
+        // selecting an item never exposes its value.
+        press(fixture, "r")?;
+        fixture
+            .observer
+            .wait_for("Fields (explicit selection; values hidden)")
+            .map_err(io::Error::other)?;
+        press(fixture, "jjjjjjj")?;
+        fixture
+            .observer
+            .wait_for("› auth[0].password")
+            .map_err(io::Error::other)?;
+        press(fixture, "\r")?;
+        fixture
+            .observer
+            .wait_for("Secret revealed temporarily")
+            .map_err(io::Error::other)?;
+        press(fixture, "c")?;
+        fixture
+            .observer
+            .wait_for("Fields (explicit selection; values hidden)")
+            .map_err(io::Error::other)?;
+        press(fixture, "jjjjjjj")?;
+        fixture
+            .observer
+            .wait_for("› auth[0].password")
+            .map_err(io::Error::other)?;
+        press(fixture, "\r")?;
+        fixture
+            .observer
+            .wait_for("Copied explicitly")
+            .map_err(io::Error::other)?;
+
+        open_menu(fixture, "g", "Generator length")?;
+        type_visible_and_submit(fixture, "24", "24")?;
+        fixture
+            .observer
+            .wait_for("Generated secret revealed temporarily")
+            .map_err(io::Error::other)?;
+
+        press(fixture, "a")?;
+        fixture
+            .observer
+            .wait_for("Delegated access: RESUMED")
+            .map_err(io::Error::other)?;
+        press(fixture, "s")?;
+        fixture
+            .observer
+            .wait_for("Delegated access: SUSPENDED")
+            .map_err(io::Error::other)?;
+        press(fixture, "s")?;
+        fixture
+            .observer
+            .wait_for("Delegated access: RESUMED")
+            .map_err(io::Error::other)?;
+        press(fixture, "\x1b")?;
+        fixture
+            .observer
+            .wait_for("Content view")
+            .map_err(io::Error::other)?;
+        press(fixture, "w")?;
+        fixture
+            .observer
+            .wait_for("Pending and recent attempts:")
+            .map_err(io::Error::other)?;
+        press(fixture, "\x1b")?;
+        fixture
+            .observer
+            .wait_for("Content view")
+            .map_err(io::Error::other)?;
+
+        open_menu(fixture, "z", "Audit:")?;
+        press(fixture, "1")?;
+        fixture
+            .observer
+            .wait_for("Audit metadata:")
+            .map_err(io::Error::other)?;
+
+        // New-file backup/export paths are distinct. Existing destinations are
+        // intentionally not removed or truncated by this fixture.
+        open_menu(fixture, "b", "Backup/recovery:")?;
+        open_menu(fixture, "1", "New native backup path")?;
+        type_visible_and_submit(fixture, paths.backup, visible_path_name(paths.backup)?)?;
+        fixture
+            .observer
+            .wait_for("Native encrypted backup complete")
+            .map_err(io::Error::other)?;
+        open_menu(fixture, "b", "Backup/recovery:")?;
+        open_menu(fixture, "2", "New plaintext export path")?;
+        type_visible_and_submit(
+            fixture,
+            paths.plaintext,
+            visible_path_name(paths.plaintext)?,
+        )?;
+        fixture
+            .observer
+            .wait_for("PLAINTEXT WARNING")
+            .map_err(io::Error::other)?;
+        type_visible_and_submit(fixture, "EXPORT", "EXPORT")?;
+        fixture
+            .observer
+            .wait_for("Plaintext export complete")
+            .map_err(io::Error::other)?;
+
+        press(fixture, "d")?;
+        fixture
+            .observer
+            .wait_for("Moved to trash")
+            .map_err(io::Error::other)?;
+        press(fixture, "u")?;
+        fixture
+            .observer
+            .wait_for("Restored with a new revision")
+            .map_err(io::Error::other)?;
+        open_menu(fixture, "p", "Type PURGE to delete non-visible revisions:")?;
+        type_visible_and_submit(fixture, "PURGE", "PURGE")?;
+        fixture
+            .observer
+            .wait_for("Purged ")
             .map_err(io::Error::other)?;
         write_keyboard_input(fixture, b"q")?;
         require_tui_exit(fixture.process)
@@ -1263,10 +1701,13 @@ mod windows_fixture {
     }
 
     fn exercise(args: &[String]) -> io::Result<()> {
-        if args.len() < 4 {
+        if args.len() < 11
+            || args.get(3).map(String::as_str) != Some("--matrix")
+            || args.get(8).map(String::as_str) != Some("--")
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "usage: fixture <protected-sddl> <pm-custody.exe> <tui args...>",
+                "usage: fixture <protected-sddl> <pm-custody.exe> --matrix <csv> <1pux> <backup> <plaintext> -- <tui args...>",
             ));
         }
         let password = read_synthetic_password()?;
@@ -1275,9 +1716,18 @@ mod windows_fixture {
             let desktop = create_private_desktop(&mut fixture, &args[1])?;
             setup_conpty(&mut fixture)?;
             setup_attributes(&mut fixture)?;
-            spawn_tui(&mut fixture, &args[2], &desktop, &args[3..])?;
+            spawn_tui(&mut fixture, &args[2], &desktop, &args[9..])?;
             start_drain_and_release_conpty_ends(&mut fixture)?;
-            exercise_keyboard_screen(&fixture, &password)
+            exercise_keyboard_screen(
+                &fixture,
+                &password,
+                MatrixPaths {
+                    csv: &args[4],
+                    onepux: &args[5],
+                    backup: &args[6],
+                    plaintext: &args[7],
+                },
+            )
         })();
         let cleanup = fixture.cleanup();
         match (operation, cleanup) {
@@ -1333,14 +1783,37 @@ mod windows_fixture {
         }
 
         #[test]
-        fn observer_rejects_non_single_cell_unicode() {
+        fn observer_models_wide_and_combining_unicode_without_approximating_cells() {
             let observer = TerminalObserver::new();
-            let error = observer.feed("界".as_bytes()).unwrap_err();
-            assert_eq!(error, "unsupported Unicode cell width in ConPTY output");
+            observer.feed("A🌎e\u{301}Z".as_bytes()).unwrap();
+            observer.wait_for("A🌎e\u{301}Z").unwrap();
+            let state = observer.state.lock().unwrap();
+            assert_eq!(state.column, 5);
+            assert_eq!(state.cells[1], ScreenCell::Glyph("🌎".into()));
+            assert_eq!(state.cells[2], ScreenCell::WideContinuation);
+            assert_eq!(state.cells[3], ScreenCell::Glyph("e\u{301}".into()));
+        }
 
+        #[test]
+        fn observer_diagnostic_distinguishes_row_geometry_from_missing_text() {
             let observer = TerminalObserver::new();
-            let error = observer.feed("\u{301}".as_bytes()).unwrap_err();
-            assert_eq!(error, "unsupported Unicode cell width in ConPTY output");
+            observer.feed(&[b'x'; SCREEN_COLUMNS - 4]).unwrap();
+            observer.feed(b"Pass").unwrap();
+            observer.feed(b"word").unwrap();
+            let state = observer.state.lock().unwrap();
+            assert!(!state.contains("Password"));
+            assert!(state.contains_flat("Password"));
+            assert_eq!(state.delayed_wraps, 1);
+        }
+
+        #[test]
+        fn observer_diagnostic_tracks_only_fixed_raw_markers_across_chunks() {
+            let observer = TerminalObserver::new();
+            observer.feed(b"Password req").unwrap();
+            observer.feed(b"uired synthetic-unreported-value").unwrap();
+            let diagnostic = observer.diagnostic().unwrap();
+            assert!(diagnostic.contains("password:true/flat:true/raw:true"));
+            assert!(!diagnostic.contains("synthetic-unreported-value"));
         }
 
         #[test]
@@ -1355,25 +1828,28 @@ mod windows_fixture {
             {
                 let state = observer.state.lock().unwrap();
                 assert_eq!((state.row, state.column, state.wrap_pending), (1, 1, false));
-                assert_eq!(state.cells[SCREEN_COLUMNS], 'y');
+                assert_eq!(state.cells[SCREEN_COLUMNS], ScreenCell::Glyph("y".into()));
             }
 
             observer.feed(b"\x1b[1;80Hz\rR").unwrap();
             {
                 let state = observer.state.lock().unwrap();
-                assert_eq!(state.cells[0], 'R');
+                assert_eq!(state.cells[0], ScreenCell::Glyph("R".into()));
                 assert_eq!(state.row, 0);
             }
             observer.feed(b"\x1b[1;80Hq\x1b[2KE").unwrap();
             {
                 let state = observer.state.lock().unwrap();
-                assert_eq!(state.cells[79], 'E');
+                assert_eq!(state.cells[79], ScreenCell::Glyph("E".into()));
                 assert!(state.wrap_pending);
             }
             observer.feed(b"\x1b[24;80Hb\np").unwrap();
             let state = observer.state.lock().unwrap();
             assert_eq!(state.row, 23);
-            assert_eq!(state.cells[23 * SCREEN_COLUMNS + 79], 'p');
+            assert_eq!(
+                state.cells[23 * SCREEN_COLUMNS + 79],
+                ScreenCell::Glyph("p".into())
+            );
         }
 
         #[test]

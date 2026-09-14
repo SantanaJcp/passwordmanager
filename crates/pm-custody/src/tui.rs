@@ -1099,10 +1099,11 @@ fn split_exact<const N: usize>(value: &str) -> Result<[String; N], Failure> {
     let mut escaped = false;
     for character in value.chars() {
         if escaped {
-            fields
-                .last_mut()
-                .ok_or(Failure::Unavailable)?
-                .push(character);
+            let field = fields.last_mut().ok_or(Failure::Unavailable)?;
+            if !matches!(character, '\\' | '|') {
+                field.push('\\');
+            }
+            field.push(character);
             escaped = false;
         } else if character == '\\' {
             escaped = true;
@@ -1116,7 +1117,7 @@ fn split_exact<const N: usize>(value: &str) -> Result<[String; N], Failure> {
         }
     }
     if escaped {
-        return Err(Failure::Unavailable);
+        fields.last_mut().ok_or(Failure::Unavailable)?.push('\\');
     }
     fields.try_into().map_err(|_| Failure::Unavailable)
 }
@@ -2653,7 +2654,14 @@ mod tests {
             panic!("valid escaped fields rejected")
         };
         assert_eq!(fields, ["/tmp/a|b", "chrome", "keep"]);
-        assert!(split_exact::<2>(r"dangling\").is_err());
+        assert_eq!(
+            split_exact::<3>(r"C:\Users\pm27human\import.1pux|keep|PAIR").unwrap(),
+            [r"C:\Users\pm27human\import.1pux", "keep", "PAIR"]
+        );
+        assert_eq!(
+            split_exact::<2>(r"C:\fixture\\|RESTORE").unwrap(),
+            [r"C:\fixture\", "RESTORE"]
+        );
     }
 
     #[test]

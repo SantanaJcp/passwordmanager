@@ -348,6 +348,63 @@ function Start-AsUser(
     return Start-Process @parameters
 }
 
+function Add-SyntheticZipEntry(
+    [IO.Compression.ZipArchive]$Archive,
+    [string]$Name,
+    [byte[]]$Bytes
+) {
+    $stream = $null
+    $primary = $null
+    $cleanup = $null
+    try {
+        $entry = $Archive.CreateEntry($Name, [IO.Compression.CompressionLevel]::Optimal)
+        $stream = $entry.Open()
+        $stream.Write($Bytes, 0, $Bytes.Length)
+    }
+    catch { $primary = $_.Exception }
+    finally {
+        if ($null -ne $stream) {
+            try { $stream.Dispose() }
+            catch { $cleanup = $_.Exception }
+        }
+    }
+    if ($null -ne $primary -and $null -ne $cleanup) {
+        throw [AggregateException]::new('1PUX entry write and cleanup failed', @($primary, $cleanup))
+    }
+    if ($null -ne $primary) { throw $primary }
+    if ($null -ne $cleanup) { throw $cleanup }
+}
+
+function New-SyntheticOnePux([string]$Path) {
+    Assert-True (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) 'synthetic 1PUX path collided'
+    $archive = $null
+    $primary = $null
+    $cleanup = $null
+    try {
+        $archive = [IO.Compression.ZipFile]::Open($Path, [IO.Compression.ZipArchiveMode]::Create)
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        Add-SyntheticZipEntry $archive 'export.attributes' ($utf8.GetBytes('{"version":3,"description":"synthetic ticket27"}'))
+        $data = '{"accounts":[{"attrs":{"uuid":"ticket27-account"},"vaults":[{"attrs":{"uuid":"ticket27-vault"},"items":[{"uuid":"ticket27-login","categoryUuid":"001","details":{"loginFields":[{"designation":"username","value":"synthetic-user"},{"designation":"password","value":"synthetic-ticket27-1pux"}]},"overview":{"title":"Keyboard 1PUX"}},{"uuid":"ticket27-file","categoryUuid":"004","details":{"documentAttributes":{"fileName":"ticket27-large.bin","documentId":"ticket27-document","decryptedSize":2097159}},"overview":{"title":"Keyboard 1PUX File"}}]}]}]}'
+        Add-SyntheticZipEntry $archive 'export.data' ($utf8.GetBytes($data))
+        $content = [byte[]]::new(2097159)
+        [Random]::new(2527).NextBytes($content)
+        Add-SyntheticZipEntry $archive 'files/ticket27-document___ignored.bin' $content
+        [Array]::Clear($content, 0, $content.Length)
+    }
+    catch { $primary = $_.Exception }
+    finally {
+        if ($null -ne $archive) {
+            try { $archive.Dispose() }
+            catch { $cleanup = $_.Exception }
+        }
+    }
+    if ($null -ne $primary -and $null -ne $cleanup) {
+        throw [AggregateException]::new('1PUX creation and cleanup failed', @($primary, $cleanup))
+    }
+    if ($null -ne $primary) { throw $primary }
+    if ($null -ne $cleanup) { throw $cleanup }
+}
+
 function Assert-Arm64Pe([string]$Dumpbin, [string]$Path, [string]$Label) {
     Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) "$Label is absent"
     $headers = @(& $Dumpbin '/headers' $Path)
@@ -453,6 +510,17 @@ try {
         Set-ExactTreeAcl $diagnosticDir @('SYSTEM', $installerName)
     }
 
+    # The native process-transfer regression resolves the real virtual service
+    # SID and verifies its short-lived process DACL lease. Provision the
+    # collision-checked owned SCM record before tests; its inert command is
+    # replaced by the normal custody binary before the service is started.
+    # Omit password=: SCM maps absence to the required NULL lpPassword for a
+    # virtual account rather than to an empty password.
+    Invoke-Checked 'sc.exe' @('create', $serviceName, 'type=', 'own', 'start=', 'demand', 'obj=', "NT SERVICE\$serviceName", 'binPath=', 'cmd /c exit 0')
+    $serviceOwned = $true
+    Invoke-Checked 'sc.exe' @('sidtype', $serviceName, 'unrestricted')
+    $serviceSid = Get-Sid "NT SERVICE\$serviceName"
+
     Invoke-Checked 'cargo' @('test', '-p', 'pm-native-channel', '--all-targets', '--locked', '--offline')
     Invoke-Checked 'cargo' @('test', '-p', 'pm-sync', '--lib', '--locked', '--offline')
     Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
@@ -480,12 +548,6 @@ try {
 
     $agentSid = Get-Sid "$env:COMPUTERNAME\$agentName"
     $humanSid = Get-Sid "$env:COMPUTERNAME\$humanName"
-    # Omit password= for a virtual account: SCM maps the absent argument to
-    # the required NULL lpPassword value, rather than an empty string.
-    Invoke-Checked 'sc.exe' @('create', $serviceName, 'type=', 'own', 'start=', 'demand', 'obj=', "NT SERVICE\$serviceName", 'binPath=', 'cmd /c exit 0')
-    $serviceOwned = $true
-    Invoke-Checked 'sc.exe' @('sidtype', $serviceName, 'unrestricted')
-    $serviceSid = Get-Sid "NT SERVICE\$serviceName"
     if ($ServiceDiagnostics) {
         Add-OwnedPath $ownedPaths $diagnosticPath
         [IO.File]::WriteAllText($diagnosticPath, [string]::Empty)
@@ -521,6 +583,20 @@ try {
     Add-OwnedPath $ownedPaths $vault
     Add-OwnedPath $ownedPaths $auditPath
     $master = 'synthetic ticket 27 master only'
+    $tuiCsv = Join-Path $humanDir 'keyboard.csv'
+    $tuiOnePux = Join-Path $humanDir 'keyboard.1pux'
+    $tuiBackup = Join-Path $humanDir 'keyboard.pmb1'
+    $tuiPlaintext = Join-Path $humanDir 'keyboard.jsonl'
+    Add-OwnedPath $ownedPaths $tuiCsv
+    Add-OwnedPath $ownedPaths $tuiOnePux
+    Add-OwnedPath $ownedPaths $tuiBackup
+    Add-OwnedPath $ownedPaths $tuiPlaintext
+    [IO.File]::WriteAllText(
+        $tuiCsv,
+        "name,url,username,password,note$([Environment]::NewLine)Keyboard Windows,https://keyboard-windows.invalid,synthetic-user,synthetic-ticket27-import,synthetic-note$([Environment]::NewLine)",
+        [Text.UTF8Encoding]::new($false)
+    )
+    New-SyntheticOnePux $tuiOnePux
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = [Diagnostics.ProcessStartInfo]::new($cli, "vault create `"$vault`"")
     $process.StartInfo.UseShellExecute = $false
@@ -594,9 +670,13 @@ try {
 
     if ($TuiConPtyRed) {
         $stationSddl = "D:P(A;;GA;;;SY)(A;;GA;;;$humanSid)"
-        $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '15', '--copy-seconds', '30') $humanInput $tuiOut $tuiErr
+        $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, '--matrix', $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '15', '--copy-seconds', '30') $humanInput $tuiOut $tuiErr
         Assert-True ($p.ExitCode -eq 0) ('normal pm-custody TUI did not complete its ConPTY tracer: ' + (Get-Content $tuiErr -Raw))
         Assert-True ((Get-Content $tuiOut -Raw) -eq "TUI_CONPTY_READY$([Environment]::NewLine)") 'TUI fixture emitted unexpected public output'
+        Assert-True (Test-Path -LiteralPath $tuiBackup -PathType Leaf) 'TUI native backup was not published'
+        Assert-True ((Get-Item -LiteralPath $tuiBackup -ErrorAction Stop).Length -gt 0) 'TUI native backup is empty'
+        Assert-True (Test-Path -LiteralPath $tuiPlaintext -PathType Leaf) 'TUI plaintext export was not published'
+        Assert-True ((Get-Item -LiteralPath $tuiPlaintext -ErrorAction Stop).Length -gt 0) 'TUI plaintext export is empty'
     }
 
     $p = Start-AsUser $humanCredential $custody @('human-lock', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $humanInput $humanOut $humanErr

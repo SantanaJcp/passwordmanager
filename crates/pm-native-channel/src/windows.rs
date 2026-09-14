@@ -67,6 +67,8 @@ use windows_sys::Win32::{
 use zeroize::Zeroizing;
 
 #[cfg(test)]
+use windows_sys::Win32::Security::{ACCESS_ALLOWED_ACE, EqualSid, GetAce};
+#[cfg(test)]
 use windows_sys::Win32::System::DataExchange::GetClipboardData;
 #[cfg(test)]
 use windows_sys::Win32::System::Memory::GlobalSize;
@@ -1961,6 +1963,64 @@ mod tests {
         let replacement = replacement.into_inner().unwrap();
         assert_eq!(replacement.read_owned_text().unwrap(), "ticket27-new-owner");
         assert!(replacement.clear_if_owned().unwrap());
+    }
+
+    fn current_process_dacl_bytes() -> Result<Vec<u8>, ChannelAuthenticationError> {
+        let (descriptor, dacl) = query_process_dacl(unsafe { GetCurrentProcess() })?;
+        let bytes = acl_bytes(dacl);
+        let released = free_local(descriptor);
+        if released.is_err() {
+            return Err(ChannelAuthenticationError);
+        }
+        bytes
+    }
+
+    fn exact_service_transfer_aces() -> Result<usize, ChannelAuthenticationError> {
+        const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+        const INHERITED_ACE_FLAG: u8 = 0x10;
+        let service = installed_service_sid()?;
+        let (descriptor, dacl) = query_process_dacl(unsafe { GetCurrentProcess() })?;
+        let mut matches = 0_usize;
+        for index in 0..unsafe { (*dacl).AceCount } {
+            let mut raw = ptr::null_mut();
+            if unsafe { GetAce(dacl, u32::from(index), &raw mut raw) } == 0 || raw.is_null() {
+                if free_local(descriptor).is_err() {
+                    return Err(ChannelAuthenticationError);
+                }
+                return Err(ChannelAuthenticationError);
+            }
+            let ace = raw.cast::<ACCESS_ALLOWED_ACE>();
+            let header = unsafe { (*ace).Header };
+            let sid = unsafe { std::ptr::addr_of!((*ace).SidStart).cast_mut().cast() };
+            if header.AceType == ACCESS_ALLOWED_ACE_TYPE
+                && header.AceFlags & INHERITED_ACE_FLAG == 0
+                && unsafe { EqualSid(sid, service.as_ptr().cast_mut().cast()) } != 0
+            {
+                if unsafe { (*ace).Mask }
+                    != (PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION)
+                {
+                    if free_local(descriptor).is_err() {
+                        return Err(ChannelAuthenticationError);
+                    }
+                    return Err(ChannelAuthenticationError);
+                }
+                matches = matches.checked_add(1).ok_or(ChannelAuthenticationError)?;
+            }
+        }
+        free_local(descriptor)?;
+        Ok(matches)
+    }
+
+    #[test]
+    fn process_transfer_lease_is_unique_and_restores_the_exact_dacl() {
+        let before = current_process_dacl_bytes().unwrap();
+        let lease = ProcessHandleTransferLease::begin().unwrap();
+        let during = current_process_dacl_bytes().unwrap();
+        assert_ne!(during, before, "lease did not install a process ACE");
+        assert_eq!(exact_service_transfer_aces().unwrap(), 1);
+        assert!(ProcessHandleTransferLease::begin().is_err());
+        lease.finish().unwrap();
+        assert_eq!(current_process_dacl_bytes().unwrap(), before);
     }
 
     #[test]

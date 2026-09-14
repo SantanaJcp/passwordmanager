@@ -1737,6 +1737,29 @@ con una categoría fija sin payload. Las regresiones cubren ambos terminadores,
 chunking/UTF-8, ausencia del título en pantalla y rechazo cerrado de OSC 52.
 
 La corrida Windows ARM64
+[`34878285945`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34878285945)
+sobre `c010af74c0202a275641d3e219b183871244dd79` pasó build, 10 pruebas
+nativas, 11 del observer y la prueba sync. El proceso TUI permaneció vivo, el
+parser quedó en estado `ground` con 933 celdas no vacías, cursor en 23/79 y
+delayed-wrap pendiente, pero ninguno de los cuatro marcadores fijos apareció en
+la pantalla reconstruida. No hubo error de parser. Es evidencia de una
+discrepancia de reconstrucción/terminal antes del primer prompt observable, no
+prueba de que el producto omitiera el render ni de una causa concreta en VT.
+Log: `/tmp/pm-windows-shared-tui-run34-failed.log`.
+
+El siguiente discriminante no registra contenido: cuenta ESC, CSI, OSC, CUP,
+LF, delayed-wrap y scroll inferior, publica sólo el número de glyphs por fila y
+compara cada marcador fijo por fila, sobre una concatenación sin límites de
+fila y con un scanner raw limitado al prefijo de esos cuatro literales. Nunca
+conserva ni imprime otros bytes. Si el marcador aparece sólo concatenado, se ha
+aislado una divergencia de geometría; si aparece raw pero no en celdas, se ha
+aislado interpretación/posicionamiento; si tampoco aparece raw, se investiga el
+screen buffer exacto y sus modos. En particular, el modo
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING` es propiedad del handle de screen buffer;
+no se atribuye la causa a `TERM` ni se cambia el modo hasta medir el writer
+`CONOUT$` exacto antes y después de entrar al alternate screen.
+
+La corrida Windows ARM64
 [`34875128476`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34875128476)
 sobre `3523b2c9b489165adac90f77bcf747e0becf6b3c` pasó 10/10 pruebas nativas,
 1/1 pipe, 9/9 observer y 1/1 sync. El observer ya no falló, pero el producto
@@ -1802,6 +1825,42 @@ ACE, peer impostor, PID cambiado, pseudohandle/source inválido, reparse/link y
 cambio concurrente del DACL. El caso positivo procesa un 1PUX sintético mayor
 que un frame desde el mismo handle. Ningún test modifica el DACL de un proceso o
 sesión ajenos; el fixture usa exclusivamente el proceso TUI propio efímero.
+
+### Extensión del tracer a operaciones 23–25 y Unicode humano
+
+El tracer completo no puede restringir los datos humanos a glifos de una sola
+celda: los fixtures confirmados incluyen `🌎`, nombres Unicode y combinaciones
+canónicas. El observer conserva una cuadrícula de celdas con inicio de glyph,
+continuación de glyph ancho y combinaciones anexadas al glyph anterior. Usa la
+tabla `unicode-width` fijada por el crate, hace wrap previo si un glyph ancho no
+cabe, y rechaza controles o anchuras no clasificadas. Nunca reemplaza, recorta
+ni cuenta un glyph ancho como una celda. Las regresiones cubren ancho dos,
+combining, margen, erase y búsqueda textual exacta.
+
+Las entradas compuestas de migración usan `|` como separador. En Windows una
+barra invertida ordinaria pertenece al path y no puede desaparecer como un
+escape genérico. El parser común reconoce únicamente `\|` y `\\` como escapes;
+cualquier otra pareja conserva la barra y un `\` final también se conserva.
+Una regresión usa paths Windows reales y mantiene los casos Unix existentes.
+
+El siguiente vertical del fixture crea dentro de la raíz humana propia un CSV
+y un 1PUX sintéticos, destinos nuevos y un pairing. Tras observar cada prompt,
+envía la acción de teclado y espera el estado terminal antes de continuar. La
+matriz debe recorrer import preview/cancel/confirm, campos/tipos, organización,
+historia, reveal/copy con ownership, trash/restore/purga, autoridad/pendientes,
+backup/export/restore/rotaciones, attachment streaming, pair/sync/offline/
+retire y auditoría. Los asserts de servicio/SQLite sólo corroboran el resultado
+durable después de la acción TUI; no sustituyen la acción. Resize debe observar
+un redraw real, y `q`/`l` debe terminar naturalmente antes del teardown ConPTY.
+
+Para cada 1PUX, el fixture captura el DACL del proceso humano antes del opcode
+31, comprueba durante el lease únicamente el ACE no heredable del SID custodio
+con `PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION`, y comprueba la
+restauración exacta después. En procesos propios separados prueba SID agente,
+peer/PID impostor, pseudohandle, handle no regular/reparse/multilink, segundo
+lease y descriptor cambiado. Un cambio concurrente visible hace fallar y no se
+sobrescribe. La prueba positiva usa el mismo handle de un 1PUX mayor que el
+frame; ninguna negativa concede derechos sobre un proceso o estación ajenos.
 
 ### Composición sync nativa pendiente
 
