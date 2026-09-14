@@ -1683,3 +1683,19 @@ falló porque su dato negativo aún combinaba 9001 y 1004, ambos ya soportados.
 Es un fallo de fixture, no un RED del TUI. La regresión usa ahora el modo
 cerrado 7777 para conservar el rechazo de un privado realmente desconocido.
 Log preservado en `/tmp/pm-windows-conpty-focus-run25-failed.log`.
+
+El primer checkpoint de producto separó la transferencia 1PUX del tracer de
+catálogo. Una propuesta intermedia intentó abrir el proceso de servicio desde
+el cliente/impersonación de nivel `SecurityIdentification`; se retiró antes de
+la siguiente publicación porque ese nivel sólo permite consultar identidad y
+porque una revalidación temprana podía abandonar el handle de proceso. No se
+considera primitive operativa ni evidencia. El contrato pendiente conserva
+`PROCESS_DUP_HANDLE` mínimo, PID observado por la pipe y cierre comprobado en
+todas las ramas; no se ampliará el token humano a administrador ni se usará una
+copia temporal sustitutiva.
+
+La sincronización del directorio Windows reutiliza el contrato ya integrado en
+`pm-vault::native_fs`: abre el directorio exacto con `GENERIC_READ |
+GENERIC_WRITE`, `BACKUP_SEMANTICS | OPEN_REPARSE_POINT`, verifica tipo e
+identidad y sólo entonces hace `sync_all`. Un handle de sólo lectura no acredita
+`FlushFileBuffers` y queda excluido.

@@ -193,7 +193,7 @@ fn create_private_windows(path: &Path, read: bool, write: bool) -> io::Result<Fi
 fn open_existing_windows(path: &Path) -> io::Result<File> {
     use std::{os::windows::io::FromRawHandle, ptr};
     use windows_sys::Win32::{
-        Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE},
+        Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
             FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -203,7 +203,7 @@ fn open_existing_windows(path: &Path) -> io::Result<File> {
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
-            GENERIC_READ,
+            GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             ptr::null(),
             OPEN_EXISTING,
@@ -252,6 +252,7 @@ fn sync_directory_windows(path: &Path) -> io::Result<()> {
             "native directory handle is not a directory",
         ));
     }
+    reject_reparse(&directory)?;
     if unsafe { FlushFileBuffers(directory.as_raw_handle()) } == 0 {
         return Err(io::Error::last_os_error());
     }

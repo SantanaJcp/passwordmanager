@@ -145,21 +145,6 @@ impl AuthenticatedHumanChannel {
             }
         }
     }
-
-    /// Claims a regular file handle from the already-authenticated Windows
-    /// human process without reopening its path.
-    ///
-    /// # Errors
-    /// Returns an opaque error if the peer changed or the handle is not a
-    /// regular, non-reparse file.
-    #[cfg(target_os = "windows")]
-    pub fn duplicate_client_file(
-        &self,
-        source_value: u64,
-    ) -> Result<std::fs::File, ChannelAuthenticationError> {
-        self.pipe.verify()?;
-        self.pipe.duplicate_client_file(source_value)
-    }
 }
 
 /// Deliberately opaque public failure for an untrusted local channel.
