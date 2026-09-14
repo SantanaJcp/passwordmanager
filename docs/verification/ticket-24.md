@@ -40,3 +40,43 @@ gate de candidato exige `scripts/check.sh`, clean locked/offline, `git diff
 --check` y todos los `scripts/test-linux-*-lab.sh` ordenados con propagación
 fiable de cualquier fallo. No acredita macOS/Windows/ARM64, sesiones externas,
 TUI de migración/sync/audit del ticket 25 ni revisión formal Astra.
+
+## Evidencia del candidato
+
+TDD comenzó con RED enfocado: `delegated_authorization` no compiló porque aún
+no existían `access_overview`, `human_pending`, `human_cancel` ni
+`prepare_disable`. Después de implementar esos seams sobre los motores humano y
+de intentos existentes, el test enfocado pasó `1/1`. El driver TUI también tuvo
+dos RED relevantes que se conservaron como diagnóstico: un PTY directo no
+ofrecía a Crossterm una terminal completa, y la primera ejecución por `tmux`
+encontró una carrera de ciclo de vida del servidor. El harness final usa un
+servidor `tmux` con nombre propio y la ejecución verde no cuenta esos intentos
+fallidos como éxito.
+
+Resultados observados sobre `a78992a`:
+
+```text
+scripts/check.sh
+# exit 0; fmt, clippy -D warnings y toda la suite Rust pasan
+
+scripts/clean-offline-build.sh
+# hashes fijados OK; 17,561 archivos / 5.1 GiB eliminados;
+# build locked/offline limpio en 40.18 s; exit 0
+
+scripts/test-linux-tui-access-lab.sh
+PASS tui-access keyboard=enroll+enable+disable+suspend+resume+revoke agents=2 common-set=same human-lock=independent
+PASS tui-pending safe-context=1 provider=separate-uid cancel=terminal secrets=absent
+
+PM_KEYCLOAK_DIST=.../keycloak-26.7.3 \
+PM_CFT_DIR=.../chrome-linux64 \
+scripts/test-linux-passkey-login-lab.sh
+PASS passkey-login-human outer=WAITING_FOR_HUMAN UP=TUI-keyboard UV=fresh-second-human-channel presence-only=denied extension=MV3-native real
+
+for lab in $(find scripts -maxdepth 1 -type f -name 'test-linux-*-lab.sh' | sort); do "$lab"; done
+PASS complete-linux-labs count=19
+# exit 0 con `set -euo pipefail`
+```
+
+La barrida final fue una sola ejecución ordenada 19/19 después del clean build.
+Los límites emitidos por los labs siguen vigentes: no se ejecutaron navegador
+de producto, reinicio/FDE de host ni los targets nativos pendientes.
