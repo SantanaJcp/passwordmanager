@@ -503,3 +503,14 @@ rc4 con `FIONREAD=0`: la categoría pública es correcta pero el secreto ya entr
 en un buffer ordinario. El GREEN debe reutilizar el mismo `NativeStdin`
 multiplataforma del CLI desde un módulo común, sin duplicar unsafe, y conservar
 ownership del fd/handle y semántica Windows ya documentada.
+
+El RED reforzado `/tmp/pm28-red-custody-native-input.log` terminó rc1 con
+`FIONREAD=0`: aunque devolvió rc4, `StdinLock` ya había precargado el canario.
+El GREEN mueve el `NativeStdin` existente a `pm-crypto` como único seam común y
+hace que CLI y el primer password de custodia lo usen sin tomar ownership.
+`/tmp/pm28-green-custody-native-input.log` terminó rc0 con el canario completo
+en kernel. Las suites enfocadas pasaron rc0 en 24 s y clippy enfocado rc0. El
+primer comando `--locked` no compiló porque mover `windows-sys` entre paquetes
+requirió sincronizar `Cargo.lock`; se conserva en
+`/tmp/pm28-green-shared-native-input-focused.log` como bookkeeping, no RED.
+No se repitió la barrida 25/25 anterior; el merger ejecutará el gate compuesto.

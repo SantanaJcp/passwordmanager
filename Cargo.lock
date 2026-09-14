@@ -1595,13 +1595,11 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 name = "pm-cli"
 version = "0.1.0"
 dependencies = [
- "libc",
  "pm-crypto",
  "pm-custody",
  "pm-interface",
  "pm-process-runner",
  "pm-vault",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1611,6 +1609,7 @@ dependencies = [
  "libc",
  "libsodium-sys-stable",
  "minicbor",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

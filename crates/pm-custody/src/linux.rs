@@ -43,7 +43,7 @@ use rustls::{
 use signature::Signer as _;
 use zeroize::{Zeroize, Zeroizing};
 
-use pm_crypto::{KdfProfile, ProtectedBytes, RecoveryCode};
+use pm_crypto::{KdfProfile, NativeStdin, ProtectedBytes, RecoveryCode};
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
 use pm_vault::{
     AgentEnrollment, AgentPeer, Attachment, AttachmentReader, AttemptOutcome, AttemptState,
@@ -1978,7 +1978,7 @@ fn human_password_crud(arguments: &mut impl Iterator<Item = OsString>) -> Result
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
     let password = read_protected_wire_field(&mut input, 1024)?;
     let title = read_wire_string(&mut input, 1024)?;
     let username = read_wire_string(&mut input, 1024 * 1024)?;

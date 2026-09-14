@@ -5,9 +5,12 @@
 //! Ticket 02 adds the typed G2 foundation and synthetic format vectors. It does
 //! not claim later authority reducers, CRUD flows, backups, or native custody.
 
+mod native_stdin;
 mod root;
 
 use std::ffi::CStr;
+
+pub use native_stdin::NativeStdin;
 
 pub use root::{
     AuditDeviceKeyPair, AuditKey, AuditKeyPackage, BackupOpener, BackupRootEnvelopes, BackupSealer,

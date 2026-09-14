@@ -18,12 +18,6 @@ pm-custody.workspace = true
 pm-interface.workspace = true
 pm-vault.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-windows-sys.workspace = true
-
 [dev-dependencies]
 pm-process-runner.workspace = true
 
