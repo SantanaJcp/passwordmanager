@@ -82,10 +82,13 @@ require_literal '[macOS custody acceptance workflow](../../.github/workflows/mac
 require_literal 'fetch --locked' "$fetch"
 require_literal '--locked --offline' "$lab"
 require_literal 'lipo -archs' "$lab"
-require_literal 'runner_temp = os.environ.get("RUNNER_TEMP")' "$harness"
+require_literal 'scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")' "$harness"
+require_literal 'assert owner_mode(scratch.parent) == (0, 0o1777)' "$harness"
 require_literal 'scratch.mkdir(mode=0o711)' "$harness"
 require_literal 'synthetic keygen failed' "$harness"
-if grep -Fq 'os.environ.get("RUNNER_TEMP",' "$harness"; then
-    echo 'macOS custody laboratory contains a forbidden RUNNER_TEMP fallback' >&2
+require_literal 'cross_uid_peer_diagnostic(agent_uid, scratch)' "$harness"
+require_literal 'assert launchd_peer_uid(AGENT, RUNTIME / "agent.sock") == custodian_uid' "$harness"
+if grep -Fq 'RUNNER_TEMP' "$harness"; then
+    echo 'macOS custody laboratory still depends on the private runner temp root' >&2
     exit 1
 fi

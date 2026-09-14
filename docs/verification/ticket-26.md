@@ -52,10 +52,10 @@ Prerequisites are a fresh macOS 13-or-newer Intel or Apple-silicon CI runner,
 the repository-pinned Rust 1.98.1 toolchain, Xcode command-line tools,
 Python 3, a logged-in non-root console user, and passwordless `sudo`. The
 runner must not already contain the three synthetic accounts or any of the
-canonical product paths. `RUNNER_TEMP` must name an existing absolute
-directory traversable by the synthetic UIDs; absence or failed traversal is an
-explicit prerequisite failure. A collision is a hard failure, never
-permission to replace existing host state.
+canonical product paths. The only fixture root is the fixed
+`/private/var/tmp/passwordmanager-ticket26`; its parent must be root-owned mode
+`01777`. A missing/mismatched parent or fixture collision is a hard failure,
+never permission to select another path or replace existing host state.
 
 The workflow fixes `RUSTUP_AUTO_INSTALL=0` before every Rustup invocation and
 installs only the exact fully qualified 1.98.1 host toolchain into
@@ -68,8 +68,8 @@ The shell gate performs the locked/offline native build, native unit tests and
 `plutil` validation. It requires each `pm`/`pm-custody` artifact to be a
 single-architecture Mach-O exactly matching `uname -m`. Its Python harness then:
 
-1. creates a collision-guarded, runner-owned `0711` fixture root below the
-   required `RUNNER_TEMP`, then `_passwordmanager`, `_pmagent26` and
+1. creates the collision-guarded, runner-owned `0711` fixture root, then
+   `_passwordmanager`, `_pmagent26` and
    `_pmother26` with unused real Darwin UIDs/groups; its private per-identity
    directories remain `0700`, bilateral denial is probed, and only synthetic
    public RPKs are copied into a root-owned `0444` publication directory;
@@ -144,13 +144,13 @@ identified the cause: the runner-owned `pm-ticket26` parent was created mode
 `0700`, so the real agent UID could not traverse to its own `0700` child.
 Captured stdout/stderr were hidden by `check=True`, and the later bootstrap
 and authorization steps would also have crossed private `0700` directories to
-read public RPKs. The corrected harness makes synthetic keygen failures report
-bounded return-code/stdout/stderr metadata, requires `RUNNER_TEMP` without a
-substitute path, uses only a `0711` collision-guarded fixture root, proves
-private-subdirectory denials, publishes only public RPKs through a root-owned
-`0444` area, and obtains privileged metadata through the administrative test
-observer. It never broadens a private directory or changes the runner parent.
-This is still a runtime fixture RED, not native acceptance.
+read public RPKs. Checkpoint `8b54d20` made synthetic keygen failures report
+bounded return-code/stdout/stderr metadata, required `RUNNER_TEMP` without a
+substitute path, used a `0711` collision-guarded fixture root, proved private
+subdirectory denials, published only public RPKs through a root-owned `0444`
+area, and obtained privileged metadata through the administrative test
+observer. It did not broaden a private directory or change the runner parent.
+That remained a runtime fixture RED, not native acceptance.
 
 The fourth native product run
 [`34765246514`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34765246514)
@@ -165,14 +165,9 @@ matching single-architecture Mach-O artifacts.
 On Apple silicon, the new prerequisite probe established that
 `/Users/runner/work/_temp` itself is not traversable by `_passwordmanager`.
 The laboratory stopped there before product setup, exactly as required; it
-did not modify the runner-owned parent. Moving the fixture outside the
-documented `RUNNER_TEMP` root would change the authorized method and therefore
-requires explicit approval. The single proposed replacement is the fixed
-`/private/var/tmp/passwordmanager-ticket26` root, with no alternate path: first
-require its parent to be root-owned mode `01777`, apply the existing collision
-guard, create the fixture root runner-owned `0711`, retain every private child
-at `0700`, run the same bilateral access probes, and clean only that owned
-fixture root.
+did not modify the runner-owned parent. The user subsequently authorized the
+single fixed `/private/var/tmp/passwordmanager-ticket26` replacement described
+by the method above, with no alternate path or parent permission change.
 
 On Intel, the parent traversal probes passed and the fixture advanced through
 synthetic key generation, public-RPK publication, bootstrap/vault creation,
@@ -190,6 +185,16 @@ opaque failure does not prove which remaining boundary failed. The successful
 same-UID socket-pair `getpeereid` unit test does not establish the cross-UID
 launchd case. No product dispatch, native primitive, or verification method
 was changed on the basis of this uncertainty.
+
+Before repeating the first agent probe, the harness now verifies only safe
+fixture metadata and kernel identity observations: exact owner/mode for the
+root-owned profile and public RPK, agent-owned private-key path and
+custodian-owned socket; the numeric UID actually selected by `sudo`; bilateral
+cross-UID `getpeereid` on a synthetic Unix pair; and the agent-side peer UID on
+the real launchd socket. Diagnostics contain only synthetic account names,
+numeric UIDs, modes, return codes and bounded stdout/stderr. They never read or
+print private-key bytes, and the public `probe` failure remains exactly
+`CUSTODY_UNAVAILABLE`.
 
 The acceptance-workflow checker was written before the workflow existed:
 

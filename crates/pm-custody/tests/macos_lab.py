@@ -3,6 +3,7 @@
 
 """Destructive-only-inside-ephemeral-CI native macOS custody laboratory."""
 
+import ctypes
 import os
 import pathlib
 import pwd
@@ -22,6 +23,20 @@ STATE = pathlib.Path("/Library/Application Support/PasswordManager")
 RUNTIME = pathlib.Path("/var/run/passwordmanager")
 PLIST = pathlib.Path(f"/Library/LaunchDaemons/{LABEL}.plist")
 PASSWORD = b"synthetic ticket 26 master password"
+PEER_UID_SCRIPT = """
+import ctypes, socket, sys
+stream = socket.socket(socket.AF_UNIX)
+stream.connect(sys.argv[1])
+uid = ctypes.c_uint(0)
+gid = ctypes.c_uint(0)
+libc = ctypes.CDLL(None, use_errno=True)
+libc.getpeereid.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+libc.getpeereid.restype = ctypes.c_int
+assert libc.getpeereid(stream.fileno(), ctypes.byref(uid), ctypes.byref(gid)) == 0
+print(uid.value, flush=True)
+if len(sys.argv) == 3:
+    assert stream.recv(1) == b'x'
+"""
 
 
 def run(command, *, check=True, input=None, timeout=30):
@@ -102,6 +117,59 @@ def require_traversal(user, path):
         f"returncode={result.returncode}, stdout={result.stdout[:1024]!r}, "
         f"stderr={result.stderr[:1024]!r}"
     )
+
+
+def peer_uid(stream):
+    uid = ctypes.c_uint(0)
+    gid = ctypes.c_uint(0)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.getpeereid.argtypes = [
+        ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint),
+    ]
+    libc.getpeereid.restype = ctypes.c_int
+    result = libc.getpeereid(stream.fileno(), ctypes.byref(uid), ctypes.byref(gid))
+    assert result == 0, f"synthetic getpeereid failed: errno={ctypes.get_errno()}"
+    return uid.value
+
+
+def cross_uid_peer_diagnostic(agent_uid, scratch):
+    endpoint = scratch / "cross-uid-diagnostic.sock"
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(endpoint)); endpoint.chmod(0o666)
+    assert owner_mode(endpoint) == (os.getuid(), 0o666)
+    listener.listen(1); listener.settimeout(5)
+    client = subprocess.Popen(
+        ["sudo", "-n", "-u", AGENT, sys.executable, "-c", PEER_UID_SCRIPT,
+         str(endpoint), "wait"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        connection, _ = listener.accept()
+        with connection:
+            assert peer_uid(connection) == agent_uid
+            connection.sendall(b"x")
+        stdout, stderr = client.communicate(timeout=5)
+        assert client.returncode == 0 and stderr == b"", (
+            client.returncode, stdout[:1024], stderr[:1024],
+        )
+        assert stdout == f"{os.getuid()}\n".encode(), stdout[:1024]
+    finally:
+        listener.close()
+        if client.poll() is None:
+            client.kill(); client.wait(timeout=5)
+        if endpoint.exists():
+            endpoint.unlink()
+
+
+def launchd_peer_uid(user, endpoint):
+    result = sudo(
+        [sys.executable, "-c", PEER_UID_SCRIPT, endpoint],
+        user=user, check=False,
+    )
+    assert result.returncode == 0 and result.stderr == b"", (
+        result.returncode, result.stdout[:1024], result.stderr[:1024],
+    )
+    return int(result.stdout.decode().strip())
 
 
 def publish_rpk(source, destination):
@@ -197,11 +265,8 @@ def main():
 
     created = []
     bootstrapped = False
-    runner_temp = os.environ.get("RUNNER_TEMP")
-    assert runner_temp, "RUNNER_TEMP is required for the collision-guarded native fixture"
-    runner_temp = pathlib.Path(runner_temp)
-    assert runner_temp.is_absolute() and runner_temp.is_dir(), runner_temp
-    scratch = runner_temp / "pm-ticket26"
+    scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")
+    assert owner_mode(scratch.parent) == (0, 0o1777)
     assert not scratch.exists(), f"refusing to replace pre-existing scratch path: {scratch}"
     try:
         scratch.mkdir(mode=0o711)
@@ -211,8 +276,11 @@ def main():
         for name, uid in [(CUSTODIAN, custodian_uid), (AGENT, agent_uid), (OTHER, other_uid)]:
             created.append(name); create_account(name, uid)
         for name in (CUSTODIAN, AGENT, OTHER):
-            require_traversal(name, runner_temp)
+            require_traversal(name, scratch.parent)
             require_traversal(name, scratch)
+        observed_agent_uid = sudo(["id", "-u"], user=AGENT).stdout.decode().strip()
+        assert observed_agent_uid == str(agent_uid), observed_agent_uid
+        cross_uid_peer_diagnostic(agent_uid, scratch)
 
         sudo(["mkdir", "-p", INSTALL, STATE, RUNTIME])
         sudo(["install", "-o", "root", "-g", "wheel", "-m", "0755", binary, INSTALL / "pm-custody"])
@@ -280,8 +348,13 @@ def main():
         assert process_command.split()[0] == str(INSTALL / "pm-custody"), process_command
 
         for path, uid, mode in [(INSTALL / "pm-custody", 0, 0o755),
-                                (PLIST, 0, 0o644), (bootstrap, custodian_uid, 0o400)]:
+                                (PLIST, 0, 0o644), (bootstrap, custodian_uid, 0o400),
+                                (agent_profile, 0, 0o444),
+                                (published_agent_pub, 0, 0o444),
+                                (agent_key, agent_uid, 0o400),
+                                (RUNTIME / "agent.sock", custodian_uid, 0o666)]:
             assert owner_mode(path) == (uid, mode), path
+        assert launchd_peer_uid(AGENT, RUNTIME / "agent.sock") == custodian_uid
         probe(INSTALL / "pm-custody", AGENT, agent_profile, agent_key, RUNTIME / "agent.sock")
         probe(INSTALL / "pm-custody", pwd.getpwuid(os.getuid()).pw_name,
               human_profile, human_key, RUNTIME / "human.sock")

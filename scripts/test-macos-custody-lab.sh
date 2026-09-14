@@ -14,7 +14,7 @@ if [[ "$(id -u)" == 0 ]] || ! sudo -n true; then
   echo "ticket 26 laboratory requires a non-root user with passwordless sudo" >&2
   exit 1
 fi
-for command in ar cargo cc cmp dscl file lipo launchctl plutil python3 script security stat sudo; do
+for command in ar cargo cc cmp dscl file id lipo launchctl plutil python3 script security stat sudo; do
   command -v "$command" >/dev/null || {
     echo "ticket 26 laboratory requires $command" >&2
     exit 1
