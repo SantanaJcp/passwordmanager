@@ -95,3 +95,27 @@ tiene antes de append audit; el rollback elimina authority/outbox y la
 reconexión vuelve a quedar permitida. Así sobreviven dos unlocks del intento
 fallido (inicial y receipt), el cliente CRUD exitoso registra otros dos y sus
 tres mutaciones dan el total independiente `2+2+3=7`.
+
+## Resultado de integración Linux
+
+Tras corregir el trigger por el estado staged real, el tercer intento enfocado
+de los cuatro labs terminó `count=4 failures=0`; su resumen es
+`/tmp/pm-audit-unlock-root-focused4-attempt3.log`. El intento anterior 4/4
+permanece en `/tmp/pm-audit-unlock-root-focused4-attempt2.log`, pero no se usa
+como aceptación por la debilidad descrita arriba.
+
+Los gates finales sobre `dcfab1d` terminaron:
+
+- `scripts/check.sh`: rc0, `/tmp/pm-audit-unlock-root-check-final.log`;
+- `scripts/clean-offline-build.sh`: rc0 en 39.65 s,
+  `/tmp/pm-audit-unlock-root-clean-final.log`;
+- barrida secuencial única de los 20 labs: `count=20 failures=0`,
+  `/tmp/pm-audit-unlock-root-labs-attempt2-summary.log`, con salida individual
+  `/tmp/pm-audit-unlock-root-attempt2-test-linux-*-lab.log`.
+
+La barrida usó `PM_KEYCLOAK_DIST` y `PM_CFT_DIR` bajo los artefactos fijados en
+`.scratch/lab-artifacts`. No hubo skips, retry dentro de una aserción ni cambio
+de timeout/KDF. Los límites impresos por los labs siguen siendo límites, no
+evidencia nativa. Tras la barrida se verificaron ausencia de procesos y raíces
+temporales propias y se retiraron sólo los `__pycache__` generados por estos
+labs mediante sus paths exactos.
