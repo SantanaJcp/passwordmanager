@@ -18,11 +18,12 @@ from linux_lab import as_uid, create_vault, start_as, stop, wait_for_sockets, wi
 CUSTODIAN, HUMAN, AGENT = 1, 0, 3
 DEVICE = "23232323232323232323232323232323"
 TMUX = "/usr/bin/tmux"
+TMUX_SERVER = os.environ.get("PM_TMUX_SERVER", "pm-ticket23")
 
 
 def tmux(root, *args, check=True):
     return subprocess.run(
-        [TMUX, "-L", "pm-ticket23", *map(str, args)],
+        [TMUX, "-L", TMUX_SERVER, *map(str, args)],
         check=check, capture_output=True, timeout=10,
         env={**os.environ, "HOME": str(root / "human"), "TERM": "xterm-256color"},
     )

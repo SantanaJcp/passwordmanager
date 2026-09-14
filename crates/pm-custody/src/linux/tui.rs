@@ -6,9 +6,12 @@
 
 use std::{
     ffi::OsString,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::Write,
-    os::unix::fs::MetadataExt,
+    os::{
+        fd::AsRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -32,10 +35,11 @@ use std::os::unix::net::UnixStream;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    Cursor, HUMAN_MAGIC, KeyMaterial, Profile, Role, connect, decode_prepared_response,
-    finish_arguments, push_bytes, read_frame, read_key, read_profile, rpc_commit, rpc_history,
+    Cursor, HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared, connect,
+    decode_prepared_response, finish_arguments, hex, open_1pux_source, push_bytes, read_frame,
+    read_import_source, read_key, read_profile, rpc_commit, rpc_download_atomic, rpc_history,
     rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore, rpc_unlock,
-    write_frame,
+    send_file_descriptor, write_frame,
 };
 use crate::{Failure, take_path};
 
@@ -64,6 +68,48 @@ enum Mode {
     SelectField,
     ConfirmPurgeRevisions,
     ConfirmPurgeItem,
+    Operations(OperationMenu),
+    CsvImport,
+    OnePuxImport,
+    ConfirmImport,
+    NativeBackup,
+    PlaintextExport,
+    ConfirmPlaintextExport,
+    NativeRestore,
+    MasterRotate,
+    AuditPurge,
+    AttachmentPath,
+    PairDevice,
+    SyncNow,
+    SyncStatus,
+    RetireDevice,
+    RecoveryRotate,
+    SelectAttachment,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OperationMenu {
+    Migration,
+    Backup,
+    Devices,
+    Audit,
+}
+
+const fn operation_help(menu: OperationMenu) -> &'static str {
+    match menu {
+        OperationMenu::Migration => {
+            "Migration: 1 CSV preview/mapping  2 1PUX preview  Enter confirms only after review  Esc cancels"
+        }
+        OperationMenu::Backup => {
+            "Backup/recovery: 1 native backup  2 plaintext export  3 restore  4 master rotation  5 recovery rotation"
+        }
+        OperationMenu::Devices => {
+            "Devices/sync: 1 pair  2 start sync  3 retire  4 status by job ID; sync remains observable after lock/restart"
+        }
+        OperationMenu::Audit => {
+            "Audit: 1 query metadata  2 purge displayed range; purge preserves an explicit discontinuity"
+        }
+    }
 }
 
 struct App {
@@ -76,12 +122,37 @@ struct App {
     reveal: Option<(Zeroizing<Vec<u8>>, Instant)>,
     clipboard: Option<ClipboardLease>,
     idle_at: Instant,
+    wire_at: Instant,
     idle: Duration,
     reveal_for: Duration,
     copy_for: Duration,
     fields: Vec<FieldDescriptor>,
     field_selected: usize,
     field_copy: bool,
+    password: Zeroizing<Vec<u8>>,
+    pending: Option<PendingOperation>,
+    attachments: Vec<AttachmentDescriptor>,
+    sync_job: Option<[u8; 16]>,
+    sync_poll_at: Instant,
+}
+
+enum PendingOperation {
+    Import(WirePrepared),
+    PlaintextExport {
+        destination: PathBuf,
+        prepared: WirePrepared,
+    },
+    Attachment {
+        item: [u8; 16],
+        attachment: [u8; 16],
+    },
+    RecoveryCode(Zeroizing<Vec<u8>>),
+}
+
+struct AttachmentDescriptor {
+    id: [u8; 16],
+    label: String,
+    size: u64,
 }
 
 struct FieldDescriptor {
@@ -101,12 +172,18 @@ impl App {
             reveal: None,
             clipboard: None,
             idle_at: Instant::now(),
+            wire_at: Instant::now(),
             idle,
             reveal_for,
             copy_for,
             fields: Vec::new(),
             field_selected: 0,
             field_copy: false,
+            password: Zeroizing::new(Vec::new()),
+            pending: None,
+            attachments: Vec::new(),
+            sync_job: None,
+            sync_poll_at: Instant::now(),
         }
     }
 
@@ -277,6 +354,7 @@ fn run_terminal(
     tls.write_all(HUMAN_MAGIC)
         .map_err(|_| Failure::Unavailable)?;
     rpc_unlock(&mut tls, password.as_bytes())?;
+    app.password.extend_from_slice(password.as_bytes());
     app.input.zeroize();
     write_frame(&mut tls, &[46])?;
     app.replace_catalog(decode_catalog(&read_frame(&mut tls)?)?);
@@ -310,6 +388,20 @@ fn event_loop(
             draw(terminal, app)?;
             return Ok(());
         }
+        if app.sync_job.is_some()
+            && Instant::now().duration_since(app.sync_poll_at) >= Duration::from_millis(250)
+        {
+            poll_sync(app, tls)?;
+        }
+        if app.mode != Mode::RecoveryRotate
+            && Instant::now().duration_since(app.wire_at) >= Duration::from_secs(5)
+        {
+            write_frame(tls, &[65])?;
+            if read_frame(tls)? != [0] {
+                return Err(Failure::Unavailable);
+            }
+            app.wire_at = Instant::now();
+        }
         draw(terminal, app)?;
         if !event::poll(Duration::from_millis(100)).map_err(|_| Failure::Unavailable)? {
             continue;
@@ -318,8 +410,15 @@ fn event_loop(
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 app.idle_at = Instant::now();
-                if handle_key(app, tls, key)? {
-                    return Ok(());
+                match handle_key(app, tls, key) {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(_) => {
+                        app.pending = None;
+                        app.input.zeroize();
+                        app.mode = Mode::Browse;
+                        app.status = "Operation failed explicitly; no success was recorded".into();
+                    }
                 }
             }
             _ => {}
@@ -331,7 +430,14 @@ fn handle_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result<bool, 
     if app.mode == Mode::SelectField {
         return handle_field_key(app, tls, key).map(|()| false);
     }
+    if app.mode == Mode::SelectAttachment {
+        return handle_attachment_key(app, key).map(|()| false);
+    }
     if app.mode != Mode::Browse {
+        if let Mode::Operations(menu) = app.mode {
+            handle_operation_key(app, tls, menu, key)?;
+            return Ok(false);
+        }
         return handle_prompt_key(app, tls, key).map(|()| false);
     }
     match key.code {
@@ -357,9 +463,94 @@ fn handle_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result<bool, 
         ),
         KeyCode::Char('r') => select_exposure_field(app, tls, false)?,
         KeyCode::Char('c') => select_exposure_field(app, tls, true)?,
+        KeyCode::Char('m') => open_operations(app, OperationMenu::Migration),
+        KeyCode::Char('b') => open_operations(app, OperationMenu::Backup),
+        KeyCode::Char('y') => open_operations(app, OperationMenu::Devices),
+        KeyCode::Char('z') => open_operations(app, OperationMenu::Audit),
+        KeyCode::Char('D') => select_attachment(app, tls)?,
         _ => {}
     }
     Ok(false)
+}
+
+fn handle_operation_key(
+    app: &mut App,
+    tls: &mut HumanTls,
+    menu: OperationMenu,
+    key: KeyEvent,
+) -> Result<(), Failure> {
+    if key.code == KeyCode::Esc {
+        app.mode = Mode::Browse;
+        app.status = "Cancelled; nothing changed".into();
+        return Ok(());
+    }
+    match (menu, key.code) {
+        (OperationMenu::Migration, KeyCode::Char('1')) => begin_prompt(
+            app,
+            Mode::CsvImport,
+            "CSV source|chrome/apple/mappable|keep/replace (plaintext source is never deleted):",
+        ),
+        (OperationMenu::Migration, KeyCode::Char('2')) => begin_prompt(
+            app,
+            Mode::OnePuxImport,
+            "1PUX source|keep/replace (private source is never deleted):",
+        ),
+        (OperationMenu::Backup, KeyCode::Char('1')) => begin_prompt(
+            app,
+            Mode::NativeBackup,
+            "New native backup path (encrypted; existing path rejected):",
+        ),
+        (OperationMenu::Backup, KeyCode::Char('2')) => begin_prompt(
+            app,
+            Mode::PlaintextExport,
+            "New plaintext export path (persistent readable copy; existing path rejected):",
+        ),
+        (OperationMenu::Backup, KeyCode::Char('3')) => begin_prompt(
+            app,
+            Mode::NativeRestore,
+            "Archive path|RESTORE (adds new IDs/keys; current authority is preserved):",
+        ),
+        (OperationMenu::Backup, KeyCode::Char('4')) => begin_prompt(
+            app,
+            Mode::MasterRotate,
+            "New master password|ROTATE (old backups retain historical recovery paths):",
+        ),
+        (OperationMenu::Backup, KeyCode::Char('5')) => rotate_recovery(app, tls)?,
+        (OperationMenu::Devices, KeyCode::Char('1')) => begin_prompt(
+            app,
+            Mode::PairDevice,
+            "Observed server RPK pin hex|new protected pairing path|PAIR:",
+        ),
+        (OperationMenu::Devices, KeyCode::Char('2')) => begin_prompt(
+            app,
+            Mode::SyncNow,
+            "pairing|pm-sync program|socket|client key|server public|server pin hex|SYNC (offline is explicit):",
+        ),
+        (OperationMenu::Devices, KeyCode::Char('3')) => begin_prompt(
+            app,
+            Mode::RetireDevice,
+            "Exact device ID hex|RETIRE (terminal for observed prefixes; offline events beyond them are rejected):",
+        ),
+        (OperationMenu::Devices, KeyCode::Char('4')) => begin_prompt(
+            app,
+            Mode::SyncStatus,
+            "Exact sync job ID hex (query only; does not repeat the operation):",
+        ),
+        (OperationMenu::Audit, KeyCode::Char('1')) => query_audit(app, tls)?,
+        (OperationMenu::Audit, KeyCode::Char('2')) => begin_prompt(
+            app,
+            Mode::AuditPurge,
+            "generation:through-sequence:PURGE AUDIT (exact range becomes a gap):",
+        ),
+        _ => app.status = operation_help(menu).into(),
+    }
+    Ok(())
+}
+
+fn open_operations(app: &mut App, menu: OperationMenu) {
+    app.clear_exposure();
+    app.mode = Mode::Operations(menu);
+    app.status = operation_help(menu).into();
 }
 
 fn begin_prompt(app: &mut App, mode: Mode, status: &str) {
@@ -372,7 +563,15 @@ fn begin_prompt(app: &mut App, mode: Mode, status: &str) {
 fn handle_prompt_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result<(), Failure> {
     match key.code {
         KeyCode::Esc => {
+            if app.mode == Mode::RecoveryRotate {
+                write_frame(tls, &[])?;
+                if read_frame(tls)? != [2] {
+                    return Err(Failure::Unavailable);
+                }
+            }
             app.input.zeroize();
+            app.pending = None;
+            app.reveal = None;
             app.mode = Mode::Browse;
             app.status = "Cancelled".into();
         }
@@ -380,7 +579,9 @@ fn handle_prompt_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result
             app.input.pop();
         }
         KeyCode::Enter => submit_prompt(app, tls)?,
-        KeyCode::Char(value) if !value.is_control() && app.input.len() < 1024 => {
+        KeyCode::Char(value)
+            if !value.is_control() && app.input.len() < prompt_input_limit(app.mode) =>
+        {
             app.input.push(value);
         }
         _ => {}
@@ -388,23 +589,657 @@ fn handle_prompt_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result
     Ok(())
 }
 
+const fn prompt_input_limit(mode: Mode) -> usize {
+    match mode {
+        Mode::CsvImport
+        | Mode::OnePuxImport
+        | Mode::NativeBackup
+        | Mode::PlaintextExport
+        | Mode::NativeRestore
+        | Mode::AttachmentPath
+        | Mode::PairDevice
+        | Mode::SyncNow => 32 * 1024,
+        _ => 1024,
+    }
+}
+
 fn submit_prompt(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
     let mode = app.mode;
-    let value = app.input.to_string();
+    let value = Zeroizing::new(app.input.to_string());
     app.input.zeroize();
     app.mode = Mode::Browse;
     match mode {
         Mode::Search => search(app, tls, &value),
-        Mode::Tag => organize(app, tls, Some(value)),
+        Mode::Tag => organize(app, tls, Some(value.to_string())),
         Mode::Generate => generate(app, tls, &value),
-        Mode::ConfirmPurgeRevisions if value == "PURGE" => purge_revisions(app, tls),
-        Mode::ConfirmPurgeItem if value == "PURGE" => purge_item(app, tls),
+        Mode::ConfirmPurgeRevisions if value.as_str() == "PURGE" => purge_revisions(app, tls),
+        Mode::ConfirmPurgeItem if value.as_str() == "PURGE" => purge_item(app, tls),
         Mode::ConfirmPurgeRevisions | Mode::ConfirmPurgeItem => {
             app.status = "Confirmation mismatch; nothing changed".into();
             Ok(())
         }
-        Mode::Unlock | Mode::Browse | Mode::SelectField => Ok(()),
+        Mode::CsvImport => preview_csv(app, tls, &value),
+        Mode::OnePuxImport => preview_1pux(app, tls, &value),
+        Mode::ConfirmImport => confirm_import(app, tls, &value),
+        Mode::NativeBackup => native_backup(app, tls, &value),
+        Mode::PlaintextExport => preview_plaintext_export(app, tls, &value),
+        Mode::ConfirmPlaintextExport => confirm_plaintext_export(app, tls, &value),
+        Mode::NativeRestore => native_restore(app, tls, &value),
+        Mode::MasterRotate => master_rotate(app, tls, &value),
+        Mode::AuditPurge => purge_audit(app, tls, &value),
+        Mode::AttachmentPath => download_attachment(app, tls, &value),
+        Mode::PairDevice => pair_device(app, tls, &value),
+        Mode::SyncNow => sync_now(app, tls, &value),
+        Mode::SyncStatus => select_sync_job(app, tls, &value),
+        Mode::RetireDevice => retire_device(app, tls, &value),
+        Mode::RecoveryRotate => confirm_recovery_rotation(app, tls, &value),
+        Mode::Unlock
+        | Mode::Browse
+        | Mode::SelectField
+        | Mode::SelectAttachment
+        | Mode::Operations(_) => Ok(()),
     }
+}
+
+fn split_exact<const N: usize>(value: &str) -> Result<[String; N], Failure> {
+    let mut fields = vec![String::new()];
+    let mut escaped = false;
+    for character in value.chars() {
+        if escaped {
+            fields
+                .last_mut()
+                .ok_or(Failure::Unavailable)?
+                .push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '|' {
+            fields.push(String::new());
+        } else {
+            fields
+                .last_mut()
+                .ok_or(Failure::Unavailable)?
+                .push(character);
+        }
+    }
+    if escaped {
+        return Err(Failure::Unavailable);
+    }
+    fields.try_into().map_err(|_| Failure::Unavailable)
+}
+
+fn decode_import_preview(response: &[u8]) -> Result<(String, WirePrepared), Failure> {
+    let mut cursor = Cursor::new(response);
+    cursor.expect(&[0])?;
+    let values = [
+        cursor.u64()?,
+        cursor.u64()?,
+        cursor.u64()?,
+        cursor.u64()?,
+        cursor.u64()?,
+        cursor.u64()?,
+        cursor.u64()?,
+    ];
+    let count = usize::try_from(cursor.u32()?).map_err(|_| Failure::Unavailable)?;
+    for _ in 0..count {
+        cursor.fixed(16)?;
+    }
+    let prepared = WirePrepared {
+        transaction_id: cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+        item_id: cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+        command: cursor.bytes()?,
+        body: cursor.bytes()?,
+        signature: cursor
+            .fixed(64)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    };
+    cursor.finish()?;
+    Ok((
+        format!(
+            "Preview values hidden: total={} new={} replaced={} exact-duplicates={} excluded={} preserved-fields={} pages={}; type IMPORT to commit",
+            values[0], values[1], values[2], values[3], values[4], values[5], values[6]
+        ),
+        prepared,
+    ))
+}
+
+fn preview_csv(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let [path, format, duplicates] = split_exact::<3>(value)?;
+    let format = match format.as_str() {
+        "chrome" => 0,
+        "apple" => 1,
+        "mappable" => 2,
+        _ => return Err(Failure::Unavailable),
+    };
+    let replace = match duplicates.as_str() {
+        "keep" => 0,
+        "replace" => 1,
+        _ => return Err(Failure::Unavailable),
+    };
+    let source = read_import_source(Path::new(&path))?;
+    let mut request = vec![23, format, replace];
+    push_bytes(&mut request, &source)?;
+    write_frame(tls, &request)?;
+    let (summary, prepared) = decode_import_preview(&read_frame(tls)?)?;
+    let summary = format!(
+        "Mapping={} duplicate-action={}; {summary}",
+        ["chrome", "apple", "mappable"][usize::from(format)],
+        duplicates
+    );
+    app.pending = Some(PendingOperation::Import(prepared));
+    begin_prompt(app, Mode::ConfirmImport, &summary);
+    Ok(())
+}
+
+fn preview_1pux(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let [path, duplicates] = split_exact::<2>(value)?;
+    let replace = match duplicates.as_str() {
+        "keep" => 0,
+        "replace" => 1,
+        _ => return Err(Failure::Unavailable),
+    };
+    let source = open_1pux_source(Path::new(&path))?;
+    write_frame(tls, &[31, replace])?;
+    if read_frame(tls)? != [0] {
+        return Err(Failure::Unavailable);
+    }
+    send_file_descriptor(&tls.sock, source.as_raw_fd())?;
+    let (summary, prepared) = decode_import_preview(&read_frame(tls)?)?;
+    app.pending = Some(PendingOperation::Import(prepared));
+    begin_prompt(app, Mode::ConfirmImport, &summary);
+    Ok(())
+}
+
+fn confirm_import(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    if value != "IMPORT" {
+        app.pending = None;
+        app.status = "Confirmation mismatch; import cancelled".into();
+        return Ok(());
+    }
+    let Some(PendingOperation::Import(prepared)) = app.pending.take() else {
+        return Err(Failure::Unavailable);
+    };
+    rpc_commit(tls, &prepared)?;
+    refresh(app, tls)?;
+    app.status = "Import committed transactionally; imported credentials remain disabled".into();
+    Ok(())
+}
+
+fn native_backup(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let bytes = rpc_download_atomic(tls, &[32], Path::new(value))?;
+    app.status = format!(
+        "Native encrypted backup complete: {bytes} bytes; existing exposed copies are unchanged"
+    );
+    Ok(())
+}
+
+fn preview_plaintext_export(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    write_frame(tls, &[33, 0])?;
+    let prepared = decode_prepared_response(&read_frame(tls)?)?;
+    app.pending = Some(PendingOperation::PlaintextExport {
+        destination: PathBuf::from(value),
+        prepared,
+    });
+    begin_prompt(
+        app,
+        Mode::ConfirmPlaintextExport,
+        "PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:",
+    );
+    Ok(())
+}
+
+fn confirm_plaintext_export(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    if value != "EXPORT" {
+        app.pending = None;
+        app.status = "Confirmation mismatch; no plaintext created".into();
+        return Ok(());
+    }
+    let Some(PendingOperation::PlaintextExport {
+        destination,
+        prepared,
+    }) = app.pending.take()
+    else {
+        return Err(Failure::Unavailable);
+    };
+    let mut request = vec![33, 1];
+    push_bytes(&mut request, &prepared.command)?;
+    request.extend_from_slice(&prepared.signature);
+    push_bytes(&mut request, &prepared.body)?;
+    let bytes = rpc_download_atomic(tls, &request, &destination)?;
+    app.status =
+        format!("Plaintext export complete: {bytes} bytes; protect or remove it explicitly");
+    Ok(())
+}
+
+fn stream_file_to_server(tls: &mut HumanTls, path: &Path) -> Result<(), Failure> {
+    let mut source = File::open(path).map_err(|_| Failure::Unavailable)?;
+    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
+    loop {
+        let count =
+            std::io::Read::read(&mut source, &mut buffer).map_err(|_| Failure::Unavailable)?;
+        if count == 0 {
+            break;
+        }
+        write_frame(tls, &buffer[..count])?;
+    }
+    buffer.zeroize();
+    write_frame(tls, &[0])
+}
+
+fn native_restore(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let [path, confirmation] = split_exact::<2>(value)?;
+    if confirmation != "RESTORE" {
+        app.status = "Confirmation mismatch; vault unchanged".into();
+        return Ok(());
+    }
+    let mut request = vec![34];
+    push_bytes(&mut request, &app.password)?;
+    write_frame(tls, &request)?;
+    stream_file_to_server(tls, Path::new(&path))?;
+    let prepared = decode_prepared_response(&read_frame(tls)?)?;
+    rpc_commit(tls, &prepared)?;
+    refresh(app, tls)?;
+    app.status = "Restore committed with new IDs/keys; current authority preserved and imported grants inactive".into();
+    Ok(())
+}
+
+fn master_rotate(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let [mut replacement, confirmation] = split_exact::<2>(value)?;
+    if confirmation != "ROTATE" || replacement.is_empty() {
+        replacement.zeroize();
+        app.status = "Confirmation mismatch; master password unchanged".into();
+        return Ok(());
+    }
+    let mut request = vec![43];
+    push_bytes(&mut request, replacement.as_bytes())?;
+    write_frame(tls, &request)?;
+    request.zeroize();
+    let prepared = decode_prepared_response(&read_frame(tls)?)?;
+    rpc_commit(tls, &prepared)?;
+    app.password.zeroize();
+    app.password.extend_from_slice(replacement.as_bytes());
+    replacement.zeroize();
+    app.status =
+        "Master password rotated; old backups and exposed copies retain historical paths".into();
+    Ok(())
+}
+
+fn query_audit(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
+    let mut request = vec![15];
+    request.extend_from_slice(&1_u64.to_be_bytes());
+    request.extend_from_slice(&1_u64.to_be_bytes());
+    request.extend_from_slice(&64_u32.to_be_bytes());
+    write_frame(tls, &request)?;
+    let response = read_frame(tls)?;
+    let mut c = Cursor::new(&response);
+    c.expect(&[0])?;
+    let records = c.u64()?;
+    let gaps = c.u64()?;
+    let segments = c.u64()?;
+    c.finish()?;
+    app.status = format!(
+        "Audit metadata: records={records} discontinuities={gaps} segments={segments}; values hidden"
+    );
+    Ok(())
+}
+
+fn purge_audit(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let mut parts = value.splitn(3, ':');
+    let generation = parts
+        .next()
+        .ok_or(Failure::Unavailable)?
+        .parse::<u64>()
+        .map_err(|_| Failure::Unavailable)?;
+    let through = parts
+        .next()
+        .ok_or(Failure::Unavailable)?
+        .parse::<u64>()
+        .map_err(|_| Failure::Unavailable)?;
+    if parts.next() != Some("PURGE AUDIT") {
+        app.status = "Confirmation mismatch; audit unchanged".into();
+        return Ok(());
+    }
+    let mut request = vec![16];
+    request.extend_from_slice(&generation.to_be_bytes());
+    request.extend_from_slice(&through.to_be_bytes());
+    commit_request(tls, &request)?;
+    app.status = format!(
+        "Audit purged only generation {generation} through sequence {through}; discontinuity retained"
+    );
+    Ok(())
+}
+
+fn rotate_recovery(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
+    write_frame(tls, &[44])?;
+    let response = read_frame(tls)?;
+    let mut c = Cursor::new(&response);
+    c.expect(&[0])?;
+    let code = Zeroizing::new(c.bytes()?);
+    c.finish()?;
+    app.pending = Some(PendingOperation::RecoveryCode(code));
+    begin_prompt(
+        app,
+        Mode::RecoveryRotate,
+        "Recovery code shown temporarily; store externally, then re-enter it exactly to commit:",
+    );
+    if let Some(PendingOperation::RecoveryCode(code)) = app.pending.as_ref() {
+        app.reveal = Some((
+            Zeroizing::new(code.to_vec()),
+            Instant::now() + app.reveal_for,
+        ));
+    }
+    Ok(())
+}
+
+fn confirm_recovery_rotation(
+    app: &mut App,
+    tls: &mut HumanTls,
+    value: &str,
+) -> Result<(), Failure> {
+    let Some(PendingOperation::RecoveryCode(code)) = app.pending.take() else {
+        return Err(Failure::Unavailable);
+    };
+    if value.as_bytes() != code.as_slice() {
+        // The server is waiting for the one mandatory confirmation. Send the
+        // mismatch so it rejects the pending rotation rather than substituting
+        // any other recovery path.
+        write_frame(tls, value.as_bytes())?;
+        read_frame(tls)?;
+        return Err(Failure::Unavailable);
+    }
+    write_frame(tls, value.as_bytes())?;
+    let prepared = decode_prepared_response(&read_frame(tls)?)?;
+    rpc_commit(tls, &prepared)?;
+    app.reveal = None;
+    app.status =
+        "Recovery rotated after exact re-entry; historical backups/copies remain usable".into();
+    Ok(())
+}
+
+fn decode_hex_44(value: &str) -> Result<[u8; 44], Failure> {
+    if value.len() != 88 {
+        return Err(Failure::Unavailable);
+    }
+    let mut out = [0_u8; 44];
+    for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        let text = std::str::from_utf8(chunk).map_err(|_| Failure::Unavailable)?;
+        out[index] = u8::from_str_radix(text, 16).map_err(|_| Failure::Unavailable)?;
+    }
+    Ok(out)
+}
+
+fn create_private_output(path: &Path) -> Result<File, Failure> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|_| Failure::Unavailable)
+}
+
+fn pair_device(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let [pin, path, confirmation] = split_exact::<3>(value)?;
+    if confirmation != "PAIR" {
+        app.status = "Confirmation mismatch; no pairing created".into();
+        return Ok(());
+    }
+    let pin = decode_hex_44(&pin)?;
+    let mut request = vec![60];
+    request.extend_from_slice(&pin);
+    write_frame(tls, &request)?;
+    let response = read_frame(tls)?;
+    let mut c = Cursor::new(&response);
+    c.expect(&[0])?;
+    let protected = Zeroizing::new(c.bytes()?);
+    c.finish()?;
+    let mut output = create_private_output(Path::new(&path))?;
+    if output
+        .write_all(&protected)
+        .and_then(|()| output.sync_all())
+        .is_err()
+    {
+        fs::remove_file(path).map_err(|_| Failure::Unavailable)?;
+        return Err(Failure::Unavailable);
+    }
+    app.status =
+        "Protected pairing created for the exact observed RPK pin; transfer remains human custody"
+            .into();
+    Ok(())
+}
+
+fn sync_now(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let [
+        pairing,
+        program,
+        socket,
+        client_key,
+        server_public,
+        pin,
+        confirmation,
+    ] = split_exact::<7>(value)?;
+    if confirmation != "SYNC" {
+        app.status = "Confirmation mismatch; sync not started".into();
+        return Ok(());
+    }
+    if UnixStream::connect(&socket).is_err() {
+        app.status = "Sync endpoint offline; no sync was performed".into();
+        return Ok(());
+    }
+    let protected = Zeroizing::new(fs::read(pairing).map_err(|_| Failure::Unavailable)?);
+    let pin = decode_hex_44(&pin)?;
+    let mut request = Zeroizing::new(vec![63]);
+    push_bytes(&mut request, &protected)?;
+    for path in [program, socket, client_key, server_public] {
+        push_bytes(&mut request, path.as_bytes())?;
+    }
+    request.extend_from_slice(&pin);
+    write_frame(tls, &request)?;
+    let response = read_frame(tls)?;
+    let mut c = Cursor::new(&response);
+    c.expect(&[0])?;
+    let job: [u8; 16] = c.fixed(16)?.try_into().map_err(|_| Failure::Unavailable)?;
+    c.finish()?;
+    app.sync_job = Some(job);
+    app.sync_poll_at = Instant::now();
+    app.status = format!(
+        "Sync job {} authorized and queued; lock/idle does not retain the human root",
+        hex(&job)
+    );
+    Ok(())
+}
+
+fn select_sync_job(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    app.sync_job = Some(decode_hex_16_text(value)?);
+    poll_sync(app, tls)
+}
+
+fn poll_sync(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
+    let job = app.sync_job.ok_or(Failure::Unavailable)?;
+    let mut request = vec![66];
+    request.extend_from_slice(&job);
+    write_frame(tls, &request)?;
+    let response = read_frame(tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let phase = cursor.fixed(1)?[0];
+    let pushed = cursor.u64()?;
+    let pulled = cursor.u64()?;
+    cursor.finish()?;
+    app.sync_poll_at = Instant::now();
+    match phase {
+        1 => app.status = format!("Sync job {} queued", hex(&job)),
+        2 => app.status = format!("Sync job {} pushing ciphertext", hex(&job)),
+        3 => {
+            app.status = format!("Sync job {} pulling ciphertext; pushed={pushed}", hex(&job));
+        }
+        4 => {
+            app.status = format!(
+                "Sync complete through pinned TLS: job={} pushed={pushed} pulled={pulled}",
+                hex(&job)
+            );
+            app.sync_job = None;
+        }
+        5 => {
+            app.status = format!(
+                "Sync job {} unavailable after bounded transport backoff; no success recorded",
+                hex(&job)
+            );
+            app.sync_job = None;
+        }
+        6 => {
+            app.status = format!(
+                "Sync job {} rejected integrity; no state was accepted as success",
+                hex(&job)
+            );
+            app.sync_job = None;
+        }
+        7 => {
+            app.status = format!(
+                "Sync job {} stopped by backpressure; no success was recorded",
+                hex(&job)
+            );
+            app.sync_job = None;
+        }
+        8 => {
+            app.status = format!(
+                "Sync job {} journal/cleanup failed; result is not declared successful",
+                hex(&job)
+            );
+            app.sync_job = None;
+        }
+        9 => {
+            app.status = format!(
+                "Sync job {} rejected its fixed authority/request context; no success recorded",
+                hex(&job)
+            );
+            app.sync_job = None;
+        }
+        _ => return Err(Failure::Unavailable),
+    }
+    Ok(())
+}
+
+fn decode_hex_16_text(value: &str) -> Result<[u8; 16], Failure> {
+    if value.len() != 32 {
+        return Err(Failure::Unavailable);
+    }
+    let mut out = [0_u8; 16];
+    for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        out[index] = u8::from_str_radix(
+            std::str::from_utf8(chunk).map_err(|_| Failure::Unavailable)?,
+            16,
+        )
+        .map_err(|_| Failure::Unavailable)?;
+    }
+    Ok(out)
+}
+
+fn retire_device(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let [device, confirmation] = split_exact::<2>(value)?;
+    if confirmation != "RETIRE" {
+        app.status = "Confirmation mismatch; no device retired".into();
+        return Ok(());
+    }
+    let mut request = vec![64];
+    request.extend_from_slice(&decode_hex_16_text(&device)?);
+    write_frame(tls, &request)?;
+    let prepared = decode_prepared_response(&read_frame(tls)?)?;
+    rpc_commit(tls, &prepared)?;
+    app.status = format!(
+        "Device {device} retired at every locally observed prefix; later offline events are outside accepted history"
+    );
+    Ok(())
+}
+
+fn select_attachment(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
+    let entry = selected(app)?;
+    if entry.trash {
+        app.status = "Restore before downloading attachment".into();
+        return Ok(());
+    }
+    let mut request = vec![61];
+    request.extend_from_slice(&entry.id);
+    write_frame(tls, &request)?;
+    let response = read_frame(tls)?;
+    let mut c = Cursor::new(&response);
+    c.expect(&[0])?;
+    let count = usize::from(u16::from_be_bytes(
+        c.fixed(2)?.try_into().map_err(|_| Failure::Unavailable)?,
+    ));
+    app.attachments.clear();
+    for _ in 0..count {
+        app.attachments.push(AttachmentDescriptor {
+            id: c.fixed(16)?.try_into().map_err(|_| Failure::Unavailable)?,
+            label: String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?,
+            size: c.u64()?,
+        });
+    }
+    c.finish()?;
+    if app.attachments.is_empty() {
+        app.status = "Selected item has no attachments".into();
+        return Ok(());
+    }
+    app.field_selected = 0;
+    app.mode = Mode::SelectAttachment;
+    app.status = "Select exact attachment descriptor; values remain hidden".into();
+    Ok(())
+}
+
+fn handle_attachment_key(app: &mut App, key: KeyEvent) -> Result<(), Failure> {
+    match key.code {
+        KeyCode::Esc => {
+            app.attachments.clear();
+            app.mode = Mode::Browse;
+            app.status = "Attachment download cancelled".into();
+        }
+        KeyCode::Down | KeyCode::Char('j') if app.field_selected + 1 < app.attachments.len() => {
+            app.field_selected += 1;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.field_selected = app.field_selected.saturating_sub(1);
+        }
+        KeyCode::Enter => {
+            let entry = selected(app)?;
+            let attachment = app
+                .attachments
+                .get(app.field_selected)
+                .ok_or(Failure::Unavailable)?
+                .id;
+            app.pending = Some(PendingOperation::Attachment {
+                item: entry.id,
+                attachment,
+            });
+            app.attachments.clear();
+            begin_prompt(
+                app,
+                Mode::AttachmentPath,
+                "New destination path (streamed, 0600, existing path rejected):",
+            );
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn download_attachment(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let Some(PendingOperation::Attachment { item, attachment }) = app.pending.take() else {
+        return Err(Failure::Unavailable);
+    };
+    let mut request = vec![62];
+    request.extend_from_slice(&item);
+    request.extend_from_slice(&attachment);
+    let bytes = rpc_download_atomic(tls, &request, Path::new(value))?;
+    app.status = format!(
+        "Attachment streamed atomically: {bytes} bytes; no human frame held the whole value"
+    );
+    Ok(())
 }
 
 fn read_prompt(
@@ -862,17 +1697,20 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
         let (rows, selected, list_title) = if app.mode == Mode::SelectField {
             let fields = app.fields.iter().map(|field| ListItem::new(format!("{} ({} bytes)", sanitize_text(&field.label), field.size))).collect();
             (fields, app.field_selected, "Fields (explicit selection; values hidden)")
+        } else if app.mode == Mode::SelectAttachment {
+            let attachments = app.attachments.iter().map(|attachment| ListItem::new(format!("{} ({} bytes)", sanitize_text(&attachment.label), attachment.size))).collect();
+            (attachments, app.field_selected, "Attachments (exact descriptor; values hidden)")
         } else {
             (rows, app.selected, "Items (selection is metadata only)")
         };
         let mut state = ListState::default(); if !rows.is_empty() { state.select(Some(selected)); }
         frame.render_stateful_widget(List::new(rows).highlight_symbol("› ").block(Block::default().title(list_title).borders(Borders::ALL)), chunks[1], &mut state);
-        let prompt = if app.mode == Mode::Unlock { "•".repeat(app.input.chars().count()) } else { sanitize_text(&app.input) };
+        let prompt = if matches!(app.mode, Mode::Unlock | Mode::MasterRotate | Mode::RecoveryRotate) { "•".repeat(app.input.chars().count()) } else { sanitize_text(&app.input) };
         let exposure = app.reveal.as_ref().map_or_else(|| "<hidden>".into(), |(secret, _)| display_secret(secret));
         let footer = Paragraph::new(vec![
             Line::from(sanitize_text(&app.status)), Line::from(format!("Input: {prompt}")),
             Line::from(format!("Exposure: {exposure}")),
-            Line::from("↑↓/jk select  / search  t tag  f favorite  g generate  h history  d trash  u restore  p/P purge  r reveal  c copy  l lock  q quit"),
+            Line::from("↑↓ select / search t tag f fav g gen h history d/u trash p/P purge r/c expose m migrate b backup y sync z audit D download l lock"),
         ]).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, chunks[2]);
     }).map(|_| ()).map_err(|_| Failure::Unavailable)
@@ -928,5 +1766,30 @@ mod tests {
     #[test]
     fn binary_secrets_are_not_lossily_rendered() {
         assert_eq!(display_secret(&[0xff, 0, 1]), "<binary secret: 3 bytes>");
+    }
+
+    #[test]
+    fn operation_menu_names_every_keyboard_workflow_without_secrets() {
+        let text = operation_help(OperationMenu::Migration);
+        assert!(text.contains("CSV"));
+        assert!(text.contains("1PUX"));
+        assert!(text.contains("preview"));
+        assert!(!text.contains("password="));
+        for menu in [
+            OperationMenu::Backup,
+            OperationMenu::Devices,
+            OperationMenu::Audit,
+        ] {
+            assert!(!operation_help(menu).is_empty());
+        }
+    }
+
+    #[test]
+    fn operation_fields_escape_delimiters_without_restricting_paths() {
+        let Ok(fields) = split_exact::<3>(r"/tmp/a\|b|chrome|keep") else {
+            panic!("valid escaped fields rejected")
+        };
+        assert_eq!(fields, ["/tmp/a|b", "chrome", "keep"]);
+        assert!(split_exact::<2>(r"dangling\").is_err());
     }
 }

@@ -44,7 +44,6 @@ use signature::Signer as _;
 use zeroize::{Zeroize, Zeroizing};
 
 use pm_crypto::{KdfProfile, RecoveryCode};
-
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
 use pm_vault::{
     AgentEnrollment, AgentPeer, Attachment, AttachmentReader, AttemptOutcome, AttemptState,
@@ -59,6 +58,7 @@ use pm_vault::{
 
 use crate::{Failure, take_path};
 
+mod sync_job;
 mod tui;
 
 const KEY_MAGIC: &[u8] = b"PMK1";
@@ -142,6 +142,7 @@ struct VaultService {
     device: [u8; 16],
     audit_custody: Arc<AuditDeviceCustody>,
     provider: Option<ControlledProvider>,
+    sync_jobs: Arc<sync_job::Manager>,
 }
 
 #[derive(Clone)]
@@ -417,12 +418,15 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
     finish_arguments(arguments)?;
     let device = decode_hex_16(&device_value)?;
     let audit_path = std::path::PathBuf::from(format!("{}.audit-custody", vault_path.display()));
+    let sync_jobs = sync_job::Manager::open(&vault_path)?;
     let service = VaultService {
         path: vault_path,
         device,
         audit_custody: Arc::new(load_or_create_audit_custody(&audit_path)?),
         provider: None,
+        sync_jobs,
     };
+    service.sync_jobs.resume()?;
     serve_loop(
         &bootstrap_path,
         &agent_socket,
@@ -442,6 +446,7 @@ fn serve_attempt_lab(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
     finish_arguments(arguments)?;
     let device = decode_hex_16(&device_value)?;
     let audit_path = std::path::PathBuf::from(format!("{}.audit-custody", vault_path.display()));
+    let sync_jobs = sync_job::Manager::open(&vault_path)?;
     let service = VaultService {
         path: vault_path,
         device,
@@ -450,7 +455,9 @@ fn serve_attempt_lab(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
             socket: provider_socket,
             uid: provider_uid,
         }),
+        sync_jobs,
     };
+    service.sync_jobs.resume()?;
     serve_loop(
         &bootstrap_path,
         &agent_socket,
@@ -2806,10 +2813,11 @@ fn handle_human_rpc(
     password.zeroize();
     write_frame(tls, &[0])?;
     loop {
-        let Ok(request) = read_frame(tls) else {
-            return Ok(());
+        let request = match read_frame(tls) {
+            Ok(value) => Zeroizing::new(value),
+            Err(_) => return Ok(()),
         };
-        if request == [14] {
+        if request.as_slice() == [14] {
             drop(vault);
             let mut autonomous = AutonomousAuditVault::open(
                 &service.path,
@@ -2836,11 +2844,11 @@ fn handle_human_rpc(
             handle_1pux_import(&mut vault, tls, &request[1..])?;
             continue;
         }
-        if request.first() == Some(&18) {
+        if matches!(request.first(), Some(18 | 62)) {
             handle_stream_download(&vault, tls, &request[1..])?;
             continue;
         }
-        if request == [32] {
+        if request.as_slice() == [32] {
             handle_native_backup_download(&mut vault, tls)?;
             continue;
         }
@@ -3839,6 +3847,11 @@ fn handle_recovery_rotation(
     push_bytes(&mut response, code.as_bytes())?;
     write_frame(tls, &response)?;
     let mut confirmation = Zeroizing::new(read_frame_bounded(tls, 1024)?);
+    if confirmation.is_empty() {
+        write_frame(tls, &[2])?;
+        code.zeroize();
+        return Ok(());
+    }
     let parsed: RecoveryCode = std::str::from_utf8(&confirmation)
         .map_err(|_| Failure::Unavailable)?
         .parse()
@@ -4201,6 +4214,90 @@ fn handle_human_request(
                     .map_err(|_| Failure::Unavailable)?
                     .to_be_bytes(),
             );
+            Ok(response)
+        }
+        60 => {
+            let pin: [u8; 44] = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let protected = Zeroizing::new(
+                vault
+                    .create_sync_pairing(pin)
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_protected_bytes(),
+            );
+            let mut response = vec![0];
+            push_bytes(&mut response, &protected)?;
+            Ok(response)
+        }
+        61 => {
+            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let record = vault.read_record(item).map_err(|_| Failure::Unavailable)?;
+            let mut response = vec![0];
+            response.extend_from_slice(
+                &u16::try_from(record.attachments().len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            for attachment in record.attachments() {
+                response.extend_from_slice(attachment.id());
+                push_bytes(&mut response, attachment.name().as_bytes())?;
+                response.extend_from_slice(&attachment.size().to_be_bytes());
+            }
+            Ok(response)
+        }
+        63 => {
+            let mut cursor = Cursor::new(rest);
+            let protected = Zeroizing::new(cursor.bytes()?);
+            let program = std::path::PathBuf::from(
+                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+            );
+            let socket = std::path::PathBuf::from(
+                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+            );
+            let client_key = std::path::PathBuf::from(
+                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+            );
+            let server_public = std::path::PathBuf::from(
+                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
+            );
+            let pin: [u8; 44] = cursor
+                .fixed(44)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            cursor.finish()?;
+            let pairing = vault
+                .open_sync_pairing(&protected)
+                .map_err(|_| Failure::Unavailable)?;
+            let job = service.sync_jobs.start(
+                &pairing,
+                program,
+                socket,
+                client_key,
+                server_public,
+                pin,
+            )?;
+            let mut response = vec![0];
+            response.extend_from_slice(&job);
+            Ok(response)
+        }
+        64 => {
+            let device: [u8; 16] = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_device_retirement(device)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
+        }
+        65 => {
+            if !rest.is_empty() {
+                return Err(Failure::Unavailable);
+            }
+            Ok(vec![0])
+        }
+        66 => {
+            let job: [u8; 16] = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let status = service.sync_jobs.status(job)?;
+            let mut response = vec![0, status.phase.byte()];
+            response.extend_from_slice(&status.pushed.to_be_bytes());
+            response.extend_from_slice(&status.pulled.to_be_bytes());
             Ok(response)
         }
         16 => {

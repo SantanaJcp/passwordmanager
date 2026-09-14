@@ -22,14 +22,27 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [Tracker](../../../docs/agents/issue-tracker.md).
 
 ## Acceptance criteria
-- [ ] Flujos enteros import preview/mapping/duplicados/errores/confirmación, export/backup/restore/rotación son operables por teclado.
-- [ ] emparejar/retirar/offline/sync errors y auditoría/purga funcionan sobre servicios reales.
-- [ ] advertencias plaintext/recovery/clipboard/offline y acciones destructivas muestran alcance sin secretos por defecto. No formularios sin operación ni CLI-only como reemplazo de TUI.
-- [ ] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
+- [x] Flujos enteros import preview/mapping/duplicados/errores/confirmación, export/backup/restore/rotación son operables por teclado.
+- [x] emparejar/retirar/offline/sync errors y auditoría/purga funcionan sobre servicios reales.
+- [x] advertencias plaintext/recovery/clipboard/offline y acciones destructivas muestran alcance sin secretos por defecto. No formularios sin operación ni CLI-only como reemplazo de TUI.
+- [x] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
 - [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
 ## Answer
-Pendiente de implementación y evidencia.
+Implementado en la TUI humana existente, sobre el mismo custodio, motor y canal
+TLS/RPK. Los menús de teclado cubren import CSV/1PUX con preview y decisiones,
+export/backup/restore/rotaciones, pairing, retiro causal exacto, sync observable
+por ID a través de lock/idle/restart, auditoría/purga y descarga streaming de
+attachments mayores de 16 MiB. Las confirmaciones destructivas son cerradas,
+las previsualizaciones no muestran valores y los fallos no activan rutas
+alternativas.
+
+El laboratorio PTY/multi-UID/TLS real pasó, igual que `scripts/check.sh`, el
+build limpio/offline y la barrida secuencial de 19 laboratorios (`failures=0`).
+Método, rojos, comandos, resultados y límites están en
+[`docs/verification/ticket-25.md`](../../../docs/verification/ticket-25.md).
+El candidato queda congelado para merger distinto; el último criterio y el
+estado `resolved` pertenecen a esa integración.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
