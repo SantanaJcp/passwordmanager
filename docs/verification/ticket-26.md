@@ -1553,7 +1553,7 @@ executed.
 | `tui_content_lab.py`: `screen`, `wait_text`, `send`, `query`, `choose_field` | `VtScreen.application_text`, `MacPtySession.wait_text`, `send_key`/`send_text`, `tui_search` and `select_tui_password_for_copy`; resize only with `MacPtySession.resize` plus a current-screen wait. Keep split UTF-8, wide-cell and row-position assertions; do not flatten rows or normalize whitespace. |
 | `tui_content_lab.py`: `setup` and `catalog_cases` | Extend the existing `seed_tui_content` fixture with the same seven-kind/field seed and synthetic token-exchange, notes, source/custom and attachment descriptors. Assert the seed command's `types=7` result before starting the TUI; do not create a second vault engine or silently substitute a field. |
 | `tui_content_lab.py`: wrong password, reveal expiry, clipboard race, trash/restore/purge | Fresh real `start_macos_tui` sessions over the human TLS/RPK socket; use `read_appkit_pasteboard`/`write_appkit_pasteboard` and `OwnedClipboard` only. Preserve the exact canary, replacement-owner check, no-secret PTY scan, `l` exit and durable revision/audit counts. |
-| `tui_access_lab.py`: `authorization`, `discover`, `wait_state`, `choose` | Provision distinct synthetic agent keys/profiles and a real provider socket under the collision-checked root. Drive `a`/`n`, `e`, `s`, `x`, `w`, `x` with `MacPtySession`; assert next real agent operations and safe pending context, not only screen labels. The passkey `v` case retains the existing real provider/browser harness and fresh human approval channel. |
+| `tui_access_lab.py`: `authorization`, `discover`, `wait_state`, `choose` | The first Mac slice reuses the already-provisioned A/B metadata, generates one additional synthetic RPK through the real agent account for keyboard enrollment, and drives `a`/`n`, `e`, `s`, `x`, `w`, `x` with `MacPtySession`; it checks the next real bootstrap-agent discovery and safe pending context, not only screen labels. The standard Mac `serve_vault` fixture has no provider worker and its agent TLS profile pins only the bootstrap agent, so this slice deliberately stops at a real `CREATED`/cancelled attempt and does not fabricate a second transport, provider, or passkey `v` response. A separate provider/browser fixture and multi-agent transport profile remain required for the full native Ticket 24 matrix. |
 | `tui_operations_lab.py`: `onepux`, `seed_remote_device`, `send_long` and durable assertions | Create deterministic CSV/1PUX/native/JSONL/recovery fixtures and a >16 MiB attachment before the TUI. Replace `tmux send_long` with visible-suffix waits plus `send_text`; run the existing `human-streaming-file`/native stream path and real `pm-sync` process with distinct device keys. Assert source bytes, digest/length, 0600 destination, pinned namespace and durable job/restart state. |
 | `tui_operations_lab.py`: `ClosingEndpoint` and negative confirmations | Use an owned native Unix endpoint that closes connections for the offline branch; all invalid source, existing destination, wrong pin, confirmation mismatch and cancelled flows must remain explicit failures with no retry or alternate endpoint. |
 
@@ -1577,6 +1577,23 @@ the AppKit copy/replacement-owner lease, and drives the existing `t`, `f`,
 mirrors the Rust descriptor ordering rather than relying on insertion order or
 an initial selection. This code has only static validation so far; its native
 execution and every durable result remain pending.
+
+The next bounded implementation slice is test-only
+`run_tui_ticket24_matrix`, invoked after the content flow. It uses the existing
+real macOS PTY and human TLS/RPK channel to inspect the two setup-authorized
+agent rows, enrolls and revokes a newly generated synthetic RPK through the
+closed `n` payload (the public RPK is read by the fixture's privileged
+observer), toggles the shared credential with `e`, and checks an actual
+bootstrap-agent discovery before and after disable, suspend and resume.
+It then starts one real `agent-attempt` against the ordinary LaunchDaemon,
+observes its safe `CREATED` context with `w`, cancels it with `x`, verifies the
+terminal `CANCELLED` state from the agent process, and finally exits with the
+human `l` key before proving discovery still works. No pending context, attempt
+reason, master password or field canary is printed by the observer. This is
+static/test-fixture preparation only: because the normal macOS service has no
+provider worker and pins one agent transport identity, provider-backed
+`WAITING_FOR_HUMAN`/passkey approval and a second live agent remain explicit
+native coverage gaps rather than being simulated.
 
 The implementation order is fixed: (1) add only fixture construction and
 adapter assertions, (2) run a focused real-PTY content/access/operations

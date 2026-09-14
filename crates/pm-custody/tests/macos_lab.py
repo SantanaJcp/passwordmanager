@@ -2281,17 +2281,79 @@ def seed_tui_content(binary, profile, private, endpoint):
         )
 
 
-def require_agent_discovery(binary, profile, private, endpoint):
+def agent_discovery(binary, profile, private, endpoint, *, allowed=True):
     result = sudo(
         [binary, "agent-discover", "--profile", profile, "--private", private,
          "--socket", endpoint],
         user=AGENT, check=False,
     )
+    if not allowed:
+        expect_unavailable(result)
+        return None
     assert result.returncode == 0 and result.stdout.startswith(b"PASS delegated-discovery") \
         and result.stderr == b"", (
             "agent discovery failed after TUI lock", result.returncode,
             result.stdout[:1024], result.stderr[:1024],
         )
+    return result.stdout.decode("utf-8")
+
+
+def require_agent_discovery(binary, profile, private, endpoint):
+    return agent_discovery(binary, profile, private, endpoint)
+
+
+def wait_selected_access_row(session, marker, *, timeout=8, limit=64):
+    """Select one metadata-only access row without assuming credential order."""
+    deadline = time.monotonic() + timeout
+    for _ in range(limit):
+        session.drain()
+        rendered = session.screen.application_text()
+        if any("›" in line and marker in line for line in rendered.splitlines()):
+            return session.mark()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        start = session.mark()
+        session.send_key("j")
+        session.wait_text("Delegated authority (metadata only)", since=start,
+                          timeout=remaining)
+    raise AssertionError(f"TUI access row was not selected: {marker}")
+
+
+def start_agent_attempt(binary, profile, private, endpoint, item):
+    """Start one real agent attempt for the standard vault service."""
+    result = sudo(
+        [binary, "agent-attempt", "--profile", profile, "--private", private,
+         "--socket", endpoint, "--action", "start", "--item", item,
+         "--issued-at", str(int(time.time() * 1_000_000)), "--nonce", "24" * 16,
+         "--context", "ticket24-macos-pending-canary"],
+        user=AGENT, check=False,
+    )
+    assert result.returncode == 0 and result.stderr == b"", (
+        "agent attempt start failed", result.returncode, result.stdout[:1024],
+        result.stderr[:1024],
+    )
+    output = result.stdout.decode("utf-8")
+    match = re.search(r"PASS attempt id=([0-9a-f]{32}).*state=([A-Z_]+)", output)
+    assert match and match.group(2) == "CREATED", output
+    assert b"ticket24-macos-pending-canary" not in result.stdout
+    return match.group(1)
+
+
+def agent_attempt_state(binary, profile, private, endpoint, attempt):
+    result = sudo(
+        [binary, "agent-attempt", "--profile", profile, "--private", private,
+         "--socket", endpoint, "--action", "get", "--attempt", attempt],
+        user=AGENT, check=False,
+    )
+    assert result.returncode == 0 and result.stderr == b"", (
+        "agent attempt state query failed", result.returncode,
+        result.stdout[:1024], result.stderr[:1024],
+    )
+    output = result.stdout.decode("utf-8")
+    match = re.search(r"PASS attempt id=[0-9a-f]{32}.*state=([A-Z_]+)", output)
+    assert match, output
+    return match.group(1), output
 
 
 def start_macos_tui(binary, profile, private, endpoint, *, idle, reveal, copy):
@@ -2476,6 +2538,134 @@ def run_tui_ticket23_matrix(binary, profile, private, endpoint):
 
         session.send_key("l")
         assert session.wait_exit(timeout=8) == 0
+    finally:
+        close_session_preserving_primary(session)
+
+
+def run_tui_ticket24_matrix(
+    binary, profile, private, endpoint, agent_profile, agent_private, agent_endpoint,
+    agent_directory,
+):
+    """Exercise Ticket 24 authority and pending keyboard contracts on macOS."""
+    enrollment_private = agent_directory / "ticket24-enrollment.key"
+    enrollment_public = agent_directory / "ticket24-enrollment.pub"
+    assert not enrollment_private.exists() and not enrollment_public.exists()
+    keygen(binary, AGENT, enrollment_private, enrollment_public)
+    enrollment_rpk = sudo(["cat", enrollment_public]).stdout
+    assert len(enrollment_rpk) == 44
+
+    session = start_macos_tui(
+        binary, profile, private, endpoint, idle=30, reveal=1, copy=5,
+    )
+    try:
+        resized = session.mark()
+        session.resize(240, 30)
+        session.wait_text("Items (selection is metadata only)", since=resized)
+
+        access = session.mark()
+        session.send_key("a")
+        page = session.wait_text("Delegated authority (metadata only)", since=access)
+        for marker in (
+            "[agent active] Synthetic agent A",
+            "[agent active] Synthetic agent B",
+            "[credential enabled] Synthetic TLS shared account",
+        ):
+            assert marker in page, ("Ticket 24 access overview omitted safe metadata", marker)
+        assert "ticket07-userns" in page
+        assert TUI_PASSWORD_RECORD.decode("ascii") not in page
+
+        # Enrollment is a closed keyboard payload.  The key is generated by
+        # the existing real agent account and its public RPK is read through
+        # the fixture's privileged observer; no second transport is fabricated.
+        enroll_start = session.mark()
+        session.send_key("n")
+        session.wait_text("Enroll subject|request|SPKI|label|environment:", since=enroll_start)
+        enrollment = (
+            "c3" * 16 + "|" + "24" * 16 + "|" + enrollment_rpk.hex()
+            + "|ticket24-agent-c|macos-lab"
+        )
+        session.send_text(enrollment, enter=True, hidden=True)
+        session.wait_text("Delegated authority (metadata only)", since=enroll_start)
+        wait_selected_access_row(session, "ticket24-agent-c")
+        assert "[agent active] ticket24-agent-c" in session.screen.application_text()
+
+        revoked_b = wait_selected_access_row(session, "Synthetic agent B")
+        session.send_key("x")
+        session.wait_text("[agent revoked] Synthetic agent B", since=revoked_b)
+        revoked_c = wait_selected_access_row(session, "ticket24-agent-c")
+        session.send_key("x")
+        session.wait_text("[agent revoked] ticket24-agent-c", since=revoked_c)
+
+        disabled = wait_selected_access_row(session, "Synthetic TLS shared account")
+        session.send_key("e")
+        session.wait_text("[credential disabled] Synthetic TLS shared account", since=disabled)
+        empty = agent_discovery(
+            binary, agent_profile, agent_private, agent_endpoint,
+        )
+        assert empty == "PASS delegated-discovery count=0 set=\n", empty
+
+        enabled = wait_selected_access_row(session, "Synthetic TLS shared account")
+        session.send_key("e")
+        session.wait_text("[credential enabled] Synthetic TLS shared account", since=enabled)
+        baseline = agent_discovery(
+            binary, agent_profile, agent_private, agent_endpoint,
+        )
+        item = re.search(
+            r"set=([0-9a-f]{32}):password:Synthetic TLS shared account:", baseline,
+        )
+        assert item, baseline
+
+        suspended = session.mark()
+        session.send_key("s")
+        session.wait_text("Delegated access: SUSPENDED", since=suspended)
+        agent_discovery(
+            binary, agent_profile, agent_private, agent_endpoint, allowed=False,
+        )
+        resumed = session.mark()
+        session.send_key("s")
+        session.wait_text("Delegated access: RESUMED", since=resumed)
+        assert agent_discovery(
+            binary, agent_profile, agent_private, agent_endpoint,
+        ).startswith("PASS delegated-discovery count=1"), "agent did not resume"
+
+        # The standard macOS LaunchDaemon has no provider worker, so this
+        # real agent operation remains CREATED.  It still exercises the
+        # human-safe pending view and terminal cancellation without inventing
+        # a passkey/provider response in a fixture that does not own one.
+        content = session.mark()
+        session.send_key("escape")
+        session.wait_text("Content view", since=content)
+        attempt = start_agent_attempt(
+            binary, agent_profile, agent_private, agent_endpoint, item.group(1),
+        )
+        pending = session.mark()
+        session.send_key("w")
+        page = session.wait_text("Attempts (safe context only)", since=pending)
+        assert "[CREATED] Synthetic TLS shared account" in page
+        assert "integration=controlled.external" in page
+        assert attempt in page
+        assert "ticket24-macos-pending-canary" not in page
+        assert PASSWORD.decode("ascii") not in page
+        assert TUI_PASSWORD_RECORD.decode("ascii") not in page
+        cancelled = session.mark()
+        session.send_key("x")
+        session.wait_text("Attempt CANCELLED", since=cancelled)
+        state, output = agent_attempt_state(
+            binary, agent_profile, agent_private, agent_endpoint, attempt,
+        )
+        assert state == "CANCELLED", output
+
+        content = session.mark()
+        session.send_key("escape")
+        session.wait_text("Content view", since=content)
+        session.send_key("l")
+        assert session.wait_exit(timeout=8) == 0
+        assert agent_discovery(
+            binary, agent_profile, agent_private, agent_endpoint,
+        ).startswith("PASS delegated-discovery count=1"), "human lock suspended agent"
+        assert PASSWORD not in bytes(session.output)
+        assert TUI_PASSWORD_RECORD not in bytes(session.output)
+        assert b"\x1b]52;" not in bytes(session.output)
     finally:
         close_session_preserving_primary(session)
 
@@ -2687,6 +2877,10 @@ def run_tui_core_lab(
     require_agent_discovery(binary, agent_profile, agent_private, agent_endpoint)
 
     run_tui_ticket23_matrix(binary, profile, private, endpoint)
+    run_tui_ticket24_matrix(
+        binary, profile, private, endpoint, agent_profile, agent_private, agent_endpoint,
+        agent_directory,
+    )
 
 
 def probe(binary, user, profile, private, endpoint, *, allowed=True, diagnostic=False):
