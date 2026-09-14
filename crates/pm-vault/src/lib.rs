@@ -81,6 +81,37 @@ pub enum VaultError {
     InvalidFormat,
     Io(std::io::Error),
     Storage(rusqlite::Error),
+    Cleanup(PersistCleanupError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PersistPublication {
+    NotPublished,
+    Published,
+}
+
+#[derive(Debug)]
+pub struct PersistCleanupError {
+    operation: Option<Box<VaultError>>,
+    cleanup: Vec<std::io::Error>,
+    publication: PersistPublication,
+}
+
+impl PersistCleanupError {
+    #[must_use]
+    pub const fn publication(&self) -> PersistPublication {
+        self.publication
+    }
+
+    #[must_use]
+    pub fn failure_count(&self) -> usize {
+        self.cleanup.len()
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> Option<&VaultError> {
+        self.operation.as_deref()
+    }
 }
 
 impl fmt::Display for VaultError {
@@ -91,11 +122,29 @@ impl fmt::Display for VaultError {
             Self::InvalidFormat => f.write_str("invalid or incompatible vault storage"),
             Self::Io(error) => write!(f, "vault I/O failed: {error}"),
             Self::Storage(error) => write!(f, "vault storage failed: {error}"),
+            Self::Cleanup(cleanup) => match cleanup.publication {
+                PersistPublication::NotPublished => {
+                    f.write_str("vault creation failed and temporary artifact cleanup also failed")
+                }
+                PersistPublication::Published => {
+                    f.write_str("vault was published but temporary artifact cleanup failed")
+                }
+            },
         }
     }
 }
 
-impl std::error::Error for VaultError {}
+impl std::error::Error for VaultError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cleanup(cleanup) => cleanup
+                .operation
+                .as_deref()
+                .map(|error| error as &(dyn std::error::Error + 'static)),
+            _ => None,
+        }
+    }
+}
 
 impl From<CryptoError> for VaultError {
     fn from(value: CryptoError) -> Self {
@@ -279,8 +328,16 @@ fn unlock_root(connection: &Connection, password: &[u8]) -> Result<UnlockedRoot,
     Ok(unlocked)
 }
 
-#[allow(clippy::too_many_lines)]
 fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
+    persist_new_with_cleanup(path, bundle, |artifact| fs::remove_file(artifact))
+}
+
+#[allow(clippy::too_many_lines)]
+fn persist_new_with_cleanup(
+    path: &Path,
+    bundle: &RootBundle,
+    mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(), VaultError> {
     if path.exists() {
         return Err(VaultError::AlreadyExists);
     }
@@ -289,8 +346,8 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
         .filter(|value| !value.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let (temporary_path, temporary_file) = create_temporary(parent, path)?;
-    let wal_path = PathBuf::from(format!("{}-wal", temporary_path.display()));
-    let shm_path = PathBuf::from(format!("{}-shm", temporary_path.display()));
+    let artifacts = PersistArtifacts::new(temporary_path.clone());
+    let mut publication = PersistPublication::NotPublished;
     let result = (|| {
         drop(temporary_file);
         let mut connection =
@@ -700,14 +757,70 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
                 VaultError::Io(error)
             }
         })?;
+        publication = PersistPublication::Published;
         File::open(parent)?.sync_all()?;
         Ok(())
     })();
 
-    let _ = fs::remove_file(&temporary_path);
-    let _ = fs::remove_file(wal_path);
-    let _ = fs::remove_file(shm_path);
-    result
+    let cleanup = cleanup_persist_artifacts(&artifacts, &mut remove);
+    combine_persist_result(result, publication, cleanup)
+}
+
+struct PersistArtifacts {
+    temporary: PathBuf,
+    wal: PathBuf,
+    shm: PathBuf,
+}
+
+impl PersistArtifacts {
+    fn new(temporary: PathBuf) -> Self {
+        let wal = PathBuf::from(format!("{}-wal", temporary.display()));
+        let shm = PathBuf::from(format!("{}-shm", temporary.display()));
+        Self {
+            temporary,
+            wal,
+            shm,
+        }
+    }
+
+    #[cfg(test)]
+    fn synthetic(temporary: &str) -> Self {
+        Self::new(PathBuf::from(temporary))
+    }
+}
+
+fn cleanup_persist_artifacts(
+    artifacts: &PersistArtifacts,
+    mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Vec<std::io::Error> {
+    let mut errors = Vec::new();
+    for (path, optional) in [
+        (&artifacts.temporary, false),
+        (&artifacts.wal, true),
+        (&artifacts.shm, true),
+    ] {
+        if let Err(error) = remove(path)
+            && (!optional || error.kind() != std::io::ErrorKind::NotFound)
+        {
+            errors.push(error);
+        }
+    }
+    errors
+}
+
+fn combine_persist_result(
+    result: Result<(), VaultError>,
+    publication: PersistPublication,
+    cleanup: Vec<std::io::Error>,
+) -> Result<(), VaultError> {
+    if cleanup.is_empty() {
+        return result;
+    }
+    Err(VaultError::Cleanup(PersistCleanupError {
+        operation: result.err().map(Box::new),
+        cleanup,
+        publication,
+    }))
 }
 
 fn create_temporary(parent: &Path, target: &Path) -> Result<(PathBuf, File), VaultError> {
@@ -748,9 +861,15 @@ mod cleanup_error_tests {
         let errors = cleanup_persist_artifacts(&paths, |path| {
             attempted.push(path.to_owned());
             if path == paths.temporary {
-                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "synthetic"))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "synthetic",
+                ))
             } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "synthetic"))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "synthetic",
+                ))
             }
         });
         assert_eq!(attempted.len(), 3);
@@ -763,7 +882,10 @@ mod cleanup_error_tests {
         let error = combine_persist_result(
             Err(original),
             PersistPublication::Published,
-            vec![std::io::Error::new(std::io::ErrorKind::PermissionDenied, "synthetic")],
+            vec![std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "synthetic",
+            )],
         )
         .unwrap_err();
         let VaultError::Cleanup(cleanup) = error else {
@@ -771,6 +893,47 @@ mod cleanup_error_tests {
         };
         assert_eq!(cleanup.publication(), PersistPublication::Published);
         assert_eq!(cleanup.failure_count(), 1);
-        assert!(matches!(cleanup.operation(), Some(VaultError::InvalidFormat)));
+        assert!(matches!(
+            cleanup.operation(),
+            Some(VaultError::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn published_target_remains_openable_when_temporary_cleanup_fails() {
+        let password = b"synthetic cleanup publication password";
+        let created = create_human_root(password, KdfProfile::confirmed(64, 3).unwrap()).unwrap();
+        let target = std::env::temp_dir().join(format!(
+            "pm-cleanup-published-{}-{}",
+            std::process::id(),
+            NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed),
+        ));
+        let attempted = std::cell::RefCell::new(Vec::new());
+        let error = persist_new_with_cleanup(&target, created.bundle(), |path| {
+            attempted.borrow_mut().push(path.to_owned());
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "synthetic",
+            ))
+        })
+        .unwrap_err();
+        let VaultError::Cleanup(cleanup) = error else {
+            panic!("published cleanup error was discarded")
+        };
+        assert_eq!(cleanup.publication(), PersistPublication::Published);
+        assert_eq!(cleanup.failure_count(), 3);
+        assert!(cleanup.operation().is_none());
+        assert_eq!(
+            open_vault(&target, password).unwrap().trusted_root(),
+            created.bundle().trusted_root(),
+        );
+        std::fs::remove_file(&target).unwrap();
+        for path in attempted.into_inner() {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("test-owned cleanup failed: {error}"),
+            }
+        }
     }
 }

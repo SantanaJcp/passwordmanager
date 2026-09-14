@@ -31,22 +31,23 @@ Success requires focused early-return, simultaneous restoration-failure,
 clipboard ownership and no-double-attempt tests. The real PTY/TUI laboratory
 must remain green in the final authorized verification window.
 
-## Vault publication method and proposed public semantics
+## Vault publication method and authorized public semantics
 
-Focused filesystem regressions must force removal failures for the unique
-temporary database, its `-wal`, and its `-shm` sidecars. `NotFound` is success
-only for each optional cleanup target; every other error is retained while all
-three removals are attempted exactly once.
+Focused filesystem regressions force removal failures for the unique temporary
+database, its `-wal`, and its `-shm` sidecars. `NotFound` is success only for the
+optional WAL/SHM targets. Absence of the required owned temporary database is a
+cleanup failure. Every artifact is attempted exactly once.
 
-The existing `VaultError` cannot truthfully represent both an operation result
-and cleanup failure, especially after `hard_link(temporary, target)` has already
-published the vault. The proposed narrow extension is a cleanup error variant
-that carries the original `VaultError` when one existed, the count of failed
-cleanup artifacts, and an explicit `published: bool`. Its display is fixed and
-distinguishes “creation failed and cleanup also failed” from “vault was
-published but cleanup failed”. It exposes a non-secret `was_published()` query
-so callers cannot interpret the latter as “not created”. It does not delete the
-published target, retry publication, or substitute another path.
+The narrow authorized extension is `VaultError::Cleanup`. Its payload retains
+the original `VaultError` when one existed, the number of failed cleanup
+artifacts and `PersistPublication::{NotPublished, Published}`. Publication is
+recorded immediately after the hard link succeeds, before the parent-directory
+fsync, because that fsync can fail after the target already exists. Publication
+metadata is available only on the cleanup variant; there is no general Boolean
+query that could falsely describe other I/O errors as unpublished. The fixed
+display distinguishes creation plus cleanup failure from published-vault
+cleanup failure. The implementation never removes the published target,
+retries publication or substitutes another path.
 
 Tests must cover: absent WAL/SHM accepted; all hard removal failures aggregated;
 the original pre-publication error retained; and a post-hardlink cleanup error
@@ -54,8 +55,46 @@ reported with `published=true` while the authenticated target remains present
 and openable. Full crypto/vault/TUI regression gates and the documented PTY lab
 run only after an exclusive verification grant.
 
-## Current test boundary
+## Execution evidence
 
-Until the public cleanup-error representation above is confirmed, no product
-code or behavior test will be changed. Cheap syntax, link and diff checks do
-not establish cleanup behavior.
+The initial test-first checkpoint `cd320084951b3a8e1328c7367c8882a43eafe456`
+did not contain the cleanup implementation. The first focused build after the
+implementation exposed a lifetime mismatch in the injected remover; the
+corrected focused package run passed. The first complete `scripts/check.sh`
+then reached Clippy and failed because the existing schema-heavy persistence
+body's `too_many_lines` exemption remained on its new thin wrapper. Moving that
+existing local exemption with the unchanged body fixed the lint without a
+global suppression or behavior change. The later partial-initialization
+regression first failed to compile because `Failure` intentionally has no
+`Debug`, then Clippy rejected a test-local type declared after statements; both
+were test-harness defects corrected without changing product behavior.
+
+Final authorized Linux verification from this worktree:
+
+```text
+./scripts/check.sh
+PASS (workspace build, tests and Clippy)
+
+./scripts/clean-offline-build.sh
+PASS (clean locked/offline workspace build)
+
+./scripts/test-linux-custody-lab.sh
+PASS bootstrap_sha256=ed97b913505fb69941d0fe1559478223a2fed076236dd99e7b1f279f71c4921f restart=process tls=1.3 rpk=mutual alpn=role-specific
+
+./scripts/test-linux-tui-content-lab.sh
+PASS tui-content types=7 fields=explicit-complete ... clipboard-race=preserved ...
+
+./scripts/test-linux-tui-operations-lab.sh
+PASS tui-operations keyboard=1 pty=1 tls-rpk=1 ... source-unchanged=1 no-secrets-preview=1
+```
+
+The focused tests cover simultaneous clipboard kill/wait failures, all active
+terminal restorations, partial terminal initialization, no second explicit
+cleanup attempt, optional sidecar absence, retained original operation error,
+and a published target that remains authenticated and openable after cleanup
+failure. The PTY labs cover the real ownership-preserving clipboard and normal
+terminal early-return paths.
+
+This base intentionally predates Ticket 24's access lab and additions. The
+distinct merger must run the unified 20-lab suite after composing those changes;
+this checkpoint does not claim that composed result.
