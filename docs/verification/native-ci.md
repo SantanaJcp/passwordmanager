@@ -455,3 +455,36 @@ El probe agente de Windows completa el handshake previo al primer write de
 rustls, pero no verifica respuesta/aceptación de aplicación ni el rol humano.
 No se confunde su READY con aceptación integral. Ninguno de estos resultados
 cierra 26/27 ni sustituye los gates 30–35.
+
+### Composición nativa posterior — 2026-09-14
+
+La evidencia siguiente corresponde a candidatos aislados, todavía no a la rama
+unificada. Conserva los fallos históricos; no acredita casos no ejecutados.
+
+- macOS [corrida30](https://github.com/SantanaJcp/passwordmanager/actions/runs/34877448420),
+  `50d69d80dad84dbfecf5ed35ef8f4b2612fa5c72`: **PASS Intel y Apple Silicon**
+  en binarios normales, custodia/ACL/peer/RPK, suspensión/restart, limpieza
+  estricta y TUI básica real: teclado, búsqueda, copia AppKit, preservación
+  de reemplazo externo, agente aislado rechazado, lock explícito/idle y resize
+  80×24, 42×12 y 100×30. El opt-in de observación de pasteboard permaneció
+  habilitado: control compartido con salida normal cero; probe en dominio
+  system distinto sin canario y humano con el canario antes/después.
+  No es evidencia de reboot/FileVault, firma ni recorridos completos 23–25.
+- macOS [corrida31](https://github.com/SantanaJcp/passwordmanager/actions/runs/34878316357),
+  `af1f1d80044bc3efc200f5e269b26fd14cbec95d`: la ampliación de contenido falló
+  al observar un valor todavía visible tras el texto de expiración (Password
+  en ARM, TOTP en Intel). Repaint parcial es una hipótesis, no un fallo del
+  motor demostrado: el siguiente fixture exigirá en el estado actual tanto
+  expiración como exposición oculta y valor ausente, dentro del plazo existente.
+- Windows [corrida34](https://github.com/SantanaJcp/passwordmanager/actions/runs/34878285945),
+  `c010af74c0202a275641d3e219b183871244dd79`: build ARM64, 10 tests nativos,
+  contrato de pipe, 11 tests del observador y test de sync pasan. La TUI real
+  sigue fallida: proceso vivo y salida presente, pero sin primer prompt
+  observado en 15 s. La causa de render/observación se investiga; no hay
+  aceptación de TUI Windows, sync integral ni transferencia 1PUX.
+  La corrida33 falló por `Cargo.lock` inconsistente antes de producto; se
+  corrigió el edge de dependencia y no se clasificó como RED conductual.
+
+El estado integrado permanece **25/35**. Firmas reales, laboratorios de
+reboot/FDE, Windows 11 x64 y aceptación humana final siguen sin evidencia;
+ninguna prueba CI efímera ni revisión de agentes los sustituye.

@@ -406,3 +406,23 @@ Se mantienen **25/35 tickets integrados**. Los gates externos de firma real,
 Windows 11 x64/reboot/FDE y validación humana no se simulan; se solicitó al
 usuario disponibilidad de certificados y responsables de firma sin pedir
 claves privadas. La revisión global continúa reservada para el final.
+
+### Composición 26–28: evidencia parcial, sin cierres anticipados
+
+2026-09-14 — El recorrido básico TUI macOS pasó en Intel y Apple Silicon;
+la ampliación a contenido completo aún debe discriminar repaint parcial de
+fallo real de expiración. Windows compila sus seams compartidos, pero el primer
+prompt ConPTY sigue sin aceptación. Commits, corridas y alcance exacto en el
+[estado nativo](../../docs/verification/native-ci.md#composición-nativa-posterior--2026-09-14).
+
+En el worktree 28, los owners protegidos de descifrado de revisiones/chunks,
+leases y entrada de adaptadores pasaron pruebas enfocadas y check/clean Linux.
+También pasó la lectura protegida de campos secretos posteriores por stdin;
+el RED válido comprobó password y metadata pública antes del header secreto,
+descartando fixtures que fallaban antes de ese seam. No están integrados aún
+ni acreditan serializers, respuestas, todos los frames TLS, inventario de
+registros o la matriz completa de fault injection.
+
+Se continúa esa frontera; no se abre 29 antes de integrar 26/27 ni se resuelve
+28 por sus checkpoints. **25/35 integrados**, PR borrador, revisión unificada
+al final y validación humana separada pendiente.
