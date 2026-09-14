@@ -1033,6 +1033,32 @@ parser-only GREEN and the next normal two-architecture native result remain
 pending; this observer is not complete Ticket 23--25 acceptance, which still
 requires the separately documented full matrix.
 
+The test-first chronology is recorded explicitly. Before the observer was
+implemented, the new parser regression was run against the old
+`MacPtySession` with this non-exclusive local command:
+
+```text
+python3 - <<'PY'
+import importlib.util
+path = 'crates/pm-custody/tests/macos_lab.py'
+spec = importlib.util.spec_from_file_location('macos_lab', path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.assert_screen_observer_regression()
+PY
+```
+
+It exited with code 1 and the fixed assertion
+`cursor-positioned screen regression: item title lost its separating cell`.
+This intentional parser RED occurred while the Windows 27 exclusive window
+was held; it was not a granted Cargo/Linux/native/system-lab gate and carries
+no acceptance evidence. The import created only the test module's own
+`crates/pm-custody/tests/__pycache__/`, which was removed by exact-path file
+deletion and directory removal. No retry or fabricated pass followed. After
+that RED, checkpoint `1820b8b` added `VtScreen`; only AST parsing and
+`git diff --check` were run, so parser GREEN and all native evidence remain
+pending a separately granted brief parser-only execution.
+
 ## Remaining acceptance work
 
 - Compose and verify the complete keyboard TUI through the normal
