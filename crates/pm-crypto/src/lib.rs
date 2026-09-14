@@ -19,6 +19,8 @@ pub use root::{
     recover_human_root, verify_audit_key_package, verify_audit_signature, verify_device_event,
     verify_human_command, verify_human_event, verify_passkey_signature,
 };
+#[cfg(feature = "macos-ticket26-diagnostics")]
+pub use root::{KdfDiagnosticBoundary, open_human_root_diagnostic};
 
 /// Returns the version reported by the linked libsodium C artifact.
 #[must_use]

@@ -2,6 +2,8 @@
 
 //! Human-only password mutations through a signed, replay-safe transaction.
 
+#[cfg(feature = "macos-ticket26-diagnostics")]
+use std::time::{Duration, Instant};
 use std::{
     collections::BTreeMap,
     fmt,
@@ -33,13 +35,15 @@ use crate::migration::{
     IMPORT_PAGE_ITEMS, PreparedCsvImport,
 };
 use crate::onepux::OnePuxImportPreview;
+#[cfg(not(feature = "macos-ticket26-diagnostics"))]
+use crate::unlock_root;
 use crate::{
     AgentEnrollment, AuthRecord, AuthorizationError, AuthorizationReason, CausalEventDraft,
     Destination, GeneratedPassword, GeneratorConfig, HistoryEntry, HumanMetadata, ItemHistory,
     ItemLifecycle, ItemPurgeScope, LogicalRecord, PasskeyAssertion, PasskeyError, PasskeyOperation,
     PasskeyPublicCredential, PasskeyRequest, PasskeyStatus, PasswordRng, PreparedAgentEnrollment,
     PreparedItemPurge, PreparedPasskeyRegistration, RecordKind, SearchHit, SearchQuery, VaultError,
-    content, load_and_validate_bundle, unlock_root,
+    content, load_and_validate_bundle,
 };
 
 const CHALLENGE_LIFETIME_US: i64 = 60_000_000;
@@ -802,8 +806,24 @@ impl HumanVault {
         channel: HumanChannel,
         audit_custody: Arc<AuditDeviceCustody>,
     ) -> Result<Self, HumanCommitError> {
+        let mut diagnostics = UnlockDiagnostics::new();
         channel.verify()?;
-        let connection = open_connection(path)?;
+        diagnostics.phase(UnlockDiagnosticPhase::ChannelVerified);
+        let connection = open_connection_observed(path, &mut diagnostics)?;
+        #[cfg(feature = "macos-ticket26-diagnostics")]
+        let root = crate::unlock_root_diagnostic(&connection, password, |boundary| {
+            diagnostics.phase(match boundary {
+                crate::RootUnlockDiagnosticBoundary::BundleLoaded => {
+                    UnlockDiagnosticPhase::BundleLoaded
+                }
+                crate::RootUnlockDiagnosticBoundary::KdfStart => UnlockDiagnosticPhase::KdfStart,
+                crate::RootUnlockDiagnosticBoundary::KdfEnd => UnlockDiagnosticPhase::KdfEnd,
+                crate::RootUnlockDiagnosticBoundary::RootAuthenticated => {
+                    UnlockDiagnosticPhase::RootAuthenticated
+                }
+            });
+        })?;
+        #[cfg(not(feature = "macos-ticket26-diagnostics"))]
         let root = unlock_root(&connection, password)?;
         let trusted_root = root.trusted_root();
         Ok(Self {
@@ -3365,7 +3385,15 @@ fn load_import_batch(
 }
 
 fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
+    open_connection_observed(path, &mut UnlockDiagnostics::disabled())
+}
+
+fn open_connection_observed(
+    path: &Path,
+    diagnostics: &mut UnlockDiagnostics,
+) -> Result<Connection, HumanCommitError> {
     let connection = Connection::open(path)?;
+    diagnostics.phase(UnlockDiagnosticPhase::SqliteOpened);
     crate::configure_platform_durability(&connection)?;
     connection.execute_batch(
         "PRAGMA synchronous=FULL;
@@ -3373,7 +3401,101 @@ fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
          PRAGMA temp_store=MEMORY;
          PRAGMA trusted_schema=OFF;",
     )?;
+    diagnostics.phase(UnlockDiagnosticPhase::DurabilityConfigured);
     Ok(connection)
+}
+
+#[derive(Clone, Copy)]
+enum UnlockDiagnosticPhase {
+    ChannelVerified,
+    SqliteOpened,
+    DurabilityConfigured,
+    #[cfg(feature = "macos-ticket26-diagnostics")]
+    BundleLoaded,
+    #[cfg(feature = "macos-ticket26-diagnostics")]
+    KdfStart,
+    #[cfg(feature = "macos-ticket26-diagnostics")]
+    KdfEnd,
+    #[cfg(feature = "macos-ticket26-diagnostics")]
+    RootAuthenticated,
+}
+
+#[cfg(feature = "macos-ticket26-diagnostics")]
+impl UnlockDiagnosticPhase {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::ChannelVerified => "channel-verified",
+            Self::SqliteOpened => "sqlite-opened",
+            Self::DurabilityConfigured => "durability-configured",
+            Self::BundleLoaded => "bundle-loaded",
+            Self::KdfStart => "kdf-start",
+            Self::KdfEnd => "kdf-end",
+            Self::RootAuthenticated => "root-authenticated",
+        }
+    }
+}
+
+struct UnlockDiagnostics {
+    #[cfg(feature = "macos-ticket26-diagnostics")]
+    enabled: bool,
+    #[cfg(feature = "macos-ticket26-diagnostics")]
+    previous: Instant,
+}
+
+impl UnlockDiagnostics {
+    #[cfg(feature = "macos-ticket26-diagnostics")]
+    fn new() -> Self {
+        Self {
+            enabled: cfg!(all(
+                target_os = "macos",
+                feature = "macos-ticket26-diagnostics"
+            )) && std::env::var_os("PM_MACOS_TICKET26_DIAGNOSTIC").as_deref()
+                == Some(std::ffi::OsStr::new("1")),
+            previous: Instant::now(),
+        }
+    }
+
+    #[cfg(not(feature = "macos-ticket26-diagnostics"))]
+    const fn new() -> Self {
+        Self {}
+    }
+
+    #[cfg(feature = "macos-ticket26-diagnostics")]
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            previous: Instant::now(),
+        }
+    }
+
+    #[cfg(not(feature = "macos-ticket26-diagnostics"))]
+    const fn disabled() -> Self {
+        Self {}
+    }
+
+    #[cfg(feature = "macos-ticket26-diagnostics")]
+    fn phase(&mut self, phase: UnlockDiagnosticPhase) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.previous);
+        self.previous = now;
+        if self.enabled {
+            eprintln!(
+                "PM26_DIAGNOSTIC unlock-phase={} elapsed-ms={}",
+                phase.name(),
+                bounded_millis(elapsed)
+            );
+        }
+    }
+
+    #[cfg(not(feature = "macos-ticket26-diagnostics"))]
+    fn phase(&mut self, phase: UnlockDiagnosticPhase) {
+        let _ = (self, phase);
+    }
+}
+
+#[cfg(feature = "macos-ticket26-diagnostics")]
+fn bounded_millis(elapsed: Duration) -> u128 {
+    elapsed.as_millis().min(999_999)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -265,6 +265,38 @@ fn unlock_root(connection: &Connection, password: &[u8]) -> Result<UnlockedRoot,
     Ok(unlocked)
 }
 
+#[cfg(feature = "macos-ticket26-diagnostics")]
+#[derive(Clone, Copy)]
+pub(crate) enum RootUnlockDiagnosticBoundary {
+    BundleLoaded,
+    KdfStart,
+    KdfEnd,
+    RootAuthenticated,
+}
+
+#[cfg(feature = "macos-ticket26-diagnostics")]
+pub(crate) fn unlock_root_diagnostic(
+    connection: &Connection,
+    password: &[u8],
+    mut observe: impl FnMut(RootUnlockDiagnosticBoundary),
+) -> Result<UnlockedRoot, VaultError> {
+    let (bundle, trusted_root) = load_and_validate_bundle(connection)?;
+    observe(RootUnlockDiagnosticBoundary::BundleLoaded);
+    let unlocked = pm_crypto::open_human_root_diagnostic(&bundle, password, |boundary| {
+        observe(match boundary {
+            pm_crypto::KdfDiagnosticBoundary::Start => RootUnlockDiagnosticBoundary::KdfStart,
+            pm_crypto::KdfDiagnosticBoundary::End => RootUnlockDiagnosticBoundary::KdfEnd,
+        });
+    })?;
+    if unlocked.vault_id() != trusted_root.vault_id()
+        || unlocked.human_public_key() != trusted_root.public_key()
+    {
+        return Err(VaultError::InvalidFormat);
+    }
+    observe(RootUnlockDiagnosticBoundary::RootAuthenticated);
+    Ok(unlocked)
+}
+
 #[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_wraps))]
 pub(crate) fn configure_platform_durability(connection: &Connection) -> rusqlite::Result<()> {
     #[cfg(target_os = "macos")]

@@ -10,8 +10,13 @@ harness="$root/crates/pm-custody/tests/macos_lab.py"
 fetch="$root/scripts/fetch-dependencies.sh"
 custody_manifest="$root/crates/pm-custody/Cargo.toml"
 custody_source="$root/crates/pm-custody/src/linux.rs"
+vault_manifest="$root/crates/pm-vault/Cargo.toml"
+vault_source="$root/crates/pm-vault/src/human.rs"
+crypto_manifest="$root/crates/pm-crypto/Cargo.toml"
+crypto_source="$root/crates/pm-crypto/src/root.rs"
+crypto_diagnostic_test="$root/crates/pm-crypto/tests/ticket26_diagnostics.rs"
 
-for file in "$workflow" "$method" "$lab" "$harness" "$fetch" "$custody_manifest" "$custody_source"; do
+for file in "$workflow" "$method" "$lab" "$harness" "$fetch" "$custody_manifest" "$custody_source" "$vault_manifest" "$vault_source" "$crypto_manifest" "$crypto_source" "$crypto_diagnostic_test"; do
     test -f "$file" || {
         echo "required macOS custody CI file is absent: $file" >&2
         exit 1
@@ -91,10 +96,19 @@ require_literal 'scratch.mkdir(mode=0o711)' "$harness"
 require_literal 'synthetic keygen failed' "$harness"
 require_literal 'cross_uid_peer_diagnostic(agent_uid, scratch)' "$harness"
 require_literal 'assert launchd_peer_uid(AGENT, RUNTIME / "agent.sock") == custodian_uid' "$harness"
-require_literal 'macos-ticket26-diagnostics = []' "$custody_manifest"
+require_literal 'macos-ticket26-diagnostics = ["pm-vault/macos-ticket26-diagnostics"]' "$custody_manifest"
+require_literal 'macos-ticket26-diagnostics = ["pm-crypto/macos-ticket26-diagnostics"]' "$vault_manifest"
+require_literal 'macos-ticket26-diagnostics = []' "$crypto_manifest"
 require_literal '--features macos-ticket26-diagnostics' "$lab"
 require_literal 'PM_MACOS_TICKET26_DIAGNOSTIC' "$harness"
 require_literal 'feature = "macos-ticket26-diagnostics"' "$custody_source"
+require_literal 'feature = "macos-ticket26-diagnostics"' "$vault_source"
+require_literal 'open_human_root_diagnostic' "$crypto_source"
+require_literal 'KdfDiagnosticBoundary::Start, KdfDiagnosticBoundary::End' "$crypto_diagnostic_test"
+require_literal 'PM26_DIAGNOSTIC unlock-phase={}' "$vault_source"
+require_literal 'PM26_DIAGNOSTIC vault-root-create-ms=' "$harness"
+require_literal 'PM26_DIAGNOSTIC sodium-cflags=' "$harness"
+require_literal 'native libsodium build metadata is unavailable or ambiguous' "$harness"
 require_literal 'ticket26_diagnostic_error' "$custody_source"
 require_literal 'PM26_DIAGNOSTIC error=' "$custody_source"
 require_literal 'client-human-unlock-result=' "$custody_source"
@@ -166,6 +180,24 @@ assert module.diagnostic_lines(
 assert module.diagnostic_lines(
     b"PM26_DIAGNOSTIC launchd-service=same-pid\n"
 ) == [b"PM26_DIAGNOSTIC launchd-service=same-pid"]
+assert module.diagnostic_lines(
+    b"PM26_DIAGNOSTIC unlock-phase=kdf-end elapsed-ms=15001\n"
+) == [b"PM26_DIAGNOSTIC unlock-phase=kdf-end elapsed-ms=15001"]
+assert module.diagnostic_lines(
+    b"PM26_DIAGNOSTIC vault-root-create-ms=24001\n"
+) == [b"PM26_DIAGNOSTIC vault-root-create-ms=24001"]
+assert module.diagnostic_lines(
+    b"PM26_DIAGNOSTIC sodium-cflags=opt0\n"
+) == [b"PM26_DIAGNOSTIC sodium-cflags=opt0"]
+assert module.parse_sodium_cflags(b"CFLAGS='-O0 -g'\n") == b"opt0"
+assert module.parse_sodium_cflags(b"CFLAGS='-O2 -g'\n") == b"optimized"
+for rejected in (b"", b"CFLAGS='-Og'\n", b"CFLAGS='-O0 -O2'\n"):
+    try:
+        module.parse_sodium_cflags(rejected)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("ambiguous native libsodium metadata was accepted")
 result = type("Result", (), {
     "returncode": 0, "stdout": b"state = running\n\tpid = 321\n", "stderr": b""
 })()

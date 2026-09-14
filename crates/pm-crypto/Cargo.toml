@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+macos-ticket26-diagnostics = []
+
 [dependencies]
 libsodium-sys-stable.workspace = true
 minicbor.workspace = true

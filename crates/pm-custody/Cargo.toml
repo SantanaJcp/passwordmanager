@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [features]
-macos-ticket26-diagnostics = []
+macos-ticket26-diagnostics = ["pm-vault/macos-ticket26-diagnostics"]
 
 [[bin]]
 name = "pm-custody"

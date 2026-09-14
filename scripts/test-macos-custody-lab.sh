@@ -25,7 +25,8 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 ./scripts/cargo-local.sh build -p pm-custody -p pm-cli \
   --features macos-ticket26-diagnostics --locked --offline
-./scripts/cargo-local.sh test -p pm-native-channel -p pm-vault --locked --offline
+./scripts/cargo-local.sh test -p pm-native-channel -p pm-vault -p pm-crypto \
+  --features macos-ticket26-diagnostics --locked --offline
 plutil -lint packaging/macos/com.santanajcp.passwordmanager.plist >/dev/null
 
 machine=$(uname -m)

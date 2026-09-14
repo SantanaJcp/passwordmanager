@@ -3256,6 +3256,38 @@ pub fn create_human_root(password: &[u8], profile: KdfProfile) -> Result<Created
 ///
 /// Returns an error if any format, KDF, envelope context, or root check fails.
 pub fn open_human_root(bundle: &RootBundle, password: &[u8]) -> Result<UnlockedRoot, CryptoError> {
+    open_human_root_inner(bundle, password, |_| {})
+}
+
+/// Stable KDF boundaries exposed only to the opt-in Ticket 26 native diagnostic.
+#[cfg(feature = "macos-ticket26-diagnostics")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KdfDiagnosticBoundary {
+    Start,
+    End,
+}
+
+/// Opens the same human root while observing the existing password derivation.
+///
+/// This performs no additional derivation or authentication operation.
+///
+/// # Errors
+///
+/// Returns the same errors as [`open_human_root`].
+#[cfg(feature = "macos-ticket26-diagnostics")]
+pub fn open_human_root_diagnostic(
+    bundle: &RootBundle,
+    password: &[u8],
+    mut observe: impl FnMut(KdfDiagnosticBoundary),
+) -> Result<UnlockedRoot, CryptoError> {
+    open_human_root_inner(bundle, password, |boundary| observe(boundary.into()))
+}
+
+fn open_human_root_inner(
+    bundle: &RootBundle,
+    password: &[u8],
+    mut observe: impl FnMut(KdfDiagnosticBoundaryInternal),
+) -> Result<UnlockedRoot, CryptoError> {
     validate_password(password)?;
     validate_bundle(bundle)?;
     let kdf = bundle
@@ -3265,8 +3297,26 @@ pub fn open_human_root(bundle: &RootBundle, password: &[u8]) -> Result<UnlockedR
         .as_ref()
         .ok_or(CryptoError::InvalidKdf)?;
     kdf.profile.validate()?;
+    observe(KdfDiagnosticBoundaryInternal::Start);
     let password_key = derive_password(password, &kdf.salt, kdf.profile)?;
+    observe(KdfDiagnosticBoundaryInternal::End);
     unlock_with_key(bundle, &password_key, &bundle.password_envelope)
+}
+
+#[derive(Clone, Copy)]
+enum KdfDiagnosticBoundaryInternal {
+    Start,
+    End,
+}
+
+#[cfg(feature = "macos-ticket26-diagnostics")]
+impl From<KdfDiagnosticBoundaryInternal> for KdfDiagnosticBoundary {
+    fn from(value: KdfDiagnosticBoundaryInternal) -> Self {
+        match value {
+            KdfDiagnosticBoundaryInternal::Start => Self::Start,
+            KdfDiagnosticBoundaryInternal::End => Self::End,
+        }
+    }
 }
 
 /// Authenticates the independent recovery path and pinned human signing root.

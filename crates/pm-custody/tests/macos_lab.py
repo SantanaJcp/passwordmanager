@@ -9,6 +9,7 @@ import pathlib
 import plistlib
 import pwd
 import re
+import shlex
 import shutil
 import socket
 import stat
@@ -36,7 +37,12 @@ DIAGNOSTIC_LINE = re.compile(
     rb"PM26_DIAGNOSTIC server-human-unlock-result="
     rb"(?:ok|vault-error) elapsed-ms=[0-9]{1,6}|"
     rb"PM26_DIAGNOSTIC launchd-service="
-    rb"(?:same-pid|different-pid|unavailable|unparseable))$"
+    rb"(?:same-pid|different-pid|unavailable|unparseable)|"
+    rb"PM26_DIAGNOSTIC unlock-phase="
+    rb"(?:channel-verified|sqlite-opened|durability-configured|bundle-loaded|"
+    rb"kdf-start|kdf-end|root-authenticated) elapsed-ms=[0-9]{1,6}|"
+    rb"PM26_DIAGNOSTIC vault-root-create-ms=[0-9]{1,6}|"
+    rb"PM26_DIAGNOSTIC sodium-cflags=(?:opt0|optimized))$"
 )
 PEER_UID_SCRIPT = """
 import ctypes, socket, sys
@@ -246,7 +252,12 @@ def create_vault(cli, path):
     process.stdin.write(PASSWORD + b"\n"); process.stdin.flush()
     assert process.stdout.readline() == b"Confirm master password:\n"
     process.stdin.write(PASSWORD + b"\n"); process.stdin.flush()
+    derivation_started = time.monotonic_ns()
     recovery = process.stdout.readline()
+    derivation_ms = min((time.monotonic_ns() - derivation_started) // 1_000_000, 999_999)
+    creation_status = f"PM26_DIAGNOSTIC vault-root-create-ms={derivation_ms}".encode()
+    diagnostic_lines(creation_status)
+    print(creation_status.decode())
     assert recovery.startswith(b"Recovery code (store externally): PMR1-")
     assert process.stdout.readline() == b"Reintroduce recovery code to confirm the external copy:\n"
     process.stdin.write(recovery.split(b": ", 1)[1]); process.stdin.close()
@@ -278,6 +289,33 @@ def diagnostic_lines(value):
         "unsafe or missing ticket-26 diagnostic output", len(lines),
     )
     return lines
+
+
+def parse_sodium_cflags(config_log):
+    values = re.findall(rb"(?m)^CFLAGS='([^']*)'$", config_log)
+    assert len(values) == 1, "native libsodium build metadata is unavailable or ambiguous"
+    try:
+        flags = shlex.split(values[0].decode("ascii"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise AssertionError(
+            "native libsodium build metadata is unavailable or ambiguous"
+        ) from error
+    opt0 = "-O0" in flags
+    optimized = any(flag in {"-O1", "-O2", "-O3", "-Os", "-Oz", "-Ofast"} for flag in flags)
+    assert opt0 != optimized, "native libsodium build metadata is unavailable or ambiguous"
+    return b"opt0" if opt0 else b"optimized"
+
+
+def classify_native_sodium(source_binary):
+    repository = source_binary.parents[2]
+    logs = list(repository.glob(
+        "target/debug/build/libsodium-sys-stable-*/out/source/libsodium-stable/config.log"
+    ))
+    assert len(logs) == 1, "native libsodium build metadata is unavailable or ambiguous"
+    classification = parse_sodium_cflags(logs[0].read_bytes())
+    status = b"PM26_DIAGNOSTIC sodium-cflags=" + classification
+    diagnostic_lines(status)
+    print(status.decode())
 
 
 def classify_launchd_service(result, expected_pid):
@@ -386,6 +424,7 @@ def main():
     assert sys.platform == "darwin" and os.geteuid() != 0
     assert os.environ.get("PM_MACOS_EPHEMERAL_CI") == "1"
     binary, cli, source_plist = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:])
+    classify_native_sodium(binary)
     guarded = [INSTALL, STATE, RUNTIME, PLIST]
     collisions = [str(path) for path in guarded if path.exists()]
     assert not collisions, f"refusing to replace pre-existing host paths: {collisions}"

@@ -476,6 +476,78 @@ Checkpoint evidence from the Linux development host:
   failure remains RED, and the new categories are not native evidence until
   the same unchanged laboratory runs there.
 
+### Eleventh-run unlock-latency discriminant method
+
+Run `34807572032` on checkpoint `98d41d` is GREEN on Intel and RED on Apple
+silicon. The ARM client classified the human unlock response as `timeout` at
+15,002 ms; launchd still reported the same service PID; and the service had
+accepted and decoded the complete human unlock frame but emitted neither an
+unlock result nor its terminal phase. This verifies the deadline and bounds
+the wait to `HumanVault::unlock_with_audit_custody`; it does not yet identify
+which operation inside unlock consumed the time.
+
+Read-only call-graph inspection fixes the next single-run discriminant:
+
+1. Preserve the exact password, Argon2id profile (256 MiB, three passes,
+   `p=1`), `IO_TIMEOUT`, process priority, build profile, TLS/RPK exchange and
+   public `CUSTODY_UNAVAILABLE` mapping. Do not add an authentication/KDF
+   operation, retry, sleep, alternate path or larger deadline.
+2. Extend the existing default-off `macos-ticket26-diagnostics` feature
+   through `pm-vault` and `pm-crypto`. It remains inert unless the service has
+   the exact `PM_MACOS_TICKET26_DIAGNOSTIC=1` opt-in. During only the existing
+   unlock, emit fixed phases for `channel-verified`, `sqlite-opened`,
+   `durability-configured`, `bundle-loaded`, `kdf-start`, `kdf-end` and
+   `root-authenticated`. Each line contains only the fixed name and a bounded
+   millisecond duration measured with a monotonic clock; it contains no path,
+   UID, password, key, bundle, SQL value or dynamic error text.
+3. Measure the already required creation derivation without executing another
+   derivation: start immediately after flushing the confirmed password and
+   stop when the CLI prints its recovery-code prompt. `PendingVault::new`
+   executes the same default KDF in that interval and persistence has not yet
+   started. Report only `vault-root-create-ms=<0..999999>`.
+4. Read the one native libsodium `config.log` produced by this clean build,
+   require a parseable `CFLAGS` assignment, and classify it only as `opt0` or
+   `optimized` from mutually exclusive exact optimization tokens. Missing,
+   multiple, contradictory or unclassified metadata is a laboratory failure,
+   never a default category. Report only `sodium-cflags=opt0|optimized`; never
+   dump the flags or select an ambient library.
+5. A focused regression must prove that the diagnostic root opener returns the
+   same authenticated root as the ordinary public opener and observes exactly
+   one `kdf-start`/`kdf-end` pair. The checker must require all feature/opt-in
+   gates and the closed fixture grammar. Local syntax/check gates may run once
+   the shared Linux test window is free; only a native Intel+ARM rerun supplies
+   the discriminant.
+
+Interpretation is closed. `kdf-start` without `kdf-end` at the unchanged client
+deadline identifies the password derivation. Stopping before `sqlite-opened`,
+`durability-configured` or `bundle-loaded` identifies channel, SQLite setup or
+bundle I/O respectively. A fast creation derivation but slow service KDF makes
+the launchd execution context a candidate; both slow makes the native crypto
+build/profile the leading candidate. Audit custody is not a candidate for this
+deadline: unlock only clones its already-open opaque handle after root
+authentication and performs no audit append, transaction or I/O.
+
+Current source inspection makes the KDF/build path the leading hypothesis, not
+a confirmed cause. The lab uses Cargo's dev profile; the workspace fixes
+`libsodium-sys-stable` 1.24.0 with default features disabled; and that crate's
+build script obtains C flags from `cc::Build` while adding `--enable-opt` only
+for its inactive `optimized` feature. A Linux build of the same graph recorded
+`-O0`, but that is not evidence of the ARM build, hence the required native
+classification above. Do not enable `optimized` speculatively: its build script
+also adds `-march=native`/`-mtune=native`, which may change distribution
+portability. Any optimization correction requires the native result and a
+separate approved method; increasing the timeout or reducing the KDF is not a
+correction.
+
+The bounded diagnostic checkpoint was verified locally without making a native
+latency claim. The focused feature-enabled `pm-crypto` regression passed 1/1
+and the static macOS CI checker passed. The first full `./scripts/check.sh`
+reached Clippy and failed because the feature-disabled no-op observer left its
+`self` argument unused; after making that no-op consume both fixed inputs, the
+same complete check passed. `./scripts/clean-offline-build.sh` then completed a
+clean locked/offline rebuild successfully. No macOS runner was dispatched, so
+the ARM location and its native `sodium-cflags` category remain unverified.
+
 ## Remaining acceptance work
 
 - Rerun the repaired checkpoint on both authorized ephemeral macOS
