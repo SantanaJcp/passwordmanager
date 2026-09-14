@@ -1575,10 +1575,13 @@ pantalla o captura superior al límite son errores categóricos; no se eliminan
 escapes ni se reemplazan glifos. El drainer continúa hasta EOF aunque el
 observer falle para no bloquear `ClosePseudoConsole`.
 
-El test espera en esa pantalla reconstruida el título y `Password required
-(input hidden)` antes de enviar la contraseña sintética. Después espera
-`Unlocked: selection never reveals secrets` y el catálogo de metadatos antes
-de enviar `q`; exige lock auditado, salida del proceso y teardown completo. La
+El test espera en esa pantalla reconstruida el título y el estado inicial
+`Password required`; envía el primer byte sintético y sólo continúa cuando la
+pantalla cambia a `Password required (input hidden)`, acreditando que el input
+no se dibuja. Después completa la contraseña, espera `Unlocked: selection never
+reveals secrets` y el catálogo de metadatos antes de enviar `q`; exige salida
+natural con código cero antes de iniciar `ClosePseudoConsole`, además del lock
+auditado y teardown completo. La
 captura conservada por el observer nunca se imprime y se comprueba que no
 contenga contraseña, secreto ni canario sintético. Sólo este recorrido acredita
 teclado y pantalla reales; el tracer previo de 15 segundos queda como evidencia

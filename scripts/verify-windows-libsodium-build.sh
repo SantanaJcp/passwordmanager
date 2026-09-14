@@ -184,11 +184,13 @@ for literal in CreateWindowStationW CWF_CREATE_ONLY CreateDesktopW CreatePseudoC
     STARTUPINFOEXW PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE CreateProcessW \
     'fixture.pseudo_console as *const c_void' OutputDrain 'thread::Builder::new()' \
     'MAX_CAPTURE_BYTES' 'TerminalObserver' 'exercise_keyboard_screen' \
-    'Password required (input hidden)' 'Unlocked: selection never reveals secrets' \
+    'Password required' 'Password required (input hidden)' \
+    'Unlocked: selection never reveals secrets' \
     'Items (selection is metadata only)' 'WriteFile(ConPTY input)' \
     'CloseHandle ceded ConPTY input' 'CloseHandle ceded ConPTY output' \
     'WaitForSingleObject(self.process, INFINITE)' \
-    'ConPTY screen did not show expected text within 15 seconds' \
+    'ConPTY screen did not show expected text within 15 seconds' 'require_tui_exit' \
+    'pm-custody.exe tui did not exit within 15 seconds after q' \
     TUI_CONPTY_RED TUI_CONPTY_READY; do
     require_literal "$literal" "$tui_fixture"
 done

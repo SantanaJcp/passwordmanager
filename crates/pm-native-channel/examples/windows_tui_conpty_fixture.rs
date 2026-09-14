@@ -22,7 +22,7 @@ mod windows_fixture {
     use windows_sys::Win32::{
         Foundation::{
             CloseHandle, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_DATA, GetLastError,
-            HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
+            HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
             Authorization::{
@@ -40,9 +40,9 @@ mod windows_fixture {
             },
             Threading::{
                 CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-                INFINITE, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-                PROCESS_INFORMATION, STARTUPINFOEXW, UpdateProcThreadAttribute,
-                WaitForSingleObject,
+                GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTUPINFOEXW,
+                UpdateProcThreadAttribute, WaitForSingleObject,
             },
         },
         UI::WindowsAndMessaging::{CWF_CREATE_ONLY, WINSTA_ALL_ACCESS},
@@ -336,8 +336,9 @@ mod windows_fixture {
                 .lock()
                 .map_err(|_| "ConPTY screen observer lock poisoned".to_owned())?;
             state.feed(bytes);
+            let result = state.error.clone().map_or(Ok(()), Err);
             self.changed.notify_all();
-            Ok(())
+            result
         }
 
         fn finish(&self) -> Result<(), String> {
@@ -346,8 +347,9 @@ mod windows_fixture {
                 .lock()
                 .map_err(|_| "ConPTY screen observer lock poisoned".to_owned())?;
             state.finish();
+            let result = state.error.clone().map_or(Ok(()), Err);
             self.changed.notify_all();
-            Ok(())
+            result
         }
 
         fn wait_for(&self, expected: &str) -> Result<(), String> {
@@ -974,9 +976,17 @@ mod windows_fixture {
     fn exercise_keyboard_screen(fixture: &Fixture, password: &[u8]) -> io::Result<()> {
         fixture
             .observer
+            .wait_for("Password required")
+            .map_err(io::Error::other)?;
+        let (first, rest) = password
+            .split_first()
+            .ok_or_else(|| io::Error::other("synthetic TUI password is empty"))?;
+        write_conpty_input(fixture.input_write, std::slice::from_ref(first))?;
+        fixture
+            .observer
             .wait_for("Password required (input hidden)")
             .map_err(io::Error::other)?;
-        let mut input = zeroize::Zeroizing::new(password.to_vec());
+        let mut input = zeroize::Zeroizing::new(rest.to_vec());
         input.push(b'\r');
         write_conpty_input(fixture.input_write, &input)?;
         fixture
@@ -991,7 +1001,37 @@ mod windows_fixture {
             .observer
             .rejects(password)
             .map_err(io::Error::other)?;
-        write_conpty_input(fixture.input_write, b"q")
+        write_conpty_input(fixture.input_write, b"q")?;
+        require_tui_exit(fixture.process)
+    }
+
+    fn require_tui_exit(process: HANDLE) -> io::Result<()> {
+        let wait = unsafe { WaitForSingleObject(process, 15_000) };
+        if wait == WAIT_FAILED {
+            return Err(win32(
+                "WaitForSingleObject(pm-custody.exe tui natural exit)",
+            ));
+        }
+        if wait == WAIT_TIMEOUT {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "pm-custody.exe tui did not exit within 15 seconds after q",
+            ));
+        }
+        if wait != WAIT_OBJECT_0 {
+            return Err(io::Error::other("unexpected TUI natural-exit wait result"));
+        }
+        let mut exit_code = 0;
+        if unsafe { GetExitCodeProcess(process, &raw mut exit_code) } == 0 {
+            return Err(win32("GetExitCodeProcess after q"));
+        }
+        if exit_code == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "pm-custody.exe tui exited {exit_code} after q"
+            )))
+        }
     }
 
     fn exercise(args: &[String]) -> io::Result<()> {
