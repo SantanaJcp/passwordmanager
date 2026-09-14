@@ -10,12 +10,20 @@ use std::{
     io::Write,
     os::{
         fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
+        unix::fs::OpenOptionsExt,
     },
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+
+#[cfg(target_os = "linux")]
+use std::{
+    os::unix::fs::MetadataExt,
+    process::{Child, Command, Stdio},
+};
+
+#[cfg(target_os = "macos")]
+use pm_native_channel::OwnedClipboard;
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -47,6 +55,7 @@ use crate::{Failure, take_path};
 const DEFAULT_IDLE: u64 = 300;
 const DEFAULT_REVEAL: u64 = 15;
 const DEFAULT_COPY: u64 = 30;
+#[cfg(target_os = "linux")]
 const WL_COPY: &str = "/usr/bin/wl-copy";
 
 #[derive(Clone)]
@@ -306,8 +315,15 @@ impl App {
     }
 }
 
+enum ClipboardBackend {
+    #[cfg(target_os = "linux")]
+    Wayland(Child),
+    #[cfg(target_os = "macos")]
+    AppKit(Option<OwnedClipboard>),
+}
+
 struct ClipboardLease {
-    child: Child,
+    backend: ClipboardBackend,
     until: Instant,
     cleanup_attempted: bool,
 }
@@ -317,7 +333,21 @@ impl ClipboardLease {
         if !begin_cleanup(&mut self.cleanup_attempted) {
             return Ok(());
         }
-        stop_clipboard_with(&mut self.child)
+        match &mut self.backend {
+            #[cfg(target_os = "linux")]
+            ClipboardBackend::Wayland(child) => stop_clipboard_with(child),
+            #[cfg(target_os = "macos")]
+            ClipboardBackend::AppKit(owner) => {
+                let owner = owner.take().ok_or(Failure::Unavailable)?;
+                // `false` means another application owns the pasteboard.  It
+                // is a successful ownership-preserving no-op, not a reason
+                // to clear the newer selection or retry cleanup.
+                owner
+                    .clear_if_owned()
+                    .map(|_| ())
+                    .map_err(|_| Failure::Unavailable)
+            }
+        }
     }
 }
 
@@ -376,6 +406,7 @@ trait ClipboardControl {
     fn wait_process(&mut self) -> Result<(), ()>;
 }
 
+#[cfg(target_os = "linux")]
 impl ClipboardControl for Child {
     fn try_exited(&mut self) -> Result<bool, ()> {
         self.try_wait()
@@ -2199,6 +2230,7 @@ fn expose_selected_field(app: &mut App, tls: &mut HumanTls) -> Result<(), Failur
     let copy = app.field_copy;
     let field = u16::try_from(app.field_selected).map_err(|_| Failure::Unavailable)?;
     if copy {
+        #[cfg(target_os = "linux")]
         validate_wl_copy()?;
     }
     let mut request = vec![if copy { 53 } else { 52 }];
@@ -2250,6 +2282,7 @@ fn expect_secret(response: &[u8]) -> Result<Zeroizing<Vec<u8>>, Failure> {
     Ok(value)
 }
 
+#[cfg(target_os = "linux")]
 fn validate_wl_copy() -> Result<(), Failure> {
     let path = PathBuf::from(WL_COPY);
     let metadata = fs::symlink_metadata(&path).map_err(|_| Failure::Unavailable)?;
@@ -2271,6 +2304,7 @@ fn validate_wl_copy() -> Result<(), Failure> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Failure> {
     let mut child = Command::new(WL_COPY)
         .args([
@@ -2284,17 +2318,26 @@ fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Fail
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| Failure::Unavailable)?;
-    let result = child
-        .stdin
-        .take()
-        .ok_or(Failure::Unavailable)?
-        .write_all(secret);
-    if result.is_err() {
+    let Some(mut stdin) = child.stdin.take() else {
+        let _cleanup = stop_clipboard_with(&mut child);
+        return Err(Failure::Unavailable);
+    };
+    if stdin.write_all(secret).is_err() {
         let _cleanup = stop_clipboard_with(&mut child);
         return Err(Failure::Unavailable);
     }
     Ok(ClipboardLease {
-        child,
+        backend: ClipboardBackend::Wayland(child),
+        until: Instant::now() + duration,
+        cleanup_attempted: false,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Failure> {
+    let owner = OwnedClipboard::copy(secret).map_err(|_| Failure::Unavailable)?;
+    Ok(ClipboardLease {
+        backend: ClipboardBackend::AppKit(Some(owner)),
         until: Instant::now() + duration,
         cleanup_attempted: false,
     })
@@ -2477,6 +2520,28 @@ mod tests {
         let result = stop_clipboard_with(&mut control);
         assert!(result.is_err());
         assert_eq!(control.0, ["try-wait", "kill", "wait"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn appkit_clipboard_lease_preserves_newer_owner_and_single_exit_cleanup() {
+        let mut first = copy_secret(b"ticket26-tui-first-owner", Duration::from_secs(1))
+            .expect("first AppKit owner");
+        let mut replacement =
+            copy_secret(b"ticket26-tui-new-owner", Duration::from_secs(1))
+                .expect("replacement AppKit owner");
+
+        // The old lease must not clear a newer pasteboard owner.  The
+        // replacement remains independently cleanable on session exit.
+        first
+            .stop_if_owner()
+            .expect("stale AppKit owner cleanup is not an error");
+        replacement
+            .stop_if_owner()
+            .expect("current AppKit owner cleanup");
+        replacement
+            .stop_if_owner()
+            .expect("cleanup is not retried after explicit exit cleanup");
     }
 
     #[test]

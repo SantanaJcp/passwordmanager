@@ -850,6 +850,28 @@ The native TUI PASS must name keyboard, PTY, TLS/RPK, seven kinds/all fields,
 access/pending, operations, AppKit ownership race, wrong UID, explicit lock and
 idle lock. It must appear on both authorized architectures in the same run.
 
+### Clipboard backend composition checkpoint
+
+The shared `ClipboardLease` keeps the Linux `wl-copy` child path and its
+validated root-owned helper unchanged. On macOS, the same lease uses only the
+existing `pm_native_channel::OwnedClipboard`: `copy` records the AppKit
+`NSPasteboard.changeCount`, and explicit expiry/session-exit cleanup calls
+`clear_if_owned` once. A stale lease that no longer owns the pasteboard is a
+successful ownership-preserving no-op; an AppKit copy or clear error remains a
+`CUSTODY_UNAVAILABLE` failure. A failed copy creates no lease, and a Linux
+helper partial-initialization failure still attempts the existing child
+stop/wait cleanup. No `pbcopy`, OSC52, shell fallback or alternate backend is
+allowed.
+
+The focused macOS regression is cfg-gated to the real AppKit backend and
+exercises a replacement-owner race plus explicit cleanup's no-second-attempt
+behavior when executed. The native acceptance method above must additionally
+execute the normal non-diagnostic `pm-custody tui` through a real PTY, verify
+copy/lock/idle exit and the observer's replacement remains after the stale lease
+expires, then perform strict owned cleanup before PASS. This checkpoint was
+prepared without Cargo, a local build, or a native runner; it makes no
+RED/green or macOS TUI acceptance claim.
+
 Before native dispatch, static verification must establish that the new
 harness parses, its command/fixture inventory is closed, its PTY driver waits
 for visible input before Enter, and the workflow still invokes only the normal
