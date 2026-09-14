@@ -327,3 +327,10 @@ El bootstrap de workflow manual quedó en `master` como `5f099f8`, sin fusionar 
 - [Corrida4, 34797595176](https://github.com/SantanaJcp/passwordmanager/actions/runs/34797595176), `49ec89ad`: guard `WindowsPrincipal.IsInRole` PASS; etapa MSVC PASS otra vez; DPAPI y ConPTY pasan (2 tests). `clipboard_sequence_never_clears_a_newer_owner` falla en `second.clear_if_owned()` (2/3 tests). No se ejecutó aún la custodia completa; el diagnóstico del clipboard continúa sin relajar ownership ni omitir la aserción.
 
 Nada de esta evidencia cierra 26/27 ni los gates integrales 30–34. Los fallos previos se conservan; no se presenta solo la última corrida como validación global.
+
+
+### Nuevos discriminantes nativos — 2026-09-13
+
+- macOS [corrida8, 34798902550](https://github.com/SantanaJcp/passwordmanager/actions/runs/34798902550), `87dc908`: ambas CPU observaron socket aceptado `nonblocking-before=1` y `after=0`; el cliente llegó a READY y servidor a request/ALPN/READY. Esto confirma la causa del fallo anterior y la corrección del modo de I/O. El lab no pasó completo: la negativa de servidor impostor agotó cinco segundos esperando `accept`. Se investiga el fixture sin convertir timeout en éxito; sigue pendiente aceptación normal sin diagnóstico.
+- Windows [corrida5, 34798532966](https://github.com/SantanaJcp/passwordmanager/actions/runs/34798532966), `40b8ec9`: diagnóstico test-only confirmó que la secuencia guardada antes de CloseClipboard quedaba obsoleta (2→5 y7→10), con owner HWND nulo. No se cambió comportamiento en esa corrida.
+- Windows [corrida6, 34799143030](https://github.com/SantanaJcp/passwordmanager/actions/runs/34799143030), `7829c12`: HWND propio por lease y captura final verificada con owner bajo lock corrigen la regresión original, que pasa; DPAPI/ConPTY también pasan. La nueva negativa de pérdida entre publicación/captura falla al crear el escritor concurrente (3/4 tests). Se investiga interferencia entre casos que comparten clipboard, preservando la carrera intencional dentro de la prueba. Ninguna corrida acredita custodia completa.
