@@ -514,3 +514,44 @@ primer comando `--locked` no compiló porque mover `windows-sys` entre paquetes
 requirió sincronizar `Cargo.lock`; se conserva en
 `/tmp/pm28-green-shared-native-input-focused.log` como bookkeeping, no RED.
 No se repitió la barrida 25/25 anterior; el merger ejecutará el gate compuesto.
+
+## Bloque coherente pendiente: owners plaintext completos
+
+El bloque siguiente se prueba como cuatro fronteras, pero se integra y barre una
+sola vez. Primero, dos tests subprocess aislados preparan paquetes y streams
+válidos, bajan sólo su propio `RLIMIT_MEMLOCK` después de crear keys/opener y
+exigen `ResourceUnavailable` al abrir revision human/auth y el primer chunk. La
+implementación cambia `open`, `OpenedRevisionPackage` y ambos wrappers
+`FileOpener`/`BackupOpener` a `ProtectedBytes`; la FFI descifra directamente en
+el owner locked, comprueba rc, longitud exacta y tag antes de devolverlo. Drop
+limpia capacidad también en error de manifest/auth; cipher, AAD y estado inline
+de secretstream no se renombran plaintext protegido.
+
+Segundo, una prueba subprocess de `AttemptVault::claim_next` prepara una
+credencial completa password+TOTP+subject-token+SSH, agota el presupuesto público
+con owners `ProtectedBytes` conservados y exige `ResourceUnavailable` antes de
+entregar `AttemptLease`. `OperationalCredential`, `CredentialMaterial`,
+`DecodedAuthMethod`, `AttemptLease`, `TotpLease` y `SshLease` deben poseer
+`ProtectedBytes`/`Option<ProtectedBytes>`; getters slice no cambian. El decode
+CBOR debe copiar directamente desde bytes autenticados al owner locked y no
+crear `Zeroizing<Vec>` intermediario. Metadata no secreta queda en String/Vec.
+
+Tercero, los clientes custody y TUI prueban memlock denegado en cada clase de
+frame abierto: password/recovery/token/requester secret/private key, response de
+reveal y chunks. Los headers/límites se leen por `NativeStdin` o canal TLS; la
+región protegida se reserva antes de payload propio. `read_frame_bounded` no
+puede seguir devolviendo un `Vec` cuando el frame contiene plaintext; parsers
+borrowean `ProtectedBytes`, y serializers sensibles escriben en un destino
+protegido antes del socket. No se protege ni reclama el heap interno de rustls.
+
+Cuarto, los labs reales web-auth y ssh arrancan cada adapter en un subprocess
+con memlock insuficiente y una request válida. Deben cerrar/fallar la request
+antes de browser/HTTP/SSH y no reflejar canarios. Sus frames completos se leen
+directamente a `ProtectedBytes`; cursores sólo prestan slices y eliminan clones
+`to_vec` de password/TOTP/token/private/passphrase. Respuestas que contienen
+bearer/resultados o material de firma permanecen protegidas hasta `write_all`.
+TLS, Chromium y russh internos siguen siendo excepciones explícitas, no fallback.
+
+Los RED se ejecutarán por filtro y lab exactamente una vez tras nueva ventana.
+Un fallo de build/fixture no cuenta. Sólo después de reproducir los cuatro seams
+se escribe GREEN; no habrá otra barrida integral entre microcambios.
