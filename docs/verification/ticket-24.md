@@ -80,3 +80,28 @@ PASS complete-linux-labs count=19
 La barrida final fue una sola ejecución ordenada 19/19 después del clean build.
 Los límites emitidos por los labs siguen vigentes: no se ejecutaron navegador
 de producto, reinicio/FDE de host ni los targets nativos pendientes.
+
+
+## Verificación independiente de integración
+
+El merger separado integró el candidato `36934b3` como `77a5198` y ejecutó,
+sin reintentos, el método anterior sobre la rama unificada:
+
+```text
+git diff --check 736afee..77a5198
+# exit 0
+
+scripts/check.sh
+# exit 0; fmt, suite Rust y clippy -D warnings
+
+scripts/clean-offline-build.sh
+# Removed 14,903 files / 4.5 GiB; build --locked --offline 44.43 s; exit 0
+
+# cada script se ejecutó exactamente una vez; el bucle conservó cada rc
+LAB-SUMMARY count=19 failures=0
+```
+
+La misma barrida emitió los PASS de `tui-access`, `tui-pending` y
+`passkey-login-human` consignados arriba. Los `LIMIT` observados permanecen:
+no se ejecutaron el navegador Chromium de producto, reboot/FDE, macOS, Windows,
+ARM64, ticket25 ni la revisión formal final.

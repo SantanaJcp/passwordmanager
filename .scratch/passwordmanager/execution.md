@@ -152,3 +152,19 @@ Candidato `f1c375e` integrado sin conflictos como `c74aba0`, resolución23 en `0
 ## Composición25: sync observable sin ampliar plazos
 
 La implementación encontró read-timeout humano de15s frente al backoff idempotente ya aprobado de sync. No se autorizó el timeout propuesto de75s: no cubre request30s por intento ni múltiples hashes/páginas, y puede dejar UI fallida con publicación todavía activa.25 debe separar inicio autorizado de trabajo cifrado observable por ID/estado/progreso en el motor único, preservando outbox/backoff y lock/idle sin retener HumanVault/KH tras bloqueo. Consultar estado no repite autenticaciones ni operaciones. Este ajuste de implementación satisface los contratos existentes; no reabre el backoff de [G5](../../docs/design/synchronization.md) ni crea gestión de sesiones de negocio. Exige método y pruebas de indisponibilidad durante sync, estado final y bloqueo/reinicio sin éxito inventado antes de aceptar25.
+
+
+## TUI24 integrada — autoridad y pendientes
+
+Candidato `36934b3` integrado sin conflictos como `77a5198`. Merger Sol distinto
+verificó `git diff --check`, `scripts/check.sh`, clean locked/offline (44.43 s)
+y una única barrida ordenada de los 19 laboratorios Linux con acumulación y
+propagación explícita: `count=19 failures=0`, sin skips ni retries. Los opcodes
+humanos 54–59 usan los motores existentes para alta/revoke, suspensión,
+conjunto común y pendientes; el lab TUI real comprobó lock humano independiente,
+dos agentes, cambios de autoridad, contexto seguro y cancelación terminal. El
+recorrido real Keycloak 26.7.3 + CFT fijado confirmó
+`UP=TUI-keyboard` y `UV=fresh-second-human-channel`, además de los negativos de
+expiración y revocación sin evidencia fabricada. Ticket24 resuelto. No acredita
+nativos, Chromium de producto, ticket25 ni revisión formal Astra; esas puertas
+continúan pendientes.

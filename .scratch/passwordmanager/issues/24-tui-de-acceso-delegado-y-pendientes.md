@@ -1,7 +1,7 @@
 # 24 — TUI de acceso delegado y pendientes
 
 Type: task
-Status: claimed
+Status: resolved
 Owner: sol-24
 Blocked by: 08,13,23
 Spec: ../spec.md
@@ -22,16 +22,37 @@ Corte aprobado del DAG; implementar únicamente este ticket, preservando todos l
 - [Tracker](../../../docs/agents/issue-tracker.md).
 
 ## Acceptance criteria
-- [ ] Alta/revoke/conjunto común/suspensión completos vía motor humano real.
-- [ ] pendientes listan contexto seguro y cancelan, consumen confirmación UP/UV del proveedor existente, no fabrican evidencia.
-- [ ] bloquear TUI conserva autonomía y suspensión/espera/expiración/revoke se muestran con estado correcto.
-- [ ] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
-- [ ] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
+- [x] Alta/revoke/conjunto común/suspensión completos vía motor humano real.
+- [x] pendientes listan contexto seguro y cancelan, consumen confirmación UP/UV del proveedor existente, no fabrican evidencia.
+- [x] bloquear TUI conserva autonomía y suspensión/espera/expiración/revoke se muestran con estado correcto.
+- [x] Evidencia TDD red/green y comandos exactos de tests/checks; sin skip/stubs para simular cumplimiento.
+- [x] Cambios revisados contra estándares y contrato; integración verificada por merger antes de resolver.
 
 ## Answer
-Pendiente de implementación y evidencia.
+
+Integrado: la TUI Ratatui/Crossterm usa los opcodes humanos cerrados 54–59
+sobre los motores de autoridad e intentos existentes para alta, revocación,
+suspensión/reanudación, conjunto común y pendientes. La confirmación passkey
+muestra el contexto cerrado, exige `APPROVE <request_id>` por teclado y abre un
+canal humano nuevo con reautenticación maestra antes de enviar UP/UV; el agente
+no puede declarar esa evidencia. El laboratorio real comprueba lock humano
+independiente, dos agentes sobre el mismo conjunto, cancelación terminal,
+rechazo tras expiración o revocación y ausencia de secretos/contexto libre en
+la pantalla. Evidencia y límites exactos en
+[ticket-24](../../../docs/verification/ticket-24.md).
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-13 — Claimed tras integración y resolución23 en `0b897c1`, con18/18labs de merger. Sol medium por composición de autoridad, suspensión y confirmación UP/UV humana; no adelanta revisión formal ni modifica modelo de seguridad.
+
+
+2026-09-14 — Merger Sol distinto integró `36934b3` sin conflictos textuales
+como `77a5198`, preservando los cambios documentales de raíz y la TUI23. Verificó
+`git diff --check`, `scripts/check.sh`, clean locked/offline (44.43 s) y una
+única barrida ordenada con acumulación y propagación explícita de fallos:
+`count=19 failures=0`. En ella pasaron la TUI real de autoridad/pendientes y el
+recorrido Keycloak 26.7.3 + CFT fijado con `UP=TUI-keyboard` y
+`UV=fresh-second-human-channel`. No hubo skips ni retries. Ticket resuelto; no
+acredita targets nativos, navegador de producto, ticket25 ni revisión formal
+Astra.
