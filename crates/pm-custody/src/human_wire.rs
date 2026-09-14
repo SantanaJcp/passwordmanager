@@ -19,7 +19,7 @@ pub(crate) fn handle_request_slice(
     opcode: u8,
     request: &[u8],
 ) -> Option<Result<Vec<u8>, Failure>> {
-    if !matches!(opcode, 2..=13 | 43 | 46 | 49..=53) {
+    if !matches!(opcode, 2..=13 | 25..=30 | 43 | 46 | 49..=53) {
         return None;
     }
     let rest = request;
@@ -45,6 +45,107 @@ pub(crate) fn handle_request_slice(
             }
             .map_err(|_| Failure::Unavailable)?;
             encode_prepared(vault, &prepared)
+        }
+        25 => {
+            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let history = vault.history(item).map_err(|_| Failure::Unavailable)?;
+            let mut response = vec![
+                0,
+                match history.lifecycle() {
+                    pm_vault::ItemLifecycle::Active => 1,
+                    pm_vault::ItemLifecycle::Trash => 2,
+                    pm_vault::ItemLifecycle::Purged => return Err(Failure::Unavailable),
+                },
+            ];
+            response.extend_from_slice(
+                &u16::try_from(history.entries().len())
+                    .map_err(|_| Failure::Unavailable)?
+                    .to_be_bytes(),
+            );
+            for entry in history.entries() {
+                response.extend_from_slice(entry.revision_id());
+                response.extend_from_slice(&entry.modified_at_us().to_be_bytes());
+                response.extend_from_slice(entry.issuer_device());
+                response.push(u8::from(entry.visible()));
+                response.extend_from_slice(
+                    &u32::try_from(entry.attachment_count())
+                        .map_err(|_| Failure::Unavailable)?
+                        .to_be_bytes(),
+                );
+            }
+            Ok(response)
+        }
+        26 => {
+            if rest.len() != 32 {
+                return Err(Failure::Unavailable);
+            }
+            let item = rest[..16].try_into().map_err(|_| Failure::Unavailable)?;
+            let revision = rest[16..].try_into().map_err(|_| Failure::Unavailable)?;
+            let prepared = vault
+                .prepare_restore(item, revision)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
+        }
+        27 => {
+            let mut cursor = Cursor::new(rest);
+            let item = cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            let count = usize::from(u16::from_be_bytes(
+                cursor
+                    .fixed(2)?
+                    .try_into()
+                    .map_err(|_| Failure::Unavailable)?,
+            ));
+            let mut revisions = Vec::with_capacity(count);
+            for _ in 0..count {
+                revisions.push(
+                    cursor
+                        .fixed(16)?
+                        .try_into()
+                        .map_err(|_| Failure::Unavailable)?,
+                );
+            }
+            cursor.finish()?;
+            let purge = vault
+                .prepare_purge_revisions(item, revisions)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_purge_prepared(vault, &purge)
+        }
+        28 => {
+            let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
+            let purge = vault
+                .prepare_purge_item(item)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_purge_prepared(vault, &purge)
+        }
+        29 => {
+            let mut cursor = Cursor::new(rest);
+            let item = cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?;
+            let record =
+                LogicalRecord::from_bytes(&cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+            cursor.finish()?;
+            let prepared = vault
+                .prepare_edit_record(item, &record)
+                .map_err(|_| Failure::Unavailable)?;
+            encode_prepared(vault, &prepared)
+        }
+        30 => {
+            if rest.len() != 32 {
+                return Err(Failure::Unavailable);
+            }
+            let item = rest[..16].try_into().map_err(|_| Failure::Unavailable)?;
+            let revision = rest[16..].try_into().map_err(|_| Failure::Unavailable)?;
+            let record = vault
+                .read_revision(item, revision)
+                .map_err(|_| Failure::Unavailable)?;
+            let mut response = vec![0];
+            response.extend_from_slice(&record.to_bytes());
+            Ok(response)
         }
         43 => {
             let mut cursor = Cursor::new(rest);
@@ -681,4 +782,45 @@ fn decode_wire_record(cursor: &mut Cursor<'_>) -> Result<PasswordRecord, Failure
     .map_err(|_| Failure::Unavailable)?;
     password.zeroize();
     Ok(record)
+}
+
+fn encode_purge_prepared(
+    vault: &HumanVault,
+    purge: &pm_vault::PreparedItemPurge,
+) -> Result<Vec<u8>, Failure> {
+    let scope = purge.scope();
+    let mut response = vec![0, u8::from(scope.terminal())];
+    response.extend_from_slice(
+        &u16::try_from(scope.revision_ids().len())
+            .map_err(|_| Failure::Unavailable)?
+            .to_be_bytes(),
+    );
+    response.extend_from_slice(
+        &u32::try_from(scope.attachment_count())
+            .map_err(|_| Failure::Unavailable)?
+            .to_be_bytes(),
+    );
+    response.extend_from_slice(&scope.encrypted_bytes().to_be_bytes());
+    for revision in scope.revision_ids() {
+        response.extend_from_slice(revision);
+    }
+    let prepared = encode_prepared(vault, purge.prepared())?;
+    response.extend_from_slice(&prepared[1..]);
+    Ok(response)
+}
+
+pub(super) fn write_frame(output: &mut impl Write, value: &[u8]) -> Result<(), Failure> {
+    if value.len() > MAX_HUMAN_FRAME {
+        return Err(Failure::Unavailable);
+    }
+    let length = u32::try_from(value.len()).map_err(|_| Failure::Unavailable)?;
+    output
+        .write_all(&length.to_be_bytes())
+        .and_then(|()| output.write_all(value))
+        .and_then(|()| output.flush())
+        .map_err(|_| Failure::Unavailable)
+}
+
+pub(super) fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, Failure> {
+    read_frame_bounded(input, MAX_HUMAN_FRAME)
 }
