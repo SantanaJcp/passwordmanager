@@ -419,3 +419,39 @@ validada. El fixture usa un propietario SID de servicio sintético ausente del
 token del runner: posible error de owner, todavía sin código Win32 observado.
 Se investiga esa condición sin relajar la DACL del producto ni omitir la
 regresión. Un warning de import test-only fuera de cfg también quedó visible.
+
+### Estado nativo tras integrar la limpieza — 2026-09-14
+
+- macOS [corrida17](https://github.com/SantanaJcp/passwordmanager/actions/runs/34840405573),
+  `8dcc980`: modo normal falló antes de compilar por expansión de array vacío
+  bajo `set -u` en Bash nativo. El error de metadata fue consecuencia, no causa.
+  Se conservaron Bash del sistema y nounset; los comandos ahora son arrays
+  completos no vacíos, con regresión de expansión normal/diagnóstica.
+- macOS [corrida18](https://github.com/SantanaJcp/passwordmanager/actions/runs/34841029441),
+  `1be9f4c`: **PASS binarios normales en Intel y Apple Silicon**, sin feature,
+  entorno ni log diagnóstico, usando plist de producción y limpieza estricta.
+  Se verificaron las mismas condiciones de custodia/ACL/peer/RPK/restart y
+  APIs TTY/AppKit. Los nueve tests aplicables y los casos Linux-gated que no
+  se ejecutaron no acreditan TUI completa. Su composición con 23–25 y cleanup
+  sigue pendiente; reboot/FileVault y firma tampoco se ejecutaron.
+- Windows [corrida15](https://github.com/SantanaJcp/passwordmanager/actions/runs/34840296086),
+  `776bf26`: 5/5 tests nativos y contrato de pipe PASS; el fixture de pipe usa
+  owner del token creador sin cambiar la DACL productiva. Ambas pipes del
+  servicio se crean y SCM permanece RUNNING. La operación humana falla;
+  Stop-Service también falla y el harness comunica ambos errores.
+- Windows [corrida16](https://github.com/SantanaJcp/passwordmanager/actions/runs/34841947088),
+  `9878bc6`: diagnóstico opt-in confirma accept humano, MAGIC/ALPN, unlock y
+  ACK correctos; alcanza petición de lock, pero no la apertura de auditoría
+  autónoma. El código compartido aún no inicializa el paquete de auditoría
+  durante el primer unlock de una bóveda vacía. Se prepara regresión y
+  corrección transaccional, sin fabricar contenido para hacer pasar el lab.
+  La categoría exacta del error nativo de apertura no fue emitida.
+- El servicio Windows anuncia controles aceptados cero y devuelve 120 desde
+  su handler; no implementa STOP. Es un déficit independiente, no un permiso
+  para usar force-kill como alternativa. El diseño de cancelación debe evitar
+  la carrera entre comprobar stop y empezar una nueva I/O bloqueante.
+
+El probe agente de Windows completa el handshake previo al primer write de
+rustls, pero no verifica respuesta/aceptación de aplicación ni el rol humano.
+No se confunde su READY con aceptación integral. Ninguno de estos resultados
+cierra 26/27 ni sustituye los gates 30–35.

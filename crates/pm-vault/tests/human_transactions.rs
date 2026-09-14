@@ -23,10 +23,11 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn password_crud_uses_signed_prepare_commit_and_durable_receipts() {
+    let audit_custody = test_audit_custody();
     let directory = TestDir::new();
     let path = directory.vault();
     persist_test_vault(&path);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
 
     let create = vault
         .prepare_create(&record("Synthetic account", SECRET_ONE))
@@ -75,7 +76,7 @@ fn password_crud_uses_signed_prepare_commit_and_durable_receipts() {
     assert_eq!(count(&connection, "human_receipts"), 3);
     assert_eq!(count(&connection, "authority_events"), 3);
     assert_eq!(count(&connection, "outbox"), 3);
-    assert_eq!(count(&connection, "encrypted_audit_records"), 3);
+    assert_eq!(count(&connection, "encrypted_audit_records"), 4);
     assert_eq!(count(&connection, "audit_keys"), 1);
     drop(connection);
 
@@ -88,6 +89,7 @@ fn password_crud_uses_signed_prepare_commit_and_durable_receipts() {
 
 #[test]
 fn changed_body_expired_challenge_false_peer_and_replay_are_rejected() {
+    let audit_custody = test_audit_custody();
     let directory = TestDir::new();
     let path = directory.vault();
     persist_test_vault(&path);
@@ -98,14 +100,21 @@ fn changed_body_expired_challenge_false_peer_and_replay_are_rejected() {
     let (server, client) = UnixStream::pair().unwrap();
     let uid = unsafe { libc::geteuid() };
     let channel = HumanChannel::authenticate(server, uid).unwrap();
-    let mut disconnected = HumanVault::unlock(&path, PASSWORD, DEVICE, channel).unwrap();
+    let mut disconnected = HumanVault::unlock(
+        &path,
+        PASSWORD,
+        DEVICE,
+        channel,
+        std::sync::Arc::clone(&audit_custody),
+    )
+    .unwrap();
     drop(client);
     assert!(matches!(
         disconnected.prepare_create(&record("Disconnected", SECRET_ONE)),
         Err(HumanCommitError::WrongChannel)
     ));
 
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
     let prepare_started_us = now_us();
     let prepared = vault
         .prepare_create(&record("Changed body", SECRET_ONE))
@@ -155,10 +164,11 @@ fn changed_body_expired_challenge_false_peer_and_replay_are_rejected() {
 
 #[test]
 fn audit_failure_rolls_back_every_commit_part_and_lost_response_recovers_receipt() {
+    let audit_custody = test_audit_custody();
     let directory = TestDir::new();
     let path = directory.vault();
     persist_test_vault(&path);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
     let prepared = vault.prepare_create(&record("Atomic", SECRET_ONE)).unwrap();
     let signature = vault.sign(&prepared).unwrap();
 
@@ -180,11 +190,15 @@ fn audit_failure_rolls_back_every_commit_part_and_lost_response_recovers_receipt
         "authority_events",
         "outbox",
         "human_receipts",
-        "audit_keys",
-        "audit_state",
-        "encrypted_audit_records",
     ] {
         assert_eq!(count(&connection, table), 0, "partial write in {table}");
+    }
+    for table in ["audit_keys", "audit_state", "encrypted_audit_records"] {
+        assert_eq!(
+            count(&connection, table),
+            1,
+            "failed commit changed unlock audit state in {table}"
+        );
     }
     assert_eq!(count_where_consumed(&connection), 0);
     connection.execute("DROP TRIGGER fail_audit", []).unwrap();
@@ -194,16 +208,17 @@ fn audit_failure_rolls_back_every_commit_part_and_lost_response_recovers_receipt
         .commit(prepared.command(), &signature, prepared.body())
         .expect("retry after no-op failure");
     drop(vault); // models response loss after SQLite committed durably
-    let (vault, _peer) = open_human(&path);
+    let (vault, _peer) = open_human(&path, &audit_custody);
     assert_eq!(vault.receipt(*prepared.transaction_id()).unwrap(), receipt);
 }
 
 #[test]
 fn invalid_signature_and_stale_expected_state_cannot_publish_staging() {
+    let audit_custody = test_audit_custody();
     let directory = TestDir::new();
     let path = directory.vault();
     persist_test_vault(&path);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
     let stale = vault.prepare_create(&record("Stale", SECRET_ONE)).unwrap();
     let winner = vault.prepare_create(&record("Winner", SECRET_TWO)).unwrap();
 
@@ -238,13 +253,29 @@ fn record(title: &str, password: &[u8]) -> PasswordRecord {
     .unwrap()
 }
 
-fn open_human(path: &Path) -> (HumanVault, UnixStream) {
+fn open_human(
+    path: &Path,
+    audit_custody: &std::sync::Arc<pm_vault::AuditDeviceCustody>,
+) -> (HumanVault, UnixStream) {
     let (server, client) = UnixStream::pair().unwrap();
     let uid = unsafe { libc::geteuid() };
     let channel = HumanChannel::authenticate(server, uid).expect("kernel-authenticated peer");
     (
-        HumanVault::unlock(path, PASSWORD, DEVICE, channel).expect("unlock human vault"),
+        HumanVault::unlock(
+            path,
+            PASSWORD,
+            DEVICE,
+            channel,
+            std::sync::Arc::clone(audit_custody),
+        )
+        .expect("unlock human vault"),
         client,
+    )
+}
+
+fn test_audit_custody() -> std::sync::Arc<pm_vault::AuditDeviceCustody> {
+    std::sync::Arc::new(
+        pm_vault::AuditDeviceCustody::generate().expect("synthetic device audit custody"),
     )
 }
 

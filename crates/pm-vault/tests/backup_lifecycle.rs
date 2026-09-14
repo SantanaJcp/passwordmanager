@@ -23,9 +23,10 @@ const LARGE: u64 = 2 * 1024 * 1024 + 73;
 #[test]
 #[allow(clippy::too_many_lines)]
 fn pmb1_roundtrip_has_exact_inventory_history_streams_and_both_root_paths() {
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new("roundtrip");
     let (path, recovery) = persist(&dir);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
 
     let first = password_record("primera", b"ticket21-old-secret-canary");
     let created = vault.prepare_create_record(&first).unwrap();
@@ -160,9 +161,10 @@ fn pmb1_roundtrip_has_exact_inventory_history_streams_and_both_root_paths() {
 
 #[test]
 fn plaintext_export_needs_a_fresh_signed_human_confirmation() {
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new("plaintext");
     let (path, _) = persist(&dir);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
     let created = vault
         .prepare_create_record(&password_record(
             "plain export",
@@ -212,9 +214,10 @@ fn plaintext_export_needs_a_fresh_signed_human_confirmation() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn native_restore_is_one_signed_commit_with_new_ids_and_no_active_authority() {
+    let audit_custody = test_audit_custody();
     let source_dir = TestDir::new("restore-source");
     let (source_path, _) = persist(&source_dir);
-    let (mut source, _peer) = open_human(&source_path);
+    let (mut source, _peer) = open_human(&source_path, &audit_custody);
     let first = password_record("restored-old", b"ticket21-restore-old");
     let created = source.prepare_create_record(&first).unwrap();
     let source_item = *created.item_id();
@@ -255,7 +258,7 @@ fn native_restore_is_one_signed_commit_with_new_ids_and_no_active_authority() {
 
     let destination_dir = TestDir::new("restore-destination");
     let (destination_path, _) = persist(&destination_dir);
-    let (mut destination, peer) = open_human(&destination_path);
+    let (mut destination, peer) = open_human(&destination_path, &audit_custody);
     let prepared = destination
         .prepare_native_restore(&mut Cursor::new(&archive), MASTER)
         .unwrap();
@@ -284,7 +287,7 @@ fn native_restore_is_one_signed_commit_with_new_ids_and_no_active_authority() {
     );
     drop(database);
 
-    let (mut destination, _peer) = open_human(&destination_path);
+    let (mut destination, _peer) = open_human(&destination_path, &audit_custody);
     let database = rusqlite::Connection::open(&destination_path).unwrap();
     database
         .execute_batch(
@@ -409,9 +412,10 @@ fn native_restore_is_one_signed_commit_with_new_ids_and_no_active_authority() {
 
 #[test]
 fn native_restore_preserves_every_logical_record_type_and_private_field() {
+    let audit_custody = test_audit_custody();
     let source_dir = TestDir::new("all-types-source");
     let (source_path, _) = persist(&source_dir);
-    let (mut source, _peer) = open_human(&source_path);
+    let (mut source, _peer) = open_human(&source_path, &audit_custody);
     let expected = all_type_records();
     for record in &expected {
         let prepared = source.prepare_create_record(record).unwrap();
@@ -422,7 +426,7 @@ fn native_restore_preserves_every_logical_record_type_and_private_field() {
 
     let destination_dir = TestDir::new("all-types-destination");
     let (destination_path, _) = persist(&destination_dir);
-    let (mut destination, _peer) = open_human(&destination_path);
+    let (mut destination, _peer) = open_human(&destination_path, &audit_custody);
     let prepared = destination
         .prepare_native_restore(&mut Cursor::new(archive), MASTER)
         .unwrap();
@@ -459,9 +463,10 @@ fn native_restore_preserves_every_logical_record_type_and_private_field() {
 
 #[test]
 fn exact_inventory_spans_multiple_pages_with_empty_attachment_chunks() {
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new("inventory-pages");
     let (path, _) = persist(&dir);
-    let (mut vault, _peer) = open_human(&path);
+    let (mut vault, _peer) = open_human(&path, &audit_custody);
     let attachments = (0..520_u16)
         .map(|index| {
             let mut id = [0x52; 16];
@@ -644,12 +649,28 @@ fn persist(dir: &TestDir) -> (PathBuf, String) {
     (path, recovery)
 }
 
-fn open_human(path: &Path) -> (HumanVault, UnixStream) {
+fn open_human(
+    path: &Path,
+    audit_custody: &std::sync::Arc<pm_vault::AuditDeviceCustody>,
+) -> (HumanVault, UnixStream) {
     let (server, client) = UnixStream::pair().unwrap();
     let channel = HumanChannel::authenticate(server, unsafe { libc::geteuid() }).unwrap();
     (
-        HumanVault::unlock(path, MASTER, DEVICE, channel).unwrap(),
+        HumanVault::unlock(
+            path,
+            MASTER,
+            DEVICE,
+            channel,
+            std::sync::Arc::clone(audit_custody),
+        )
+        .unwrap(),
         client,
+    )
+}
+
+fn test_audit_custody() -> std::sync::Arc<pm_vault::AuditDeviceCustody> {
+    std::sync::Arc::new(
+        pm_vault::AuditDeviceCustody::generate().expect("synthetic device audit custody"),
     )
 }
 

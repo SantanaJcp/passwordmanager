@@ -15,13 +15,14 @@ use pm_vault::{
 #[test]
 #[allow(clippy::too_many_lines)]
 fn human_streaming_attachment_graph_is_complete_before_atomic_activation() {
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new();
     let seed = dir.path("graph-seed.sqlite3");
     persist(&seed);
     let sender = dir.path("graph-a.sqlite3");
     let receiver = dir.path("graph-b.sqlite3");
     fs::copy(&seed, &sender).unwrap();
-    let (mut human, _peer) = human(&sender, [0xf1; 16]);
+    let (mut human, _peer) = human(&sender, [0xf1; 16], &audit_custody);
     let pairing = human.create_sync_pairing([0x51; 44]).unwrap();
     let protected = pairing.to_protected_bytes();
     let _device_package = human
@@ -155,6 +156,7 @@ fn human_streaming_attachment_graph_is_complete_before_atomic_activation() {
         MASTER,
         [0xf1; 16],
         HumanChannel::authenticate(channel, unsafe { libc::geteuid() }).unwrap(),
+        Arc::clone(&audit_custody),
     )
     .unwrap();
     let mut output = Vec::new();
@@ -191,6 +193,7 @@ fn replica_push_and_pull_cross_the_real_tls_rpc_process() {
         thread,
         time::{Duration, Instant},
     };
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new();
     let seed = dir.path("seed-tls.sqlite3");
     persist(&seed);
@@ -200,7 +203,7 @@ fn replica_push_and_pull_cross_the_real_tls_rpc_process() {
     let sender = dir.path("tls-a.sqlite3");
     let receiver = dir.path("tls-b.sqlite3");
     fs::copy(&seed, &sender).unwrap();
-    let (mut human, _peer) = human(&sender, [0xe1; 16]);
+    let (mut human, _peer) = human(&sender, [0xe1; 16], &audit_custody);
     let pairing = human.create_sync_pairing(pin).unwrap();
     let protected = pairing.to_protected_bytes();
     let namespace = *pairing.namespace();
@@ -317,6 +320,7 @@ fn replica_push_and_pull_cross_the_real_tls_rpc_process() {
         MASTER,
         [0xe1; 16],
         HumanChannel::authenticate(channel, unsafe { libc::geteuid() }).unwrap(),
+        Arc::clone(&audit_custody),
     )
     .unwrap();
     let opened_record = reader.read_record(*prepared.item_id()).unwrap();
@@ -432,11 +436,13 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn human_retirement_commits_every_observed_prefix_for_the_exact_device() {
+    let owner_custody = test_audit_custody();
+    let remote_custody = test_audit_custody();
     let dir = TestDir::new();
     let vault = dir.path("retire.sqlite3");
     persist(&vault);
-    let (mut owner, _owner_peer) = human(&vault, [0xa1; 16]);
-    let (remote, _remote_peer) = human(&vault, [0xb2; 16]);
+    let (mut owner, _owner_peer) = human(&vault, [0xa1; 16], &owner_custody);
+    let (remote, _remote_peer) = human(&vault, [0xb2; 16], &remote_custody);
     let event = remote
         .sign_causal_event(&revision([0x31; 16], [0x32; 16], 1))
         .unwrap();
@@ -462,12 +468,15 @@ fn human_retirement_commits_every_observed_prefix_for_the_exact_device() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn three_paired_replicas_converge_through_opaque_ciphertext_without_copying_sqlite() {
+    let a_custody = test_audit_custody();
+    let b_custody = test_audit_custody();
+    let c_custody = test_audit_custody();
     let dir = TestDir::new();
     let seed = dir.path("seed.sqlite3");
     persist(&seed);
-    let (a, _pa) = human(&seed, [0xa1; 16]);
-    let (b, _pb) = human(&seed, [0xb2; 16]);
-    let (c, _pc) = human(&seed, [0xc3; 16]);
+    let (a, _pa) = human(&seed, [0xa1; 16], &a_custody);
+    let (b, _pb) = human(&seed, [0xb2; 16], &b_custody);
+    let (c, _pc) = human(&seed, [0xc3; 16], &c_custody);
     let pairing = a.create_sync_pairing([0x51; 44]).unwrap();
     let protected = pairing.to_protected_bytes();
     let namespace = *pairing.namespace();
@@ -589,10 +598,11 @@ fn three_paired_replicas_converge_through_opaque_ciphertext_without_copying_sqli
 #[test]
 #[allow(clippy::too_many_lines)]
 fn omitted_block_never_activates_half_of_one_published_root_and_retry_is_atomic() {
+    let audit_custody = test_audit_custody();
     let dir = TestDir::new();
     let seed = dir.path("seed-partial.sqlite3");
     persist(&seed);
-    let (human, _peer) = human(&seed, [0xd1; 16]);
+    let (human, _peer) = human(&seed, [0xd1; 16], &audit_custody);
     let pairing = human.create_sync_pairing([0x51; 44]).unwrap();
     let protected = pairing.to_protected_bytes();
     let namespace = *pairing.namespace();
@@ -761,21 +771,23 @@ fn revision(event: [u8; 16], revision: [u8; 16], time: i64) -> CausalEventDraft 
     )
     .unwrap()
 }
-fn human(path: &Path, device: [u8; 16]) -> (HumanVault, UnixStream) {
+fn human(
+    path: &Path,
+    device: [u8; 16],
+    audit_custody: &Arc<AuditDeviceCustody>,
+) -> (HumanVault, UnixStream) {
     let (server, peer) = UnixStream::pair().unwrap();
     let ch = HumanChannel::authenticate(server, unsafe { libc::geteuid() }).unwrap();
     (
-        HumanVault::unlock_with_audit_custody(
-            path,
-            MASTER,
-            device,
-            ch,
-            Arc::new(AuditDeviceCustody::generate().unwrap()),
-        )
-        .unwrap(),
+        HumanVault::unlock(path, MASTER, device, ch, Arc::clone(audit_custody)).unwrap(),
         peer,
     )
 }
+
+fn test_audit_custody() -> Arc<AuditDeviceCustody> {
+    Arc::new(AuditDeviceCustody::generate().expect("synthetic device audit custody"))
+}
+
 fn persist(path: &Path) {
     let p = PendingVault::new(MASTER, KdfProfile::confirmed(64, 3).unwrap()).unwrap();
     let r = p.recovery_code().to_string().parse().unwrap();

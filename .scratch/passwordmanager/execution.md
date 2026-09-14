@@ -247,3 +247,128 @@ global esté vacío. El filtro final y la barrida final no dejaron nuevas rutas.
 La evidencia acredita sólo Linux x86_64. Las líneas `LIMIT` de los laboratorios
 siguen siendo límites de aceptación para browser de producto, targets nativos,
 cross-platform y servicios externos; no se convierten en gates cerrados.
+
+## Evidencia nativa y memoria — checkpoint 2026-09-14
+
+La raíz conserva 25/35 tickets integrados. Los siguientes resultados pertenecen
+al trabajo aislado de 26–28, no cierran tickets ni sustituyen la integración
+por merger o la revisión global final.
+
+- **macOS:** el [run 34847582724](https://github.com/SantanaJcp/passwordmanager/actions/runs/34847582724)
+  en `6c3c5e0` falló antes del harness: cinco `expect` nuevos exigían `Debug`
+  para `Failure`. La corrección de test `a247340` mantuvo el error opaco.
+  El [run 34848148030](https://github.com/SantanaJcp/passwordmanager/actions/runs/34848148030)
+  compiló y ejecutó correctamente el test AppKit en biblioteca y binario,
+  tanto Intel como Apple Silicon. El primer arranque TUI mediante `forkpty`
+  devolvió `CUSTODY_UNAVAILABLE` antes de pedir contraseña en ambos targets.
+  No se acredita la aceptación TUI. El candidato con documentación `7d3bba5`
+  pasó check completo y clean build Linux; la causa nativa sigue en diagnóstico.
+- **Windows:** `5d64bc2` pasó check y clean build Linux, que no compilan los
+  bloques Windows. El run `34848390243` fue cancelado por root tras detectar
+  estáticamente la falta de `Send` en el pipe transferido al worker; no es RED
+  de compilación ni conductual. La corrección `0a0ec3d` pasó 6 tests nativos y
+  1 contrato de pipe en el [run 34848533955](https://github.com/SantanaJcp/passwordmanager/actions/runs/34848533955).
+  Se verificaron `RUNNING` con STOP, detención SCM, ausencia del PID anterior,
+  reinicio con PID distinto y probes de ambos roles antes del primer unlock.
+  `human-lock` volvió a fallar en el límite de auditoría vacía ya identificado;
+  segundo STOP y crash/restart posteriores no se ejecutaron. Cleanup retornó
+  sin error, pero el harness aún no consulta ausencia final de servicio,
+  usuario y directorio después de borrarlos. Las tres apariciones de `args-ok`
+  en consola reflejan dos generaciones y una reimpresión de la historia, no
+  tres arranques. Cambiar la API pública de unlock para exigir custodia de
+  auditoría estable sigue pendiente de autorización; su WIP está aislado.
+- **Memoria (28):** `3b9a34f` pasó tests enfocados crypto/CLI y una ejecución
+  del lab de fallos, tras RED real que mostraba lectura antes de proteger la
+  primera línea. Este corte protege el buffer antes de la confirmación, no
+  durante su lectura inicial. El test posterior `6063859` mantiene stdin
+  abierto y envía cero bytes: reprodujo que el cliente espera entrada antes
+  de reservar memoria bloqueada. Su corrección está en verificación separada;
+  no se declara G7 cerrado ni se amplían sus excepciones de memoria.
+
+Los cuatro errores de cleanup heredados adicionales ya señalados y el cambio
+público de custodia de auditoría permanecen pendientes de aprobación. No se
+alteran por deducir permiso de autorizaciones anteriores con otro alcance.
+
+### Autorización posterior del checkpoint
+
+2026-09-14 — El usuario respondió «autorizado» a la pregunta explícita sobre
+ambos cambios pendientes: `HumanVault::unlock` recibirá custodia de auditoría
+estable explícita, adaptando sus consumidores sin reducir los flujos CLI/TUI;
+y se propagarán los cuatro errores de limpieza ya identificados en
+`TemporaryDirectory::drop`, keygen de clave privada parcial,
+`rpc_download_atomic` y `write_new`. Se preservan el error primario, los
+fallos de cleanup y la propiedad de recursos; no autoriza fallbacks, borrar
+recursos ajenos ni modificar otras omisiones heredadas. Las menciones de
+«pendiente» en el checkpoint anterior son históricas desde esta aprobación.
+
+### Integración de unlock auditado y resultados nativos posteriores
+
+2026-09-14 — El merger distinto integró el cambio común en `a9eb4b8`:
+`HumanVault::unlock` exige custodia estable explícita, registra `HumanUnlock`
+atómicamente y conserva la rotación humana autenticada de generación. Check,
+build limpio offline y la barrida final de **20/20 labs Linux** pasaron.
+Los fallos e intentos intermedios se conservan en
+[el informe de integración](../../docs/verification/audit-unlock.md): el trigger
+de atomicidad se corrigió para alcanzar el commit y permitir la reconexión para
+receipt, no para eludir la nueva auditoría del unlock.
+
+El candidato Windows aislado `50dd1bf` pasó el
+[run 34853430364](https://github.com/SantanaJcp/passwordmanager/actions/runs/34853430364):
+6 tests nativos, contrato de pipe, unlock/lock auditado, STOP/restart,
+crash deliberado y consultas de ausencia final de recursos propios. Esto no
+acredita la TUI completa ni resuelve 27. Su launcher ConPTY sigue en preparación.
+
+macOS `f1a1a51` alcanzó copia TUI, pero su log no distinguía rc0 de
+extracción. El diagnóstico posterior sobre binario normal `73e9175`,
+[run 34858597883](https://github.com/SantanaJcp/passwordmanager/actions/runs/34858597883),
+**confirmó exposición del canario en ambos CPU**: el agente devolvió el valor
+exacto y el humano conservaba la copia antes/después. Las identidades eran las
+esperadas, pero ambos procesos compartían el dominio launchd humano. El
+laboratorio no satisface G1 por cambiar sólo UID mediante sudo; el siguiente
+fixture debe probar un dominio agente separado real y conservar este resultado
+como evidencia del perfil inseguro. No se afirma aislamiento ni cierre de 26.
+
+Se mantienen **25/35 tickets integrados**. Los cuatro cleanups recién
+autorizados siguen en 28; este checkpoint no los declara implementados ni
+sustituye la revisión unificada final.
+
+### Integración de los cuatro cleanups autorizados y corte nativo actual
+
+2026-09-14 — Merger distinto integró `a4b7704..f3fe05d` sobre `168573d`,
+commit `b467d0e`: cierre comprobado del directorio de evidencia y propagación
+de fallos de limpieza en keygen, `write_new` y `rpc_download_atomic`. Conserva
+el error primario y todos los errores tipados de cleanup, sin reintentos ni
+borrado de recursos ajenos. El informe distingue el RED conductual de este
+candidato de los fallos de compilación de un candidato anterior y declara la
+sobrescritura accidental de un log histórico, sin inventar su recuperación.
+
+Check, build limpio offline, focalizados y barrida secuencial final de
+**22/22 labs Linux x86_64** pasaron; evidencia en
+[cleanup-errors](../../docs/verification/cleanup-errors.md). Los dos casos
+`ignored` son entradas de subprocesos ejecutadas por sus tests padres.
+Los dos alcances de la última autorización quedan integrados. Esto no cierra
+el ticket 28 ni constituye revisión formal o certificación de seguridad.
+
+- **macOS:** el [run 34862828726](https://github.com/SantanaJcp/passwordmanager/actions/runs/34862828726)
+  sobre `d514233` falló antes de ejecutar el nuevo probe de dominio aislado:
+  Apple Silicon no observó la selección en la segunda TUI a 80×24;
+  Intel no obtuvo el cierre esperado de la primera TUI. El control compartido
+  volvió a mostrar extracción en ARM; en Intel expiró el probe sin medirla.
+  No invalida la exposición confirmada en ambos CPU por la corrida anterior,
+  ni acredita el nuevo aislamiento. Falta además la matriz completa TUI.
+- **Windows:** el launcher ConPTY real de `7998eba` ya demostró el RED de
+  producto: `tui` termina con `INVALID_ARGUMENT` antes del criterio de vida
+  ([run 34857970004](https://github.com/SantanaJcp/passwordmanager/actions/runs/34857970004)).
+  El [run 34864402493](https://github.com/SantanaJcp/passwordmanager/actions/runs/34864402493)
+  de `a6ddb89` pasó 8 tests nativos, 1 pipe, 6 observer y 1 sync, pero falló al
+  encontrar modo de foco 1004 en el observador. `9e50f51` reconoce ese modo
+  estáticamente; no tiene verificación nativa y el movimiento mecánico de la
+  TUI compartida no implementa aún la TUI Windows completa.
+- **G7:** el candidato de lectura nativa en memoria protegida tiene evidencia
+  Linux parcial; la nueva fixture ENOSPC `33516bb` sólo pasó comprobaciones
+  estáticas y requiere primero componer la API actual de auditoría. No hay
+  aceptación integral de memoria, disco lleno o crash-safety.
+
+Se mantienen **25/35 tickets integrados** y el PR en borrador. Los worktrees
+26–28 quedan preservados sin procesos de verificación activos en este corte.
+La revisión Astra global se ejecutará después de integrar todos los tickets.

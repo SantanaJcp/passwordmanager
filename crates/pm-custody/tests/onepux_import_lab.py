@@ -46,6 +46,11 @@ def counts(vault):
     values=tuple(db.execute(f"select count(*) from {table}").fetchone()[0] for table in ("vault_items","revision_parts","attachment_streams","attachment_stream_chunks","authority_events","outbox","human_receipts","encrypted_audit_records","import_reports"))
     db.close(); return values
 
+def assert_only_human_unlock_changed(before, after):
+    assert after[:7] == before[:7], (before, after)
+    assert after[7] == before[7] + 1, (before, after)
+    assert after[8:] == before[8:], (before, after)
+
 def main():
     assert pathlib.Path('/proc/self/uid_map').exists() and len(sys.argv)==3
     source_binary, source_cli=map(lambda p:pathlib.Path(p).resolve(),sys.argv[1:])
@@ -88,16 +93,17 @@ def main():
             time.sleep(0.01)
         assert saw_descriptor and saw_staging
         stop(daemon); stdout,stderr=client.communicate(timeout=5); assert client.returncode != 0 and stdout==b'' and stderr==b'CUSTODY_UNAVAILABLE\n',(client.returncode,stdout,stderr)
-        assert counts(vault)==before
+        assert_only_human_unlock_changed(before, counts(vault))
         daemon=start(binary,bootstrap,runtime,vault)
         assert b'total=2 new=2' in run_import(binary,human_key,human_profile,runtime/'human.sock',password,crash)
         hostile=fixtures/'traversal.1pux'; archive(hostile,'account-hostile','document-hostile',b'hostile',traversal=True)
-        before=counts(vault); run_import(binary,human_key,human_profile,runtime/'human.sock',password,hostile,ok=False); assert counts(vault)==before
+        before=counts(vault); run_import(binary,human_key,human_profile,runtime/'human.sock',password,hostile,ok=False); assert_only_human_unlock_changed(before, counts(vault))
         assert not (root/'ticket20-outside-canary').exists()
         linked=fixtures/'linked.1pux'; linked.symlink_to(valid); os.lchown(linked,HUMAN,HUMAN); run_import(binary,human_key,human_profile,runtime/'human.sock',password,linked,ok=False)
         atomic=fixtures/'atomic.1pux'; archive(atomic,'account-atomic','document-atomic',pseudo_random(1024*1024+3))
-        db=sqlite3.connect(vault); db.execute("create trigger fail_ticket20_public_audit before insert on encrypted_audit_records begin select raise(abort,'ticket20 audit'); end"); db.commit(); db.close()
-        before=counts(vault); run_import(binary,human_key,human_profile,runtime/'human.sock',password,atomic,ok=False); assert counts(vault)==before
+        before=counts(vault)
+        db=sqlite3.connect(vault); db.execute(f"create trigger fail_ticket20_public_audit before insert on encrypted_audit_records when (select count(*) from encrypted_audit_records) > {before[7]} begin select raise(abort,'ticket20 audit'); end"); db.commit(); db.close()
+        run_import(binary,human_key,human_profile,runtime/'human.sock',password,atomic,ok=False); assert_only_human_unlock_changed(before, counts(vault))
         db=sqlite3.connect(vault); db.execute('drop trigger fail_ticket20_public_audit'); db.commit(); db.close()
         assert b'total=2 new=2' in run_import(binary,human_key,human_profile,runtime/'human.sock',password,atomic)
         stop(daemon); daemon=start(binary,bootstrap,runtime,vault)
