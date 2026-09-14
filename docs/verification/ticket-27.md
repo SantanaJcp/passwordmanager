@@ -1026,3 +1026,83 @@ no implementado. La prueba nativa deberá parar con `Stop-Service` sin `-Force`,
 incluido mientras ambos roles esperan conexión, verificar el mismo PID
 terminado y luego reiniciar ambos roles. No se autoriza force-kill, polling
 arbitrario, conexión sustituta, segundo motor ni ampliación de plazos.
+
+### Método RED y diseño cerrado de la parada
+
+La regresión nativa se coloca antes del primer `human-lock`, para que la
+ausencia inicial del paquete KAUD observada por separado no pueda explicar el
+resultado de STOP. Después de que SCM publique `RUNNING` y el agente complete
+el canal Named Pipe/TLS-RPK normal, el fixture exige `CanStop`, captura el PID,
+ejecuta `Stop-Service` sin `-Force`, comprueba `Stopped` y que una consulta CIM
+exacta ya no encuentra ese PID. Luego inicia el mismo servicio, exige un PID
+nuevo y repite los probes agente y humano con los mismos SIDs, DACL, perfiles y
+RPK. El probe humano sólo completa su canal; no desbloquea ni reautentica una
+operación externa. Tras el recorrido humano posterior se repite la misma
+parada/reinicio, para cubrir tanto threads esperando conexión como una conexión
+ya atendida. Todo error de SCM, consulta, proceso o canal aborta el lab.
+
+El RED previo es cerrado: sobre `9878bc6`, `dwControlsAccepted=0` y el handler
+devuelve `ERROR_CALL_NOT_IMPLEMENTED`, por lo que el primer `Stop-Service` debe
+fallar antes de unlock. Se elimina del fixture la sustitución heredada que
+mataba el PID con `Stop-Process -Force` para representar un reinicio, y cleanup
+deja de usar `Stop-Service -Force`; ninguna de esas rutas puede convertir una
+parada SCM fallida en éxito. Los procesos/servicio pertenecen a la raíz única
+del lab y la limpieza conserva su agregación de errores.
+
+La implementación propuesta usa un evento manual-reset de STOP, creado y
+cerrado por el runtime del servicio. El contexto estable registrado con
+`RegisterServiceCtrlHandlerExW` contiene únicamente ese evento y el status
+handle válido. Sólo después de que ambos workers hayan creado su primer pipe y
+el contexto esté listo se publica `SERVICE_RUNNING | SERVICE_ACCEPT_STOP`.
+`SERVICE_CONTROL_STOP` publica `SERVICE_STOP_PENDING`, deja de aceptar otros
+controles y señala el evento; el handler retorna inmediatamente. INTERROGATE
+devuelve éxito sin mutar estado y los demás controles devuelven
+`ERROR_CALL_NOT_IMPLEMENTED`. Al terminar ambos workers, el hilo de servicio
+publica `SERVICE_STOPPED`; un fallo de status, wait, cancel, drain, join o close
+queda visible como salida no cero, nunca como STOP correcto.
+
+Cada `WindowsServerPipe` del servicio se crea con `FILE_FLAG_OVERLAPPED`. Un
+objeto owned conserva el handle del pipe, un evento manual-reset por operación,
+el `OVERLAPPED` y el buffer hasta que esa operación termina. Connect, read y
+write inician una sola operación y esperan simultáneamente su evento I/O y el
+evento STOP mediante `WaitForMultipleObjects(INFINITE)`: no se introduce un
+deadline. Si gana STOP, `CancelIoEx(handle, &overlapped)` solicita cancelar
+exactamente esa operación y, incluso si devuelve `ERROR_NOT_FOUND`, el worker
+debe obtener/drain su resultado terminal mediante `GetOverlappedResult` antes
+de liberar o reutilizar `OVERLAPPED`, evento, buffer o handle. Ese
+`ERROR_NOT_FOUND` sólo significa que no encontró una petición cancelable; no
+autoriza asumir cancelación ni empezar otro I/O. Si gana I/O, se obtiene y
+valida su resultado antes de comprobar STOP y antes de iniciar la operación
+siguiente. Por ello no existe ventana `stop flag -> nuevo bloqueo síncrono`.
+
+El mismo wrapper implementa `Read`/`Write` para rustls sin cambiar framing,
+ALPN, RPK, DACL o verificación bilateral. En STOP, una conexión parcial termina
+con el error opaco existente y no produce audit, intento ni respuesta de éxito;
+no se reintenta el request. El dueño desconecta/cierra cada instancia sólo
+después del drain y cada handle/evento se cierra exactamente una vez. Los
+clientes instalados pueden conservar I/O síncrono: STOP cancela únicamente las
+operaciones overlapped de los handles server owned por este proceso.
+
+Este orden sigue las APIs primarias: Microsoft exige conservar `OVERLAPPED` y
+buffer hasta completar la operación y usar un evento para sincronizar
+([I/O síncrono y asíncrono](https://learn.microsoft.com/en-us/windows/win32/fileio/synchronous-and-asynchronous-i-o));
+`CancelIoEx` no espera la cancelación y requiere consultar el resultado, con
+`ERROR_NOT_FOUND` posible
+([CancelIoEx](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex));
+el patrón Named Pipe overlapped obtiene el resultado de toda operación pendiente
+([servidor Named Pipe overlapped](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-server-using-overlapped-i-o));
+y el servicio debe anunciar STOP, transitar por `STOP_PENDING` y devolver pronto
+desde su handler
+([transiciones SCM](https://learn.microsoft.com/en-us/windows/win32/services/service-status-transitions),
+[control handler](https://learn.microsoft.com/en-us/windows/win32/services/service-control-handler-function)).
+
+Antes de GREEN, el checker estático exige en el fixture las dos paradas sin
+`-Force`, PID terminado/nuevo y probes bilaterales; en producto exige las APIs,
+flags y estados anteriores y rechaza `CancelSynchronousIo`, polling, sleeps y
+timeouts añadidos. Esta inspección no acredita la carrera: el mismo lab Windows
+11 ARM64 debe observar el RED previo y, después del código, STOP antes de
+unlock, STOP después de tráfico, reinicio con nuevo PID y ambos canales. Luego
+siguen los cinco tests nativos, pipe contract, DPAPI, ConPTY, clipboard, cleanup
+estricto y gates completos. Un RED posterior de auditoría vacía permanece un
+fallo independiente y no invalida el STOP ya observado, pero impide aceptar el
+ticket completo.

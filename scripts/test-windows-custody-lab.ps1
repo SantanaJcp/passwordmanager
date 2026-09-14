@@ -25,6 +25,33 @@ function Invoke-Checked([string]$File, [string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$File failed ($LASTEXITCODE)" }
 }
 
+function Get-StoppableServicePid([string]$Name) {
+    $record = Get-CimInstance Win32_Service -Filter "Name='$Name'" -ErrorAction Stop
+    Assert-True ($null -ne $record) 'owned service record is absent'
+    Assert-True ([string]$record.State -eq 'Running') 'owned service is not RUNNING'
+    Assert-True ([int]$record.ProcessId -gt 0) 'SCM did not expose service PID'
+    $controller = Get-Service -Name $Name -ErrorAction Stop
+    Assert-True $controller.CanStop 'RUNNING service did not advertise SERVICE_ACCEPT_STOP'
+    return [int]$record.ProcessId
+}
+
+function Stop-OwnedService([string]$Name, [int]$ServiceProcessId) {
+    Stop-Service -Name $Name -ErrorAction Stop
+    $service = Get-CimInstance Win32_Service -Filter "Name='$Name'" -ErrorAction Stop
+    Assert-True ($null -ne $service) 'owned service record vanished during STOP'
+    Assert-True ([string]$service.State -eq 'Stopped') 'service did not reach STOPPED'
+    Assert-True ([int]$service.ProcessId -eq 0) 'SCM retained a PID after STOPPED'
+    $process = @(Get-CimInstance Win32_Process -Filter "ProcessId=$ServiceProcessId" -ErrorAction Stop)
+    Assert-True ($process.Count -eq 0) 'stopped service PID remains alive'
+}
+
+function Start-OwnedServiceWithNewPid([string]$Name, [int]$PreviousProcessId) {
+    Start-Service -Name $Name -ErrorAction Stop
+    $current = Get-StoppableServicePid $Name
+    Assert-True ($current -ne $PreviousProcessId) 'service restart reused the terminated PID'
+    return $current
+}
+
 function Write-ServiceDiagnostic([string]$Phase, [string]$Name) {
     if (-not $ServiceDiagnostics) { return }
     $stateCategory = 'query-error'
@@ -464,6 +491,17 @@ try {
     Assert-True ($p.ExitCode -eq 0) ('agent native probe failed: ' + (Get-Content $agentErr -Raw))
     Assert-True ((Get-Content $agentOut -Raw) -match 'tls=1.3 rpk=pinned named-pipe=bilateral') 'agent did not prove pinned transport'
 
+    # STOP is exercised before first human unlock so the independent empty-vault
+    # audit failure cannot explain its result. No process termination substitutes
+    # for the SCM transition.
+    $preUnlockPid = Get-StoppableServicePid $serviceName
+    Stop-OwnedService $serviceName $preUnlockPid
+    $postStopPid = Start-OwnedServiceWithNewPid $serviceName $preUnlockPid
+    $p = Start-AsUser $agentCredential $custody @('probe', '--profile', $agentProfile, '--private', $agentPrivate, '--vault-id', $vaultId) $emptyInput $agentOut $agentErr
+    Assert-True ($p.ExitCode -eq 0) 'agent RPK channel failed after SCM restart'
+    $p = Start-AsUser $humanCredential $custody @('probe', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $emptyInput $humanOut $humanErr
+    Assert-True ($p.ExitCode -eq 0) 'human RPK channel failed after SCM restart'
+
     $p = Start-AsUser $humanCredential $custody @('human-lock', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $humanInput $humanOut $humanErr
     Write-ServiceSubphaseDiagnostics $diagnosticPath
     Assert-True ($p.ExitCode -eq 0) ('human native channel failed: ' + (Get-Content $humanErr -Raw))
@@ -472,17 +510,16 @@ try {
     $p = Start-AsUser $agentCredential $custody @('probe', '--profile', $humanProfile, '--private', $agentPrivate, '--vault-id', $vaultId) $emptyInput $badOut $badErr
     Assert-True ($p.ExitCode -ne 0) 'cross-role identity substitution unexpectedly succeeded'
 
-    $servicePid = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").ProcessId
-    Assert-True ($servicePid -gt 0) 'SCM did not expose service PID'
-    Stop-Process -Id $servicePid -Force
-    Start-Sleep -Seconds 1
-    Invoke-Checked 'sc.exe' @('start', $serviceName)
-    Start-Sleep -Seconds 2
-    Assert-True ((Get-Service $serviceName).Status -eq 'Running') 'service restart failed'
+    $servicePid = Get-StoppableServicePid $serviceName
+    Assert-True ($servicePid -eq $postStopPid) 'service PID changed without an SCM stop'
+    Stop-OwnedService $serviceName $servicePid
+    $null = Start-OwnedServiceWithNewPid $serviceName $servicePid
     $p = Start-AsUser $agentCredential $custody @('probe', '--profile', $agentProfile, '--private', $agentPrivate, '--vault-id', $vaultId) $emptyInput $agentOut $agentErr
     Assert-True ($p.ExitCode -eq 0) 'persistent vault failed after service restart'
+    $p = Start-AsUser $humanCredential $custody @('probe', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $emptyInput $humanOut $humanErr
+    Assert-True ($p.ExitCode -eq 0) 'human channel failed after post-operation restart'
 
-    $passMessage = "PASS ticket27 windows=$product cpu=$osArch service-virtual-account=1 dacl=protected dpapi=machine pipe=bilateral tls=1.3-rpk human=unlock-lock restart=1 agent-admin=0"
+    $passMessage = "PASS ticket27 windows=$product cpu=$osArch service-virtual-account=1 dacl=protected dpapi=machine pipe=bilateral tls=1.3-rpk human=unlock-lock restart=scm-stop agent-admin=0"
 }
 catch {
     $bodyError = $_
@@ -492,7 +529,7 @@ finally {
         try {
             $installed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
             if ($null -ne $installed -and $installed.State -ne 'Stopped') {
-                Stop-Service -Name $serviceName -Force -ErrorAction Stop
+                Stop-Service -Name $serviceName -ErrorAction Stop
             }
             Invoke-Checked 'sc.exe' @('delete', $serviceName)
         }
