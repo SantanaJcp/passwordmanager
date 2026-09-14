@@ -136,6 +136,7 @@ require_literal 'require_readable_regular(AGENT, agent_profile' "$harness"
 require_literal 'require_readable_regular(AGENT, agent_key' "$harness"
 require_literal 'os.chmod(sys.argv[1], 0o666)' "$harness"
 require_literal 'human_authorization_setup' "$harness"
+require_literal 'path_exists=os.path.lexists' "$harness"
 require_literal '"env", f"{DIAGNOSTIC_ENV}=1"' "$harness"
 if grep -Fq 'RUNNER_TEMP' "$harness"; then
     echo 'macOS custody laboratory still depends on the private runner temp root' >&2
@@ -211,6 +212,35 @@ for rejected in (b"", b"CFLAGS='-Og'\n", b"CFLAGS='-O0 -O2'\n"):
         pass
     else:
         raise AssertionError("ambiguous native libsodium metadata was accepted")
+
+owned_paths = [("state", pathlib.Path("/synthetic-ticket26-owned-state"))]
+owned_records = ["/Groups/_synthetic26", "/Users/_synthetic26"]
+success_calls = []
+def successful_cleanup(command, *, check):
+    assert check is False
+    success_calls.append(tuple(map(str, command)))
+    absent_query = (command[:2] == ["launchctl", "print"] or
+                    (command[:3] == ["dscl", ".", "-read"]))
+    return type("Result", (), {"returncode": 1 if absent_query else 0})()
+assert module.cleanup_owned_resources(
+    True, owned_paths, owned_records, successful_cleanup, lambda _path: False
+) == []
+assert len(success_calls) == 7
+
+failure_calls = []
+def failing_cleanup(command, *, check):
+    assert check is False
+    failure_calls.append(tuple(map(str, command)))
+    absence_query = (command[:2] == ["launchctl", "print"] or
+                     (command[:3] == ["dscl", ".", "-read"]))
+    return type("Result", (), {"returncode": 0 if absence_query else 9})()
+cleanup_errors = module.cleanup_owned_resources(
+    True, owned_paths, owned_records, failing_cleanup, lambda _path: False
+)
+assert len(failure_calls) == 7 and len(cleanup_errors) == 7
+aggregate = module.OwnedCleanupError(cleanup_errors)
+assert len(aggregate.errors) == 7
+assert "launchd-bootout" in str(aggregate) and "delete-user" in str(aggregate)
 result = type("Result", (), {
     "returncode": 0, "stdout": b"state = running\n\tpid = 321\n", "stderr": b""
 })()

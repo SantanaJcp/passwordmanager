@@ -81,12 +81,14 @@ def wire_fields(values):
     return bytes(result)
 
 
-def create_account(name, uid):
+def create_account(name, uid, owned_records):
     group = f"/Groups/{name}"
     user = f"/Users/{name}"
     sudo(["dscl", ".", "-create", group])
+    owned_records.append(group)
     sudo(["dscl", ".", "-create", group, "PrimaryGroupID", str(uid)])
     sudo(["dscl", ".", "-create", user])
+    owned_records.append(user)
     for attribute, value in [
         ("RealName", f"Password Manager ticket 26 {name}"),
         ("UniqueID", str(uid)), ("PrimaryGroupID", str(uid)),
@@ -94,6 +96,69 @@ def create_account(name, uid):
         ("IsHidden", "1"), ("Password", "*"),
     ]:
         sudo(["dscl", ".", "-create", user, attribute, value])
+
+
+class OwnedCleanupError(AssertionError):
+    def __init__(self, errors):
+        self.errors = tuple(errors)
+        super().__init__("; ".join(str(error) for error in self.errors))
+
+
+def cleanup_owned_resources(
+    bootstrapped, owned_paths, owned_records, invoke=sudo,
+    path_exists=os.path.lexists,
+):
+    errors = []
+
+    def attempt(action, command):
+        try:
+            result = invoke(command, check=False)
+            if result.returncode != 0:
+                errors.append(AssertionError(
+                    f"owned cleanup failed: action={action} returncode={result.returncode}"
+                ))
+        except Exception as error:
+            errors.append(AssertionError(f"owned cleanup raised: action={action}"))
+            errors[-1].__cause__ = error
+
+    if bootstrapped:
+        attempt("launchd-bootout", ["launchctl", "bootout", f"system/{LABEL}"])
+    for name, path in reversed(owned_paths):
+        attempt(f"remove-{name}", ["rm", "-rf", path])
+    for record in reversed(owned_records):
+        kind = "user" if record.startswith("/Users/") else "group"
+        attempt(f"delete-{kind}", ["dscl", ".", "-delete", record])
+
+    if bootstrapped:
+        try:
+            result = invoke(
+                ["launchctl", "print", f"system/{LABEL}"], check=False
+            )
+            if result.returncode == 0:
+                errors.append(AssertionError("owned cleanup left launchd job"))
+        except Exception as error:
+            wrapped = AssertionError("owned cleanup absence check raised: launchd")
+            wrapped.__cause__ = error
+            errors.append(wrapped)
+    for name, path in owned_paths:
+        try:
+            if path_exists(path):
+                errors.append(AssertionError(f"owned cleanup left path: name={name}"))
+        except Exception as error:
+            wrapped = AssertionError("owned cleanup absence check raised: path")
+            wrapped.__cause__ = error
+            errors.append(wrapped)
+    for record in owned_records:
+        try:
+            result = invoke(["dscl", ".", "-read", record], check=False)
+            if result.returncode == 0:
+                kind = "user" if record.startswith("/Users/") else "group"
+                errors.append(AssertionError(f"owned cleanup left record: kind={kind}"))
+        except Exception as error:
+            wrapped = AssertionError("owned cleanup absence check raised: directory-record")
+            wrapped.__cause__ = error
+            errors.append(wrapped)
+    return errors
 
 
 def unused_ids(count):
@@ -432,18 +497,21 @@ def main():
         for record in (f"/Users/{name}", f"/Groups/{name}"):
             assert run(["dscl", ".", "-read", record], check=False).returncode != 0
 
-    created = []
+    owned_records = []
+    owned_paths = []
     bootstrapped = False
+    lab_error = None
     scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")
     require_owner_mode(scratch.parent, (0, 0o1777))
     assert not scratch.exists(), f"refusing to replace pre-existing scratch path: {scratch}"
     try:
         scratch.mkdir(mode=0o711)
+        owned_paths.append(("scratch", scratch))
         scratch.chmod(0o711)
         require_owner_mode(scratch, (os.getuid(), 0o711))
         custodian_uid, agent_uid, other_uid = unused_ids(3)
         for name, uid in [(CUSTODIAN, custodian_uid), (AGENT, agent_uid), (OTHER, other_uid)]:
-            created.append(name); create_account(name, uid)
+            create_account(name, uid, owned_records)
         for name in (CUSTODIAN, AGENT, OTHER):
             require_traversal(name, scratch.parent)
             require_traversal(name, scratch)
@@ -451,7 +519,9 @@ def main():
         assert observed_agent_uid == str(agent_uid), observed_agent_uid
         cross_uid_peer_diagnostic(agent_uid, scratch)
 
-        sudo(["mkdir", "-p", INSTALL, STATE, RUNTIME])
+        for name, path in [("install", INSTALL), ("state", STATE), ("runtime", RUNTIME)]:
+            sudo(["mkdir", path])
+            owned_paths.append((name, path))
         sudo(["install", "-o", "root", "-g", "wheel", "-m", "0755", binary, INSTALL / "pm-custody"])
         sudo(["install", "-o", "root", "-g", "wheel", "-m", "0755", cli, INSTALL / "pm"])
         sudo(["chown", f"{CUSTODIAN}:{CUSTODIAN}", STATE, RUNTIME])
@@ -515,6 +585,7 @@ def main():
         with open(diagnostic_plist, "wb") as destination:
             plistlib.dump(launchd_config, destination)
         sudo(["install", "-o", "root", "-g", "wheel", "-m", "0644", diagnostic_plist, PLIST])
+        owned_paths.append(("plist", PLIST))
         sudo(["plutil", "-lint", PLIST])
         sudo(["launchctl", "bootstrap", "system", PLIST]); bootstrapped = True
         wait_for_service()
@@ -610,19 +681,21 @@ def main():
 
         tty_clipboard = run(["script", "-q", "/dev/null", INSTALL / "pm-custody", "macos-native-probe"])
         assert b"PASS macos-native tty=real rlimit-core=0 clipboard=AppKit-changeCount" in tty_clipboard.stdout
-        print("PASS macos-launchdaemon account=_passwordmanager peer=getpeereid bilateral=tls-rpk")
-        print("PASS macos-acl bootstrap=0400 binary+plist=root-owned wrong-uid=rejected")
-        print("PASS macos-persistence suspension=durable launchd-restart=real")
-        print("PASS macos-native tty=/dev/tty clipboard=AppKit-changeCount fullfsync=queried-tests")
-        print("LIMIT reboot=NOT_RUN intel+arm64=handled-by-ticket31 signing+notarization=NOT_RUN")
-    finally:
-        if bootstrapped:
-            sudo(["launchctl", "bootout", f"system/{LABEL}"], check=False)
-        for path in [PLIST, INSTALL, STATE, RUNTIME, scratch]:
-            sudo(["rm", "-rf", path], check=False)
-        for name in reversed(created):
-            sudo(["dscl", ".", "-delete", f"/Users/{name}"], check=False)
-            sudo(["dscl", ".", "-delete", f"/Groups/{name}"], check=False)
+    except Exception as error:
+        lab_error = error
+
+    cleanup_errors = cleanup_owned_resources(
+        bootstrapped, owned_paths, owned_records
+    )
+    if cleanup_errors:
+        raise OwnedCleanupError(cleanup_errors) from lab_error
+    if lab_error is not None:
+        raise lab_error
+    print("PASS macos-launchdaemon account=_passwordmanager peer=getpeereid bilateral=tls-rpk")
+    print("PASS macos-acl bootstrap=0400 binary+plist=root-owned wrong-uid=rejected")
+    print("PASS macos-persistence suspension=durable launchd-restart=real")
+    print("PASS macos-native tty=/dev/tty clipboard=AppKit-changeCount fullfsync=queried-tests")
+    print("LIMIT reboot=NOT_RUN intel+arm64=handled-by-ticket31 signing+notarization=NOT_RUN")
 
 
 if __name__ == "__main__":

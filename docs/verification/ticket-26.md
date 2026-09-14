@@ -619,6 +619,41 @@ non-diagnostic binary/TUI composition, reboot plus FileVault coverage, and
 signing/notarization gates also remain outstanding. The diagnostic build and CI
 runner do not substitute for those requirements.
 
+### Owned native-fixture cleanup method
+
+The prior harness printed its four product PASS lines before entering cleanup,
+then invoked every cleanup command with `check=False` without inspecting its
+result. A failed `launchctl bootout`, path removal, user deletion or group
+deletion could therefore leave owned host state while the job still appeared
+successful. The user authorized propagating all of those inherited cleanup
+errors after run 14; that successful diagnostic record remains unchanged.
+
+The correction is fixture-only and uses a closed ownership ledger. Collision
+checks remain before mutation. A path, launchd job, user or group is added to
+the ledger immediately after its own creation command succeeds, including
+partially configured accounts. Cleanup attempts every and only ledger entry in
+dependency-safe reverse order, records every nonzero result or exception using
+fixed non-sensitive action names, then queries absence for every owned path,
+launchd label and directory-service record. It raises one aggregate error after
+all attempts; no cleanup failure can be ignored or converted to success. The
+four PASS lines move after successful cleanup and verified absence. No glob,
+alternate root, broad account match, home-directory deletion or unrelated
+system mutation is permitted.
+
+Callable fake-command regressions cover a successful cleanup and simultaneous
+bootout/path/user/group failures, proving all later operations and absence
+checks still run and the aggregate is visible. These regressions validate only
+error propagation; they are not native acceptance. Native validation remains
+the same collision-guarded ephemeral CI laboratory on both architectures.
+
+The focused callable regressions passed for both the all-success result and a
+seven-error bootout/path/user/group plus absence-check result; they also proved
+all seven commands were attempted. Python AST parsing, the macOS static checker
+and `git diff --check` passed. No Rust gate, build or native laboratory was run
+for this scripts-and-documentation-only checkpoint. Only the unchanged native
+CI laboratory can verify real launchd, filesystem and Directory Services
+cleanup on both architectures.
+
 ## Remaining acceptance work
 
 - Resolve and verify the inherited cleanup behavior only after its separate
