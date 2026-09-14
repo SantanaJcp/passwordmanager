@@ -176,7 +176,7 @@ fn duplicate_decisions_pagination_and_audit_failure_are_atomic() {
         .unwrap();
     let db = Connection::open(&path).unwrap();
     assert_eq!(count(&db, "authority_events"), 70);
-    assert_eq!(count(&db, "encrypted_audit_records"), 1);
+    assert_eq!(count(&db, "encrypted_audit_records"), 2);
     drop(db);
     assert_eq!(vault.receipt(*prepared.transaction_id()).unwrap(), receipt);
     assert_eq!(

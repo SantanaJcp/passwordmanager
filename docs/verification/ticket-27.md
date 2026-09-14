@@ -1126,6 +1126,19 @@ checker estático Windows y una comprobación sintáctica de que cada llamada a
 `HumanVault::unlock` tiene los cinco argumentos explícitos. Ninguno de esos
 checks se presenta como evidencia conductual.
 
+La ejecución enfocada posterior confirmó `audit_lifecycle` 8/8 (incluida la
+rotación humana enlazada original), `human_transactions` 4/4 y
+`backup_lifecycle` 5/5 en el primer intento. La primera barrida de todos los
+tests de `pm-vault` conservada en
+`/tmp/pm27-audit-api-pm-vault-tests-attempt1.log` encontró un único RED
+conductual: `csv_import` todavía esperaba un solo registro tras el commit y
+ahora existen el `HumanUnlock` obligatorio más `Import`. Se corrigió sólo ese
+contador 1→2; el test enfocado pasó 3/3 y la segunda barrida completa pasó. El
+`e2ee_replication` migrado a custodias estables por dispositivo pasó 5/5. Las
+salidas enfocadas están en `/tmp/pm27-audit-api-{audit-lifecycle-attempt1,human-transactions-attempt1,backup-lifecycle-attempt1,csv-import-attempt2,e2ee-replication-attempt1}.log` y la barrida completa verde en
+`/tmp/pm27-audit-api-pm-vault-tests-attempt2.log`. Estos resultados son Linux;
+no acreditan todavía el servicio Windows nativo.
+
 ## Déficit contractual de parada SCM (plan, no implementación)
 
 La misma corrida mostró `NOT_STOPPABLE` y el cleanup no pudo ejecutar
