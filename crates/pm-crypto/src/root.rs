@@ -91,6 +91,7 @@ impl KdfProfile {
 pub struct ProtectedBytes {
     pointer: NonNull<u8>,
     len: usize,
+    capacity: usize,
 }
 
 impl ProtectedBytes {
@@ -101,18 +102,67 @@ impl ProtectedBytes {
     /// Returns [`CryptoError::ResourceUnavailable`] when the process budget,
     /// allocation, or native memory lock is unavailable.
     pub fn new(mut value: Vec<u8>) -> Result<Self, CryptoError> {
-        let protected = Self::allocate_from_slice(&value);
+        let protected = Self::copy_from_slice(&value);
         wipe_ordinary_bytes(&mut value);
         protected
     }
 
-    fn allocate_from_slice(value: &[u8]) -> Result<Self, CryptoError> {
+    /// Allocates an initialized zero-filled region in locked native memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::ResourceUnavailable`] when the process budget,
+    /// allocation, or native memory lock is unavailable.
+    pub fn zeroed(len: usize) -> Result<Self, CryptoError> {
+        let protected = Self::allocate(len)?;
+        if len != 0 {
+            // SAFETY: `protected` owns an allocation valid for `len` bytes.
+            unsafe { libsodium_sys::sodium_memzero(protected.pointer.as_ptr().cast(), len) };
+        }
+        Ok(protected)
+    }
+
+    /// Shortens the exposed bytes and immediately wipes the removed suffix.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `len` would extend rather than shorten the protected region.
+    pub fn truncate(&mut self, len: usize) {
+        assert!(len <= self.len, "protected bytes cannot be extended");
+        if len == self.len {
+            return;
+        }
+        // SAFETY: `len < self.len <= self.capacity`, so the removed suffix is
+        // wholly inside the allocation and remains uniquely owned.
+        unsafe {
+            libsodium_sys::sodium_memzero(self.pointer.as_ptr().add(len).cast(), self.len - len);
+        }
+        self.len = len;
+    }
+
+    fn copy_from_slice(value: &[u8]) -> Result<Self, CryptoError> {
+        let protected = Self::allocate(value.len())?;
+        if !value.is_empty() {
+            // SAFETY: both regions are valid for `value.len()` initialized
+            // bytes and cannot overlap because `pointer` is freshly allocated.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    value.as_ptr(),
+                    protected.pointer.as_ptr(),
+                    value.len(),
+                );
+            }
+        }
+        Ok(protected)
+    }
+
+    fn allocate(len: usize) -> Result<Self, CryptoError> {
         sodium()?;
-        let len = value.len();
         if len == 0 {
             return Ok(Self {
                 pointer: NonNull::dangling(),
                 len: 0,
+                capacity: 0,
             });
         }
         LOCKED_SECRET_BYTES
@@ -136,10 +186,11 @@ impl ProtectedBytes {
             LOCKED_SECRET_BYTES.fetch_sub(len, Ordering::AcqRel);
             return Err(CryptoError::ResourceUnavailable);
         }
-        // SAFETY: both regions are valid for `len` initialized bytes and
-        // cannot overlap because `pointer` names a fresh allocation.
-        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), pointer.as_ptr(), len) };
-        Ok(Self { pointer, len })
+        Ok(Self {
+            pointer,
+            len,
+            capacity: len,
+        })
     }
 }
 
@@ -176,15 +227,15 @@ impl DerefMut for ProtectedBytes {
 
 impl Drop for ProtectedBytes {
     fn drop(&mut self) {
-        if self.len == 0 {
+        if self.capacity == 0 {
             return;
         }
         // SAFETY: the allocation remains valid and uniquely owned until free.
         unsafe {
-            libsodium_sys::sodium_memzero(self.pointer.as_ptr().cast(), self.len);
+            libsodium_sys::sodium_memzero(self.pointer.as_ptr().cast(), self.capacity);
             libsodium_sys::sodium_free(self.pointer.as_ptr().cast());
         }
-        LOCKED_SECRET_BYTES.fetch_sub(self.len, Ordering::AcqRel);
+        LOCKED_SECRET_BYTES.fetch_sub(self.capacity, Ordering::AcqRel);
     }
 }
 
@@ -197,7 +248,7 @@ struct LockedKey(ProtectedBytes);
 
 impl LockedKey {
     fn new(mut value: [u8; KEY_BYTES]) -> Result<Self, CryptoError> {
-        let protected = ProtectedBytes::allocate_from_slice(&value).map(Self);
+        let protected = ProtectedBytes::copy_from_slice(&value).map(Self);
         wipe_ordinary_bytes(&mut value);
         protected
     }

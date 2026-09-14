@@ -17,7 +17,6 @@ pm-crypto.workspace = true
 pm-custody.workspace = true
 pm-interface.workspace = true
 pm-vault.workspace = true
-zeroize.workspace = true
 
 [dev-dependencies]
 pm-process-runner.workspace = true

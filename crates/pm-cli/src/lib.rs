@@ -15,7 +15,6 @@ use std::{
     io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
 };
-use zeroize::Zeroizing;
 
 #[derive(Debug)]
 pub struct CliError {
@@ -814,27 +813,42 @@ fn prompt(message: &str) -> Result<(), String> {
     writeln!(output, "{message}").map_err(|e| e.to_string())?;
     output.flush().map_err(|e| e.to_string())
 }
-fn read_protected_line(input: &mut impl BufRead, maximum: usize) -> Result<ProtectedBytes, String> {
-    let mut value = Zeroizing::new(Vec::with_capacity(maximum.min(128)));
-    let mut limited = Read::by_ref(input)
-        .take(u64::try_from(maximum + 2).map_err(|_| "input limit overflow".to_owned())?);
-    let bytes = limited
-        .read_until(b'\n', &mut value)
-        .map_err(|e| e.to_string())?;
-    if bytes == 0 {
-        return Err("unexpected end of input".into());
-    }
-    if value.last() == Some(&b'\n') {
-        value.pop();
-        if value.last() == Some(&b'\r') {
-            value.pop();
+fn read_protected_line(input: &mut impl Read, maximum: usize) -> Result<ProtectedBytes, String> {
+    let capacity = maximum
+        .checked_add(2)
+        .ok_or_else(|| "input limit overflow".to_owned())?;
+    let mut value = ProtectedBytes::zeroed(capacity).map_err(|error| error.to_string())?;
+    let mut len = 0;
+    loop {
+        let bytes = input
+            .read(&mut value[len..=len])
+            .map_err(|error| error.to_string())?;
+        if bytes == 0 {
+            if len == 0 {
+                return Err("unexpected end of input".into());
+            }
+            if len > maximum {
+                return Err(format!("input exceeds {maximum} bytes"));
+            }
+            value.truncate(len);
+            return Ok(value);
+        }
+        if value[len] == b'\n' {
+            let mut content_len = len;
+            if content_len != 0 && value[content_len - 1] == b'\r' {
+                content_len -= 1;
+            }
+            if content_len > maximum {
+                return Err(format!("input exceeds {maximum} bytes"));
+            }
+            value.truncate(content_len);
+            return Ok(value);
+        }
+        len += 1;
+        if len == capacity {
+            return Err(format!("input exceeds {maximum} bytes"));
         }
     }
-    if value.len() > maximum {
-        return Err(format!("input exceeds {maximum} bytes"));
-    }
-    let value = std::mem::take(&mut *value);
-    ProtectedBytes::new(value).map_err(|error| error.to_string())
 }
 fn hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -852,30 +866,29 @@ mod tests {
     #[test]
     fn protected_line_preserves_public_line_parsing() {
         let lf = read_protected_line(&mut Cursor::new(b"ticket28-lf\n"), 32).unwrap();
-        assert!(lf.as_ref() == b"ticket28-lf");
+        assert!(matches!(lf.as_ref(), b"ticket28-lf"));
 
         let crlf = read_protected_line(&mut Cursor::new(b"ticket28-crlf\r\n"), 32).unwrap();
-        assert!(crlf.as_ref() == b"ticket28-crlf");
+        assert!(matches!(crlf.as_ref(), b"ticket28-crlf"));
 
-        let eof_after_bytes =
-            read_protected_line(&mut Cursor::new(b"ticket28-eof"), 32).unwrap();
-        assert!(eof_after_bytes.as_ref() == b"ticket28-eof");
+        let eof_after_bytes = read_protected_line(&mut Cursor::new(b"ticket28-eof"), 32).unwrap();
+        assert!(matches!(eof_after_bytes.as_ref(), b"ticket28-eof"));
 
         let lone_cr = read_protected_line(&mut Cursor::new(b"ticket28-cr\r"), 32).unwrap();
-        assert!(lone_cr.as_ref() == b"ticket28-cr\r");
+        assert!(matches!(lone_cr.as_ref(), b"ticket28-cr\r"));
 
         let exact_limit = read_protected_line(&mut Cursor::new(b"1234\n"), 4).unwrap();
-        assert!(exact_limit.as_ref() == b"1234");
+        assert!(matches!(exact_limit.as_ref(), b"1234"));
 
         let Err(empty) = read_protected_line(&mut Cursor::new(b""), 32) else {
             panic!("empty input was accepted");
         };
-        assert!(empty == "unexpected end of input");
+        assert!(matches!(empty.as_str(), "unexpected end of input"));
 
         let Err(over_limit) = read_protected_line(&mut Cursor::new(b"12345\n"), 4) else {
             panic!("over-limit input was accepted");
         };
-        assert!(over_limit == "input exceeds 4 bytes");
+        assert!(matches!(over_limit.as_str(), "input exceeds 4 bytes"));
     }
 
     #[test]

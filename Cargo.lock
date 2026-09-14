@@ -1600,7 +1600,6 @@ dependencies = [
  "pm-interface",
  "pm-process-runner",
  "pm-vault",
- "zeroize",
 ]
 
 [[package]]

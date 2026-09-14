@@ -84,3 +84,15 @@ en memoria bloqueada ni los demás buffers/canales, por lo que 28 queda abierto.
 enviados, memlock=0 debe fallar tras el primer prompt; esperar entrada demuestra
 que el destino no fue protegido antes de leer. Casos enfocados fijan LF, CRLF,
 EOF vacío/no vacío y límite sin registrar el canario. No se escribió GREEN.
+
+2026-09-14 — Tercer RED real `/tmp/pm28-red-direct-protected-input.log`: rc1 en
+7 s, build correcto; stdin abierto con cero bytes quedó bloqueado leyendo y
+agotó exactamente los 3 s del fixture. Cleanup dejó cero procesos/raíces. GREEN
+estático ahora reserva+mlock antes del primer `Read`, sin `Vec` plaintext ni
+`read_until`; queda pendiente de compilación y ejecución con ventana exclusiva.
+
+2026-09-14 — GREEN propio de destino: suites enfocadas y lab público rc0; check
+rc0 tras preservar tres fallos de formato/lint, y clean offline rc0 en 40 s.
+Esto sólo demuestra reserva/mlock antes de `Read`: el caller conserva
+`stdin.lock()` y su buffer interno puede precargar plaintext. Falta lectura
+nativa sin buffer por plataforma; no se marca G7 ni el ticket como cerrado.

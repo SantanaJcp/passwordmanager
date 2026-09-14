@@ -187,6 +187,12 @@ no envía ningún byte. Tras el primer prompt, el proceso debe fallar cerrado co
 actual permanece esperando entrada: ese timeout demuestra que intenta leer
 antes de reservar/bloquear el destino, no un fallo de credencial o dependencia.
 
+La ejecución `/tmp/pm28-red-direct-protected-input.log` reprodujo exactamente
+ese RED una vez: build correcto y rc1 en 7 s; el hijo mantuvo stdin abierto sin
+recibir bytes, agotó los 3 s del fixture y falló con `client read stdin before
+reserving its protected input destination`. El `finally` verificó cero procesos
+y raíces propias antes de liberar la ventana.
+
 El GREEN preasignará el destino nativo protegido antes de la primera lectura y
 leerá en su capacidad mediante `Read`, sin un `BufRead` propio intermedio. Debe
 conservar exactamente: aceptación de LF, retirada de un único CR antes de LF,
@@ -195,6 +201,32 @@ límite. Las regresiones enfocadas comparan sólo booleanos y errores públicos,
 sin imprimir el material sintético. Este vertical no amplía la garantía a los
 buffers internos de stdio/OS ni a librerías de terceros permitidos por G7 §2.1,
 y tampoco reescribe Argon, TLS, russh o browser.
+
+El GREEN estático posterior reserva y bloquea `maximum + 2` bytes inicializados
+antes del primer `Read`, lee cada byte directamente en esa región para no
+consumir parte de la línea siguiente y limpia inmediatamente el sufijo retirado.
+El owner conserva capacidad separada de longitud para limpiar/liberar y cargar
+el presupuesto completo incluso después de truncar. No se ejecutó todavía.
+
+El checkpoint compilado prueba solamente que el buffer **propio** de destino se
+reserva y bloquea antes de invocar `Read`; el caller aún usa `stdin.lock()` y
+`StdinLock` puede precargar plaintext en su `BufReader` interno. Por tanto no se
+afirma todavía protección integral desde stdin. El siguiente vertical debe leer
+del handle nativo sin buffer en cada plataforma, preservando terminal y pipe y
+sin ruta sustituta; no se crea una excepción nueva para stdio.
+
+Evidencia enfocada: `pm-crypto` rc0
+(`/tmp/pm28-direct-green-pm-crypto.log`); el primer `pm-cli` no compiló por haber
+retirado el import de `BufRead` que usa otro flujo público
+(`/tmp/pm28-direct-green-pm-cli.log`, rc101), se restauró sólo ese trait y la
+segunda ejecución pasó rc0 (`/tmp/pm28-direct-green-pm-cli-2.log`). El lab se
+ejecutó una vez y pasó rc0 con cleanup verificado
+(`/tmp/pm28-direct-green-fault-safety.log`). `scripts/check.sh` registró tres
+fallos previos, todos conservados: formato (`...-check.log`, rc1), documentación
+`# Panics` (`...-check-2.log`, rc101) y lints de rango/aserciones
+(`...-check-3.log`, rc101). Tras correcciones acotadas pasó rc0
+(`/tmp/pm28-direct-green-check-4.log`). El build limpio locked/offline pasó rc0
+en 40 s (`/tmp/pm28-direct-green-clean.log`).
 
 ## Verticales de fault/crash pendientes de RED
 
