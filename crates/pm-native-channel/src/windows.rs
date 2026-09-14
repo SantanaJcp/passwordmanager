@@ -794,7 +794,7 @@ impl WindowsClientPipe {
                 0,
                 ptr::null(),
                 OPEN_EXISTING,
-                SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
                 ptr::null_mut(),
             )
         };
