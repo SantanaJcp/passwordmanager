@@ -1,0 +1,24 @@
+[package]
+name = "pm-web-auth"
+description = "Trusted private-browser OIDC authentication adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "pm-web-auth"
+path = "src/main.rs"
+
+[dependencies]
+aws-lc-rs.workspace = true
+base64.workspace = true
+libc.workspace = true
+pm-interface.workspace = true
+rustls.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

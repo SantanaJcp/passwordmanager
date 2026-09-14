@@ -1,0 +1,21 @@
+[package]
+name = "pm-vault"
+description = "Atomic encrypted local vault persistence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+libc.workspace = true
+minicbor.workspace = true
+pm-crypto.workspace = true
+pm-native-channel.workspace = true
+rusqlite.workspace = true
+zeroize.workspace = true
+zip.workspace = true
+
+[lints]
+workspace = true

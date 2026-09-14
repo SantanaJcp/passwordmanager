@@ -1,0 +1,1505 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! The single, deliberately small contract used by the delegated CLI and MCP
+//! adapters.  This crate contains no vault policy and no provider code: both
+//! adapters hand validated requests to the same engine supplied by the
+//! caller.  Keeping framing and validation here prevents the two front doors
+//! from slowly acquiring different security semantics.
+
+use std::{
+    fmt,
+    fmt::Write as FmtWrite,
+    io::{self, Read, Write},
+    path::Path,
+    sync::Arc,
+};
+
+use pm_vault::{
+    AgentPeer, AttemptError, AttemptVault, DelegatedVault, IdempotencyKey, RecordKind, StartAttempt,
+};
+
+pub const PROTOCOL: u64 = 1;
+pub const MAX_FRAME: usize = 1024 * 1024;
+pub const MAX_DEPTH: usize = 16;
+pub const MAX_RESULT: usize = 64 * 1024;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<Json>),
+    Object(Vec<(String, Json)>),
+}
+
+impl Json {
+    #[must_use]
+    pub const fn object(fields: Vec<(String, Json)>) -> Self {
+        Self::Object(fields)
+    }
+    #[must_use]
+    pub fn field(&self, name: &str) -> Option<&Json> {
+        match self {
+            Self::Object(fields) => fields.iter().find(|(key, _)| key == name).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+    #[must_use]
+    pub fn string(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+    #[must_use]
+    pub fn number(&self) -> Option<&str> {
+        match self {
+            Self::Number(value) => Some(value),
+            _ => None,
+        }
+    }
+    #[must_use]
+    pub fn bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+    #[must_use]
+    pub fn is_object(&self) -> bool {
+        matches!(self, Self::Object(_))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParseError {
+    TooLarge,
+    Empty,
+    InvalidUtf8,
+    InvalidJson,
+    DuplicateKey,
+    TooDeep,
+    TrailingBytes,
+    InvalidRequest,
+    InvalidId,
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::TooLarge => "FRAME_TOO_LARGE",
+            Self::Empty => "INVALID_ARGUMENT",
+            Self::InvalidUtf8 | Self::InvalidJson | Self::TrailingBytes => "INVALID_JSON",
+            Self::DuplicateKey => "DUPLICATE_KEY",
+            Self::TooDeep => "JSON_TOO_DEEP",
+            Self::InvalidRequest => "INVALID_REQUEST",
+            Self::InvalidId => "INVALID_ID",
+        })
+    }
+}
+impl std::error::Error for ParseError {}
+
+/// A private-RPC request. IDs are strings intentionally; numbers would permit
+/// lossy handling by adapters and are not part of this wire contract.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Request {
+    pub id: String,
+    pub method: String,
+    pub params: Json,
+}
+
+/// # Errors
+/// Returns an error when the document violates the bounded JSON grammar.
+pub fn parse_json(bytes: &[u8]) -> Result<Json, ParseError> {
+    if bytes.is_empty() {
+        return Err(ParseError::Empty);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| ParseError::InvalidUtf8)?;
+    let mut parser = Parser {
+        bytes: text.as_bytes(),
+        at: 0,
+    };
+    let value = parser.value(0)?;
+    parser.space();
+    if parser.at != parser.bytes.len() {
+        return Err(ParseError::TrailingBytes);
+    }
+    Ok(value)
+}
+
+/// # Errors
+/// Returns an error for malformed JSON, unsupported fields, or an invalid ID.
+pub fn parse_request(bytes: &[u8]) -> Result<Request, ParseError> {
+    let value = parse_json(bytes)?;
+    let Json::Object(object) = value else {
+        return Err(ParseError::InvalidRequest);
+    };
+    if object
+        .iter()
+        .any(|(key, _)| !["jsonrpc", "id", "method", "params"].contains(&key.as_str()))
+    {
+        return Err(ParseError::InvalidRequest);
+    }
+    let get = |name: &str| {
+        object
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value)
+    };
+    if get("jsonrpc").and_then(Json::string) != Some("2.0") {
+        return Err(ParseError::InvalidRequest);
+    }
+    let id = get("id")
+        .and_then(Json::string)
+        .ok_or(ParseError::InvalidId)?;
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii() && !byte.is_ascii_control())
+    {
+        return Err(ParseError::InvalidId);
+    }
+    let method = get("method")
+        .and_then(Json::string)
+        .ok_or(ParseError::InvalidRequest)?;
+    let params = get("params")
+        .cloned()
+        .unwrap_or_else(|| Json::Object(Vec::new()));
+    if !params.is_object() {
+        return Err(ParseError::InvalidRequest);
+    }
+    Ok(Request {
+        id: id.to_owned(),
+        method: method.to_owned(),
+        params,
+    })
+}
+
+/// MCP permits string or number request IDs, unlike the private RPC. Numeric
+/// IDs are retained canonically as text and never converted to floating point.
+/// # Errors
+/// Returns an error for malformed JSON, unsupported fields, or an invalid ID.
+pub fn parse_mcp_request(bytes: &[u8]) -> Result<Request, ParseError> {
+    let value = parse_json(bytes)?;
+    let Json::Object(object) = value else {
+        return Err(ParseError::InvalidRequest);
+    };
+    if object
+        .iter()
+        .any(|(key, _)| !["jsonrpc", "id", "method", "params"].contains(&key.as_str()))
+    {
+        return Err(ParseError::InvalidRequest);
+    }
+    let get = |name: &str| {
+        object
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value)
+    };
+    if get("jsonrpc").and_then(Json::string) != Some("2.0") {
+        return Err(ParseError::InvalidRequest);
+    }
+    let id = match get("id") {
+        Some(Json::String(value) | Json::Number(value)) => value.clone(),
+        _ => return Err(ParseError::InvalidId),
+    };
+    if id.is_empty() || id.len() > 64 {
+        return Err(ParseError::InvalidId);
+    }
+    let method = get("method")
+        .and_then(Json::string)
+        .ok_or(ParseError::InvalidRequest)?;
+    let params = get("params")
+        .cloned()
+        .unwrap_or_else(|| Json::Object(Vec::new()));
+    if !params.is_object() {
+        return Err(ParseError::InvalidRequest);
+    }
+    Ok(Request {
+        id,
+        method: method.to_owned(),
+        params,
+    })
+}
+
+#[must_use]
+pub fn encode_json(value: &Json) -> Vec<u8> {
+    let mut output = String::new();
+    encode_into(value, &mut output);
+    output.into_bytes()
+}
+
+/// # Errors
+/// Returns an I/O or bound error if the frame cannot be read safely.
+pub fn read_frame(input: &mut impl Read) -> io::Result<Vec<u8>> {
+    let mut header = [0_u8; 4];
+    input.read_exact(&mut header)?;
+    let length = u32::from_be_bytes(header) as usize;
+    if length == 0 || length > MAX_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame exceeds private RPC limit",
+        ));
+    }
+    let mut frame = vec![0_u8; length];
+    input.read_exact(&mut frame)?;
+    Ok(frame)
+}
+
+/// # Errors
+/// Returns an I/O or bound error if the frame is empty, oversized, or cannot be written.
+pub fn write_frame(output: &mut impl Write, value: &[u8]) -> io::Result<()> {
+    if value.is_empty() || value.len() > MAX_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "frame exceeds private RPC limit",
+        ));
+    }
+    let length = u32::try_from(value.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame length overflow"))?;
+    output.write_all(&length.to_be_bytes())?;
+    output.write_all(value)?;
+    output.flush()
+}
+
+/// Public error categories deliberately contain no provider text.  Adapters
+/// map these to their own error envelope/exit status without changing policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErrorCode {
+    Unauthorized,
+    AgentRevoked,
+    AccessSuspended,
+    CredentialUnavailable,
+    InvalidArgument,
+    UnsupportedVersion,
+    NotFound,
+    IdempotencyConflict,
+    IdempotencyExpired,
+    ResultExpired,
+    RateLimited,
+    ClockUntrusted,
+    CustodyUnavailable,
+    Internal,
+}
+
+impl ErrorCode {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unauthorized => "UNAUTHORIZED",
+            Self::AgentRevoked => "AGENT_REVOKED",
+            Self::AccessSuspended => "AGENT_ACCESS_SUSPENDED",
+            Self::CredentialUnavailable => "CREDENTIAL_UNAVAILABLE",
+            Self::InvalidArgument => "INVALID_ARGUMENT",
+            Self::UnsupportedVersion => "UNSUPPORTED_VERSION",
+            Self::NotFound => "NOT_FOUND",
+            Self::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
+            Self::IdempotencyExpired => "IDEMPOTENCY_EXPIRED",
+            Self::ResultExpired => "RESULT_EXPIRED",
+            Self::RateLimited => "RATE_LIMITED",
+            Self::ClockUntrusted => "CLOCK_UNTRUSTED",
+            Self::CustodyUnavailable => "CUSTODY_UNAVAILABLE",
+            Self::Internal => "INTERNAL_ERROR",
+        }
+    }
+}
+
+pub trait Engine {
+    /// Executes one validated delegated operation.
+    ///
+    /// # Errors
+    /// Returns a public, secret-free error category.
+    fn call(&self, method: &str, params: &Json) -> Result<Json, ErrorCode>;
+}
+
+/// Dispatches the common JSON-RPC envelope. Both CLI and MCP call this
+/// function; neither adapter gets a second authorization implementation.
+pub fn dispatch<E: Engine>(request: &Request, engine: &E) -> Json {
+    let result = engine.call(&request.method, &request.params);
+    let mut response = vec![
+        ("jsonrpc".to_owned(), Json::String("2.0".to_owned())),
+        ("id".to_owned(), Json::String(request.id.clone())),
+    ];
+    match result {
+        Ok(value) => response.push(("result".to_owned(), value)),
+        Err(code) => response.push((
+            "error".to_owned(),
+            Json::Object(vec![
+                ("code".to_owned(), Json::String(code.name().to_owned())),
+                ("message".to_owned(), Json::String(code.name().to_owned())),
+            ]),
+        )),
+    }
+    Json::Object(response)
+}
+
+/// The real vault-backed engine used by both adapters. It opens device
+/// custody only and receives identity from the already authenticated RPK
+/// peer; no caller-supplied role or agent id is trusted.
+pub struct VaultEngine {
+    delegated: DelegatedVault,
+    attempts: AttemptVault,
+    peer: AgentPeer,
+}
+
+impl VaultEngine {
+    /// # Errors
+    /// Returns `CUSTODY_UNAVAILABLE` if custody or its authenticated package
+    /// cannot be opened.
+    pub fn open(
+        path: &Path,
+        device: [u8; 16],
+        custody: Arc<pm_vault::AuditDeviceCustody>,
+        peer: AgentPeer,
+    ) -> Result<Self, ErrorCode> {
+        let delegated = DelegatedVault::open(path, device, Arc::clone(&custody))
+            .map_err(|_| ErrorCode::CustodyUnavailable)?;
+        let attempts = AttemptVault::open(
+            DelegatedVault::open(path, device, custody)
+                .map_err(|_| ErrorCode::CustodyUnavailable)?,
+        )
+        .map_err(|_| ErrorCode::CustodyUnavailable)?;
+        Ok(Self {
+            delegated,
+            attempts,
+            peer,
+        })
+    }
+}
+
+impl Engine for VaultEngine {
+    fn call(&self, method: &str, params: &Json) -> Result<Json, ErrorCode> {
+        match method {
+            "pm.v1.hello" => Ok(Json::Object(vec![(
+                "protocol".into(),
+                Json::Number("1".into()),
+            )])),
+            "pm.v1.capabilities" => capabilities_result(),
+            "pm.v1.credentials.discover" => self.discover(params),
+            "pm.v1.authentication.start" => self.start(params),
+            "pm.v1.authentication.get" => self.get(params),
+            "pm.v1.authentication.cancel" => self.cancel(params),
+            _ => Err(ErrorCode::NotFound),
+        }
+    }
+}
+
+/// # Errors
+/// This currently returns no runtime error; the result is fallible to keep
+/// the adapter seam uniform with future capability providers.
+pub fn capabilities_result() -> Result<Json, ErrorCode> {
+    Ok(Json::Object(vec![
+        ("protocol".into(), Json::Number("1".into())),
+        (
+            "integrations".into(),
+            Json::Array(vec![
+                Json::Object(vec![
+                    ("id".into(), Json::String("controlled.external".into())),
+                    ("version".into(), Json::Number("1".into())),
+                    (
+                        "methods".into(),
+                        Json::Array(vec![Json::String("password".into())]),
+                    ),
+                    ("availability".into(), Json::String("verified".into())),
+                    ("input_schema".into(), schema_start()),
+                    (
+                        "result_schema".into(),
+                        Json::Object(vec![("type".into(), Json::String("object".into()))]),
+                    ),
+                ]),
+                Json::Object(vec![
+                    ("id".into(), Json::String("keycloak-browser-oidc".into())),
+                    ("version".into(), Json::Number("1".into())),
+                    (
+                        "methods".into(),
+                        Json::Array(vec![
+                            Json::String("password".into()),
+                            Json::String("password_totp".into()),
+                        ]),
+                    ),
+                    ("availability".into(), Json::String("verified".into())),
+                    ("input_schema".into(), schema_start()),
+                    (
+                        "result_schema".into(),
+                        Json::Object(vec![("kind".into(), Json::String("oidc_tokens".into()))]),
+                    ),
+                ]),
+                Json::Object(vec![
+                    ("id".into(), Json::String("keycloak-token-exchange".into())),
+                    ("version".into(), Json::Number("1".into())),
+                    (
+                        "methods".into(),
+                        Json::Array(vec![Json::String("token_exchange".into())]),
+                    ),
+                    ("availability".into(), Json::String("verified".into())),
+                    ("input_schema".into(), schema_start()),
+                    (
+                        "result_schema".into(),
+                        Json::Object(vec![(
+                            "kind".into(),
+                            Json::String("exchanged_access_token".into()),
+                        )]),
+                    ),
+                ]),
+                Json::Object(vec![
+                    ("id".into(), Json::String("keycloak-webauthn".into())),
+                    ("version".into(), Json::Number("1".into())),
+                    (
+                        "methods".into(),
+                        Json::Array(vec![Json::String("webauthn".into())]),
+                    ),
+                    ("availability".into(), Json::String("verified".into())),
+                    ("input_schema".into(), schema_start()),
+                    (
+                        "result_schema".into(),
+                        Json::Object(vec![("kind".into(), Json::String("oidc_tokens".into()))]),
+                    ),
+                ]),
+                github_capability(),
+                integration_capability(
+                    "ssh-server",
+                    &["publickey"],
+                    "verified-linux",
+                    "ssh_authenticated_connection",
+                ),
+                integration_capability(
+                    "linux-system-ssh",
+                    &["password"],
+                    "verified-linux",
+                    "ssh_authenticated_connection",
+                ),
+            ]),
+        ),
+        (
+            "limits".into(),
+            Json::Object(vec![
+                ("max_frame".into(), Json::Number(MAX_FRAME.to_string())),
+                ("max_context".into(), Json::Number((64 * 1024).to_string())),
+                ("max_result".into(), Json::Number(MAX_RESULT.to_string())),
+            ]),
+        ),
+    ]))
+}
+
+fn integration_capability(id: &str, methods: &[&str], availability: &str, result: &str) -> Json {
+    Json::Object(vec![
+        ("id".into(), Json::String(id.into())),
+        ("version".into(), Json::Number("1".into())),
+        (
+            "methods".into(),
+            Json::Array(
+                methods
+                    .iter()
+                    .map(|value| Json::String((*value).into()))
+                    .collect(),
+            ),
+        ),
+        ("availability".into(), Json::String(availability.into())),
+        ("input_schema".into(), schema_start()),
+        (
+            "result_schema".into(),
+            Json::Object(vec![("kind".into(), Json::String(result.into()))]),
+        ),
+    ])
+}
+
+fn github_capability() -> Json {
+    Json::Object(vec![
+        ("id".into(), Json::String("github-rest-bearer".into())),
+        ("version".into(), Json::Number("1".into())),
+        (
+            "methods".into(),
+            Json::Array(vec![Json::String("bearer".into())]),
+        ),
+        (
+            "availability".into(),
+            Json::String("verified-adversarial-double".into()),
+        ),
+        (
+            "request_profiles".into(),
+            Json::Array(vec![Json::String("github-assigned-issues/1".into())]),
+        ),
+        ("input_schema".into(), schema_start()),
+        (
+            "result_schema".into(),
+            Json::Object(vec![(
+                "kind".into(),
+                Json::String("authenticated_http_response".into()),
+            )]),
+        ),
+    ])
+}
+
+fn schema_start() -> Json {
+    Json::Object(vec![
+        ("type".into(), Json::String("object".into())),
+        ("additionalProperties".into(), Json::Bool(false)),
+    ])
+}
+
+impl VaultEngine {
+    fn discover(&self, params: &Json) -> Result<Json, ErrorCode> {
+        reject_unknown(params, &["filter", "limit", "cursor"])?;
+        let limit = optional_uint(params, "limit")?.unwrap_or(50);
+        if !(1..=100).contains(&limit) {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        if let Some(cursor) = optional_string(params, "cursor")?
+            && (!cursor.is_empty() || cursor.len() > 512)
+        {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        let text = params
+            .field("filter")
+            .and_then(|v| v.field("text"))
+            .and_then(Json::string);
+        if let Some(value) = text
+            && value.len() > 256
+        {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        let mut credentials = self
+            .delegated
+            .discover(&self.peer)
+            .map_err(|error| map_authorization(&error))?;
+        if let Some(filter) = text {
+            credentials.retain(|credential| {
+                credential.title().contains(filter)
+                    || credential
+                        .account()
+                        .is_some_and(|account| account.contains(filter))
+            });
+        }
+        credentials.truncate(usize::try_from(limit).map_err(|_| ErrorCode::InvalidArgument)?);
+        let values = credentials
+            .into_iter()
+            .map(|credential| {
+                Json::Object(vec![
+                    ("id".into(), Json::String(hex(credential.item_id()))),
+                    ("title".into(), Json::String(credential.title().into())),
+                    (
+                        "type".into(),
+                        Json::String(record_type(credential.kind()).into()),
+                    ),
+                    (
+                        "destination".into(),
+                        credential
+                            .destination()
+                            .map_or(Json::Null, |v| Json::String(v.into())),
+                    ),
+                    (
+                        "account".into(),
+                        credential
+                            .account()
+                            .map_or(Json::Null, |v| Json::String(v.into())),
+                    ),
+                    (
+                        "integrations".into(),
+                        discovery_integrations(credential.kind(), credential.destination()),
+                    ),
+                ])
+            })
+            .collect();
+        Ok(Json::Object(vec![
+            ("credentials".into(), Json::Array(values)),
+            ("next_cursor".into(), Json::Null),
+        ]))
+    }
+    fn start(&self, params: &Json) -> Result<Json, ErrorCode> {
+        reject_unknown(
+            params,
+            &[
+                "credential_id",
+                "integration_id",
+                "integration_version",
+                "method",
+                "destination",
+                "context",
+                "idempotency_key",
+            ],
+        )?;
+        let item = decode_hex(
+            optional_string(params, "credential_id")?.ok_or(ErrorCode::InvalidArgument)?,
+        )?;
+        let integration =
+            optional_string(params, "integration_id")?.ok_or(ErrorCode::InvalidArgument)?;
+        let method = optional_string(params, "method")?.ok_or(ErrorCode::InvalidArgument)?;
+        let destination =
+            optional_string(params, "destination")?.ok_or(ErrorCode::InvalidArgument)?;
+        let version =
+            optional_uint(params, "integration_version")?.ok_or(ErrorCode::InvalidArgument)?;
+        let context = if integration == "github-rest-bearer" {
+            github_request_context(params.field("context").ok_or(ErrorCode::InvalidArgument)?)?
+        } else {
+            optional_string(params, "context")?
+                .unwrap_or("")
+                .as_bytes()
+                .to_vec()
+        };
+        let key = params
+            .field("idempotency_key")
+            .ok_or(ErrorCode::InvalidArgument)?;
+        let issued = key
+            .field("issued_at")
+            .and_then(Json::string)
+            .ok_or(ErrorCode::InvalidArgument)?
+            .parse::<i64>()
+            .map_err(|_| ErrorCode::InvalidArgument)?;
+        let nonce = decode_hex(
+            key.field("nonce")
+                .and_then(Json::string)
+                .ok_or(ErrorCode::InvalidArgument)?,
+        )?;
+        let request = StartAttempt::new(
+            item,
+            integration,
+            u32::try_from(version).map_err(|_| ErrorCode::InvalidArgument)?,
+            method,
+            destination,
+            context,
+            IdempotencyKey::new(issued, nonce).map_err(|_| ErrorCode::InvalidArgument)?,
+        )
+        .map_err(|error| map_attempt(&error))?;
+        self.attempts
+            .start(&self.peer, &request)
+            .map_err(|error| map_attempt(&error))
+            .and_then(|value| snapshot(&value))
+    }
+    fn get(&self, params: &Json) -> Result<Json, ErrorCode> {
+        reject_unknown(params, &["attempt_id"])?;
+        let id =
+            decode_hex(optional_string(params, "attempt_id")?.ok_or(ErrorCode::InvalidArgument)?)?;
+        self.attempts
+            .get(&self.peer, id)
+            .map_err(|error| map_attempt(&error))
+            .and_then(|value| snapshot(&value))
+    }
+    fn cancel(&self, params: &Json) -> Result<Json, ErrorCode> {
+        reject_unknown(params, &["attempt_id"])?;
+        let id =
+            decode_hex(optional_string(params, "attempt_id")?.ok_or(ErrorCode::InvalidArgument)?)?;
+        self.attempts
+            .cancel(&self.peer, id)
+            .map_err(|error| map_attempt(&error))
+            .and_then(|value| snapshot(&value))
+    }
+}
+
+fn discovery_integrations(kind: RecordKind, destination: Option<&str>) -> Json {
+    let mut values = vec![Json::String("controlled.external".into())];
+    if destination == Some("keycloak-lab") {
+        values.push(Json::String("keycloak-browser-oidc".into()));
+    } else if destination == Some("ssh-lab") {
+        values.push(Json::String("ssh-server".into()));
+        values.push(Json::String("linux-system-ssh".into()));
+    } else if destination == Some("keycloak-exchange-lab") {
+        values.push(Json::String("keycloak-token-exchange".into()));
+    } else if destination == Some("github-assigned-issues/1") {
+        values.push(Json::String("github-rest-bearer".into()));
+    }
+    if kind == RecordKind::Passkey {
+        values.push(Json::String("keycloak-webauthn".into()));
+    }
+    Json::Array(values)
+}
+
+fn snapshot(value: &pm_vault::AttemptSnapshot) -> Result<Json, ErrorCode> {
+    let result = public_attempt_result(value.integration_id(), value.result())?;
+    Ok(Json::Object(vec![
+        ("attempt_id".into(), Json::String(hex(value.attempt_id()))),
+        (
+            "credential_id".into(),
+            Json::String(hex(value.credential_id())),
+        ),
+        ("revision_id".into(), Json::String(hex(value.revision_id()))),
+        (
+            "integration_id".into(),
+            Json::String(value.integration_id().into()),
+        ),
+        (
+            "integration_version".into(),
+            Json::Number(value.integration_version().to_string()),
+        ),
+        ("state".into(), Json::String(state(value.state()).into())),
+        (
+            "created_at".into(),
+            Json::String(value.created_at_us().to_string()),
+        ),
+        (
+            "expires_at".into(),
+            Json::String(value.expires_at_us().to_string()),
+        ),
+        (
+            "reason".into(),
+            value
+                .reason()
+                .map_or(Json::Null, |v| Json::String(v.into())),
+        ),
+        ("result".into(), result),
+    ]))
+}
+
+/// Converts opaque provider bytes to the integration's closed public schema.
+/// Unknown integrations and absent results remain redacted.
+///
+/// # Errors
+/// Returns `Internal` if a Keycloak result is malformed or has extra fields.
+pub fn public_attempt_result(
+    integration_id: &str,
+    result: Option<&[u8]>,
+) -> Result<Json, ErrorCode> {
+    let Some(result) = result else {
+        return Ok(Json::Null);
+    };
+    match integration_id {
+        "keycloak-browser-oidc" | "keycloak-webauthn" => {
+            validate_oidc_result(parse_json(result).map_err(|_| ErrorCode::Internal)?)
+        }
+        "keycloak-token-exchange" => {
+            validate_exchange_result(parse_json(result).map_err(|_| ErrorCode::Internal)?)
+        }
+        "github-rest-bearer" => {
+            validate_github_result(parse_json(result).map_err(|_| ErrorCode::Internal)?)
+        }
+        "ssh-server" | "linux-system-ssh" => {
+            validate_ssh_result(parse_json(result).map_err(|_| ErrorCode::Internal)?)
+        }
+        _ => Ok(Json::Null),
+    }
+}
+
+fn validate_oidc_result(value: Json) -> Result<Json, ErrorCode> {
+    const REQUIRED: [&str; 10] = [
+        "kind",
+        "issuer",
+        "subject",
+        "client_id",
+        "audience",
+        "token_type",
+        "access_token",
+        "id_token",
+        "expires_at",
+        "scope",
+    ];
+    let Json::Object(fields) = &value else {
+        return Err(ErrorCode::Internal);
+    };
+    if fields.len() != REQUIRED.len()
+        || fields
+            .iter()
+            .any(|(key, item)| !REQUIRED.contains(&key.as_str()) || item.string().is_none())
+        || value.field("kind").and_then(Json::string) != Some("oidc_tokens")
+        || value.field("token_type").and_then(Json::string) != Some("Bearer")
+        || value
+            .field("access_token")
+            .and_then(Json::string)
+            .is_none_or(str::is_empty)
+        || value
+            .field("id_token")
+            .and_then(Json::string)
+            .is_none_or(str::is_empty)
+    {
+        return Err(ErrorCode::Internal);
+    }
+    Ok(value)
+}
+
+fn validate_exchange_result(value: Json) -> Result<Json, ErrorCode> {
+    const REQUIRED: [&str; 8] = [
+        "kind",
+        "issuer",
+        "audience",
+        "token_type",
+        "access_token",
+        "issued_token_type",
+        "expires_at",
+        "scope",
+    ];
+    let Json::Object(fields) = &value else {
+        return Err(ErrorCode::Internal);
+    };
+    if fields.len() != REQUIRED.len()
+        || fields
+            .iter()
+            .any(|(key, item)| !REQUIRED.contains(&key.as_str()) || item.string().is_none())
+        || value.field("kind").and_then(Json::string) != Some("exchanged_access_token")
+        || value.field("token_type").and_then(Json::string) != Some("Bearer")
+        || value
+            .field("access_token")
+            .and_then(Json::string)
+            .is_none_or(str::is_empty)
+        || value.field("issued_token_type").and_then(Json::string)
+            != Some("urn:ietf:params:oauth:token-type:access_token")
+    {
+        return Err(ErrorCode::Internal);
+    }
+    Ok(value)
+}
+
+fn validate_ssh_result(value: Json) -> Result<Json, ErrorCode> {
+    const REQUIRED: [&str; 4] = ["kind", "consumer_ref", "host_key_sha256", "username"];
+    let Json::Object(fields) = &value else {
+        return Err(ErrorCode::Internal);
+    };
+    let reference = value
+        .field("consumer_ref")
+        .and_then(Json::string)
+        .unwrap_or("");
+    let host_key = value
+        .field("host_key_sha256")
+        .and_then(Json::string)
+        .unwrap_or("");
+    let username = value.field("username").and_then(Json::string).unwrap_or("");
+    if fields.len() != REQUIRED.len()
+        || fields
+            .iter()
+            .any(|(key, item)| !REQUIRED.contains(&key.as_str()) || item.string().is_none())
+        || value.field("kind").and_then(Json::string) != Some("ssh_authenticated_connection")
+        || reference.len() != 43
+        || !reference
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || host_key.len() != 64
+        || !host_key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || username.is_empty()
+        || username.len() > 64
+        || !username
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(ErrorCode::Internal);
+    }
+    Ok(value)
+}
+
+fn validate_github_result(value: Json) -> Result<Json, ErrorCode> {
+    const REQUIRED: [&str; 7] = [
+        "kind",
+        "provider",
+        "request_profile_id",
+        "status",
+        "items",
+        "page",
+        "next_page",
+    ];
+    let Json::Object(fields) = &value else {
+        return Err(ErrorCode::Internal);
+    };
+    if fields.len() != REQUIRED.len()
+        || fields
+            .iter()
+            .any(|(key, _)| !REQUIRED.contains(&key.as_str()))
+        || value.field("kind").and_then(Json::string) != Some("authenticated_http_response")
+        || value.field("provider").and_then(Json::string) != Some("github")
+        || value.field("request_profile_id").and_then(Json::string)
+            != Some("github-assigned-issues/1")
+        || exact_uint(value.field("status"), 200, 200).is_err()
+        || exact_uint(value.field("page"), 1, u64::MAX).is_err()
+    {
+        return Err(ErrorCode::Internal);
+    }
+    match value.field("next_page") {
+        Some(Json::Null) => {}
+        value if exact_uint(value, 1, u64::MAX).is_ok() => {}
+        _ => return Err(ErrorCode::Internal),
+    }
+    let Some(Json::Array(items)) = value.field("items") else {
+        return Err(ErrorCode::Internal);
+    };
+    if items.len() > 100 || items.iter().any(|item| !valid_github_issue(item)) {
+        return Err(ErrorCode::Internal);
+    }
+    Ok(value)
+}
+
+fn valid_github_issue(value: &Json) -> bool {
+    const REQUIRED: [&str; 5] = ["id", "number", "title", "state", "html_url"];
+    let Json::Object(fields) = value else {
+        return false;
+    };
+    let id = value.field("id").and_then(Json::string).unwrap_or("");
+    let title = value.field("title").and_then(Json::string).unwrap_or("");
+    let state = value.field("state").and_then(Json::string).unwrap_or("");
+    let url = value.field("html_url").and_then(Json::string).unwrap_or("");
+    fields.len() == REQUIRED.len()
+        && fields
+            .iter()
+            .all(|(key, _)| REQUIRED.contains(&key.as_str()))
+        && !id.is_empty()
+        && id.bytes().all(|byte| byte.is_ascii_digit())
+        && id.parse::<u64>().is_ok()
+        && exact_uint(value.field("number"), 1, u64::MAX).is_ok()
+        && title.len() <= 1024
+        && matches!(state, "open" | "closed")
+        && url.starts_with("https://github.com/")
+        && url.len() <= 8 * 1024
+        && !url.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn exact_uint(value: Option<&Json>, minimum: u64, maximum: u64) -> Result<u64, ErrorCode> {
+    let value = value
+        .and_then(Json::number)
+        .ok_or(ErrorCode::InvalidArgument)?
+        .parse::<u64>()
+        .map_err(|_| ErrorCode::InvalidArgument)?;
+    if !(minimum..=maximum).contains(&value) {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    Ok(value)
+}
+
+/// Converts the public GitHub context object into the one canonical internal
+/// request profile. URLs, methods and headers are deliberately not representable.
+///
+/// # Errors
+/// Rejects unknown fields, unsupported enums and out-of-range pagination.
+pub fn github_request_context(context: &Json) -> Result<Vec<u8>, ErrorCode> {
+    reject_unknown(context, &["request_profile_id", "query"])?;
+    if context.field("request_profile_id").and_then(Json::string)
+        != Some("github-assigned-issues/1")
+    {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    let query = context.field("query").ok_or(ErrorCode::InvalidArgument)?;
+    reject_unknown(
+        query,
+        &["filter", "state", "sort", "direction", "page", "per_page"],
+    )?;
+    let filter = closed_enum(
+        query,
+        "filter",
+        "assigned",
+        &[
+            "assigned",
+            "created",
+            "mentioned",
+            "subscribed",
+            "repos",
+            "all",
+        ],
+    )?;
+    let state = closed_enum(query, "state", "open", &["open", "closed", "all"])?;
+    let sort = closed_enum(
+        query,
+        "sort",
+        "created",
+        &["created", "updated", "comments"],
+    )?;
+    let direction = closed_enum(query, "direction", "desc", &["asc", "desc"])?;
+    let page = optional_uint(query, "page")?.unwrap_or(1);
+    let per_page = optional_uint(query, "per_page")?.unwrap_or(30);
+    if page == 0 || !(1..=100).contains(&per_page) {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    Ok(format!(
+        "github-assigned-issues/1\nfilter={filter}\nstate={state}\nsort={sort}\ndirection={direction}\npage={page}\nper_page={per_page}\n"
+    )
+    .into_bytes())
+}
+
+fn closed_enum<'a>(
+    value: &'a Json,
+    key: &str,
+    default: &'a str,
+    allowed: &[&str],
+) -> Result<&'a str, ErrorCode> {
+    let value = optional_string(value, key)?.unwrap_or(default);
+    allowed
+        .contains(&value)
+        .then_some(value)
+        .ok_or(ErrorCode::InvalidArgument)
+}
+
+fn optional_string<'a>(params: &'a Json, name: &str) -> Result<Option<&'a str>, ErrorCode> {
+    match params.field(name) {
+        None | Some(Json::Null) => Ok(None),
+        Some(value) => value.string().map(Some).ok_or(ErrorCode::InvalidArgument),
+    }
+}
+fn optional_uint(params: &Json, name: &str) -> Result<Option<u64>, ErrorCode> {
+    match params.field(name) {
+        None => Ok(None),
+        Some(Json::Number(value)) => value
+            .parse()
+            .map(Some)
+            .map_err(|_| ErrorCode::InvalidArgument),
+        _ => Err(ErrorCode::InvalidArgument),
+    }
+}
+fn reject_unknown(params: &Json, allowed: &[&str]) -> Result<(), ErrorCode> {
+    if let Json::Object(fields) = params {
+        if fields
+            .iter()
+            .any(|(key, _)| !allowed.contains(&key.as_str()))
+        {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        Ok(())
+    } else {
+        Err(ErrorCode::InvalidArgument)
+    }
+}
+fn decode_hex(value: &str) -> Result<[u8; 16], ErrorCode> {
+    if value.len() != 32
+        || !value
+            .bytes()
+            .all(|v| v.is_ascii_hexdigit() && !v.is_ascii_uppercase())
+    {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    let mut output = [0_u8; 16];
+    for (index, output_byte) in output.iter_mut().enumerate() {
+        let chunk = &value.as_bytes()[index * 2..index * 2 + 2];
+        *output_byte = (hex_digit(chunk[0])? << 4) | hex_digit(chunk[1])?;
+    }
+    Ok(output)
+}
+fn hex_digit(value: u8) -> Result<u8, ErrorCode> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(ErrorCode::InvalidArgument),
+    }
+}
+fn hex(value: &[u8; 16]) -> String {
+    let mut output = String::with_capacity(32);
+    for byte in value {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+fn state(value: pm_vault::AttemptState) -> &'static str {
+    match value {
+        pm_vault::AttemptState::Created => "CREATED",
+        pm_vault::AttemptState::Running => "RUNNING",
+        pm_vault::AttemptState::WaitingForHuman => "WAITING_FOR_HUMAN",
+        pm_vault::AttemptState::Succeeded => "SUCCEEDED",
+        pm_vault::AttemptState::Failed => "FAILED",
+        pm_vault::AttemptState::Cancelled => "CANCELLED",
+        pm_vault::AttemptState::Expired => "EXPIRED",
+        pm_vault::AttemptState::Indeterminate => "INDETERMINATE",
+    }
+}
+fn record_type(value: pm_vault::RecordKind) -> &'static str {
+    match value {
+        pm_vault::RecordKind::Password => "password",
+        pm_vault::RecordKind::Totp => "totp",
+        pm_vault::RecordKind::Passkey => "passkey",
+        pm_vault::RecordKind::Ssh => "ssh",
+        pm_vault::RecordKind::Token => "token",
+        pm_vault::RecordKind::Note => "note",
+        pm_vault::RecordKind::File => "file",
+    }
+}
+fn map_attempt(value: &AttemptError) -> ErrorCode {
+    match value {
+        AttemptError::AccessSuspended => ErrorCode::AccessSuspended,
+        AttemptError::AgentRevoked => ErrorCode::AgentRevoked,
+        AttemptError::CredentialUnavailable => ErrorCode::CredentialUnavailable,
+        AttemptError::IdempotencyConflict => ErrorCode::IdempotencyConflict,
+        AttemptError::IdempotencyExpired => ErrorCode::IdempotencyExpired,
+        AttemptError::ResultExpired => ErrorCode::ResultExpired,
+        AttemptError::InvalidArgument => ErrorCode::InvalidArgument,
+        AttemptError::NotFound => ErrorCode::NotFound,
+        AttemptError::RateLimited => ErrorCode::RateLimited,
+        AttemptError::ClockUntrusted => ErrorCode::ClockUntrusted,
+        AttemptError::Integrity | AttemptError::Storage(_) | AttemptError::Vault(_) => {
+            ErrorCode::Internal
+        }
+    }
+}
+fn map_authorization(value: &pm_vault::AuthorizationError) -> ErrorCode {
+    match value {
+        pm_vault::AuthorizationError::AccessSuspended => ErrorCode::AccessSuspended,
+        pm_vault::AuthorizationError::AgentRevoked => ErrorCode::AgentRevoked,
+        pm_vault::AuthorizationError::CredentialUnavailable => ErrorCode::CredentialUnavailable,
+        pm_vault::AuthorizationError::Unauthorized => ErrorCode::Unauthorized,
+        _ => ErrorCode::Internal,
+    }
+}
+
+fn encode_into(value: &Json, output: &mut String) {
+    match value {
+        Json::Null => output.push_str("null"),
+        Json::Bool(true) => output.push_str("true"),
+        Json::Bool(false) => output.push_str("false"),
+        Json::Number(number) => output.push_str(number),
+        Json::String(string) => encode_string(string, output),
+        Json::Array(values) => {
+            output.push('[');
+            for (index, item) in values.iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                encode_into(item, output);
+            }
+            output.push(']');
+        }
+        Json::Object(fields) => {
+            output.push('{');
+            for (index, (key, item)) in fields.iter().enumerate() {
+                if index != 0 {
+                    output.push(',');
+                }
+                encode_string(key, output);
+                output.push(':');
+                encode_into(item, output);
+            }
+            output.push('}');
+        }
+    }
+}
+
+fn encode_string(value: &str, output: &mut String) {
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(output, "\\u{:04x}", c as u32);
+            }
+            c => output.push(c),
+        }
+    }
+    output.push('"');
+}
+
+struct Parser<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+impl Parser<'_> {
+    fn value(&mut self, depth: usize) -> Result<Json, ParseError> {
+        if depth > MAX_DEPTH {
+            return Err(ParseError::TooDeep);
+        }
+        self.space();
+        let byte = *self.bytes.get(self.at).ok_or(ParseError::InvalidJson)?;
+        match byte {
+            b'n' => self.literal(b"null", Json::Null),
+            b't' => self.literal(b"true", Json::Bool(true)),
+            b'f' => self.literal(b"false", Json::Bool(false)),
+            b'"' => Ok(Json::String(self.string()?)),
+            b'[' => self.array(depth),
+            b'{' => self.object(depth),
+            b'-' | b'0'..=b'9' => Ok(Json::Number(self.number()?)),
+            _ => Err(ParseError::InvalidJson),
+        }
+    }
+    fn literal(&mut self, literal: &[u8], value: Json) -> Result<Json, ParseError> {
+        if self.bytes.get(self.at..self.at + literal.len()) != Some(literal) {
+            return Err(ParseError::InvalidJson);
+        }
+        self.at += literal.len();
+        Ok(value)
+    }
+    fn string(&mut self) -> Result<String, ParseError> {
+        self.at += 1;
+        let mut result = String::new();
+        loop {
+            let byte = *self.bytes.get(self.at).ok_or(ParseError::InvalidJson)?;
+            self.at += 1;
+            match byte {
+                b'"' => return Ok(result),
+                b'\\' => {
+                    let escaped = *self.bytes.get(self.at).ok_or(ParseError::InvalidJson)?;
+                    self.at += 1;
+                    match escaped {
+                        b'"' => result.push('"'),
+                        b'\\' => result.push('\\'),
+                        b'/' => result.push('/'),
+                        b'b' => result.push('\u{0008}'),
+                        b'f' => result.push('\u{000c}'),
+                        b'n' => result.push('\n'),
+                        b'r' => result.push('\r'),
+                        b't' => result.push('\t'),
+                        b'u' => {
+                            let digits = self
+                                .bytes
+                                .get(self.at..self.at + 4)
+                                .ok_or(ParseError::InvalidJson)?;
+                            let text =
+                                std::str::from_utf8(digits).map_err(|_| ParseError::InvalidJson)?;
+                            let code = u16::from_str_radix(text, 16)
+                                .map_err(|_| ParseError::InvalidJson)?;
+                            self.at += 4;
+                            let character =
+                                char::from_u32(u32::from(code)).ok_or(ParseError::InvalidJson)?;
+                            if (0xd800..=0xdfff).contains(&code) {
+                                return Err(ParseError::InvalidJson);
+                            }
+                            result.push(character);
+                        }
+                        _ => return Err(ParseError::InvalidJson),
+                    }
+                }
+                b if b < 0x20 => return Err(ParseError::InvalidJson),
+                _b => {
+                    let start = self.at - 1;
+                    while self.at < self.bytes.len()
+                        && self.bytes[self.at] >= 0x20
+                        && self.bytes[self.at] != b'"'
+                        && self.bytes[self.at] != b'\\'
+                    {
+                        self.at += 1;
+                    }
+                    let text = std::str::from_utf8(&self.bytes[start..self.at])
+                        .map_err(|_| ParseError::InvalidUtf8)?;
+                    result.push_str(text);
+                }
+            }
+        }
+    }
+    fn number(&mut self) -> Result<String, ParseError> {
+        let start = self.at;
+        if self.bytes[self.at] == b'-' {
+            self.at += 1;
+        }
+        match self.bytes.get(self.at) {
+            Some(b'0') => self.at += 1,
+            Some(b'1'..=b'9') => {
+                self.at += 1;
+                while matches!(self.bytes.get(self.at), Some(b'0'..=b'9')) {
+                    self.at += 1;
+                }
+            }
+            _ => return Err(ParseError::InvalidJson),
+        }
+        if self.bytes.get(self.at) == Some(&b'.') {
+            self.at += 1;
+            let begin = self.at;
+            while matches!(self.bytes.get(self.at), Some(b'0'..=b'9')) {
+                self.at += 1;
+            }
+            if self.at == begin {
+                return Err(ParseError::InvalidJson);
+            }
+        }
+        if matches!(self.bytes.get(self.at), Some(b'e' | b'E')) {
+            self.at += 1;
+            if matches!(self.bytes.get(self.at), Some(b'+' | b'-')) {
+                self.at += 1;
+            }
+            let begin = self.at;
+            while matches!(self.bytes.get(self.at), Some(b'0'..=b'9')) {
+                self.at += 1;
+            }
+            if self.at == begin {
+                return Err(ParseError::InvalidJson);
+            }
+        }
+        String::from_utf8(self.bytes[start..self.at].to_vec()).map_err(|_| ParseError::InvalidJson)
+    }
+    fn array(&mut self, depth: usize) -> Result<Json, ParseError> {
+        self.at += 1;
+        let mut values = Vec::new();
+        self.space();
+        if self.bytes.get(self.at) == Some(&b']') {
+            self.at += 1;
+            return Ok(Json::Array(values));
+        }
+        loop {
+            values.push(self.value(depth + 1)?);
+            self.space();
+            match self.bytes.get(self.at) {
+                Some(b',') => {
+                    self.at += 1;
+                }
+                Some(b']') => {
+                    self.at += 1;
+                    return Ok(Json::Array(values));
+                }
+                _ => return Err(ParseError::InvalidJson),
+            }
+        }
+    }
+    fn object(&mut self, depth: usize) -> Result<Json, ParseError> {
+        self.at += 1;
+        let mut fields = Vec::new();
+        self.space();
+        if self.bytes.get(self.at) == Some(&b'}') {
+            self.at += 1;
+            return Ok(Json::Object(fields));
+        }
+        loop {
+            self.space();
+            if self.bytes.get(self.at) != Some(&b'"') {
+                return Err(ParseError::InvalidJson);
+            }
+            let key = self.string()?;
+            if fields.iter().any(|(known, _)| known == &key) {
+                return Err(ParseError::DuplicateKey);
+            }
+            self.space();
+            if self.bytes.get(self.at) != Some(&b':') {
+                return Err(ParseError::InvalidJson);
+            }
+            self.at += 1;
+            fields.push((key, self.value(depth + 1)?));
+            self.space();
+            match self.bytes.get(self.at) {
+                Some(b',') => self.at += 1,
+                Some(b'}') => {
+                    self.at += 1;
+                    return Ok(Json::Object(fields));
+                }
+                _ => return Err(ParseError::InvalidJson),
+            }
+        }
+    }
+    fn space(&mut self) {
+        while matches!(self.bytes.get(self.at), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            self.at += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn private_framing_is_bounded_and_big_endian() {
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, b"{}").unwrap();
+        assert_eq!(&bytes[..4], &[0, 0, 0, 2]);
+        assert_eq!(read_frame(&mut bytes.as_slice()).unwrap(), b"{}");
+        let oversized = vec![0_u8; MAX_FRAME + 1];
+        assert!(write_frame(&mut Vec::new(), &oversized).is_err());
+    }
+    #[test]
+    fn hostile_json_is_rejected_without_lenient_fallback() {
+        for value in [
+            br#"{"a":1,"a":2}"#.as_slice(),
+            br#"{"a":NaN}"#.as_slice(),
+            br#"{"a":1} trailing"#.as_slice(),
+        ] {
+            assert!(matches!(
+                parse_json(value),
+                Err(ParseError::DuplicateKey | ParseError::InvalidJson | ParseError::TrailingBytes)
+            ));
+        }
+    }
+    #[test]
+    fn only_the_closed_oidc_result_crosses_the_delegated_boundary() {
+        let valid = br#"{"kind":"oidc_tokens","issuer":"https://auth.invalid/realms/pm","subject":"synthetic","client_id":"pm-browser","audience":"pm-browser","token_type":"Bearer","access_token":"new-access","id_token":"new-id","expires_at":"42","scope":"openid"}"#;
+        let output = public_attempt_result("keycloak-browser-oidc", Some(valid)).unwrap();
+        assert_eq!(
+            output.field("access_token").and_then(Json::string),
+            Some("new-access")
+        );
+        assert_eq!(
+            public_attempt_result("keycloak-webauthn", Some(valid))
+                .unwrap()
+                .field("subject")
+                .and_then(Json::string),
+            Some("synthetic")
+        );
+        let reflected = br#"{"kind":"oidc_tokens","issuer":"x","subject":"x","client_id":"x","audience":"x","token_type":"Bearer","access_token":"x","id_token":"x","expires_at":"42","scope":"openid","password":"original"}"#;
+        assert_eq!(
+            public_attempt_result("keycloak-browser-oidc", Some(reflected)),
+            Err(ErrorCode::Internal)
+        );
+        assert_eq!(
+            public_attempt_result("unknown", Some(valid)).unwrap(),
+            Json::Null
+        );
+        assert_eq!(
+            public_attempt_result("controlled.external", Some(b"private provider bytes")).unwrap(),
+            Json::Null
+        );
+
+        let exchanged = br#"{"kind":"exchanged_access_token","issuer":"https://auth.invalid/realms/pm","audience":"pm-target","token_type":"Bearer","access_token":"new-B","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","expires_at":"42","scope":"openid target.read"}"#;
+        let output = public_attempt_result("keycloak-token-exchange", Some(exchanged)).unwrap();
+        assert_eq!(
+            output.field("access_token").and_then(Json::string),
+            Some("new-B")
+        );
+        let reflected = br#"{"kind":"exchanged_access_token","issuer":"x","audience":"x","token_type":"Bearer","access_token":"new-B","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","expires_at":"42","scope":"x","subject_token":"secret-A"}"#;
+        assert_eq!(
+            public_attempt_result("keycloak-token-exchange", Some(reflected)),
+            Err(ErrorCode::Internal)
+        );
+    }
+    #[test]
+    fn ssh_result_is_closed_and_rejects_secret_shaped_extensions() {
+        let good = br#"{"kind":"ssh_authenticated_connection","consumer_ref":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","host_key_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","username":"pmssh"}"#;
+        assert_eq!(
+            public_attempt_result("ssh-server", Some(good))
+                .unwrap()
+                .field("username")
+                .and_then(Json::string),
+            Some("pmssh")
+        );
+        let extended = br#"{"kind":"ssh_authenticated_connection","consumer_ref":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","host_key_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","username":"pmssh","password":"forbidden"}"#;
+        assert_eq!(
+            public_attempt_result("ssh-server", Some(extended)),
+            Err(ErrorCode::Internal)
+        );
+        assert_eq!(
+            public_attempt_result("ssh-server", Some(b"{}")),
+            Err(ErrorCode::Internal)
+        );
+    }
+
+    #[test]
+    fn github_request_and_result_are_closed_typed_schemas() {
+        let context = Json::Object(vec![
+            (
+                "request_profile_id".into(),
+                Json::String("github-assigned-issues/1".into()),
+            ),
+            (
+                "query".into(),
+                Json::Object(vec![
+                    ("filter".into(), Json::String("assigned".into())),
+                    ("state".into(), Json::String("open".into())),
+                    ("sort".into(), Json::String("updated".into())),
+                    ("direction".into(), Json::String("desc".into())),
+                    ("page".into(), Json::Number("2".into())),
+                    ("per_page".into(), Json::Number("50".into())),
+                ]),
+            ),
+        ]);
+        assert_eq!(
+            github_request_context(&context).unwrap(),
+            b"github-assigned-issues/1\nfilter=assigned\nstate=open\nsort=updated\ndirection=desc\npage=2\nper_page=50\n"
+        );
+        let injected = Json::Object(vec![
+            (
+                "request_profile_id".into(),
+                Json::String("github-assigned-issues/1".into()),
+            ),
+            (
+                "query".into(),
+                Json::Object(vec![(
+                    "url".into(),
+                    Json::String("https://reflect.invalid/".into()),
+                )]),
+            ),
+        ]);
+        assert_eq!(
+            github_request_context(&injected),
+            Err(ErrorCode::InvalidArgument)
+        );
+
+        let good = br#"{"kind":"authenticated_http_response","provider":"github","request_profile_id":"github-assigned-issues/1","status":200,"items":[{"id":"9007199254740993","number":7,"title":"Synthetic issue","state":"open","html_url":"https://github.com/acme/repo/issues/7"}],"page":2,"next_page":3}"#;
+        let output = public_attempt_result("github-rest-bearer", Some(good)).unwrap();
+        assert_eq!(
+            output.field("request_profile_id").and_then(Json::string),
+            Some("github-assigned-issues/1")
+        );
+        let extended = br#"{"kind":"authenticated_http_response","provider":"github","request_profile_id":"github-assigned-issues/1","status":200,"items":[],"page":1,"next_page":null,"authorization":"Bearer synthetic-secret"}"#;
+        assert_eq!(
+            public_attempt_result("github-rest-bearer", Some(extended)),
+            Err(ErrorCode::Internal)
+        );
+    }
+}

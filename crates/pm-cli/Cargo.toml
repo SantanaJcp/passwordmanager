@@ -1,0 +1,25 @@
+[package]
+name = "pm-cli"
+description = "Command-line client for passwordmanager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "pm"
+path = "src/main.rs"
+
+[dependencies]
+pm-crypto.workspace = true
+pm-custody.workspace = true
+pm-interface.workspace = true
+pm-vault.workspace = true
+
+[dev-dependencies]
+pm-process-runner.workspace = true
+
+[lints]
+workspace = true

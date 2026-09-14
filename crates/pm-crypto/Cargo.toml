@@ -1,0 +1,18 @@
+[package]
+name = "pm-crypto"
+description = "Single native cryptography boundary for passwordmanager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+libc.workspace = true
+libsodium-sys-stable.workspace = true
+minicbor.workspace = true
+windows-sys.workspace = true
+
+[lints]
+workspace = true

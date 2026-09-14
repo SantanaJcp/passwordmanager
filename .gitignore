@@ -1,0 +1,4 @@
+# Isolated implementation worktrees and local build/toolchain artifacts.
+/.worktrees/
+/.toolchain/
+/target/

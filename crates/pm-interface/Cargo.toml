@@ -1,0 +1,17 @@
+[package]
+name = "pm-interface"
+description = "Bounded private RPC and shared delegated interface contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+pm-vault.workspace = true
+
+[dev-dependencies]
+
+[lints]
+workspace = true

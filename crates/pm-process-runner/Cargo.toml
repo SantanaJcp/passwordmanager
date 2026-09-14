@@ -1,0 +1,15 @@
+[package]
+name = "pm-process-runner"
+description = "Real-process evidence runner for passwordmanager acceptance tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true
