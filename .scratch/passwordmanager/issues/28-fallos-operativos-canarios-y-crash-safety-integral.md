@@ -171,3 +171,16 @@ y sólo el header wire, `human-password-crud` esperó payload en un `Vec`
 desbloqueado (`/tmp/pm28-red-custody-protected-input.log`, rc1). GREEN acotado
 reserva `ProtectedBytes` antes de leer payload y terminó rc0; no se atribuye al
 resto de buffers plaintext ni se cierra G7.
+
+2026-09-14 — Merger distinto integró el candidato `96dd37a` sobre `52d1920`
+como `3ca41eee220cfff0e5498c2439c7dedf5e60e9b1`, conservando el issue en estado
+`claimed` y los 17 paths del checkpoint. En la única ventana Linux x86_64
+pasaron los focused `pm-crypto`, `pm-cli`, `pm-custody` y los tres labs nuevos;
+`scripts/check.sh` rc0 (`/tmp/pm-g7-root-check.log`) y clean offline rc0
+(`/tmp/pm-g7-root-clean.log`). Una sola barrida secuencial de los 25 wrappers
+terminó `SUMMARY count=25 failures=0`, con evidencia individual en
+`/tmp/pm-g7-root-labs-test-linux-*-lab.log` y resumen en
+`/tmp/pm-g7-root-labs-summary.log`. No hubo retries, skips ni paralelismo; los
+artefactos Keycloak/CFT fueron los paths absolutos aprobados. Esta evidencia
+solo acredita Linux x86_64: el ticket sigue parcial/claimed y no se cierran
+puertos nativos ni verticales restantes.

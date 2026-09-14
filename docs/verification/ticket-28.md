@@ -514,3 +514,42 @@ primer comando `--locked` no compiló porque mover `windows-sys` entre paquetes
 requirió sincronizar `Cargo.lock`; se conserva en
 `/tmp/pm28-green-shared-native-input-focused.log` como bookkeeping, no RED.
 No se repitió la barrida 25/25 anterior; el merger ejecutará el gate compuesto.
+
+## Integración parcial en raíz — 2026-09-14
+
+El merger distinto integró por merge normal el candidato `96dd37a` (rama
+`codex/pm-28`, base `52d1920`) como `3ca41eee220cfff0e5498c2439c7dedf5e60e9b1`.
+Se conservaron los 17 paths del candidato, incluidos este método y el issue
+28 en estado `claimed`; no se alteraron workflows ni candidatos nativos de
+otros tickets u otros worktrees.
+
+Antes de la ejecución se verificaron `git diff --check` y
+`scripts/verify-native-ci-config.sh`. En la única ventana Linux x86_64, con
+toolchain local 1.98.1, modo `--locked --offline`, sin red, cachés, retries,
+skips ni labs paralelos, pasaron los focused `pm-crypto`, `pm-cli` y
+`pm-custody` con todos sus targets. También pasaron los tres nuevos labs reales:
+`custody-protected-input`, `fault-safety` y `storage-fault`.
+
+La comprobación compuesta pasó:
+
+- `scripts/check.sh`, rc0 — `/tmp/pm-g7-root-check.log`;
+- `scripts/clean-offline-build.sh`, rc0 — `/tmp/pm-g7-root-clean.log`;
+- focused package/lab logs — `/tmp/pm-g7-root-focused-*.log`;
+- una única barrida secuencial de los 25 wrappers
+  `scripts/test-linux-*-lab.sh`, rc0 cada uno,
+  `SUMMARY count=25 failures=0` — `/tmp/pm-g7-root-labs-summary.log` y
+  `/tmp/pm-g7-root-labs-test-linux-*-lab.log`.
+
+La barrida usó exactamente los artefactos sintéticos absolutos ya aprobados:
+
+```text
+PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3
+PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64
+```
+
+El target observado fue `/home/santana/Documents/ChatGPT/passwordmanager/target`.
+No quedaron procesos de Cargo/lab propios activos ni cambios sin commit; los
+wrappers verificaron su cleanup. Esta evidencia es únicamente Linux x86_64:
+los puertos nativos, los verticales restantes de fault/crash y la aceptación
+final de 28 siguen abiertos. El ticket permanece `claimed` y este es un
+checkpoint parcial, no una resolución del ticket ni de G7.
