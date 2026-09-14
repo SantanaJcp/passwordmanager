@@ -62,6 +62,22 @@ pub fn open_regular_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Flushes directory metadata through a native directory handle.
+///
+/// # Errors
+/// Returns an error when the path is not a directory or native open/flush
+/// fails. The operation never substitutes a file or ancestor directory.
+pub fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()
+    }
+    #[cfg(windows)]
+    {
+        sync_directory_windows(path)
+    }
+}
+
 #[cfg(windows)]
 fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
     use std::os::windows::ffi::OsStrExt;
@@ -199,6 +215,47 @@ fn open_existing_windows(path: &Path) -> io::Result<File> {
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+#[cfg(windows)]
+fn sync_directory_windows(path: &Path) -> io::Result<()> {
+    use std::{
+        os::windows::io::{AsRawHandle, FromRawHandle},
+        ptr,
+    };
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers, OPEN_EXISTING,
+        },
+    };
+    let wide = wide_path(path)?;
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let directory = unsafe { File::from_raw_handle(handle) };
+    if !directory.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "native directory handle is not a directory",
+        ));
+    }
+    if unsafe { FlushFileBuffers(directory.as_raw_handle()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

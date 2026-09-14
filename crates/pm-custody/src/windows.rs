@@ -65,7 +65,8 @@ const ED25519_SPKI_PREFIX: &[u8] = &[
 const SPKI_BYTES: usize = 44;
 const MAX_PROTECTED_BYTES: usize = 64 * 1024;
 const MAX_FRAME: usize = 18 * 1024 * 1024;
-const HUMAN_MAGIC: &[u8; 5] = b"PMH1\n";
+pub(super) const STREAM_CHUNK_BYTES: usize = 1024 * 1024;
+pub(super) const HUMAN_MAGIC: &[u8; 5] = b"PMH1\n";
 const AGENT_MAGIC: &[u8; 5] = b"PMA1\n";
 static SERVICE_ARGUMENTS: std::sync::OnceLock<Vec<OsString>> = std::sync::OnceLock::new();
 static SERVICE_FAILED: AtomicBool = AtomicBool::new(false);
@@ -91,7 +92,7 @@ impl ServiceControlContext {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Role {
+pub(super) enum Role {
     Agent,
     Human,
 }
@@ -127,7 +128,7 @@ impl Role {
     }
 }
 
-struct KeyMaterial {
+pub(super) struct KeyMaterial {
     private: Zeroizing<Vec<u8>>,
     spki: Vec<u8>,
 }
@@ -141,8 +142,8 @@ struct Bootstrap {
     human_spki: Vec<u8>,
 }
 
-struct Profile {
-    role: Role,
+pub(super) struct Profile {
+    pub(super) role: Role,
     server_spki: Vec<u8>,
 }
 
@@ -285,6 +286,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("service") => service_dispatch(arguments.collect()),
         Some("probe") => probe(&mut arguments),
         Some("human-lock") => human_lock(&mut arguments),
+        Some("tui") => crate::tui::run(&mut arguments),
         _ => Err(Failure::Usage),
     }
 }
@@ -749,7 +751,7 @@ fn serve_human(
         Arc::clone(&service.audit_custody),
     );
     password.zeroize();
-    let vault = match vault_result {
+    let mut vault = match vault_result {
         Ok(vault) => vault,
         Err(error) => {
             if let Some(diagnostics) = service.diagnostics.as_ref() {
@@ -765,9 +767,15 @@ fn serve_human(
     if let Some(diagnostics) = service.diagnostics.as_ref() {
         diagnostics.record(ServiceDiagnosticPhase::HumanUnlockAck)?;
     }
-    let request = read_frame(tls)?;
-    if request != [14] {
-        return Err(Failure::Unavailable);
+    loop {
+        let request = read_frame(tls)?;
+        if request == [14] {
+            break;
+        }
+        let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
+        let response = crate::human_wire::handle_catalog(&mut vault, opcode, rest)
+            .ok_or(Failure::Unavailable)??;
+        write_frame(tls, &response)?;
     }
     if let Some(diagnostics) = service.diagnostics.as_ref() {
         diagnostics.record(ServiceDiagnosticPhase::HumanLockRequest)?;
@@ -881,6 +889,345 @@ fn human_lock(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fail
     Ok(())
 }
 
+pub(super) struct WirePrepared {
+    pub(super) transaction_id: [u8; 16],
+    pub(super) item_id: [u8; 16],
+    pub(super) command: Vec<u8>,
+    pub(super) body: Vec<u8>,
+    pub(super) signature: [u8; 64],
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct WireHistoryEntry {
+    pub(super) revision_id: [u8; 16],
+    pub(super) visible: bool,
+    pub(super) attachment_count: u32,
+}
+
+pub(super) struct WireHistory {
+    pub(super) lifecycle: u8,
+    pub(super) entries: Vec<WireHistoryEntry>,
+}
+
+pub(super) struct WirePurge {
+    pub(super) terminal: bool,
+    pub(super) revision_ids: Vec<[u8; 16]>,
+    pub(super) attachment_count: u32,
+    pub(super) encrypted_bytes: u64,
+    pub(super) prepared: WirePrepared,
+}
+
+pub(super) fn decode_prepared_response(response: &[u8]) -> Result<WirePrepared, Failure> {
+    let mut cursor = Cursor::new(response);
+    cursor.expect(&[0])?;
+    let transaction_id = cursor
+        .fixed(16)?
+        .try_into()
+        .map_err(|_| Failure::Unavailable)?;
+    let item_id = cursor
+        .fixed(16)?
+        .try_into()
+        .map_err(|_| Failure::Unavailable)?;
+    let command = cursor.bytes()?;
+    let body = cursor.bytes()?;
+    let signature = cursor
+        .fixed(64)?
+        .try_into()
+        .map_err(|_| Failure::Unavailable)?;
+    cursor.finish()?;
+    Ok(WirePrepared {
+        transaction_id,
+        item_id,
+        command,
+        body,
+        signature,
+    })
+}
+
+fn encode_commit_request(
+    opcode: u8,
+    prepared: &WirePrepared,
+    body: &[u8],
+) -> Result<Vec<u8>, Failure> {
+    let mut request = vec![opcode];
+    push_bytes(&mut request, &prepared.command)?;
+    request.extend_from_slice(&prepared.signature);
+    push_bytes(&mut request, body)?;
+    Ok(request)
+}
+
+pub(super) fn rpc_commit(
+    tls: &mut rustls::StreamOwned<ClientConnection, WindowsClientPipe>,
+    prepared: &WirePrepared,
+) -> Result<Vec<u8>, Failure> {
+    write_frame(tls, &encode_commit_request(5, prepared, &prepared.body)?)?;
+    let response = read_frame(tls)?;
+    expect_success_payload(&response)
+}
+
+pub(super) fn rpc_unlock(
+    tls: &mut rustls::StreamOwned<ClientConnection, WindowsClientPipe>,
+    password: &[u8],
+) -> Result<(), Failure> {
+    let mut request = vec![1];
+    push_bytes(&mut request, password)?;
+    write_frame(tls, &request)?;
+    if read_frame(tls)? == [0] {
+        Ok(())
+    } else {
+        Err(Failure::Unavailable)
+    }
+}
+
+pub(super) fn rpc_prepare_restore(
+    tls: &mut rustls::StreamOwned<ClientConnection, WindowsClientPipe>,
+    item: [u8; 16],
+    revision: [u8; 16],
+) -> Result<WirePrepared, Failure> {
+    let mut request = vec![26];
+    request.extend_from_slice(&item);
+    request.extend_from_slice(&revision);
+    write_frame(tls, &request)?;
+    decode_prepared_response(&read_frame(tls)?)
+}
+
+pub(super) fn rpc_history(
+    tls: &mut rustls::StreamOwned<ClientConnection, WindowsClientPipe>,
+    item: [u8; 16],
+) -> Result<WireHistory, Failure> {
+    let mut request = vec![25];
+    request.extend_from_slice(&item);
+    write_frame(tls, &request)?;
+    let response = read_frame(tls)?;
+    let mut cursor = Cursor::new(&response);
+    cursor.expect(&[0])?;
+    let lifecycle = cursor.fixed(1)?[0];
+    if !matches!(lifecycle, 1 | 2) {
+        return Err(Failure::Unavailable);
+    }
+    let count = usize::from(u16::from_be_bytes(
+        cursor
+            .fixed(2)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    ));
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        entries.push(WireHistoryEntry {
+            revision_id: cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?,
+            visible: {
+                cursor.fixed(8)?;
+                cursor.fixed(16)?;
+                cursor.fixed(1)?[0] == 1
+            },
+            attachment_count: u32::from_be_bytes(
+                cursor
+                    .fixed(4)?
+                    .try_into()
+                    .map_err(|_| Failure::Unavailable)?,
+            ),
+        });
+    }
+    cursor.finish()?;
+    Ok(WireHistory { lifecycle, entries })
+}
+
+pub(super) fn rpc_prepare_purge_revisions(
+    tls: &mut rustls::StreamOwned<ClientConnection, WindowsClientPipe>,
+    item: [u8; 16],
+    revisions: &[[u8; 16]],
+) -> Result<WirePurge, Failure> {
+    let mut request = vec![27];
+    request.extend_from_slice(&item);
+    request.extend_from_slice(
+        &u16::try_from(revisions.len())
+            .map_err(|_| Failure::Unavailable)?
+            .to_be_bytes(),
+    );
+    for revision in revisions {
+        request.extend_from_slice(revision);
+    }
+    write_frame(tls, &request)?;
+    decode_purge_response(&read_frame(tls)?)
+}
+
+pub(super) fn rpc_prepare_purge_item(
+    tls: &mut rustls::StreamOwned<ClientConnection, WindowsClientPipe>,
+    item: [u8; 16],
+) -> Result<WirePurge, Failure> {
+    let mut request = vec![28];
+    request.extend_from_slice(&item);
+    write_frame(tls, &request)?;
+    decode_purge_response(&read_frame(tls)?)
+}
+
+fn decode_purge_response(response: &[u8]) -> Result<WirePurge, Failure> {
+    let mut cursor = Cursor::new(response);
+    cursor.expect(&[0])?;
+    let terminal = cursor.fixed(1)?[0] == 1;
+    let count = usize::from(u16::from_be_bytes(
+        cursor
+            .fixed(2)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    ));
+    let attachment_count = u32::from_be_bytes(
+        cursor
+            .fixed(4)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    );
+    let encrypted_bytes = cursor.u64()?;
+    let mut revision_ids = Vec::with_capacity(count);
+    for _ in 0..count {
+        revision_ids.push(
+            cursor
+                .fixed(16)?
+                .try_into()
+                .map_err(|_| Failure::Unavailable)?,
+        );
+    }
+    let prepared = decode_prepared_from_cursor(&mut cursor)?;
+    cursor.finish()?;
+    Ok(WirePurge {
+        terminal,
+        revision_ids,
+        attachment_count,
+        encrypted_bytes,
+        prepared,
+    })
+}
+
+fn decode_prepared_from_cursor(cursor: &mut Cursor<'_>) -> Result<WirePrepared, Failure> {
+    Ok(WirePrepared {
+        transaction_id: cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+        item_id: cursor
+            .fixed(16)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+        command: cursor.bytes()?,
+        body: cursor.bytes()?,
+        signature: cursor
+            .fixed(64)?
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    })
+}
+
+pub(super) fn rpc_download_atomic(
+    tls: &mut rustls::StreamOwned<ClientConnection, WindowsClientPipe>,
+    request: &[u8],
+    destination: &Path,
+) -> Result<u64, Failure> {
+    let temporary = destination.with_extension("partial");
+    let mut output = pm_native_channel::create_private_file(&temporary, false, true)
+        .map_err(|_| Failure::Unavailable)?;
+    let result = (|| {
+        write_frame(tls, request)?;
+        if read_frame(tls)? != [0] {
+            return Err(Failure::Unavailable);
+        }
+        let mut written = 0_u64;
+        loop {
+            let frame = read_frame(tls)?;
+            if frame == [0] {
+                break;
+            }
+            if frame.len() > STREAM_CHUNK_BYTES + 64 {
+                return Err(Failure::Unavailable);
+            }
+            written = written
+                .checked_add(u64::try_from(frame.len()).map_err(|_| Failure::Unavailable)?)
+                .ok_or(Failure::Unavailable)?;
+            output.write_all(&frame).map_err(|_| Failure::Unavailable)?;
+        }
+        output.sync_all().map_err(|_| Failure::Unavailable)?;
+        Ok(written)
+    })();
+    let written = match result {
+        Ok(written) => written,
+        Err(error) => {
+            return Err(error.after_owned_path_cleanup(fs::remove_file(&temporary)));
+        }
+    };
+    drop(output);
+    fs::rename(&temporary, destination).map_err(|_| Failure::Unavailable)?;
+    pm_native_channel::sync_directory(destination.parent().ok_or(Failure::Unavailable)?)
+        .map_err(|_| Failure::Unavailable)?;
+    Ok(written)
+}
+
+pub(super) fn read_import_source(path: &Path) -> Result<Zeroizing<Vec<u8>>, Failure> {
+    let mut file = pm_native_channel::open_regular_file(path).map_err(|_| Failure::Unavailable)?;
+    let before = file.metadata().map_err(|_| Failure::Unavailable)?;
+    if before.len() == 0 || before.len() > (MAX_FRAME - 16) as u64 {
+        return Err(Failure::Unavailable);
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(before.len()).map_err(|_| Failure::Unavailable)?,
+    ));
+    file.read_to_end(&mut bytes)
+        .map_err(|_| Failure::Unavailable)?;
+    let after = file.metadata().map_err(|_| Failure::Unavailable)?;
+    let before_modified = before.modified().map_err(|_| Failure::Unavailable)?;
+    let after_modified = after.modified().map_err(|_| Failure::Unavailable)?;
+    if u64::try_from(bytes.len()).ok() != Some(before.len())
+        || before.len() != after.len()
+        || before_modified != after_modified
+    {
+        return Err(Failure::Unavailable);
+    }
+    Ok(bytes)
+}
+
+pub(super) fn open_1pux_source(path: &Path) -> Result<File, Failure> {
+    let file = pm_native_channel::open_regular_file(path).map_err(|_| Failure::Unavailable)?;
+    let metadata = file.metadata().map_err(|_| Failure::Unavailable)?;
+    if metadata.len() == 0 || metadata.len() > 1024_u64.pow(4) + 256 * 1024 * 1024 {
+        return Err(Failure::Unavailable);
+    }
+    Ok(file)
+}
+
+pub(super) fn send_file_handle(
+    tls: &mut rustls::StreamOwned<ClientConnection, WindowsClientPipe>,
+    source: &File,
+) -> Result<(), Failure> {
+    use std::os::windows::io::AsRawHandle;
+
+    tls.sock.verify().map_err(|_| Failure::Unavailable)?;
+    let value = source.as_raw_handle() as usize as u64;
+    if value == 0 || value == usize::MAX as u64 {
+        return Err(Failure::Unavailable);
+    }
+    write_frame(tls, &value.to_be_bytes())?;
+    tls.sock.verify().map_err(|_| Failure::Unavailable)
+}
+
+pub(super) fn hex(value: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(value.len() * 2);
+    for byte in value {
+        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+pub(super) fn connect_tui(
+    profile: &Profile,
+    key: &KeyMaterial,
+    vault: &Path,
+) -> Result<rustls::StreamOwned<ClientConnection, WindowsClientPipe>, Failure> {
+    connect(profile, key, vault.to_str().ok_or(Failure::Unavailable)?)
+}
+
 pub fn agent_rpc(
     profile_path: &Path,
     private_path: &Path,
@@ -908,7 +1255,7 @@ pub fn agent_rpc(
     result.map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())
 }
 
-fn connect(
+pub(super) fn connect(
     profile: &Profile,
     key: &KeyMaterial,
     vault: &str,
@@ -1109,7 +1456,7 @@ fn verify_raw_signature(
     )
 }
 
-fn read_key(path: &Path) -> Result<KeyMaterial, Failure> {
+pub(super) fn read_key(path: &Path) -> Result<KeyMaterial, Failure> {
     let encoded = read_protected(path)?;
     let mut cursor = Cursor::new(&encoded);
     cursor.expect(KEY_MAGIC)?;
@@ -1159,7 +1506,7 @@ fn read_bootstrap(path: &Path) -> Result<Bootstrap, Failure> {
     })
 }
 
-fn read_profile(path: &Path) -> Result<Profile, Failure> {
+pub(super) fn read_profile(path: &Path) -> Result<Profile, Failure> {
     let encoded = read_bounded(path)?;
     let mut cursor = Cursor::new(&encoded);
     cursor.expect(PROFILE_MAGIC)?;
@@ -1236,7 +1583,7 @@ fn validate_spki(spki: &[u8]) -> Result<(), Failure> {
     Ok(())
 }
 
-fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, Failure> {
+pub(super) fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, Failure> {
     let mut header = [0_u8; 4];
     input
         .read_exact(&mut header)
@@ -1252,7 +1599,7 @@ fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, Failure> {
     Ok(value)
 }
 
-fn write_frame(output: &mut impl Write, value: &[u8]) -> Result<(), Failure> {
+pub(super) fn write_frame(output: &mut impl Write, value: &[u8]) -> Result<(), Failure> {
     if value.is_empty() || value.len() > MAX_FRAME {
         return Err(Failure::Unavailable);
     }
@@ -1267,7 +1614,7 @@ fn write_frame(output: &mut impl Write, value: &[u8]) -> Result<(), Failure> {
     output.flush().map_err(|_| Failure::Unavailable)
 }
 
-fn push_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), Failure> {
+pub(super) fn push_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), Failure> {
     output.extend_from_slice(
         &u32::try_from(value.len())
             .map_err(|_| Failure::Unavailable)?
@@ -1277,47 +1624,47 @@ fn push_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), Failure> {
     Ok(())
 }
 
-struct Cursor<'a> {
+pub(super) struct Cursor<'a> {
     bytes: &'a [u8],
     at: usize,
 }
 
 impl<'a> Cursor<'a> {
-    const fn new(bytes: &'a [u8]) -> Self {
+    pub(super) const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, at: 0 }
     }
-    fn fixed(&mut self, length: usize) -> Result<&'a [u8], Failure> {
+    pub(super) fn fixed(&mut self, length: usize) -> Result<&'a [u8], Failure> {
         let end = self.at.checked_add(length).ok_or(Failure::Unavailable)?;
         let value = self.bytes.get(self.at..end).ok_or(Failure::Unavailable)?;
         self.at = end;
         Ok(value)
     }
-    fn expect(&mut self, expected: &[u8]) -> Result<(), Failure> {
+    pub(super) fn expect(&mut self, expected: &[u8]) -> Result<(), Failure> {
         if self.fixed(expected.len())? == expected {
             Ok(())
         } else {
             Err(Failure::Unavailable)
         }
     }
-    fn u32(&mut self) -> Result<u32, Failure> {
+    pub(super) fn u32(&mut self) -> Result<u32, Failure> {
         Ok(u32::from_be_bytes(
             self.fixed(4)?
                 .try_into()
                 .map_err(|_| Failure::Unavailable)?,
         ))
     }
-    fn u64(&mut self) -> Result<u64, Failure> {
+    pub(super) fn u64(&mut self) -> Result<u64, Failure> {
         Ok(u64::from_be_bytes(
             self.fixed(8)?
                 .try_into()
                 .map_err(|_| Failure::Unavailable)?,
         ))
     }
-    fn bytes(&mut self) -> Result<Vec<u8>, Failure> {
+    pub(super) fn bytes(&mut self) -> Result<Vec<u8>, Failure> {
         let length = usize::try_from(self.u32()?).map_err(|_| Failure::Unavailable)?;
         Ok(self.fixed(length)?.to_vec())
     }
-    fn finish(self) -> Result<(), Failure> {
+    pub(super) fn finish(self) -> Result<(), Failure> {
         if self.at == self.bytes.len() {
             Ok(())
         } else {
@@ -1326,7 +1673,9 @@ impl<'a> Cursor<'a> {
     }
 }
 
-fn finish_arguments(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+pub(super) fn finish_arguments(
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<(), Failure> {
     if arguments.next().is_none() {
         Ok(())
     } else {

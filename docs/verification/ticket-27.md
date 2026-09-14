@@ -1674,3 +1674,12 @@ Microsoft Terminal clasifica en el mismo parser primario `CSI ? 1004 h` como
 `DECSET_FOCUS`. El observer modela de forma separada `1004 h/l` como el estado
 que habilita reportes Focus In/Out; no altera la pantalla ni inventa eventos de
 foco para esta sesión estable. Cualquier otro modo privado sigue fallando.
+
+La corrida
+[`34866591723`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34866591723)
+sobre `9e50f5184c390ae1a6b649d4bb4965a967705257` no llegó al producto: seis
+tests del observer pasaron y `observer_classifies_private_csi_without_screen_content`
+falló porque su dato negativo aún combinaba 9001 y 1004, ambos ya soportados.
+Es un fallo de fixture, no un RED del TUI. La regresión usa ahora el modo
+cerrado 7777 para conservar el rechazo de un privado realmente desconocido.
+Log preservado en `/tmp/pm-windows-conpty-focus-run25-failed.log`.

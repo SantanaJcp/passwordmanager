@@ -7,9 +7,11 @@ use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod agent_wire;
 mod failure;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod human_wire;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod tui;
 #[cfg(target_os = "windows")]
 mod windows;

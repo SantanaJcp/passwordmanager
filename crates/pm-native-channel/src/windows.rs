@@ -20,8 +20,10 @@ use windows_sys::Win32::{
         TOKEN_QUERY, TOKEN_USER, TokenImpersonationLevel, TokenUser,
     },
     Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
-        PIPE_ACCESS_DUPLEX, ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
+        GetFileInformationByHandle, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
+        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
     },
     System::{
         Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole},
@@ -35,7 +37,7 @@ use windows_sys::Win32::{
         Pipes::{
             ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId,
             GetNamedPipeServerProcessId, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE,
-            PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe,
+            PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
         },
         Services::{
             CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx,
@@ -43,8 +45,9 @@ use windows_sys::Win32::{
             SERVICE_STATUS_PROCESS,
         },
         Threading::{
-            CreateEventW, GetCurrentProcess, GetCurrentThread, INFINITE, OpenThreadToken, SetEvent,
-            WaitForMultipleObjects, WaitForSingleObject,
+            CreateEventW, GetCurrentProcess, GetCurrentThread, GetProcessId, INFINITE, OpenProcess,
+            OpenThreadToken, PROCESS_DUP_HANDLE, SetEvent, WaitForMultipleObjects,
+            WaitForSingleObject,
         },
     },
     UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE},
@@ -291,6 +294,101 @@ impl WindowsServerPipe {
             client_pid: self.client_pid,
         })
     }
+
+    /// Duplicates one handle from the authenticated pipe client into this
+    /// service process. The caller owns the returned handle.
+    ///
+    /// # Errors
+    /// Returns an opaque error if the accepted client changes, its exact PID
+    /// cannot be opened with `PROCESS_DUP_HANDLE`, or duplication/cleanup fails.
+    pub fn duplicate_client_handle(
+        &self,
+        source_value: u64,
+    ) -> Result<HANDLE, ChannelAuthenticationError> {
+        let source = source_value as usize as HANDLE;
+        if source.is_null() || source == INVALID_HANDLE_VALUE {
+            return Err(ChannelAuthenticationError);
+        }
+        self.verify()?;
+        let pid = self.client_pid.ok_or(ChannelAuthenticationError)?;
+        let client = open_authenticated_client_process(self.handle, pid)?;
+        if client.is_null() || unsafe { GetProcessId(client) } != pid {
+            if !client.is_null() {
+                close_handle(client)?;
+            }
+            return Err(ChannelAuthenticationError);
+        }
+        self.verify()?;
+        let mut local = ptr::null_mut();
+        let duplicated = unsafe {
+            DuplicateHandle(
+                client,
+                source,
+                GetCurrentProcess(),
+                &raw mut local,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        let peer_valid = self.verify();
+        let client_closed = close_handle(client);
+        if duplicated == 0 || peer_valid.is_err() || client_closed.is_err() {
+            if !local.is_null() && close_handle(local).is_err() {
+                return Err(ChannelAuthenticationError);
+            }
+            return Err(ChannelAuthenticationError);
+        }
+        Ok(local)
+    }
+
+    /// Claims one authenticated client file handle as a regular, non-reparse
+    /// file owned by the service.
+    ///
+    /// # Errors
+    /// Returns an opaque error when duplication or kernel type validation fails.
+    pub fn duplicate_client_file(
+        &self,
+        source_value: u64,
+    ) -> Result<std::fs::File, ChannelAuthenticationError> {
+        use std::os::windows::io::FromRawHandle;
+
+        let handle = self.duplicate_client_handle(source_value)?;
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        if unsafe { GetFileInformationByHandle(handle, &raw mut information) } == 0
+            || information.dwFileAttributes
+                & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                != 0
+            || ((u64::from(information.nFileIndexHigh) << 32)
+                | u64::from(information.nFileIndexLow))
+                == 0
+        {
+            close_handle(handle)?;
+            return Err(ChannelAuthenticationError);
+        }
+        Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+    }
+}
+
+fn open_authenticated_client_process(
+    pipe: HANDLE,
+    pid: u32,
+) -> Result<HANDLE, ChannelAuthenticationError> {
+    if unsafe { ImpersonateNamedPipeClient(pipe) } == 0 {
+        return Err(ChannelAuthenticationError);
+    }
+    let client = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) };
+    let reverted = unsafe { RevertToSelf() };
+    if reverted == 0 {
+        if !client.is_null() {
+            close_handle(client)?;
+        }
+        return Err(ChannelAuthenticationError);
+    }
+    if client.is_null() {
+        return Err(ChannelAuthenticationError);
+    }
+    Ok(client)
 }
 
 fn create_pipe_instance(
@@ -592,6 +690,30 @@ impl WindowsClientPipe {
     #[must_use]
     pub const fn raw_handle(&self) -> HANDLE {
         self.handle
+    }
+}
+
+/// Checks whether one exact named-pipe endpoint currently has an available instance.
+///
+/// # Errors
+/// Returns an opaque error for malformed names or any Windows query failure other
+/// than the documented busy/not-found states. It never probes a substitute endpoint.
+pub fn windows_named_pipe_available(
+    path: &std::path::Path,
+) -> Result<bool, ChannelAuthenticationError> {
+    let value = path.to_str().ok_or(ChannelAuthenticationError)?;
+    if !value.starts_with(r"\\.\pipe\") || value.len() <= r"\\.\pipe\".len() {
+        return Err(ChannelAuthenticationError);
+    }
+    let name = wide(value);
+    if unsafe { WaitNamedPipeW(name.as_ptr(), 0) } != 0 {
+        return Ok(true);
+    }
+    match unsafe { GetLastError() } {
+        windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND
+        | windows_sys::Win32::Foundation::ERROR_SEM_TIMEOUT
+        | windows_sys::Win32::Foundation::ERROR_PIPE_BUSY => Ok(false),
+        _ => Err(ChannelAuthenticationError),
     }
 }
 

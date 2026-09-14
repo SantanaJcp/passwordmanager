@@ -1180,11 +1180,11 @@ mod windows_fixture {
         fn observer_classifies_private_csi_without_screen_content() {
             let observer = TerminalObserver::new();
             let error = observer
-                .feed(b"secret-not-reported\x1b[?9001;1004h")
+                .feed(b"secret-not-reported\x1b[?7777h")
                 .unwrap_err();
             assert_eq!(
                 error,
-                "unsupported private ConPTY CSI modes=[9001, 1004] count=2 final=0x68"
+                "unsupported private ConPTY CSI modes=[7777] count=1 final=0x68"
             );
             assert!(!error.contains("secret-not-reported"));
         }

@@ -6,15 +6,20 @@
 
 use std::{
     ffi::OsString,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::Write,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+
+#[cfg(unix)]
+use std::{
+    fs::OpenOptions,
     os::{
         fd::AsRawFd,
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
-    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
 };
 
 use crossterm::{
@@ -32,15 +37,25 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use rustls::{ClientConnection, StreamOwned};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(target_os = "linux")]
 use crate::linux::{
     Cursor, HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared, connect,
     decode_prepared_response, finish_arguments, hex, open_1pux_source, push_bytes, read_frame,
     read_import_source, read_key, read_profile, rpc_commit, rpc_download_atomic, rpc_history,
     rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore, rpc_unlock,
     send_file_descriptor, write_frame,
+};
+#[cfg(target_os = "windows")]
+use crate::windows::{
+    Cursor, HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared,
+    connect_tui as connect, decode_prepared_response, finish_arguments, hex, open_1pux_source,
+    push_bytes, read_frame, read_import_source, read_profile, rpc_commit, rpc_download_atomic,
+    rpc_history, rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore,
+    rpc_unlock, send_file_handle, write_frame,
 };
 use crate::{Failure, take_path};
 
@@ -307,7 +322,10 @@ impl App {
 }
 
 struct ClipboardLease {
+    #[cfg(target_os = "linux")]
     child: Child,
+    #[cfg(target_os = "windows")]
+    owned: Option<pm_native_channel::OwnedClipboard>,
     until: Instant,
     cleanup_attempted: bool,
 }
@@ -317,7 +335,19 @@ impl ClipboardLease {
         if !begin_cleanup(&mut self.cleanup_attempted) {
             return Ok(());
         }
-        stop_clipboard_with(&mut self.child)
+        #[cfg(target_os = "linux")]
+        {
+            stop_clipboard_with(&mut self.child)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.owned
+                .take()
+                .ok_or(Failure::Unavailable)?
+                .clear_if_owned()
+                .map(|_| ())
+                .map_err(|_| Failure::Unavailable)
+        }
     }
 }
 
@@ -370,12 +400,14 @@ impl Drop for TerminalGuard {
     }
 }
 
+#[cfg(target_os = "linux")]
 trait ClipboardControl {
     fn try_exited(&mut self) -> Result<bool, ()>;
     fn kill_process(&mut self) -> Result<(), ()>;
     fn wait_process(&mut self) -> Result<(), ()>;
 }
 
+#[cfg(target_os = "linux")]
 impl ClipboardControl for Child {
     fn try_exited(&mut self) -> Result<bool, ()> {
         self.try_wait()
@@ -392,6 +424,7 @@ impl ClipboardControl for Child {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn stop_clipboard_with(control: &mut impl ClipboardControl) -> Result<(), Failure> {
     let exited = control.try_exited();
     let should_stop = !matches!(exited, Ok(true));
@@ -457,7 +490,10 @@ fn report_cleanup_failure(component: &str) {
     );
 }
 
+#[cfg(target_os = "linux")]
 type HumanTls = StreamOwned<ClientConnection, UnixStream>;
+#[cfg(target_os = "windows")]
+type HumanTls = StreamOwned<ClientConnection, pm_native_channel::WindowsClientPipe>;
 
 pub(super) fn run(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
     let profile_path = take_path(arguments, "--profile")?;
@@ -474,8 +510,18 @@ pub(super) fn run(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), 
     if profile.role != Role::Human {
         return Err(Failure::Unavailable);
     }
-    let key = read_key(&private_path, super::current_uid())?;
+    let key = read_tui_key(&private_path)?;
     run_terminal(&profile, &key, &socket_path, idle, reveal, copy)
+}
+
+#[cfg(target_os = "linux")]
+fn read_tui_key(path: &Path) -> Result<KeyMaterial, Failure> {
+    read_key(path, crate::linux::current_uid())
+}
+
+#[cfg(target_os = "windows")]
+fn read_tui_key(path: &Path) -> Result<KeyMaterial, Failure> {
+    crate::windows::read_key(path)
 }
 
 fn take_seconds(
@@ -507,11 +553,7 @@ fn run_terminal(
     reveal: u64,
     copy: u64,
 ) -> Result<(), Failure> {
-    let writer = File::options()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .map_err(|_| Failure::Unavailable)?;
+    let writer = open_terminal()?;
     if enable_raw_mode().is_err() {
         if disable_raw_mode().is_err() {
             report_cleanup_failure("terminal-initialization");
@@ -548,6 +590,24 @@ fn run_terminal(
     })();
     let restoration = guard.restore();
     combine_failures([operation, restoration])
+}
+
+#[cfg(target_os = "linux")]
+fn open_terminal() -> Result<File, Failure> {
+    File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|_| Failure::Unavailable)
+}
+
+#[cfg(target_os = "windows")]
+fn open_terminal() -> Result<File, Failure> {
+    File::options()
+        .read(true)
+        .write(true)
+        .open("CONOUT$")
+        .map_err(|_| Failure::Unavailable)
 }
 
 fn run_authenticated_session(
@@ -1107,11 +1167,21 @@ fn preview_1pux(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Fa
     if read_frame(tls)? != [0] {
         return Err(Failure::Unavailable);
     }
-    send_file_descriptor(&tls.sock, source.as_raw_fd())?;
+    send_import_file(tls, &source)?;
     let (summary, prepared) = decode_import_preview(&read_frame(tls)?)?;
     app.operation = Some(PendingOperation::Import(prepared));
     begin_prompt(app, Mode::ConfirmImport, &summary);
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn send_import_file(tls: &mut HumanTls, source: &File) -> Result<(), Failure> {
+    send_file_descriptor(&tls.sock, source.as_raw_fd())
+}
+
+#[cfg(target_os = "windows")]
+fn send_import_file(tls: &mut HumanTls, source: &File) -> Result<(), Failure> {
+    send_file_handle(tls, source)
 }
 
 fn confirm_import(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
@@ -1545,12 +1615,7 @@ fn decode_hex_44(value: &str) -> Result<[u8; 44], Failure> {
 }
 
 fn create_private_output(path: &Path) -> Result<File, Failure> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|_| Failure::Unavailable)
+    pm_native_channel::create_private_file(path, true, true).map_err(|_| Failure::Unavailable)
 }
 
 fn pair_device(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
@@ -1597,7 +1662,7 @@ fn sync_now(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failur
         app.status = "Confirmation mismatch; sync not started".into();
         return Ok(());
     }
-    if UnixStream::connect(&socket).is_err() {
+    if !sync_endpoint_available(Path::new(&socket))? {
         app.status = "Sync endpoint offline; no sync was performed".into();
         return Ok(());
     }
@@ -1622,6 +1687,16 @@ fn sync_now(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failur
         hex(&job)
     );
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn sync_endpoint_available(path: &Path) -> Result<bool, Failure> {
+    Ok(UnixStream::connect(path).is_ok())
+}
+
+#[cfg(target_os = "windows")]
+fn sync_endpoint_available(path: &Path) -> Result<bool, Failure> {
+    pm_native_channel::windows_named_pipe_available(path).map_err(|_| Failure::Unavailable)
 }
 
 fn select_sync_job(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
@@ -2199,6 +2274,7 @@ fn expose_selected_field(app: &mut App, tls: &mut HumanTls) -> Result<(), Failur
     let copy = app.field_copy;
     let field = u16::try_from(app.field_selected).map_err(|_| Failure::Unavailable)?;
     if copy {
+        #[cfg(target_os = "linux")]
         validate_wl_copy()?;
     }
     let mut request = vec![if copy { 53 } else { 52 }];
@@ -2250,6 +2326,7 @@ fn expect_secret(response: &[u8]) -> Result<Zeroizing<Vec<u8>>, Failure> {
     Ok(value)
 }
 
+#[cfg(target_os = "linux")]
 fn validate_wl_copy() -> Result<(), Failure> {
     let path = PathBuf::from(WL_COPY);
     let metadata = fs::symlink_metadata(&path).map_err(|_| Failure::Unavailable)?;
@@ -2271,6 +2348,7 @@ fn validate_wl_copy() -> Result<(), Failure> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Failure> {
     let mut child = Command::new(WL_COPY)
         .args([
@@ -2295,6 +2373,17 @@ fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Fail
     }
     Ok(ClipboardLease {
         child,
+        until: Instant::now() + duration,
+        cleanup_attempted: false,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Failure> {
+    let owned =
+        pm_native_channel::OwnedClipboard::copy(secret).map_err(|_| Failure::Unavailable)?;
+    Ok(ClipboardLease {
+        owned: Some(owned),
         until: Instant::now() + duration,
         cleanup_attempted: false,
     })

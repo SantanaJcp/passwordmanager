@@ -5,7 +5,7 @@
 use std::fmt;
 
 mod native_file;
-pub use native_file::{create_private_file, open_regular_file};
+pub use native_file::{create_private_file, open_regular_file, sync_directory};
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -13,7 +13,7 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{
     ConPty, OwnedClipboard, WindowsClientPipe, WindowsServerPipe, WindowsStopEvent,
-    dpapi_protect_machine, dpapi_unprotect,
+    dpapi_protect_machine, dpapi_unprotect, windows_named_pipe_available,
 };
 
 /// One of the two Windows named-pipe endpoints. Roles are fixed by the
@@ -144,6 +144,21 @@ impl AuthenticatedHumanChannel {
                 Err(ChannelAuthenticationError)
             }
         }
+    }
+
+    /// Claims a regular file handle from the already-authenticated Windows
+    /// human process without reopening its path.
+    ///
+    /// # Errors
+    /// Returns an opaque error if the peer changed or the handle is not a
+    /// regular, non-reparse file.
+    #[cfg(target_os = "windows")]
+    pub fn duplicate_client_file(
+        &self,
+        source_value: u64,
+    ) -> Result<std::fs::File, ChannelAuthenticationError> {
+        self.pipe.verify()?;
+        self.pipe.duplicate_client_file(source_value)
     }
 }
 
