@@ -52,3 +52,25 @@ Rust instalado de forma local en `.toolchain/`, sin modificar PATH/configuració
 Verificado en este host: `rustc 1.98.1 (48a229cea 2026-09-01)`, `cargo 1.98.1 (797e8a9bc 2026-08-05)`; rustfmt/clippy instalados para el mismo toolchain. Bootstrap oficial rustup-init validado SHA-256 `dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71`. [Manifest oficial del toolchain](https://static.rust-lang.org/dist/channel-rust-1.98.1.toml), [bootstrap checksum](https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256). Esta comprobación inicial de versiones no acreditaba build del proyecto. Posteriormente, 01 entregó workspace/lockfile y runner; el merger verificó clean offline build y 9 tests en Linux x86_64. Evidencia en [ticket 01](issues/01-build-reproducible-y-runner-de-procesos.md); no acredita todavía bóveda funcional, seguridad ni otros targets.
 
 Astra entregó [propuesta de DAG de 35 tickets](implementation-plan.md), comprobada con IDs consecutivos/dependencias previas/sin ciclos y criterios/punteros presentes. El usuario aprobó granularidad/orden con «autorizado»; [35 tickets publicados](issues/README.md) conforme `to-tickets`. La frontera inicial es 01; no se puede ejecutar tickets descendientes en paralelo antes de integrar sus dependencias.
+
+## Cuatro ajustes de desbloqueo autorizados
+
+El usuario confirmó conjuntamente estos cuatro ajustes después del informe de
+preflight 5/5 y aceptación macOS todavía fallida:
+
+1. TUI 23: seleccionar explícitamente el campo a revelar/copiar, sin sustituir
+   una contraseña ausente por notas; conservar todos los campos accesibles.
+2. Windows 27: compilar libsodium 1.0.22 desde la fuente fijada mediante MSVC,
+   de forma explícita, sin recurrir al fallback de binarios precompilados.
+3. macOS 26: raíz efímera única `/private/var/tmp/passwordmanager-ticket26`,
+   padre root con modo `01777`, colisiones rechazadas, raíz propia `0711` y
+   subdirectorios privados `0700`; no cambiar permisos del home del runner ni
+   seleccionar otra ruta si falta un requisito.
+4. Verificación: observar el estado contractual estable admitiendo únicamente
+   estados intermedios documentados, sin repetir autenticaciones ni ampliar
+   los plazos existentes; conservar código de salida y diagnósticos seguros
+   para fallos antes indeterminados. Documentar el método concreto antes de
+   ejecutar las pruebas modificadas; no convertir errores en éxito.
+
+La autorización no elimina gates, no cambia el modelo de seguridad y no
+adelanta la revisión formal de Astra: continúa al final de todos los tickets.
