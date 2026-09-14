@@ -555,3 +555,13 @@ TLS, Chromium y russh internos siguen siendo excepciones explícitas, no fallbac
 Los RED se ejecutarán por filtro y lab exactamente una vez tras nueva ventana.
 Un fallo de build/fixture no cuenta. Sólo después de reproducir los cuatro seams
 se escribe GREEN; no habrá otra barrida integral entre microcambios.
+
+Checkpoint test-first estático: `protected_plaintext.rs` contiene helpers
+subprocess independientes para revision y backup chunk; `delegated_authorization`
+reutiliza su fixture Keycloak completo y agota el presupuesto mediante la API
+pública antes de `claim_next`; `adapter_protected_frame_lab.py` inicia los dos
+binarios reales con memlock=0, envía sólo header y exige cierre/error antes de
+payload. El custody socketpair previo cubre el frame humano. Ninguno de estos
+RED nuevos se ejecutó ni tiene GREEN anticipado; próxima ventana requiere los
+tres filtros Rust (crypto revision, crypto stream, lease) y el lab adapters por
+separado, preservando cualquier fallo de fixture/compilación como no RED.

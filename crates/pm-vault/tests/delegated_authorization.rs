@@ -6,14 +6,14 @@ use std::{
     fs,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process,
+    process::{self, Command},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
 
-use pm_crypto::KdfProfile;
+use pm_crypto::{CryptoError, KdfProfile, ProtectedBytes};
 use pm_vault::{
     AgentEnrollment, AgentPeer, AttemptError, AttemptOutcome, AttemptState, AttemptVault,
     AuditDeviceCustody, AuthorizationError, AuthorizationReason, CausalEventBody, CausalEventDraft,
@@ -23,6 +23,36 @@ use pm_vault::{
 
 #[test]
 fn keycloak_attempt_lease_carries_password_and_matching_totp_only_to_trusted_adapter() {
+    keycloak_lease_fixture(false);
+}
+
+#[test]
+fn attempt_lease_rejects_unlocked_plaintext_owners() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            "attempt_lease_memlock_helper",
+            "--nocapture",
+        ])
+        .env_clear()
+        .output()
+        .expect("start isolated locked-budget helper");
+    assert!(
+        output.status.success(),
+        "attempt lease did not fail before unlocked secret owners: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "executed in an isolated subprocess by attempt_lease_rejects_unlocked_plaintext_owners"]
+fn attempt_lease_memlock_helper() {
+    keycloak_lease_fixture(true);
+}
+
+fn keycloak_lease_fixture(deny_locked_output: bool) {
     use pm_vault::{AuthRecord, Destination, HumanMetadata, TotpAlgorithm};
 
     let directory = TestDir::new();
@@ -96,7 +126,17 @@ fn keycloak_attempt_lease_carries_password_and_matching_totp_only_to_trusted_ada
         attempts.start(&peer, &request).unwrap().state(),
         AttemptState::Created
     );
-    let lease = attempts.claim_next().unwrap().unwrap();
+    let locked_budget = deny_locked_output.then(exhaust_locked_budget);
+    let lease_result = attempts.claim_next();
+    if deny_locked_output {
+        let Err(error) = lease_result else {
+            panic!("lease used unlocked secret owners");
+        };
+        assert_eq!(error.to_string(), "CUSTODY_UNAVAILABLE");
+        drop(locked_budget);
+        return;
+    }
+    let lease = lease_result.unwrap().unwrap();
     assert_eq!(lease.integration_id(), "keycloak-browser-oidc");
     assert_eq!(lease.method(), "password_totp");
     assert_eq!(lease.username(), "alice");
@@ -107,6 +147,22 @@ fn keycloak_attempt_lease_carries_password_and_matching_totp_only_to_trusted_ada
     assert_eq!(totp.digits(), 6);
     assert_eq!(totp.period(), 30);
     assert_eq!(totp.t0(), 0);
+}
+
+fn exhaust_locked_budget() -> Vec<ProtectedBytes> {
+    let mut owners = Vec::new();
+    let mut size = 1024 * 1024;
+    while size != 0 {
+        loop {
+            match ProtectedBytes::zeroed(size) {
+                Ok(owner) => owners.push(owner),
+                Err(CryptoError::ResourceUnavailable) => break,
+                Err(error) => panic!("unexpected protected allocation error: {error}"),
+            }
+        }
+        size /= 2;
+    }
+    owners
 }
 
 #[test]
