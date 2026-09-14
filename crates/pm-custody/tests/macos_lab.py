@@ -4,6 +4,7 @@
 """Destructive-only-inside-ephemeral-CI native macOS custody laboratory."""
 
 import ctypes
+import codecs
 import errno
 import fcntl
 import os
@@ -100,7 +101,13 @@ class MacPtySession:
         self.pid = pid
         self.master = master
         self.output = bytearray()
+        self._decode_at = 0
+        self._ansi_pending = b""
+        self._decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        self._decoded_chunks = []
+        self._decoder_finalized = False
         self.returncode = None
+        self.reaped = False
         self.eof = False
 
     @classmethod
@@ -133,6 +140,37 @@ class MacPtySession:
         dimensions = struct.pack("HHHH", rows, columns, 0, 0)
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, dimensions)
 
+    @staticmethod
+    def _strip_ansi_incremental(value, final):
+        visible = bytearray()
+        offset = 0
+        while offset < len(value):
+            if value[offset] != 0x1b:
+                visible.append(value[offset])
+                offset += 1
+                continue
+            match = ANSI_SEQUENCE.match(value, offset)
+            if match is not None:
+                offset = match.end()
+                continue
+            if not final:
+                return bytes(visible), value[offset:]
+            visible.append(value[offset])
+            offset += 1
+        return bytes(visible), b""
+
+    def _consume_output(self, *, final=False):
+        if self._decoder_finalized:
+            return
+        value = self._ansi_pending + bytes(self.output[self._decode_at:])
+        self._decode_at = len(self.output)
+        visible, self._ansi_pending = self._strip_ansi_incremental(value, final)
+        rendered = self._decoder.decode(visible, final=final)
+        if rendered:
+            self._decoded_chunks.append((len(self.output), rendered))
+        if final:
+            self._decoder_finalized = True
+
     def _read_once(self, timeout):
         if self.eof:
             return False
@@ -142,14 +180,17 @@ class MacPtySession:
         try:
             value = os.read(self.master, 64 * 1024)
         except OSError as error:
-            if error.errno in (errno.EIO, errno.EBADF):
+            if error.errno == errno.EIO:
                 self.eof = True
+                self._consume_output(final=True)
                 return False
             raise
         if not value:
             self.eof = True
+            self._consume_output(final=True)
             return False
         self.output.extend(value)
+        self._consume_output()
         return True
 
     def drain(self):
@@ -157,8 +198,9 @@ class MacPtySession:
             pass
 
     def text(self, since=0):
-        cleaned = ANSI_SEQUENCE.sub(b"", bytes(self.output[since:]))
-        return cleaned.decode("utf-8", "replace")
+        return "".join(
+            rendered for raw_end, rendered in self._decoded_chunks if raw_end > since
+        )
 
     def wait_text(self, expected, *, timeout=8, since=0):
         deadline = time.monotonic() + timeout
@@ -200,15 +242,18 @@ class MacPtySession:
             return os.WEXITSTATUS(status)
         if os.WIFSIGNALED(status):
             return 128 + os.WTERMSIG(status)
-        return 1
+        raise AssertionError("TUI PTY child returned an unknown wait status")
 
     def wait_exit(self, *, timeout=8):
         if self.returncode is not None:
             return self.returncode
+        if self.reaped:
+            raise AssertionError("TUI PTY child exit status was already reaped")
         deadline = time.monotonic() + timeout
         while True:
             child, status = os.waitpid(self.pid, os.WNOHANG)
             if child == self.pid:
+                self.reaped = True
                 self.returncode = self._exit_code(status)
                 self.drain()
                 return self.returncode
@@ -219,7 +264,7 @@ class MacPtySession:
 
     def close(self):
         errors = []
-        if self.returncode is None:
+        if self.returncode is None and not self.reaped:
             try:
                 os.kill(self.pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -228,11 +273,6 @@ class MacPtySession:
                 self.wait_exit(timeout=5)
             except BaseException as error:
                 errors.append(error)
-                try:
-                    os.kill(self.pid, signal.SIGKILL)
-                    self.wait_exit(timeout=5)
-                except BaseException as kill_error:
-                    errors.append(kill_error)
         try:
             os.close(self.master)
         except OSError as error:
@@ -766,7 +806,9 @@ def select_tui_password_for_copy(session):
     session.send_text("j" * 14)
     page = session.wait_text("auth[0].password", since=start)
     assert any("›" in line and "auth[0].password" in line for line in page.splitlines()), page
+    copy_start = session.mark()
     session.send_key("enter")
+    return copy_start
 
 
 def run_tui_core_lab(
@@ -802,8 +844,7 @@ def run_tui_core_lab(
         ):
             tui_search(first, title)
         tui_search(first, "Password")
-        select_tui_password_for_copy(first)
-        copied_start = first.mark()
+        copied_start = select_tui_password_for_copy(first)
         first.wait_text("Copied explicitly", since=copied_start)
         assert read_appkit_pasteboard() == TUI_PASSWORD_RECORD
         assert_agent_cannot_read_pasteboard(TUI_PASSWORD_RECORD)

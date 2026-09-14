@@ -3263,15 +3263,13 @@ fn handle_human_rpc(
     ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanUnlockResponse);
     let mut setup_completed = false;
     loop {
-        let request = match read_frame(tls) {
-            Ok(value) => Zeroizing::new(value),
-            Err(_) => {
-                if !setup_completed {
-                    ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanRequestRead);
-                }
-                return Ok(());
+        let Ok(value) = read_frame(tls) else {
+            if !setup_completed {
+                ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanRequestRead);
             }
+            return Ok(());
         };
+        let request = Zeroizing::new(value);
         if request.as_slice() == [14] {
             drop(vault);
             let mut autonomous = AutonomousAuditVault::open(

@@ -907,6 +907,16 @@ sanitization. The synthetic seed exercises the established seven-kind
 content path; empty or binary field behavior is not changed or accepted by a
 new fixture-specific rule.
 
+There is an existing macOS capability boundary that this checkpoint does not
+hide: `pm_native_channel::OwnedClipboard::copy` rejects an empty value or
+bytes that are not valid UTF-8 before calling the AppKit bridge, and the
+Objective-C bridge also requires a nonempty `NSUTF8StringEncoding` string.
+Those fields remain representable and revealable through the human-field
+protocol, but an explicit macOS copy fails closed rather than converting or
+substituting their bytes; Linux's byte-oriented `wl-copy` path is broader.
+The complete TUI acceptance must report this compatibility boundary instead
+of treating the UTF-8 copy fixture as coverage for empty/binary fields.
+
 This checkpoint is intentionally named `tui-core`: it proves the native PTY,
 service/channel, AppKit ownership race, explicit lock and idle lock seams
 without claiming the complete Ticket 23--25 keyboard operation matrix. The
@@ -921,8 +931,10 @@ previous package list.
 Static verification for this implementation is closed before native execution:
 the Python AST parses; the shell command plan still has normal and explicit
 diagnostic modes with no implicit feature; the PTY implementation contains
-`forkpty`/`TIOCSWINSZ`, prompt-render synchronization, bounded child wait and
-one cleanup path; the macOS fixture contains neither a shell clipboard command
+`forkpty`/`TIOCSWINSZ`, prompt-render synchronization, strict incremental
+UTF-8 decoding across split reads, bounded child wait and one teardown policy
+(SIGTERM plus checked wait/close; a timeout is a failure, not a forced-signal
+fallback); the macOS fixture contains neither a shell clipboard command
 nor an alternate/fallback branch; and the existing nine native tests and
 wrong-UID/negative assertions remain in the same harness. No Linux run or
 local macOS result is substituted for the required normal Intel+Apple-silicon

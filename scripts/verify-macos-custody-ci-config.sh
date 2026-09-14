@@ -108,6 +108,13 @@ require_literal 'pid, master = pty.fork()' "$harness"
 require_literal 'termios.TIOCSWINSZ' "$harness"
 require_literal 'self.wait_text(f"Input: {value}", since=start)' "$harness"
 require_literal 'wait_exit(timeout=8)' "$harness"
+require_literal 'self._decoder = codecs.getincrementaldecoder("utf-8")("strict")' "$harness"
+require_literal 'self._strip_ansi_incremental(value, final)' "$harness"
+require_literal 'if error.errno == errno.EIO:' "$harness"
+require_literal 'if self.returncode is None and not self.reaped:' "$harness"
+require_literal 'raise AssertionError("TUI PTY child returned an unknown wait status")' "$harness"
+require_literal 'copy_start = session.mark()' "$harness"
+require_literal 'return copy_start' "$harness"
 require_literal 'human-content-flow' "$harness"
 require_literal 'assert_agent_cannot_read_pasteboard' "$harness"
 require_literal 'osascript' "$harness"
@@ -167,6 +174,10 @@ if grep -Fq 'RUNNER_TEMP' "$harness"; then
 fi
 if grep -Eq 'wl-copy|pbcopy|OSC52|tmux' "$harness"; then
     echo 'macOS TUI laboratory contains a non-AppKit clipboard or simulated-terminal path' >&2
+    exit 1
+fi
+if grep -Eq 'SIGKILL|decode\("utf-8",[[:space:]]*"replace"\)' "$harness"; then
+    echo 'macOS TUI laboratory hides malformed output or uses forced cleanup fallback' >&2
     exit 1
 fi
 if grep -Fq 'macos-ticket26-diagnostics' "$workflow" ||
