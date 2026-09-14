@@ -1588,3 +1588,15 @@ teclado y pantalla reales; el tracer previo de 15 segundos queda como evidencia
 RED, no como aceptación. Resize, clipboard, transferencia Windows y todos los
 flujos 23–25 permanecen tracers posteriores y no se declaran por este primer
 GREEN.
+
+La primera corrida del observer,
+[`34860222525`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34860222525)
+sobre `33fcff71a684cc4fb4ea7cc01aaab9fd84decf6a`, no llegó al launcher ni al
+producto. En `cargo test -p pm-native-channel --all-targets`, el caso Unicode
+pasó y los dos negativos fallaron porque el propio test hizo `unwrap` del
+`Err` inmediato y correcto de `feed` para OSC no soportado y UTF-8 inválido.
+El harness intentó todo su cleanup propio sin error agregado y terminó con el
+error primario `cargo failed (101)`. Esto es un RED de la aserción del fixture,
+no evidencia de pantalla/teclado ni una regresión de producto. El log completo
+está en `/tmp/pm-windows-tui-observer-red-run20-full.log`; la corrección exige
+directamente esos dos `Err` sin cambiar parser, producto ni plazos.

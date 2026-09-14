@@ -1105,16 +1105,14 @@ mod windows_fixture {
         #[test]
         fn observer_rejects_unsupported_sequences_instead_of_stripping_them() {
             let observer = TerminalObserver::new();
-            observer.feed(b"visible\x1b]0;concealed\x07").unwrap();
-            let error = observer.wait_for("concealed").unwrap_err();
+            let error = observer.feed(b"visible\x1b]0;concealed\x07").unwrap_err();
             assert!(error.contains("unsupported ConPTY escape"));
         }
 
         #[test]
         fn observer_rejects_invalid_utf8_instead_of_replacing_it() {
             let observer = TerminalObserver::new();
-            observer.feed(&[0xff]).unwrap();
-            let error = observer.wait_for("replacement").unwrap_err();
+            let error = observer.feed(&[0xff]).unwrap_err();
             assert_eq!(error, "invalid UTF-8 in ConPTY product output");
         }
     }
