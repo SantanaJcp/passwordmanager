@@ -135,3 +135,11 @@ más cleanup, path owned y un intento; no es autorización global de cleanup.
 El método ya fija REDs conductuales mediante permisos reales e interposer de
 syscalls limitado por PID/path/contador, además de la vida checked de
 `ProcessEvidence`; todavía no se ejecutaron ni se escribió su GREEN.
+
+2026-09-14 — Los cuatro cleanup RED se reprodujeron por sus seams públicos:
+ProcessEvidence rc101 descartó un `remove_dir_all` realmente fallido; keygen y
+write_new rc1 observaron respectivamente `unlink` y `fsync+unlink` exactos pero
+sólo imprimieron `CUSTODY_UNAVAILABLE`; rpc-download rc1 cortó el peer después
+de bytes `.partial`, falló su unlink exacto y también ocultó cleanup. Todos los
+fixtures finales verificaron ausencia de procesos y retiraron sus paths owned.
+No se escribió GREEN.

@@ -356,6 +356,23 @@ inyectado, restaura permisos si aplica, retira cada path exacto y falla si queda
 residuo. No se ejecutará ni implementará GREEN antes de conservar cada RED
 conductual.
 
+Los cuatro RED públicos quedaron observados antes del GREEN. ProcessEvidence
+descartó el fallo real de `remove_dir_all` y no emitió `CLEANUP_FAILED`
+(`/tmp/pm28-red-cleanup-process-runner-final.log`, rc101); el helper restauró
+permisos y retiró el path exacto antes de propagar la aserción. Keygen y
+`write_new` ejecutaron exactamente los fallos `unlink` y `fsync+unlink`, dejaron
+sus archivos owned y devolvieron sólo `CUSTODY_UNAVAILABLE`
+(`/tmp/pm28-red-cleanup-custody-keygen-write-final.log`, rc1). Finalmente, el
+fixture de descarga mató al peer sólo después de observar bytes en `.partial`;
+el unlink exacto falló una vez, el destino final no existió y el cliente también
+devolvió sólo `CUSTODY_UNAVAILABLE`
+(`/tmp/pm28-red-cleanup-rpc-download.log`, rc1). Cada fixture verificó y retiró
+sus residuos. Los intentos anteriores de custody que no compilaron el
+interposer o no permitieron escribir su log se conservan como fallos de fixture,
+no RED; el primer helper ProcessEvidence reveló una omisión de cleanup del
+propio test, se retiró exactamente ese path y el helper final usa
+`catch_unwind` para garantizar limpieza aun con la aserción RED.
+
 ## Verticales de fault/crash pendientes de RED
 
 El seam de almacenamiento será un lab público separado, no una colección de
