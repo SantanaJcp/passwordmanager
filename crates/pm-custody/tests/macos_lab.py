@@ -307,7 +307,8 @@ def expect_unavailable(result):
 def fake_server_rejected_before_tls(binary, profile, private, impostor_home):
     endpoint = impostor_home / "impostor.sock"
     code = (
-        "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); "
+        "import os,socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); "
+        "os.chmod(sys.argv[1], 0o666); "
         "s.listen(1); c,_=s.accept(); c.settimeout(2); "
         "\ntry: data=c.recv(1)\nexcept TimeoutError: data=b''\n"
         "print(len(data), flush=True)"

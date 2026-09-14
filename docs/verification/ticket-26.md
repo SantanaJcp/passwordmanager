@@ -271,6 +271,28 @@ For this candidate, the focused local TDD record is:
 # GREEN after the implementation: 1 test passed
 ```
 
+### Eighth-run fixture-only RED
+
+Run
+[`34798902550`](https://github.com/SantanaJcp/passwordmanager/actions/runs/34798902550)
+on `87dc908` confirmed the product correction on both architectures: the
+diagnostics observed `accepted-stream-nonblocking-before=1` and `after=0`, and
+the agent probe reached client/server READY, including TLS, RPK pinning and
+ALPN. The run then stopped in the negative `fake_server_rejected_before_tls`
+fixture: its `OTHER`-owned impostor socket was bound successfully, but the
+default socket mode did not grant `_pmagent26` write permission to connect.
+The path-exists check therefore passed while the fake server's `accept()`
+remained blocked until the existing five-second `communicate` bound. This is a
+fixture permission mismatch, not a product or TLS failure.
+
+The fixture correction is limited to `os.chmod(sys.argv[1], 0o666)` after the
+synthetic impostor bind and before `listen(1)`. It preserves the real
+wrong-UID-before-secret contract: `_pmagent26` must connect to the real fake
+server, the custody probe must reject on kernel peer UID before sending a TLS
+request, and the fake server must receive EOF (`0` bytes). The timeout is not
+changed, no failure is converted to success, and no product path is altered.
+The rerun must retain this `0`-byte assertion on both native architectures.
+
 The acceptance-workflow checker was written before the workflow existed:
 
 ```text

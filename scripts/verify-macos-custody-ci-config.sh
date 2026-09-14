@@ -101,6 +101,7 @@ require_literal 'accepted-stream-nonblocking-before=' "$custody_source"
 require_literal 'accepted-stream-nonblocking-after=' "$custody_source"
 require_literal 'require_readable_regular(AGENT, agent_profile' "$harness"
 require_literal 'require_readable_regular(AGENT, agent_key' "$harness"
+require_literal 'os.chmod(sys.argv[1], 0o666)' "$harness"
 if grep -Fq 'RUNNER_TEMP' "$harness"; then
     echo 'macOS custody laboratory still depends on the private runner temp root' >&2
     exit 1
