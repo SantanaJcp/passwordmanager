@@ -1620,6 +1620,7 @@ dependencies = [
  "pm-crypto",
  "pm-interface",
  "pm-native-channel",
+ "pm-sync",
  "pm-vault",
  "ratatui",
  "russh",

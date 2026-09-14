@@ -196,6 +196,20 @@ pub fn open_vault(path: &Path, password: &[u8]) -> Result<OpenedVault, VaultErro
     Ok(OpenedVault { trusted_root })
 }
 
+/// Opens and validates only the public vault identity, without opening a human
+/// root or running the password KDF.
+///
+/// # Errors
+///
+/// Returns an error for incompatible, incomplete or altered public metadata
+/// and root envelopes.
+pub fn open_vault_identity(path: &Path) -> Result<OpenedVault, VaultError> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
+    let (_, trusted_root) = load_and_validate_bundle(&connection)?;
+    Ok(OpenedVault { trusted_root })
+}
+
 fn load_and_validate_bundle(
     connection: &Connection,
 ) -> Result<(RootBundle, TrustedRoot), VaultError> {
@@ -384,7 +398,7 @@ fn persist_new(path: &Path, bundle: &RootBundle) -> Result<(), VaultError> {
              CREATE TABLE human_staging (
                transaction_id BLOB PRIMARY KEY CHECK (length(transaction_id) = 16),
                operation TEXT NOT NULL CHECK (operation IN ('item_write', 'item_lifecycle', 'history_restore', 'item_purge', 'audit_purge', 'availability_change', 'identity_change', 'import_commit', 'backup_restore', 'root_rotation')),
-               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'restore', 'purge-item', 'purge-revisions', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'import-batch', 'backup-restore', 'root-password-rotate', 'root-recovery-rotate')),
+               event_kind TEXT NOT NULL CHECK (event_kind IN ('item-revision', 'trash', 'restore', 'purge-item', 'purge-revisions', 'audit-purge', 'agent-grant', 'agent-revoke', 'enable', 'disable', 'suspend', 'resume', 'device-retire', 'import-batch', 'backup-restore', 'root-password-rotate', 'root-recovery-rotate')),
                item_id BLOB NOT NULL CHECK (length(item_id) = 16),
                revision_id BLOB CHECK (revision_id IS NULL OR length(revision_id) = 16),
                body BLOB NOT NULL CHECK (length(body) BETWEEN 1 AND 262144),

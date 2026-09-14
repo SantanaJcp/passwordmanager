@@ -186,3 +186,20 @@ clean locked/offline (1m 01s; 11,644 archivos/4.0 GiB) y una única barrida fina
 pasaron con `count=19 failures=0 ticket24-cleanup-set-changed=0`. No quedaron
 procesos o residuos propios nuevos. 24 queda resuelto; no acredita nativos,
 Chromium de producto, ticket25 ni revisión formal Astra.
+
+## TUI25 — integración y fixture SQLite quiescente
+
+El candidato `2a01905` se compuso sobre 24 por merger distinto. Una barrida
+exclusiva preservó RED `count=20 failures=1`: token exchange intentó leer
+`vault.sqlite3-shm` después de que el custodio lo eliminara; los otros 19 labs
+pasaron. Con autorización explícita se estabilizó sólo el fixture: `SIGSTOP` y
+`SIGCONT` al PID custodial propio con reconocimiento `waitpid` no bloqueante y
+límite monotónico existente de 20 s, escaneo completo quiescente sin ignorar
+`ENOENT`, reanudación garantizada y cleanup estricto/agregado antes de `PASS`.
+
+En la ventana final sin otro Cargo/lab local activo pasaron el token enfocado,
+`scripts/check.sh` (75 s), clean locked/offline (44 s; 11,754 archivos/4.1 GiB)
+y una única barrida secuencial `count=20 failures=0` (617 s), con logs
+`/tmp/pm25-final4-test-linux-*-lab.log`. No hubo skips, retries de producto ni
+cambios de deadline. 25 queda integrado y resuelto para Linux x86_64; no
+acredita nativos ni la revisión formal final.

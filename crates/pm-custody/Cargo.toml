@@ -23,6 +23,7 @@ libc.workspace = true
 pm-native-channel.workspace = true
 pm-crypto.workspace = true
 pm-interface.workspace = true
+pm-sync.workspace = true
 pm-vault.workspace = true
 rustls.workspace = true
 ratatui.workspace = true

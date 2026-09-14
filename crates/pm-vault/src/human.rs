@@ -1042,6 +1042,97 @@ impl HumanVault {
         self.channel.verify()?;
         Ok(self.root.create_sync_pairing(server_pin)?)
     }
+
+    /// Reopens human-custodied pairing material only when its root signature
+    /// belongs to this vault and the authenticated human channel is live.
+    ///
+    /// # Errors
+    /// Rejects an unauthenticated channel, malformed material, a foreign root,
+    /// a changed server pin or an invalid human signature.
+    pub fn open_sync_pairing(
+        &self,
+        protected: &[u8],
+    ) -> Result<pm_crypto::SyncPairing, HumanCommitError> {
+        self.channel.verify()?;
+        pm_crypto::SyncPairing::from_protected_bytes(protected, &self.trusted_root)
+            .map_err(HumanCommitError::Crypto)
+    }
+
+    /// Stages retirement of one exact device at every prefix already observed
+    /// by this vault. Events not included in the displayed/committed prefixes
+    /// remain outside the accepted history.
+    ///
+    /// # Errors
+    /// Rejects the current device, an unknown device, malformed persisted
+    /// prefixes, unavailable custody or failure to stage the signed command.
+    pub fn prepare_device_retirement(
+        &mut self,
+        device: [u8; 16],
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        self.channel.verify()?;
+        if device == self.device {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        let connection = open_connection(&self.path)?;
+        let mut statement = connection.prepare(
+            "SELECT issuer_generation,seq,event_digest FROM authority_events WHERE issuer_device=?1 ORDER BY issuer_generation,seq",
+        )?;
+        let rows = statement.query_map([device.as_slice()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        let mut prefixes: BTreeMap<u64, (u64, [u8; 32])> = BTreeMap::new();
+        for row in rows {
+            let (generation, seq, digest) = row?;
+            let generation = u64::try_from(generation).map_err(|_| HumanCommitError::Integrity)?;
+            let seq = u64::try_from(seq).map_err(|_| HumanCommitError::Integrity)?;
+            prefixes.insert(generation, (seq, bytes(&digest)?));
+        }
+        if prefixes.is_empty() {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        drop(statement);
+        drop(connection);
+        let mut body = Encoder::new(Vec::new());
+        body.map(2)
+            .map_err(|_| HumanCommitError::InvalidCommand)?
+            .str("reason_code")
+            .map_err(|_| HumanCommitError::InvalidCommand)?
+            .str("owner_request")
+            .map_err(|_| HumanCommitError::InvalidCommand)?
+            .str("accepted_prefix")
+            .map_err(|_| HumanCommitError::InvalidCommand)?
+            .array(u64::try_from(prefixes.len()).map_err(|_| HumanCommitError::InvalidCommand)?)
+            .map_err(|_| HumanCommitError::InvalidCommand)?;
+        for (generation, (seq, tip)) in prefixes {
+            body.map(3)
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .str("generation")
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .u64(generation)
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .str("seq")
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .u64(seq)
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .str("tip_digest")
+                .map_err(|_| HumanCommitError::InvalidCommand)?
+                .bytes(&tip)
+                .map_err(|_| HumanCommitError::InvalidCommand)?;
+        }
+        self.prepare_authority(
+            "identity_change",
+            "device-retire",
+            device,
+            1,
+            &body.into_writer(),
+            None,
+            None,
+        )
+    }
     /// Signs a canonical causal event with device provenance and, for authority
     /// events, the human root. This does not publish the event.
     ///
@@ -1652,7 +1743,7 @@ impl HumanVault {
             );
         }
         let event_id = random_id()?;
-        let previous = current_head(&transaction)?;
+        let previous = current_device_head(&transaction, self.device, 1)?;
         let seq = next_authority_seq(&transaction, self.device, 1)?;
         let mut parents = authority_specific_parents(&transaction, &staged)?;
         if let Some(previous) = previous {
@@ -4753,7 +4844,7 @@ fn apply_staged(
         "purge-item" => {
             apply_item_purge(transaction, staged, event_digest)?;
         }
-        "audit-purge" => {}
+        "audit-purge" | "device-retire" => {}
         "agent-grant" => {
             let body = decode_agent_grant_body(
                 staged
@@ -5208,6 +5299,21 @@ fn validate_staged(
                 && staged.audit_through_seq.is_some()
                 && staged.subject_generation.is_none()
                 && staged.authority_body.is_none()
+                && staged.staged_grant.is_none()
+        }
+        "device-retire" => {
+            staged.operation == "identity_change"
+                && staged.revision_id.is_none()
+                && staged.package.is_none()
+                && staged.item_kind.is_none()
+                && staged.attachments.is_none()
+                && staged.audit_generation.is_none()
+                && staged.audit_through_seq.is_none()
+                && staged.subject_generation == Some(1)
+                && staged
+                    .authority_body
+                    .as_deref()
+                    .is_some_and(valid_device_retire_body)
                 && staged.staged_grant.is_none()
         }
         "agent-grant" => {
@@ -5741,6 +5847,46 @@ fn purge_scope(
         encrypted_bytes,
         terminal,
     })
+}
+
+fn device_retire_tips(value: &[u8]) -> Option<Vec<[u8; 32]>> {
+    let mut decoder = Decoder::new(value);
+    (|| {
+        if decoder.map().ok()? != Some(2)
+            || decoder.str().ok()? != "reason_code"
+            || decoder.str().ok()? != "owner_request"
+            || decoder.str().ok()? != "accepted_prefix"
+        {
+            return None;
+        }
+        let count = usize::try_from(decoder.array().ok()??).ok()?;
+        if count == 0 || count > 4096 {
+            return None;
+        }
+        let mut previous = 0_u64;
+        let mut tips = Vec::with_capacity(count);
+        for _ in 0..count {
+            if decoder.map().ok()? != Some(3) || decoder.str().ok()? != "generation" {
+                return None;
+            }
+            let generation = decoder.u64().ok()?;
+            if generation <= previous
+                || decoder.str().ok()? != "seq"
+                || decoder.u64().ok()? == 0
+                || decoder.str().ok()? != "tip_digest"
+            {
+                return None;
+            }
+            let tip: [u8; 32] = decoder.bytes().ok()?.try_into().ok()?;
+            tips.push(tip);
+            previous = generation;
+        }
+        (decoder.position() == value.len()).then_some(tips)
+    })()
+}
+
+fn valid_device_retire_body(value: &[u8]) -> bool {
+    device_retire_tips(value).is_some()
 }
 
 fn encode_reason_body(reason: AuthorizationReason) -> Vec<u8> {
@@ -6449,6 +6595,13 @@ fn authority_specific_parents(
     connection: &Connection,
     staged: &Staged,
 ) -> Result<Vec<[u8; 32]>, HumanCommitError> {
+    if staged.event_kind == "device-retire" {
+        return staged
+            .authority_body
+            .as_deref()
+            .and_then(device_retire_tips)
+            .ok_or(HumanCommitError::BodyChanged);
+    }
     let kinds: &[&str] = match staged.event_kind.as_str() {
         "agent-grant" => &["agent-grant", "agent-revoke"],
         "resume" => &["suspend"],
@@ -6509,6 +6662,22 @@ fn current_head(connection: &Connection) -> Result<Option<[u8; 32]>, HumanCommit
         .query_row(
             "SELECT event_digest FROM authority_events ORDER BY rowid DESC LIMIT 1",
             [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    value.map(|bytes_value| bytes(&bytes_value)).transpose()
+}
+
+fn current_device_head(
+    connection: &Connection,
+    device: [u8; 16],
+    generation: u64,
+) -> Result<Option<[u8; 32]>, HumanCommitError> {
+    let generation = i64::try_from(generation).map_err(|_| HumanCommitError::InvalidInput)?;
+    let value: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT event_digest FROM authority_events WHERE issuer_device=?1 AND issuer_generation=?2 ORDER BY seq DESC LIMIT 1",
+            params![device.as_slice(), generation],
             |row| row.get(0),
         )
         .optional()?;
