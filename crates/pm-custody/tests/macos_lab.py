@@ -2435,6 +2435,16 @@ def tui_search(session, value):
     return session.wait_text("Search returned 1 active items", since=search_start)
 
 
+def selected_tui_row(session, title, *, since=0):
+    rendered = session.wait_selected(title, since=since)
+    rows = [
+        line for line in rendered.splitlines()
+        if line.startswith("› ") and title in line
+    ]
+    assert len(rows) == 1, ("TUI selected-row observation was ambiguous", rows)
+    return rows[0]
+
+
 def select_tui_password_for_copy(session):
     # Catalog order is defined by opaque item IDs, not fixture insertion order.
     # Establish the intended record through the same human-visible search used
@@ -2613,10 +2623,19 @@ def run_tui_ticket23_matrix(binary, profile, private, endpoint):
         session.send_key("t")
         session.send_text("keyboard-ticket23", enter=True)
         session.wait_text("Organization committed", since=organized)
+        selected_before = selected_tui_row(session, "ticket05-e2e-search-canary")
+        favorite_before = "★" in selected_before
         favorite = session.mark()
         session.send_key("f")
         session.wait_text("Favorite committed", since=favorite)
-        assert "★" in session.screen.application_text()
+        selected_after = selected_tui_row(
+            session, "ticket05-e2e-search-canary", since=favorite,
+        )
+        favorite_after = "★" in selected_after
+        assert favorite_after is not favorite_before, (
+            "favorite key did not toggle the selected row",
+            selected_before, selected_after,
+        )
 
         generated = session.mark()
         session.send_key("g")
