@@ -2435,11 +2435,10 @@ def tui_search(session, value):
     return session.wait_text("Search returned 1 active items", since=search_start)
 
 
-def selected_tui_row(session, title, *, since=0):
-    rendered = session.wait_selected(title, since=since)
+def selected_tui_row(rendered, title):
     rows = [
         line for line in rendered.splitlines()
-        if line.startswith("› ") and title in line
+        if "›" in line and title in line
     ]
     assert len(rows) == 1, ("TUI selected-row observation was ambiguous", rows)
     return rows[0]
@@ -2622,14 +2621,16 @@ def run_tui_ticket23_matrix(binary, profile, private, endpoint):
         organized = session.mark()
         session.send_key("t")
         session.send_text("keyboard-ticket23", enter=True)
-        session.wait_text("Organization committed", since=organized)
-        selected_before = selected_tui_row(session, "ticket05-e2e-search-canary")
+        organized_text = session.wait_text("Organization committed", since=organized)
+        selected_before = selected_tui_row(
+            organized_text, "ticket05-e2e-search-canary",
+        )
         favorite_before = "★" in selected_before
         favorite = session.mark()
         session.send_key("f")
-        session.wait_text("Favorite committed", since=favorite)
+        favorite_text = session.wait_text("Favorite committed", since=favorite)
         selected_after = selected_tui_row(
-            session, "ticket05-e2e-search-canary", since=favorite,
+            favorite_text, "ticket05-e2e-search-canary",
         )
         favorite_after = "★" in selected_after
         assert favorite_after is not favorite_before, (
