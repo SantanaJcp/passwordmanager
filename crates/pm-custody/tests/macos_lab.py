@@ -2719,7 +2719,7 @@ def run_tui_ticket24_matrix(
             + "|ticket24-agent-c|macos-lab"
         )
         session.send_text(enrollment, enter=True, hidden=True)
-        session.wait_text("Delegated authority (metadata only)", since=enroll_start)
+        session.wait_text("[agent active] ticket24-agent-c", since=enroll_start)
         wait_selected_access_row(session, "ticket24-agent-c")
         assert "[agent active] ticket24-agent-c" in session.screen.application_text()
 
