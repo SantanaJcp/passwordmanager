@@ -2,7 +2,7 @@
 #![cfg(target_os = "linux")]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use pm_crypto::digest;
+use pm_crypto::{ProtectedBytes, digest};
 use pm_sync::{OpaqueSyncStore, SyncError};
 use rustls::{
     CertificateError, DigitallySignedStruct, DistinguishedName, Error as TlsError, SignatureScheme,
@@ -34,14 +34,12 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use zeroize::Zeroizing;
 
 const MAGIC: &[u8] = b"PMK1";
 const ALPN: &[u8] = b"pm-sync/1";
 const MAX_FRAME: usize = 1024 * 1024;
-#[derive(Debug)]
 struct Key {
-    private: Zeroizing<Vec<u8>>,
+    private: ProtectedBytes,
     spki: Vec<u8>,
 }
 
@@ -538,26 +536,43 @@ fn raw(
     verify_tls13_signature_with_raw_key(m, &SubjectPublicKeyInfoDer::from(c.as_ref()), d, a)
 }
 fn read_key(path: &Path) -> Result<Key, ()> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| ())?;
-    if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
+    let path_metadata = fs::symlink_metadata(path).map_err(|_| ())?;
+    let mut file = fs::File::open(path).map_err(|_| ())?;
+    let metadata = file.metadata().map_err(|_| ())?;
+    if !path_metadata.file_type().is_file()
+        || path_metadata.file_type().is_symlink()
+        || !metadata.file_type().is_file()
         || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.mode() & 0o777 != 0o400
     {
         return Err(());
     }
-    let b = fs::read(path).map_err(|_| ())?;
-    if !b.starts_with(MAGIC) || b.len() < 4 + 4 + 44 {
+    let mut header = [0_u8; 8];
+    file.read_exact(&mut header).map_err(|_| ())?;
+    if !header.starts_with(MAGIC) {
         return Err(());
     }
-    let n = u32::from_be_bytes(b[4..8].try_into().map_err(|_| ())?) as usize;
-    if b.len() != 8 + n + 44 {
+    let n = u32::from_be_bytes(header[4..8].try_into().map_err(|_| ())?) as usize;
+    if metadata.len()
+        != u64::try_from(
+            8_usize
+                .checked_add(n)
+                .and_then(|v| v.checked_add(44))
+                .ok_or(())?,
+        )
+        .map_err(|_| ())?
+    {
         return Err(());
     }
-    Ok(Key {
-        private: Zeroizing::new(b[8..8 + n].to_vec()),
-        spki: b[8 + n..].to_vec(),
-    })
+    let mut private = ProtectedBytes::zeroed(n).map_err(|_| ())?;
+    file.read_exact(&mut private).map_err(|_| ())?;
+    let mut spki = vec![0_u8; 44];
+    file.read_exact(&mut spki).map_err(|_| ())?;
+    let mut extra = [0_u8; 1];
+    if file.read(&mut extra).map_err(|_| ())? != 0 {
+        return Err(());
+    }
+    Ok(Key { private, spki })
 }
 fn read_public(path: &Path) -> Result<Vec<u8>, ()> {
     let metadata = fs::symlink_metadata(path).map_err(|_| ())?;

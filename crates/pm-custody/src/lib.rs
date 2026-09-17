@@ -40,6 +40,6 @@ pub fn agent_rpc(
     private: &std::path::Path,
     socket: &std::path::Path,
     request: Option<&[u8]>,
-) -> Result<Vec<u8>, String> {
+) -> Result<pm_crypto::ProtectedBytes, String> {
     linux::agent_rpc(profile, private, socket, request)
 }

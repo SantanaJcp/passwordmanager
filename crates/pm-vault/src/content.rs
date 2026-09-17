@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use minicbor::{Decoder, Encoder, data::Type};
-use pm_crypto::{ItemKind, digest};
+use pm_crypto::{ItemKind, ProtectedBytes, digest};
 use zeroize::Zeroize;
 
 use crate::human::HumanCommitError;
@@ -395,18 +395,12 @@ pub trait PasswordRng {
 }
 
 /// Generated secret bytes, wiped when the human caller releases them.
-pub struct GeneratedPassword(Vec<u8>);
+pub struct GeneratedPassword(ProtectedBytes);
 
 impl GeneratedPassword {
     #[must_use]
     pub fn expose(&self) -> &[u8] {
         &self.0
-    }
-}
-
-impl Drop for GeneratedPassword {
-    fn drop(&mut self) {
-        self.0.zeroize();
     }
 }
 
@@ -435,18 +429,19 @@ pub(crate) fn generate_password(
     }
     let ceiling = u8::MAX
         - (u8::MAX % u8::try_from(alphabet.len()).map_err(|_| HumanCommitError::InvalidInput)?);
-    let mut result = Vec::with_capacity(config.length);
+    let mut result = ProtectedBytes::zeroed(config.length).map_err(HumanCommitError::Crypto)?;
+    let mut written = 0_usize;
     let mut random = [0_u8; 64];
-    while result.len() < config.length {
+    while written < config.length {
         if let Err(error) = rng.fill(&mut random) {
-            result.zeroize();
             random.zeroize();
             return Err(error);
         }
         for value in random {
             if value < ceiling {
-                result.push(alphabet[usize::from(value) % alphabet.len()]);
-                if result.len() == config.length {
+                result[written] = alphabet[usize::from(value) % alphabet.len()];
+                written += 1;
+                if written == config.length {
                     break;
                 }
             }

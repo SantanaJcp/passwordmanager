@@ -638,3 +638,52 @@ composición, no como evidencia conductual ni GREEN. Los frames TLS abiertos,
 serializers y responses siguen pendientes de su RED público discriminante.
 La suite enfocada `pm-custody` pasó rc0
 (`/tmp/pm28-green-custody-inventory-focused.log`).
+
+## Octavo vertical: frames TLS y serializers sensibles
+
+La migración estática comenzó después del GREEN de stdin, antes de ejecutar la
+regresión adicional de este vertical; esta cronología se conserva y ningún fallo
+de compilación cuenta como RED. El baseline conductual para la regresión será el
+checkpoint limpio `9ec8b30`, en una copia aislada propia: un hijo limita sólo su
+`RLIMIT_MEMLOCK`, supera un control pequeño de construcción pública y solicita
+una respuesta sintética con canario de 512 KiB. El marcador fijo posterior al
+control distingue la precondición; aceptar una respuesta `Vec` bajo denegación es
+el RED. El candidato debe devolver `CUSTODY_UNAVAILABLE` antes de crear el owner
+de respuesta y no escribir ni reflejar el canario. El parent sólo observa status
+y marcadores fijos, nunca renderiza bytes del canario.
+
+El contrato interno del GREEN separa `HumanResponse::Public` para frames de
+estado/metadatos ya clasificados y `HumanResponse::Protected` para records,
+secrets, resultados, challenges, material de firma y prepared command/body.
+Todo frame entrante pertenece a `ProtectedBytes`; `Cursor` sólo presta slices.
+Los serializers sensibles calculan el tamaño con aritmética checked, reservan el
+owner locked antes de escribir y sólo entregan `finish_exact`; cualquier error o
+desajuste descarta el owner completo. No existe salida truncada, retry, `Vec`
+secreto alternativo ni conversión para diagnóstico. Los heaps internos de
+rustls permanecen fuera de este claim.
+
+El mismo bloque migra el input/reveal/password persistente del TUI, las claves
+RPK propias de custody y `pm-sync`, y sus lecturas de archivo: la longitud se
+valida desde el header público, el owner locked se reserva antes de leer private
+key y sólo el SPKI público usa `Vec`. La copia que exige la API de rustls se crea
+únicamente al transferir ownership al proveedor TLS; no vuelve a ser storage
+propio ni se presenta como memoria interna de la biblioteca protegida.
+
+### Usage interruption checkpoint — 2026-09-16
+
+User requested bounded closure followed by STOP/handoff, not completion claims
+for this vertical. On resumption the uncommitted migration was preserved and
+checked from the actual WT28 cwd. First compile failed at the new `push!`
+macro's trailing comma grammar (28 errors); second exposed expression-position
+semicolon and one non-mutable request that is explicitly zeroized. Those syntax/
+mutability errors were corrected without changing the memory/protocol contract.
+Logs: `/tmp/pm-handoff-g7-check{,2,3}.log`. This does not supply the missing
+baseline behavioral RED, focused response GREEN, full check or integration gate.
+The pre-interruption compile logs in `/tmp` are no longer present on this host;
+previous narrative remains historical evidence, not an accessible log claim.
+
+Final compile after rustfmt passed: `/tmp/pm-handoff-g7-final-check.log`,
+`cargo check -p pm-custody -p pm-sync -p pm-vault --all-targets --locked --offline`
+from WT28. Saved as a local WIP checkpoint, NOT integrated or accepted.
+Next: run the discriminating regression on baseline9ec8b30 before claiming
+a behavioral correction; then candidate focused tests and full G7 inventory.

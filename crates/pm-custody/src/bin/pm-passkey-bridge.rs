@@ -349,7 +349,7 @@ fn call(config: &Config, rpc: &[u8]) -> Result<Json, ()> {
 }
 
 #[cfg(target_os = "linux")]
-fn agent_call(config: &Config, rpc: &[u8]) -> Result<Vec<u8>, ()> {
+fn agent_call(config: &Config, rpc: &[u8]) -> Result<pm_crypto::ProtectedBytes, ()> {
     pm_custody::agent_rpc(&config.profile, &config.private, &config.socket, Some(rpc))
         .map_err(|_| ())
 }

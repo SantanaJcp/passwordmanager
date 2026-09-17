@@ -206,7 +206,6 @@ impl StartAttempt {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttemptSnapshot {
     attempt_id: [u8; 16],
     credential_id: [u8; 16],
@@ -217,7 +216,7 @@ pub struct AttemptSnapshot {
     created_at_us: i64,
     expires_at_us: i64,
     reason: Option<String>,
-    result: Option<Vec<u8>>,
+    result: Option<ProtectedBytes>,
 }
 
 /// Secret-free attempt context shown only on an authenticated human surface.
@@ -432,8 +431,8 @@ impl TotpLease {
 }
 
 pub enum AttemptOutcome {
-    Succeeded { result: Vec<u8> },
-    WaitingForHuman { challenge: Vec<u8> },
+    Succeeded { result: ProtectedBytes },
+    WaitingForHuman { challenge: ProtectedBytes },
     Failed { reason: &'static str },
     Indeterminate,
 }
@@ -705,7 +704,7 @@ impl AttemptVault {
         )?)?;
         snapshot.state = AttemptState::Succeeded;
         snapshot.reason = None;
-        snapshot.result = Some(response.clone());
+        snapshot.result = Some(protected_copy(&response)?);
         update_snapshot(
             &tx,
             &self.custody,
@@ -1323,8 +1322,11 @@ impl AttemptVault {
                     return Err(AttemptError::InvalidArgument);
                 }
                 snap.state = AttemptState::WaitingForHuman;
-                snap.reason =
-                    Some(String::from_utf8(challenge).map_err(|_| AttemptError::InvalidArgument)?);
+                snap.reason = Some(
+                    std::str::from_utf8(&challenge)
+                        .map_err(|_| AttemptError::InvalidArgument)?
+                        .to_owned(),
+                );
                 (AuditOutcome::Accepted, false)
             }
             AttemptOutcome::Failed { reason } => {
@@ -1563,7 +1565,9 @@ fn decode_snapshot(bytes: &[u8]) -> Result<AttemptSnapshot, AttemptError> {
         d.null().unwrap();
         None
     } else {
-        Some(d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec())
+        Some(protected_copy(
+            d.bytes().map_err(|_| AttemptError::Integrity)?,
+        )?)
     };
     d.skip().map_err(|_| AttemptError::Integrity)?;
     if d.position() != bytes.len() {

@@ -13,7 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use pm_crypto::{KdfProfile, verify_passkey_signature};
+use pm_crypto::{KdfProfile, ProtectedBytes, verify_passkey_signature};
 use pm_vault::{
     AgentEnrollment, AgentPeer, AttemptOutcome, AttemptState, AttemptVault, AuditDeviceCustody,
     AuthorizationReason, DelegatedVault, HumanChannel, HumanVault, HumanVerification,
@@ -353,7 +353,8 @@ fn assertion_needs_bound_up_uv_and_live_attempt_authority_before_signing() {
         .settle(
             &lease,
             AttemptOutcome::Succeeded {
-                result: b"validated-oidc-result".to_vec(),
+                result: ProtectedBytes::copy_from_slice(b"validated-oidc-result")
+                    .expect("fixture protected bytes"),
             },
         )
         .unwrap();

@@ -249,7 +249,8 @@ fn keycloak_exchange_lease_is_context_bound_and_rechecked_before_provider_use() 
         .settle(
             &lease,
             AttemptOutcome::Succeeded {
-                result: b"closed exchanged result".to_vec(),
+                result: ProtectedBytes::copy_from_slice(b"closed exchanged result")
+                    .expect("fixture protected bytes"),
             },
         )
         .unwrap();
@@ -526,7 +527,8 @@ fn trusted_outcomes_pause_only_one_attempt_and_cancel_is_terminal() {
         .settle(
             &lease,
             AttemptOutcome::WaitingForHuman {
-                challenge: b"provider-ref".to_vec(),
+                challenge: ProtectedBytes::copy_from_slice(b"provider-ref")
+                    .expect("fixture protected bytes"),
             },
         )
         .unwrap();
@@ -547,7 +549,8 @@ fn trusted_outcomes_pause_only_one_attempt_and_cancel_is_terminal() {
         .settle(
             &lease,
             AttemptOutcome::Succeeded {
-                result: b"synthetic evidence".to_vec(),
+                result: ProtectedBytes::copy_from_slice(b"synthetic evidence")
+                    .expect("fixture protected bytes"),
             },
         )
         .unwrap();
