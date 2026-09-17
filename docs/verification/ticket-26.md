@@ -1646,3 +1646,32 @@ No existing fallback was changed. The previously unsupported non-Linux path
 failed explicitly; this patch replaces that explicit failure only for macOS
 with native primitives. Other unimplemented targets continue to fail
 explicitly.
+
+### Bounded interruption close — 2026-09-16
+
+Mac32 (`34880042223`, `9e3f46e`) failed in both CPUs at the Passkey reveal
+assertion. The seed is `[0x73; 32]`, valid UTF-8 (`s` repeated 32 times), not
+invalid binary: the expected fixture string was wrong. The fixture now matches
+the unchanged product seed. Reveal acceptance observes status and expected
+exposure together on the current screen within the original eight seconds.
+Expiry observes the real bordered footer, tolerates only its space padding,
+and requires hidden exposure plus full-screen absence for unique canaries.
+Only the generic note value uses exposure-local absence because `[note]` is
+legitimate catalog metadata. Split-frame regression retains both cases and
+strict VT parsing. Linux focused observer/helper regression passed; it does not
+prove macOS product acceptance. The first local correction run failed because
+the synthetic bordered row retained trailing screen spaces; that fixture/parser
+alignment was corrected without relaxing the status/canary predicates.
+
+The interrupted macOS sync seam from Sol's `c010af7` is composed without the
+Windows port: exact Linux/macOS cfg and checked `SO_NOSIGPIPE` on both accepted
+and connected Unix streams. Native build/test now includes `pm-sync`; this is
+not the pending complete TUI25 sync/pair/retire acceptance fixture.
+
+Verification correction: /tmp/pm-handoff-mac-check.log ran Cargo from the root cwd;
+it is ROOT Linux evidence, not WT26 evidence. Correct WT26 command runs from
+its worktree, log /tmp/pm-handoff-mac-worktree-check.log. No native claim.
+
+Final bounded local verification: focused observer/helper regression PASS;
+`cd .worktrees/26-macos && ./scripts/check.sh` PASS in
+`/tmp/pm-handoff-mac-worktree-check.log` (Linux, no native acceptance).

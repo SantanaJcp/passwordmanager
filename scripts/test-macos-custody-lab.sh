@@ -6,12 +6,12 @@ configure_ticket26_build_commands() {
   local mode="$1"
   local root="$2"
   build_command=(
-    "$root/scripts/cargo-local.sh" build -p pm-custody -p pm-cli
+    "$root/scripts/cargo-local.sh" build -p pm-custody -p pm-cli -p pm-sync
     --locked --offline --message-format=json-render-diagnostics
   )
   test_command=(
     "$root/scripts/cargo-local.sh" test
-    -p pm-native-channel -p pm-vault -p pm-crypto -p pm-custody --locked --offline
+    -p pm-native-channel -p pm-vault -p pm-crypto -p pm-custody -p pm-sync --locked --offline
   )
   if [[ "$mode" == diagnostic ]]; then
     build_command+=(--features macos-ticket26-diagnostics)
@@ -96,7 +96,7 @@ main() {
       ;;
   esac
   local binary architectures
-  for binary in target/debug/pm-custody target/debug/pm; do
+  for binary in target/debug/pm-custody target/debug/pm target/debug/pm-sync; do
     test -x "$binary" || {
       echo "ticket 26 native artifact is absent: $binary" >&2
       exit 1

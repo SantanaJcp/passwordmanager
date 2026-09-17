@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use pm_crypto::digest;
@@ -107,6 +107,7 @@ fn serve(
     fs::set_permissions(socket, fs::Permissions::from_mode(0o666)).map_err(|_| ())?;
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
         let store_path = db.to_owned();
         let config = Arc::clone(&config);
         std::thread::spawn(move || {
@@ -352,6 +353,7 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
         _ => return Err(()),
     };
     let stream = UnixStream::connect(socket).map_err(|_| ())?;
+    pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
     let config = client_config(&key, &server)?;
     let conn = ClientConnection::new(
         Arc::new(config),

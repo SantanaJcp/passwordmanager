@@ -1270,10 +1270,10 @@ def assert_screen_observer_regression():
     split_expiry.reads = 0
     expiry_frames = iter((
         b"\x1b[2J\x1b[1;1HStatus: Secret revealed temporarily"
-        b"\x1b[2;1HExposure: ticket05-e2e-password-canary"
-        b"\x1b[3;1Hkind: note",
+        + "\x1b[2;1H│Exposure: ticket05-e2e-password-canary│".encode("utf-8")
+        + b"\x1b[3;1Hkind: note",
         b"\x1b[1;1H\x1b[2KStatus: Reveal expired",
-        b"\x1b[2;1H\x1b[2KExposure: <hidden>",
+        "\x1b[2;1H\x1b[2K│Exposure: <hidden>│".encode("utf-8"),
     ))
 
     def read_expiry_frame(_timeout):
@@ -1288,7 +1288,7 @@ def assert_screen_observer_regression():
 
     split_expiry._read_once = read_expiry_frame
     assert wait_stable_reveal_expiry(
-        split_expiry, forbidden="note", timeout=1,
+        split_expiry, forbidden="ticket05-e2e-password-canary", timeout=1,
     ).find("Reveal expired") >= 0
     assert split_expiry.reads == 3, (
         "cursor-positioned screen regression: intermediate expiry frame was accepted"
@@ -1297,7 +1297,20 @@ def assert_screen_observer_regression():
     assert "Exposure: <hidden>" in stable_expiry and \
         "ticket05-e2e-password-canary" not in stable_expiry, (
             "cursor-positioned screen regression: stable expiry retained exposure"
+    )
+    try:
+        wait_stable_reveal_expiry(
+            split_expiry, forbidden="note", timeout=0,
         )
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(
+            "cursor-positioned screen regression: generic metadata passed a global canary check"
+        )
+    assert wait_stable_reveal_expiry(
+        split_expiry, forbidden="note", forbidden_in_exposure=True, timeout=0,
+    ).find("Exposure: <hidden>") >= 0
     assert_pasteboard_diagnostic_regression()
     assert_pty_helper_drain_regression()
 
@@ -2470,15 +2483,40 @@ def assert_tui_field_catalog(session, title, fields):
 
 def reveal_tui_field(session, title, label, index, expected):
     revealed = select_tui_field(session, title, "r", label, index)
-    session.wait_text("Secret revealed temporarily", since=revealed)
-    if expected is not None:
-        assert expected in session.screen.application_text(), (
-            "TUI field reveal did not render the expected synthetic value", title, label,
-        )
-    wait_stable_reveal_expiry(session, forbidden=expected, since=revealed)
+    deadline = time.monotonic() + 8
+    while True:
+        rendered = session._current_text_after(revealed)
+        if (rendered is not None and "Secret revealed temporarily" in rendered
+                and (expected is None or any(
+                    expected in line for line in exposure_rows(rendered)))):
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError("TUI field reveal did not render the expected synthetic value")
+        session._read_once(min(0.1, remaining))
+    wait_stable_reveal_expiry(
+        session,
+        forbidden=expected,
+        forbidden_in_exposure=(expected == "note"),
+        since=revealed,
+    )
 
 
-def wait_stable_reveal_expiry(session, *, forbidden=None, timeout=8, since=0):
+def exposure_rows(rendered):
+    """Read the actual bordered footer, not catalog metadata or VT bytes."""
+    rows = []
+    for line in rendered.splitlines():
+        line = line.rstrip(" ")
+        if line.startswith("│") and line.endswith("│"):
+            content = line[1:-1].strip()
+            if content.startswith("Exposure:"):
+                rows.append(content)
+    return tuple(rows)
+
+
+def wait_stable_reveal_expiry(
+    session, *, forbidden=None, forbidden_in_exposure=False, timeout=8, since=0,
+):
     """Observe expiry only on one current frame with the exposure removed.
 
     ``App::expire`` updates the status before the next complete terminal draw.
@@ -2486,20 +2524,28 @@ def wait_stable_reveal_expiry(session, *, forbidden=None, timeout=8, since=0):
     visible while the previous exposure line is still present.  Do not accept
     that intermediate frame or search historical screen events: the status,
     hidden exposure marker and forbidden value must agree on the current
-    screen before the original wait deadline expires.
+    screen before the original wait deadline expires.  Distinctive synthetic
+    canaries are forbidden on the whole current screen.  The one generic
+    ``note`` field uses ``forbidden_in_exposure`` so its catalog label cannot
+    be mistaken for the revealed value.
     """
     deadline = time.monotonic() + timeout
     while True:
         rendered = session._current_text_after(since)
-        exposure_lines = () if rendered is None else tuple(
-            line.strip() for line in rendered.splitlines()
-            if line.strip().startswith("Exposure:")
+        exposure_lines = () if rendered is None else exposure_rows(rendered)
+        forbidden_absent = rendered is not None and (
+            forbidden is None
+            or (
+                all(forbidden not in line for line in exposure_lines)
+                if forbidden_in_exposure
+                else forbidden not in rendered
+            )
         )
         if (
             rendered is not None
             and any("Reveal expired" in line for line in rendered.splitlines())
             and "Exposure: <hidden>" in exposure_lines
-            and (forbidden is None or all(forbidden not in line for line in exposure_lines))
+            and forbidden_absent
         ):
             return rendered
         remaining = deadline - time.monotonic()
@@ -2542,7 +2588,7 @@ def run_tui_ticket23_matrix(binary, profile, private, endpoint):
         for title, label, index, expected in (
             ("Password", "auth[0].password", 14, "ticket05-e2e-password-canary"),
             ("TOTP", "auth[0].secret", 13, "ticket05-e2e-totp-canary"),
-            ("Passkey", "auth[0].private_key", 17, "<binary secret: 32 bytes>"),
+            ("Passkey", "auth[0].private_key", 17, "s" * 32),
             ("SSH", "auth[0].private_key", 14, "ticket05-e2e-ssh-canary"),
             ("Token", "auth[0].secret", 13, "ticket05-e2e-token-canary"),
             ("ticket05-e2e-search-canary", "notes", 5, "note"),

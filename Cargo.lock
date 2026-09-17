@@ -1672,6 +1672,7 @@ dependencies = [
  "libc",
  "minicbor",
  "pm-crypto",
+ "pm-native-channel",
  "pm-vault",
  "rusqlite",
  "rustls",
