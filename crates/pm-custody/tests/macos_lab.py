@@ -2377,18 +2377,36 @@ def require_agent_discovery(binary, profile, private, endpoint):
 def wait_selected_access_row(session, marker, *, timeout=8, limit=64):
     """Select one metadata-only access row without assuming credential order."""
     deadline = time.monotonic() + timeout
-    for _ in range(limit):
+    row_pattern = re.compile(
+        r"│(› |  )(\[(?:agent (?:active|revoked|superseded)|"
+        r"credential (?:enabled|disabled))\] .+ (?:subject|item)=[0-9a-f]{32}) *│"
+    )
+    moves = 0
+    while moves < limit:
         session.drain()
-        rendered = session.screen.application_text()
-        if any("›" in line and marker in line for line in rendered.splitlines()):
+        rows = [
+            match.groups() for line in session.screen.application_text().splitlines()
+            if (match := row_pattern.fullmatch(line)) is not None
+        ]
+        selected = [index for index, row in enumerate(rows) if row[0] == "› "]
+        targets = [index for index, row in enumerate(rows) if marker in row[1]]
+        if len(selected) == 1 and len(targets) == 1 and selected == targets:
             return session.mark()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
+        # Wait for complete metadata rows, including the trailing identity.
+        # A partial repaint may temporarily have no highlight or two highlights.
+        if len(selected) != 1 or len(targets) != 1:
+            session._read_once(min(0.1, remaining))
+            continue
+        step = -1 if targets[0] < selected[0] else 1
+        next_row = rows[selected[0] + step][1]
         start = session.mark()
-        session.send_key("j")
-        session.wait_text("Delegated authority (metadata only)", since=start,
-                          timeout=remaining)
+        session.send_key("k" if step < 0 else "j")
+        session.wait_selected(next_row, since=start,
+                              timeout=max(0, deadline - time.monotonic()))
+        moves += 1
     raise AssertionError(f"TUI access row was not selected: {marker}")
 
 
