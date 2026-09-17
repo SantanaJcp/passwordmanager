@@ -2646,8 +2646,8 @@ def run_tui_ticket23_matrix(binary, profile, private, endpoint):
 
         history = session.mark()
         session.send_key("h")
-        history_text = session.wait_text("History:", since=history)
-        assert "lifecycle active" in history_text
+        history_text = session.wait_text("lifecycle active", since=history)
+        assert "History:" in history_text and "lifecycle active" in history_text
 
         purge_revisions = session.mark()
         session.send_key("p")
