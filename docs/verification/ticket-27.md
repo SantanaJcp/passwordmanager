@@ -2003,3 +2003,18 @@ lector acotado `read_frame_bounded`. Es un fallo de composición/compilación, n
 un RED de pantalla. La unidad común posterior posee explícitamente esas
 primitivas y mantiene el límite de 18 MiB para frames de control y de 1 MiB para
 streaming; debe pasar check local antes de otra publicación nativa.
+
+### Bounded usage-interruption close — 2026-09-16
+
+Native run35 `34880881633` at `3ff9734` failed before the TUI tracer:
+`process_transfer_lease_is_unique_and_restores_the_exact_dacl` could not begin
+its lease, while the other process-DACL mutation test passed (11 passed, one
+failed). Both tests share the process-wide reservation and DACL under the Rust
+parallel test harness. They now acquire one test-only mutex before inspecting
+or mutating that shared resource; the nested second lease inside the uniqueness
+test still must fail. Product ACL/lease semantics are unchanged. Native rerun
+is required to confirm this cause and reach the pending first-prompt diagnostic.
+
+Local close verification: rustfmt/config and pm-native-channel all-targets
+PASS on Linux (`/tmp/pm-handoff-windows-local.log`); Windows-gated tests
+are not executed by that command. Native confirmation remains separate.

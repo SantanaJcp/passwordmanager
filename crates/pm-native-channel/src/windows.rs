@@ -1796,6 +1796,9 @@ mod tests {
     };
 
     const CANARY: &[u8] = b"ticket27-synthetic-native-canary";
+    // Both tests below mutate this process-wide DACL and lease reservation.
+    static PROCESS_DACL_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     static CLIPBOARD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -2015,6 +2018,7 @@ mod tests {
 
     #[test]
     fn process_transfer_lease_is_unique_and_restores_the_exact_dacl() {
+        let _exclusive_process_dacl = PROCESS_DACL_TEST.lock().unwrap();
         let before = current_process_dacl_bytes().unwrap();
         let lease = ProcessHandleTransferLease::begin().unwrap();
         let during = current_process_dacl_bytes().unwrap();
@@ -2027,6 +2031,7 @@ mod tests {
 
     #[test]
     fn process_transfer_lease_detects_a_visible_dacl_change_without_overwriting_it() {
+        let _exclusive_process_dacl = PROCESS_DACL_TEST.lock().unwrap();
         let process = unsafe { GetCurrentProcess() };
         let (before_descriptor, before_dacl) = query_process_dacl(process).unwrap();
         let before = acl_bytes(before_dacl).unwrap();
