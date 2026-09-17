@@ -906,7 +906,9 @@ class MacPtySession:
                 self.wait_text(f"Input: {value}", since=start)
             self.send_key("enter")
 
-    def run_while_draining(self, command, *, check=True, timeout=30):
+    def run_while_draining(
+        self, command, *, check=True, timeout=30, ready_path=None, ready_timeout=2,
+    ):
         """Run a fixture helper while continuously consuming this PTY."""
         argv = [str(value) for value in command]
         process = subprocess.Popen(
@@ -968,10 +970,26 @@ class MacPtySession:
                 pass
 
         primary = None
-        try:
-            complete = pump(time.monotonic() + timeout)
-        except BaseException as error:
-            primary = error
+        if ready_path is not None:
+            ready_path = pathlib.Path(ready_path)
+            ready_deadline = time.monotonic() + ready_timeout
+            while not ready_path.exists():
+                remaining = ready_deadline - time.monotonic()
+                if remaining <= 0:
+                    primary = AssertionError(
+                        "fixture helper readiness marker was not created"
+                    )
+                    break
+                try:
+                    pump(time.monotonic() + min(0.05, remaining))
+                except BaseException as error:
+                    primary = error
+                    break
+        if primary is None:
+            try:
+                complete = pump(time.monotonic() + timeout)
+            except BaseException as error:
+                primary = error
         if primary is None and not complete:
             primary = subprocess.TimeoutExpired(
                 argv, timeout,
@@ -1414,6 +1432,7 @@ def assert_pty_helper_drain_regression():
                     "os._exit(0)\n"
                 ) + [str(started), str(marker)],
                 timeout=0.1,
+                ready_path=started,
             )
         except subprocess.TimeoutExpired as error:
             assert error.output == b""
@@ -2658,7 +2677,8 @@ def run_tui_ticket23_matrix(binary, profile, private, endpoint):
         session.wait_text("Moved to trash", since=trashed)
         trash_history = session.mark()
         session.send_key("h")
-        assert "lifecycle trash" in session.wait_text("History:", since=trash_history)
+        trash_history_text = session.wait_text("lifecycle trash", since=trash_history)
+        assert "History:" in trash_history_text and "lifecycle trash" in trash_history_text
         restored = session.mark()
         session.send_key("u")
         session.wait_text("Restored with a new revision", since=restored)
