@@ -98,6 +98,11 @@ DIAGNOSTIC_LINE = re.compile(
     rb"(?:ok|vault-error) elapsed-ms=[0-9]{1,6}|"
     rb"PM26_DIAGNOSTIC launchd-service="
     rb"(?:same-pid|different-pid|unavailable|unparseable)|"
+    rb"PM26_DIAGNOSTIC agent-discovery-concurrent "
+    rb"before=(?:ok|failed) discovery=(?:ok|failed) after=(?:ok|failed) "
+    rb"cleanup=(?:ok|failed) process=(?:same|changed|missing) "
+    rb"result=(?:zero|nonzero) stderr=(?:custody-unavailable|other) "
+    rb"elapsed=(?:immediate|before-io-bound|io-bound-or-later)|"
     rb"PM26_DIAGNOSTIC pasteboard-human-canary-read="
     rb"(?:yes|no|indeterminate)|"
     rb"PM26_DIAGNOSTIC pasteboard-human-canary-(?:before|after)="
@@ -2291,6 +2296,18 @@ def classify_launchd_service(result, expected_pid):
     return b"same-pid" if int(match.group(1)) == expected_pid else b"different-pid"
 
 
+def running_launchd_pid(result):
+    """Return a PID only for one unambiguously running launchd job snapshot."""
+    if result.returncode != 0 or result.stderr:
+        return None
+    if re.search(rb"(?m)^\s*state = running\s*$", result.stdout) is None:
+        return None
+    matches = re.findall(rb"(?m)^\s*pid = ([0-9]+)\s*$", result.stdout)
+    if len(matches) != 1:
+        return None
+    return int(matches[0])
+
+
 def human_authorization_setup(
     binary, profile, private, endpoint, first, second, service_pid, diagnostic,
 ):
@@ -2370,24 +2387,123 @@ def agent_discovery(binary, profile, private, endpoint, *, allowed=True):
     return result.stdout.decode("utf-8")
 
 
+def safe_sudo_while_draining(session, command, *, user=None, timeout=30):
+    """Capture helper failure and cleanup state without propagating unsafe details."""
+    try:
+        result = session.run_sudo_while_draining(
+            command, user=user, check=False, timeout=timeout,
+        )
+    except BaseException as error:
+        cleanup_failed = isinstance(error, BaseExceptionGroup) \
+            or error.__cause__ is not None
+        return None, b"failed" if cleanup_failed else b"ok"
+    return result, b"ok"
+
+
+def diagnostic_agent_discovery(session, binary, profile, private, endpoint):
+    """Run one discovery while draining the TUI and emit only fixed categories."""
+    before, before_cleanup = safe_sudo_while_draining(
+        session, ["launchctl", "print", f"system/{LABEL}"],
+    )
+    before_pid = running_launchd_pid(before) if before is not None else None
+    before_category = b"ok" if before_pid is not None else b"failed"
+
+    started = time.monotonic()
+    result, discovery_cleanup = safe_sudo_while_draining(
+        session,
+        [binary, "agent-discover", "--profile", profile, "--private", private,
+         "--socket", endpoint],
+        user=AGENT, timeout=30,
+    )
+    elapsed = time.monotonic() - started
+
+    after, after_cleanup = safe_sudo_while_draining(
+        session, ["launchctl", "print", f"system/{LABEL}"],
+    )
+    after_pid = running_launchd_pid(after) if after is not None else None
+    after_category = b"ok" if after_pid is not None else b"failed"
+    cleanup_category = b"failed" if b"failed" in (
+        before_cleanup, discovery_cleanup, after_cleanup,
+    ) else b"ok"
+
+    if before_pid is None or after_pid is None:
+        process_category = b"missing"
+    elif before_pid == after_pid:
+        process_category = b"same"
+    else:
+        process_category = b"changed"
+    result_category = b"zero" if result is not None and result.returncode == 0 else b"nonzero"
+    stderr_category = b"custody-unavailable" if result is not None \
+        and result.stderr == b"CUSTODY_UNAVAILABLE\n" else b"other"
+    discovery_ok = result is not None and result.returncode == 0 \
+        and result.stdout.startswith(b"PASS delegated-discovery") \
+        and result.stderr == b""
+    discovery_category = b"ok" if discovery_ok else b"failed"
+    if elapsed < 1:
+        elapsed_category = b"immediate"
+    elif elapsed < 15:
+        elapsed_category = b"before-io-bound"
+    else:
+        elapsed_category = b"io-bound-or-later"
+
+    emit_diagnostic(
+        b"PM26_DIAGNOSTIC agent-discovery-concurrent before=" + before_category
+        + b" discovery=" + discovery_category + b" after=" + after_category
+        + b" cleanup=" + cleanup_category + b" process=" + process_category
+        + b" result=" + result_category + b" stderr=" + stderr_category
+        + b" elapsed=" + elapsed_category
+    )
+    categories = (
+        before_category, discovery_category, after_category, cleanup_category,
+        process_category, result_category, stderr_category, elapsed_category,
+    )
+    if before_category != b"ok" or discovery_category != b"ok" \
+            or after_category != b"ok" or cleanup_category != b"ok":
+        evidence = "/".join(value.decode("ascii") for value in categories)
+        raise AssertionError(
+            "agent discovery concurrent diagnostic failed categories=" + evidence
+        ) from None
+    return result.stdout
+
+
 def require_agent_discovery(binary, profile, private, endpoint):
     return agent_discovery(binary, profile, private, endpoint)
+
+
+def access_rows(rendered):
+    """Parse only complete, bordered metadata rows from the access overview."""
+    row_pattern = re.compile(
+        r"│(› |  )(\[(?:agent (?:active|revoked|superseded)|"
+        r"credential (?:enabled|disabled))\] .+ (?:subject|item)=[0-9a-f]{32}) *│"
+    )
+    return [
+        match.groups() for line in rendered.splitlines()
+        if (match := row_pattern.fullmatch(line)) is not None
+    ]
+
+
+def wait_complete_access_row(session, marker, *, timeout=8, since=0):
+    """Wait for one unique access row including its trailing public identifier."""
+    deadline = time.monotonic() + timeout
+    while True:
+        rendered = session._current_text_after(since)
+        if rendered is not None:
+            matches = [row for row in access_rows(rendered) if marker in row[1]]
+            if len(matches) == 1:
+                return rendered
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(f"TUI complete access row was not observed: {marker}")
+        session._read_once(min(0.1, remaining))
 
 
 def wait_selected_access_row(session, marker, *, timeout=8, limit=64):
     """Select one metadata-only access row without assuming credential order."""
     deadline = time.monotonic() + timeout
-    row_pattern = re.compile(
-        r"│(› |  )(\[(?:agent (?:active|revoked|superseded)|"
-        r"credential (?:enabled|disabled))\] .+ (?:subject|item)=[0-9a-f]{32}) *│"
-    )
     moves = 0
     while moves < limit:
         session.drain()
-        rows = [
-            match.groups() for line in session.screen.application_text().splitlines()
-            if (match := row_pattern.fullmatch(line)) is not None
-        ]
+        rows = access_rows(session.screen.application_text())
         selected = [index for index, row in enumerate(rows) if row[0] == "› "]
         targets = [index for index, row in enumerate(rows) if marker in row[1]]
         if len(selected) == 1 and len(targets) == 1 and selected == targets:
@@ -2736,7 +2852,10 @@ def run_tui_ticket24_matrix(
 
         access = session.mark()
         session.send_key("a")
-        page = session.wait_text("Delegated authority (metadata only)", since=access)
+        session.wait_text("Delegated authority (metadata only)", since=access)
+        page = wait_complete_access_row(
+            session, "[credential enabled] Synthetic TLS shared account", since=access,
+        )
         for marker in (
             "[agent active] Synthetic agent A",
             "[agent active] Synthetic agent B",
@@ -2771,10 +2890,12 @@ def run_tui_ticket24_matrix(
         disabled = wait_selected_access_row(session, "Synthetic TLS shared account")
         session.send_key("e")
         session.wait_text("[credential disabled] Synthetic TLS shared account", since=disabled)
-        empty = agent_discovery(
-            binary, agent_profile, agent_private, agent_endpoint,
+        empty = diagnostic_agent_discovery(
+            session, binary, agent_profile, agent_private, agent_endpoint,
         )
-        assert empty == "PASS delegated-discovery count=0 set=\n", empty
+        assert empty == b"PASS delegated-discovery count=0 set=\n", (
+            "disabled credential remained discoverable"
+        )
 
         enabled = wait_selected_access_row(session, "Synthetic TLS shared account")
         session.send_key("e")
