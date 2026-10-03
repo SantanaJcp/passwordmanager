@@ -197,6 +197,36 @@ mod windows_fixture {
             })
         }
 
+        fn information_rows(&self) -> Option<Vec<String>> {
+            let row_text = |y: usize| {
+                let mut row = String::new();
+                for cell in &self.cells[y * SCREEN_COLUMNS..(y + 1) * SCREEN_COLUMNS] {
+                    match cell {
+                        ScreenCell::Empty => row.push(' '),
+                        ScreenCell::Glyph(value) => row.push_str(value),
+                        ScreenCell::WideContinuation => {}
+                    }
+                }
+                row
+            };
+            if !row_text(3).contains("Information") {
+                return None;
+            }
+            (4..SCREEN_ROWS - 7)
+                .map(|y| {
+                    let row = row_text(y);
+                    row.strip_prefix('│')
+                        .and_then(|r| r.strip_suffix('│'))
+                        .map(|r| r.trim_end().to_owned())
+                })
+                .collect()
+        }
+
+        fn information_contains(&self, expected: &str) -> bool {
+            self.information_rows()
+                .is_some_and(|rows| rows.join(" ").contains(expected))
+        }
+
         fn contains_flat(&self, expected: &str) -> bool {
             let mut rendered = String::new();
             for cell in &self.cells {
@@ -685,6 +715,53 @@ mod windows_fixture {
 
         fn wait_for(&self, expected: &str) -> Result<(), String> {
             self.wait_for_matching(expected, |state| state.contains(expected))
+        }
+
+        fn wait_for_information(&self, expected: &str) -> Result<(), String> {
+            self.wait_for_matching(expected, |state| state.information_contains(expected))
+        }
+
+        fn wait_for_import_review(
+            &self,
+            total: u64,
+            new: u64,
+            preserved: u64,
+        ) -> Result<(), String> {
+            self.wait_for_matching("complete import counters in main panel", |state| {
+                let Some(rows) = state.information_rows() else {
+                    return false;
+                };
+                let text = rows.join(" ");
+                let expected = [
+                    format!("total={total}"),
+                    format!("new={new}"),
+                    "replaced=0".into(),
+                    "exact-duplicates=0".into(),
+                    "excluded=0".into(),
+                    format!("preserved-fields={preserved}"),
+                    "pages=1;".into(),
+                ];
+                expected
+                    .iter()
+                    .all(|token| text.split_whitespace().any(|part| part == token))
+                    && text.contains("type IMPORT to commit")
+            })
+        }
+
+        fn wait_for_recovery_code(&self) -> Result<zeroize::Zeroizing<String>, String> {
+            self.wait_for_matching(
+                "complete temporary recovery code and historical warning in panel",
+                |state| {
+                    state.information_contains("historical recovery paths")
+                        && recovery_code(state).is_some()
+                },
+            )?;
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "ConPTY observer lock poisoned".to_owned())?;
+            recovery_code(&state)
+                .ok_or_else(|| "temporary recovery code expired before observation".to_owned())
         }
 
         fn wait_for_footer_suffix(&self, expected: &str) -> Result<(), String> {
@@ -1502,7 +1579,7 @@ mod windows_fixture {
         press(fixture, key)?;
         fixture
             .observer
-            .wait_for(expected)
+            .wait_for_information(expected)
             .map_err(io::Error::other)
     }
 
@@ -1599,12 +1676,16 @@ mod windows_fixture {
         press(fixture, "\r")?;
         fixture
             .observer
-            .wait_for("Preview values hidden")
+            .wait_for_information("Preview values hidden")
             .map_err(io::Error::other)?;
         // Required review data must be visible before the fixture confirms.
         fixture
             .observer
-            .wait_for("exact-duplicates=0")
+            .wait_for_information("exact-duplicates=0")
+            .map_err(io::Error::other)?;
+        fixture
+            .observer
+            .wait_for_import_review(1, 1, 0)
             .map_err(io::Error::other)?;
         type_visible_and_submit(fixture, "IMPORT", "IMPORT")?;
         fixture
@@ -1619,7 +1700,11 @@ mod windows_fixture {
         type_visible_and_submit(fixture, &onepux_request, "|keep")?;
         fixture
             .observer
-            .wait_for("Preview values hidden")
+            .wait_for_information("Preview values hidden")
+            .map_err(io::Error::other)?;
+        fixture
+            .observer
+            .wait_for_import_review(2, 2, 4)
             .map_err(io::Error::other)?;
         type_visible_and_submit(fixture, "IMPORT", "IMPORT")?;
         fixture
@@ -1648,7 +1733,7 @@ mod windows_fixture {
         press(fixture, "h")?;
         fixture
             .observer
-            .wait_for("History:")
+            .wait_for_information("History:")
             .map_err(io::Error::other)?;
 
         // Exact-field reveal/copy always crosses the selection screen; merely
@@ -1762,7 +1847,7 @@ mod windows_fixture {
         press(fixture, "1")?;
         fixture
             .observer
-            .wait_for("Audit metadata:")
+            .wait_for_information("Audit metadata:")
             .map_err(io::Error::other)?;
 
         eprintln!("TUI_STAGE stage=generator-access-pending-audit result=pass");
@@ -1773,7 +1858,7 @@ mod windows_fixture {
         type_visible_and_submit(fixture, paths.backup, visible_path_name(paths.backup)?)?;
         fixture
             .observer
-            .wait_for("Native encrypted backup complete")
+            .wait_for_information("Native encrypted backup complete")
             .map_err(io::Error::other)?;
         open_menu(fixture, "b", "Backup/recovery:")?;
         open_menu(fixture, "2", "New plaintext export path")?;
@@ -1784,12 +1869,14 @@ mod windows_fixture {
         )?;
         fixture
             .observer
-            .wait_for("PLAINTEXT WARNING")
+            .wait_for_information(
+                "PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:",
+            )
             .map_err(io::Error::other)?;
         type_visible_and_submit(fixture, "EXPORT", "EXPORT")?;
         fixture
             .observer
-            .wait_for("Plaintext export complete")
+            .wait_for_information("Plaintext export complete")
             .map_err(io::Error::other)?;
 
         press(fixture, "d")?;
@@ -1809,8 +1896,77 @@ mod windows_fixture {
             .wait_for("Purged ")
             .map_err(io::Error::other)?;
         eprintln!("TUI_STAGE stage=backup-export-trash result=pass");
+        exercise_restore_rotations(fixture, &paths)?;
         write_keyboard_input(fixture, b"q")?;
         require_tui_exit(fixture.process)
+    }
+
+    fn recovery_code(state: &ScreenState) -> Option<zeroize::Zeroizing<String>> {
+        let rows = state.information_rows()?;
+        let index = rows.iter().position(|row| row == "Recovery code:")?;
+        let value = zeroize::Zeroizing::new(rows[index + 1..].join(""));
+        let parts = value.split('-').collect::<Vec<_>>();
+        if parts.len() != 12
+            || parts[0] != "PMR1"
+            || parts[1].len() != 32
+            || !parts[1].bytes().all(|b| b.is_ascii_hexdigit())
+            || parts[2].is_empty()
+            || !parts[2].bytes().all(|b| b.is_ascii_digit())
+            || !parts[3..]
+                .iter()
+                .all(|p| p.len() == 8 && p.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return None;
+        }
+        Some(value)
+    }
+
+    fn exercise_restore_rotations(fixture: &Fixture, paths: &MatrixPaths<'_>) -> io::Result<()> {
+        open_menu(fixture, "b", "Backup/recovery:")?;
+        open_menu(
+            fixture,
+            "3",
+            "Archive path|RESTORE (adds new IDs/keys; current authority is preserved):",
+        )?;
+        let restore = format!("{}|RESTORE", encode_operation_field(paths.backup));
+        type_visible_and_submit(fixture, &restore, "|RESTORE")?;
+        fixture.observer.wait_for_information("Restore committed with new IDs/keys; current authority preserved and imported grants inactive").map_err(io::Error::other)?;
+        eprintln!("TUI_STAGE stage=restore result=pass");
+        open_menu(fixture, "b", "Backup/recovery:")?;
+        open_menu(fixture, "5", "Recovery code shown temporarily")?;
+        let code = fixture
+            .observer
+            .wait_for_recovery_code()
+            .map_err(io::Error::other)?;
+        // No secret code is printed or sent through a visible-input oracle.
+        let request = zeroize::Zeroizing::new(format!("{}\r", code.as_str()));
+        write_keyboard_input(fixture, request.as_bytes())?;
+        fixture
+            .observer
+            .wait_for_information(
+                "Recovery rotated after exact re-entry; historical backups/copies remain usable",
+            )
+            .map_err(io::Error::other)?;
+        eprintln!("TUI_STAGE stage=recovery-rotation result=pass");
+        open_menu(fixture, "b", "Backup/recovery:")?;
+        open_menu(
+            fixture,
+            "4",
+            "New master password|ROTATE (old backups and exposed copies retain historical recovery paths):",
+        )?;
+        write_keyboard_input(fixture, b"synthetic-ticket27-rotated-master|ROTATE\r")?;
+        fixture
+            .observer
+            .wait_for_information(
+                "Master password rotated; old backups and exposed copies retain historical paths",
+            )
+            .map_err(io::Error::other)?;
+        fixture
+            .observer
+            .rejects(b"synthetic-ticket27-rotated-master")
+            .map_err(io::Error::other)?;
+        eprintln!("TUI_STAGE stage=master-rotation result=pass");
+        Ok(())
     }
 
     fn child_diagnostic(process: HANDLE) -> io::Result<String> {
@@ -1979,6 +2135,33 @@ mod windows_fixture {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn observer_requires_mandatory_information_in_main_panel() {
+            let observer = ScreenObserver::new();
+            observer
+                .feed(b"\x1b[20;2HPreview values hidden: exact-duplicates=1")
+                .unwrap();
+            assert!(
+                !observer
+                    .state
+                    .lock()
+                    .unwrap()
+                    .information_contains("exact-duplicates=1")
+            );
+            observer.feed("\x1b[4;1H┌Information───────────────────────────────────────────────────────────────────┐".as_bytes()).unwrap();
+            for y in 5..18 {
+                let text = if y == 5 {
+                    "Preview values hidden: exact-duplicates=1"
+                } else {
+                    ""
+                };
+                observer
+                    .feed(format!("\x1b[{y};1H│{text:<78}│").as_bytes())
+                    .unwrap();
+            }
+            observer.wait_for_information("exact-duplicates=1").unwrap();
+        }
 
         #[test]
         fn observer_matches_footer_suffix_and_cursor_in_one_screen() {

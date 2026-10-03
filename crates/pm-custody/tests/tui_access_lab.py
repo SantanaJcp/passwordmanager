@@ -19,7 +19,7 @@ import time
 from linux_lab import as_uid, create_vault, expect_unavailable, start_as, stop, wait_for_sockets, wire_fields
 
 if len(sys.argv) <= 1 or sys.argv[1] != "provider":
-    from tui_content_lab import screen, send, start_tui, tmux, wait_text
+    from tui_content_lab import wait_information, screen, send, start_tui, tmux, wait_text
 
 CUSTODIAN, HUMAN, AGENT_A, AGENT_B, AGENT_C, PROVIDER = 1, 0, 3, 4, 6, 5
 DEVICE = "24242424242424242424242424242424"

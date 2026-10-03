@@ -905,6 +905,19 @@ class MacPtySession:
                 )
             self._read_once(min(0.1, remaining))
 
+    def wait_information(self, expected, *, timeout=8, since=0):
+        from tui_migration_fixtures import information_text
+        deadline = time.monotonic() + timeout
+        while True:
+            rendered = self._current_text_after(since)
+            value = "" if rendered is None else information_text(rendered)
+            if expected in value:
+                return value
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError("mandatory TUI panel observation timed out " + self._screen_diagnostic(since))
+            self._read_once(min(0.1, remaining))
+
     def wait_selected(self, label, *, timeout=8, since=0):
         pattern = re.compile(rf"›\s+{re.escape(label)}(?:\s|\(|$)")
         deadline = time.monotonic() + timeout
@@ -2708,7 +2721,7 @@ def start_macos_tui(binary, profile, private, endpoint, *, idle, reveal, copy, p
 def tui_search(session, value):
     start = session.mark()
     session.send_key("/")
-    session.wait_text("Search (engine-decrypted):", since=start)
+    session.wait_information("Search (engine-decrypted):", since=start)
     search_start = session.mark()
     session.send_text(value, enter=True)
     return session.wait_text("Search returned 1 active items", since=search_start)

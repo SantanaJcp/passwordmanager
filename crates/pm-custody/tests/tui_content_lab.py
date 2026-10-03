@@ -13,6 +13,8 @@ import sys
 import tempfile
 import time
 
+from tui_migration_fixtures import information_text
+
 from linux_lab import as_uid, create_vault, start_as, stop, wait_for_sockets, wire_fields
 
 CUSTODIAN, HUMAN, AGENT = 1, 0, 3
@@ -43,6 +45,16 @@ def wait_text(root, text, timeout=8):
     raise AssertionError((text, screen(root)))
 
 
+def wait_information(root, text, timeout=8):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = information_text(screen(root))
+        if text in value:
+            return value
+        time.sleep(0.05)
+    raise AssertionError("mandatory TUI information not observed in main panel: " + text)
+
+
 def send(root, value, enter=False, hidden=False):
     if value:
         tmux(root, "send-keys", "-l", value)
@@ -58,7 +70,7 @@ def send(root, value, enter=False, hidden=False):
 
 def query(root, value):
     send(root, "/")
-    wait_text(root, "Search (engine-decrypted):")
+    wait_information(root, "Search (engine-decrypted):")
     send(root, value, enter=True)
     return wait_text(root, "Search returned")
 
@@ -213,7 +225,7 @@ def main():
             wait_text(root, "Organization committed")
             query(root, title)
             send(root, "h")
-            wait_text(root, "History:")
+            wait_information(root, "History:")
             send(root, "r")
             field_page = wait_text(root, "Fields (explicit selection; values hidden)")
             assert field_label in field_page, (field_label, field_page)

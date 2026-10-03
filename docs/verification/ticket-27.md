@@ -2568,3 +2568,24 @@ Crossterm TERM puede declarar soporte tras fallo VT; Ratatui reflow omite un
 glyph mayor que su ancho (el nuevo panel usa wrapping explícito por grafema);
 `tui_content_lab.py::screen` reemplaza UTF-8 inválido. El `unwrap_or(0)` de
 selección de catálogo conserva selección inicial si falta el ID, sin cambio.
+
+
+W1 RED conductual: `ef820a2`, extracción sin cambio de comportamiento;
+`flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody
+--lib information_ --locked --offline` → rc101, 0/3, log
+`/tmp/pmw1-render-red.log`. GREEN inicial: 6/6 panel + 7/7 footer, biblioteca y
+binario, dentro de 38+38 tests y bootstrap1/1, `/tmp/pmw1-render-green3.log`.
+Las dos iteraciones de oráculo corrigieron sólo normalización de líneas
+físicas/etiqueta recovery; un fallo `Debug` fue de compilación de test y no
+RED conductual. Checks intermedios detectaron fmt y tamaño de render; se
+extrajeron helpers de render del catálogo, sin relajar lint.
+
+PTY Linux operations pasó todo el recorrido original, además de avisos completos
+recovery/master desde el panel a 80×24, `/tmp/pmw1-tui-operations-green1.log`.
+Los plazos/leases permanecen iguales. Extensión nativa preparada: Windows
+exige los siete contadores exactos CSV (1/1/0/0/0/0/1) y 1PUX (2/2/0/0/0/4/1,
+raw+provenance por cada item), warning plaintext completo, restore y ambas
+rotaciones por teclado con código PMR1 completo en panel y máscara conservada.
+La lease reveal/copy nativa permanece1s. Se exige unlock posterior con la nueva
+maestra sintética. Mac Full25 observa los mismos avisos a 80×24 con las
+aserciones históricas completas y el timeout original.

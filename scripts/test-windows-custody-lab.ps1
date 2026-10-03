@@ -699,6 +699,10 @@ try {
         Assert-True ((Get-Item -LiteralPath $tuiBackup -ErrorAction Stop).Length -gt 0) 'TUI native backup is empty'
         Assert-True (Test-Path -LiteralPath $tuiPlaintext -PathType Leaf) 'TUI plaintext export was not published'
         Assert-True ((Get-Item -LiteralPath $tuiPlaintext -ErrorAction Stop).Length -gt 0) 'TUI plaintext export is empty'
+        # Matrix ends with a real keyboard master rotation; subsequent unlock
+        # must use that exact synthetic password, never an alternative path.
+        [IO.File]::WriteAllText($humanInput, "synthetic-ticket27-rotated-master`n", [Text.UTF8Encoding]::new($false))
+
     }
 
     $p = Start-AsUser $humanCredential $custody @('human-lock', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $humanInput $humanOut $humanErr

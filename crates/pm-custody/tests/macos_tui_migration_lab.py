@@ -10,7 +10,7 @@ import re
 import sys
 import zipfile
 
-from tui_migration_fixtures import onepux, pairing_namespace
+from tui_migration_fixtures import onepux, pairing_namespace, information_text, recovery_code
 from tui_operations_lab import ClosingEndpoint
 
 REMOTE_DEVICE = "25252525252525252525252525252525"
@@ -53,11 +53,11 @@ def submit(session, value, *, hidden=False):
 def operation(session, menu, number, prompt, value=None, *, hidden=False):
     mark = session.mark()
     session.send_key(menu)
-    session.wait_text({"m": "Migration:", "b": "Backup/recovery:",
+    session.wait_information({"m": "Migration:", "b": "Backup/recovery:",
                        "y": "Devices/sync:", "z": "Audit:"}[menu], since=mark)
     mark = session.mark()
     session.send_key(number)
-    session.wait_text(prompt, since=mark)
+    session.wait_information(prompt, since=mark)
     if value is not None:
         submit(session, str(value), hidden=hidden)
     return mark
@@ -74,7 +74,7 @@ def start(m, binary, profile, private, endpoint, *, password=None, idle=30):
                               idle=idle, reveal=10, copy=2,
                               password=m.PASSWORD if password is None else password)
     mark = session.mark()
-    session.resize(240, 30)
+    session.resize(80, 24)
     session.wait_text("Items (selection is metadata only)", since=mark)
     return session
 
@@ -272,14 +272,13 @@ def expect_output_collision(session, kind, path, expected_digest, *, since):
 
 def wait_recovery_code(m, session, *, since):
     deadline = m.time.monotonic() + 8
-    grammar = r"Exposure: (PMR1-[0-9a-f]{32}-[0-9]+(?:-[0-9a-f]{8}){9})"
     while True:
         page = session._current_text_after(since)
-        if page is not None and "Recovery code shown temporarily" in page:
-            codes = [match.group(1) for row in m.exposure_rows(page)
-                     if (match := re.fullmatch(grammar, row)) is not None]
-            if len(codes) == 1:
-                return codes[0]
+        if page is not None:
+            panel = information_text(page)
+            code = recovery_code(page)
+            if code is not None and "Recovery code shown temporarily" in panel and "historical recovery paths" in panel:
+                return code
         remaining = deadline - m.time.monotonic()
         if remaining <= 0:
             raise AssertionError("complete recovery exposure did not paint within the original bound")
@@ -393,7 +392,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         for kind in ("chrome", "apple", "mappable"):
             before = snapshot(m, session)["vault_items"]
             mark = operation(session, "m", "1", "CSV source", f"{sources[kind]}|{kind}|keep")
-            preview = session.wait_text("type IMPORT to commit", since=mark)
+            preview = session.wait_information("type IMPORT to commit", since=mark)
             assert "new=1" in preview and "Mapping=" + kind in preview
             assert "synthetic-ticket25-" not in preview
             submit(session, "IMPORT")
@@ -402,7 +401,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         before = snapshot(m, session)["vault_items"]
         for confirmation in ("NOT IMPORT", None):
             mark = operation(session, "m", "1", "CSV source", f"{sources['chrome']}|chrome|keep")
-            session.wait_text("exact-duplicates=1", since=mark)
+            session.wait_information("exact-duplicates=1", since=mark)
             if confirmation is None:
                 session.send_key("escape"); session.wait_text("Cancelled", since=mark)
             else:
@@ -410,12 +409,12 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
                 session.wait_text("Confirmation mismatch; import cancelled", since=mark)
             assert snapshot(m, session)["vault_items"] == before
         mark = operation(session, "m", "1", "CSV source", f"{sources['chrome']}|chrome|replace")
-        session.wait_text("duplicate-action=replace", since=mark)
-        session.wait_text("type IMPORT to commit", since=mark)
+        session.wait_information("duplicate-action=replace", since=mark)
+        session.wait_information("type IMPORT to commit", since=mark)
         session.send_key("escape"); session.wait_text("Cancelled", since=mark)
         assert snapshot(m, session)["vault_items"] == before
         mark = operation(session, "m", "2", "1PUX source", f"{archive}|keep")
-        preview = session.wait_text("type IMPORT to commit", since=mark)
+        preview = session.wait_information("type IMPORT to commit", since=mark)
         assert "new=2" in preview and "synthetic-ticket25-" not in preview
         submit(session, "IMPORT"); session.wait_text("Import committed transactionally", since=mark)
         assert snapshot(m, session)["vault_items"] == before + 2
@@ -424,14 +423,14 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
 
         print("PM26_MATRIX full25-import=observed", flush=True)
         mark = operation(session, "y", "3", "Exact device ID", REMOTE_DEVICE + "|RETIRE")
-        session.wait_text("retired at every locally observed", since=mark)
+        session.wait_information("retired at every locally observed", since=mark)
         result = session.run_sudo_while_draining([sys.executable, "-c",
             "import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);print(d.execute(\"select count(*) from authority_events where kind='device-retire' and subject=?\",[bytes.fromhex(sys.argv[2])]).fetchone()[0])",
             m.STATE / "vault.sqlite3", REMOTE_DEVICE])
         assert result.stdout == b"1\n" and result.stderr == b""
 
         mark = operation(session, "y", "1", "Observed server RPK", f"{pin}|{pairing}|PAIR")
-        session.wait_text("Protected pairing created", since=mark)
+        session.wait_information("Protected pairing created", since=mark)
         assert pairing.stat().st_mode & 0o777 == 0o600
         namespace = pairing_namespace(pairing.read_bytes())
         sync_value = f"{pairing}|{sync_binary}|{sync_socket}|{client_key}|{server_pub}|{pin}|SYNC"
@@ -449,16 +448,16 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         print("PM26_MATRIX full25-offline+wrong-pin=observed", flush=True)
 
         mark = operation(session, "b", "1", "New native backup path", native)
-        session.wait_text("Native encrypted backup complete", since=mark)
+        session.wait_information("Native encrypted backup complete", since=mark)
         assert native.stat().st_mode & 0o777 == 0o600 and native.stat().st_size > 0
         native_digest = source_digest(native)
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
-        session.wait_text("PLAINTEXT WARNING", since=mark)
+        session.wait_information("PLAINTEXT WARNING", since=mark)
         submit(session, "NOT EXPORT"); session.wait_text("Confirmation mismatch", since=mark)
         assert not plaintext.exists()
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
-        session.wait_text("PLAINTEXT WARNING", since=mark)
-        submit(session, "EXPORT"); session.wait_text("Plaintext export complete", since=mark)
+        session.wait_information("PLAINTEXT WARNING", since=mark)
+        submit(session, "EXPORT"); session.wait_information("Plaintext export complete", since=mark)
         assert plaintext.stat().st_mode & 0o777 == 0o600 \
             and plaintext.read_bytes().startswith(b"PM-LOGICAL-JSONL/1\n")
         plaintext_digest = source_digest(plaintext)
@@ -467,8 +466,8 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         page = session.wait_text("large-雪.bin", since=mark)
         assert "Attachments (exact descriptor; values hidden)" in page
         assert "ticket05-large-stream-canary-" not in page
-        session.send_key("enter"); session.wait_text("New destination path", since=mark)
-        submit(session, str(attachment)); session.wait_text("Attachment streamed atomically", since=mark)
+        session.send_key("enter"); session.wait_information("New destination path", since=mark)
+        submit(session, str(attachment)); session.wait_information("Attachment streamed atomically", since=mark)
         assert_stream(attachment)
 
         mark = operation(session, "z", "1", "Audit metadata:")
@@ -476,7 +475,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         records = re.search(r"records=(\d+)", page); assert records and int(records.group(1)) > 0
         before = snapshot(m, session)
         mark = operation(session, "z", "2", "generation:through-sequence", "1:2:PURGE AUDIT")
-        session.wait_text("discontinuity retained", since=mark)
+        session.wait_information("discontinuity retained", since=mark)
         after = snapshot(m, session)
         assert after["revision_parts"] == before["revision_parts"]
         assert after["audit_purge_ranges"] > before["audit_purge_ranges"]
@@ -488,7 +487,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         assert snapshot(m, session)["vault_items"] == before_count
         mark = operation(session, "b", "3", "Archive path|RESTORE", f"{native}|RESTORE")
         try:
-            session.wait_text("Restore committed with new IDs/keys", since=mark)
+            session.wait_information("Restore committed with new IDs/keys", since=mark)
         except BaseException as error:
             try:
                 diagnose_restore_wait(m, session, after, since=mark)
@@ -501,13 +500,13 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         mark = operation(session, "b", "5", "Recovery code shown temporarily")
         code = wait_recovery_code(m, session, since=mark)
         submit(session, code, hidden=True)
-        page = session.wait_text("Recovery rotated after exact re-entry; historical backups/copies remain usable", since=mark)
+        page = session.wait_information("Recovery rotated after exact re-entry; historical backups/copies remain usable", since=mark)
         assert "historical backups/copies remain usable" in page
         lock(m, session); session = None
         session = start(m, binary, profile, private, endpoint)
         mark = operation(session, "b", "4", "New master password|ROTATE",
                          NEW_PASSWORD.decode() + "|ROTATE", hidden=True)
-        page = session.wait_text("Master password rotated; old backups and exposed copies retain historical paths", since=mark)
+        page = session.wait_information("Master password rotated; old backups and exposed copies retain historical paths", since=mark)
         assert "historical" in page
         lock(m, session); session = None
         wrong = m.MacPtySession.start(binary, profile, private, endpoint, idle=30, reveal=1, copy=1)
@@ -525,13 +524,13 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         mark = operation(session, "b", "1", "New native backup path", native)
         expect_output_collision(session, "backup", native, native_digest, since=mark)
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
-        session.wait_text("PLAINTEXT WARNING", since=mark)
+        session.wait_information("PLAINTEXT WARNING", since=mark)
         submit(session, "EXPORT")
         expect_output_collision(session, "plaintext", plaintext, plaintext_digest, since=mark)
 
         mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value)
         try:
-            complete = session.wait_text("Sync complete through pinned TLS", timeout=20, since=mark)
+            complete = session.wait_information("Sync complete through pinned TLS", timeout=20, since=mark)
         except BaseException as error:
             try:
                 diagnose_sync_wait(m, session, mark, sync_db, sync_pid)
@@ -541,12 +540,12 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         assert "pushed=" in complete and "pulled=" in complete
         job = re.search(r"job=([0-9a-f]{32})", complete); assert job
         mark = operation(session, "y", "4", "Exact sync job ID", job.group(1))
-        session.wait_text("Sync complete through pinned TLS", since=mark)
+        session.wait_information("Sync complete through pinned TLS", since=mark)
         hostile_socket = scratch / "closing.sock"
         closing = ClosingEndpoint(hostile_socket)
         failed_value = sync_value.replace(str(sync_socket), str(hostile_socket))
         mark = operation(session, "y", "2", "pairing|pm-sync program", failed_value)
-        queued = session.wait_text("authorized and queued", since=mark)
+        queued = session.wait_information("authorized and queued", since=mark)
         failed_job = re.search(r"Sync job ([0-9a-f]{32})", queued); assert failed_job
         lock(m, session); session = None
         assert m.sudo(["test", "-f", m.STATE / "vault.sqlite3.sync-job"], check=False).returncode == 0

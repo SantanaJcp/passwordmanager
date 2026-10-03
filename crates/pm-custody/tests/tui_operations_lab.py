@@ -16,7 +16,7 @@ import time
 import tui_migration_fixtures as migration_fixtures
 
 from linux_lab import as_uid, start_as, stop, wait_for_sockets, wire_fields
-from tui_content_lab import HUMAN, query, screen, send, setup, start_tui, tmux, wait_text
+from tui_content_lab import wait_information, HUMAN, query, screen, send, setup, start_tui, tmux, wait_text
 
 REMOTE_DEVICE = "25252525252525252525252525252525"
 
@@ -164,28 +164,28 @@ def main():
         send(root, "m"); send(root, "1"); send(root, f"{root / 'human' / 'missing.csv'}|chrome|keep", enter=True)
         wait_text(root, "Operation failed explicitly; no success was recorded")
         assert tmux(root, "has-session", check=False).returncode == 0
-        send(root, "m"); wait_text(root, "Migration:")
-        send(root, "1"); wait_text(root, "CSV source")
+        send(root, "m"); wait_information(root, "Migration:")
+        send(root, "1"); wait_information(root, "CSV source")
         send_long(root, f"{source}|chrome|keep", "|chrome|keep")
-        preview = wait_text(root, "Preview values hidden")
+        preview = wait_information(root, "Preview values hidden")
         assert "new=1" in preview and "synthetic-ticket25-import" not in preview
         send(root, "IMPORT", enter=True); wait_text(root, "Import committed transactionally")
         assert source.read_bytes() == before_source
         query(root, "Keyboard import")
         before_cancel = sqlite3.connect(vault).execute("select count(*) from vault_items").fetchone()[0]
         send(root, "m"); send(root, "1"); send_long(root, f"{source}|chrome|keep", "|chrome|keep")
-        wait_text(root, "exact-duplicates=1"); send(root, "NOT IMPORT", enter=True)
+        wait_information(root, "exact-duplicates=1"); send(root, "NOT IMPORT", enter=True)
         wait_text(root, "Confirmation mismatch; import cancelled")
         assert sqlite3.connect(vault).execute("select count(*) from vault_items").fetchone()[0] == before_cancel
         send(root, "m"); send(root, "2"); send(root, f"{archive}|keep", enter=True)
-        preview = wait_text(root, "Preview values hidden")
+        preview = wait_information(root, "Preview values hidden")
         assert "new=2" in preview and "synthetic-ticket25-1pux" not in preview
         send(root, "IMPORT", enter=True); wait_text(root, "Import committed transactionally")
         assert archive.read_bytes() == before_archive
         query(root, "Keyboard 1PUX")
 
         send(root, "y"); send(root, "1"); send_long(root, f"{pin}|{pairing}|PAIR", "|PAIR")
-        wait_text(root, "Protected pairing created")
+        wait_information(root, "Protected pairing created")
         assert pairing.stat().st_mode & 0o777 == 0o600
         namespace = pairing_namespace(pairing.read_bytes())
         sync_socket, sync_db = root / "run" / "sync.sock", root / "state" / "sync.sqlite3"
@@ -196,11 +196,11 @@ def main():
         assert sync_socket.exists()
         send(root, "y"); send(root, "2")
         send_long(root, f"{pairing}|{sync_binary}|{sync_socket}|{client_key}|{sync_pub}|{pin}|SYNC", "|SYNC")
-        sync_page = wait_text(root, "Sync complete through pinned TLS", timeout=20)
+        sync_page = wait_information(root, "Sync complete through pinned TLS", timeout=20)
         assert "pushed=" in sync_page and sync_db.stat().st_size > 0
         send(root, "y"); send(root, "3")
         send_long(root, f"{REMOTE_DEVICE}|RETIRE", "|RETIRE")
-        wait_text(root, "retired at every locally observed")
+        wait_information(root, "retired at every locally observed")
         retirement = sqlite3.connect(vault).execute(
             "select count(*) from authority_events where kind='device-retire' and subject=?",
             [bytes.fromhex(REMOTE_DEVICE)]).fetchone()[0]
@@ -210,7 +210,7 @@ def main():
         closing_endpoint = ClosingEndpoint(hostile_socket)
         send(root, "y"); send(root, "2")
         send_long(root, f"{pairing}|{sync_binary}|{hostile_socket}|{client_key}|{sync_pub}|{pin}|SYNC", "|SYNC")
-        queued = wait_text(root, "authorized and queued")
+        queued = wait_information(root, "authorized and queued")
         job_match = re.search(r"Sync job ([0-9a-f]{32})", queued)
         assert job_match
         failed_job = job_match.group(1)
@@ -232,16 +232,16 @@ def main():
         assert tmux(root, "has-session", check=False).returncode == 1
         start_tui(root, binary, profile, key, runtime, password, idle=90, reveal=10, copy=2)
         send(root, "y"); send(root, "4"); send(root, failed_job, enter=True)
-        wait_text(root, "unavailable after bounded transport", timeout=75)
+        wait_information(root, "unavailable after bounded transport", timeout=75)
         assert not pathlib.Path(f"{vault}.sync-job").exists()
         closing_endpoint.close(); closing_endpoint = None
 
-        send(root, "b"); wait_text(root, "Backup/recovery:")
-        send(root, "1"); send(root, str(native), enter=True); wait_text(root, "Native encrypted backup complete")
+        send(root, "b"); wait_information(root, "Backup/recovery:")
+        send(root, "1"); send(root, str(native), enter=True); wait_information(root, "Native encrypted backup complete")
         assert native.stat().st_mode & 0o777 == 0o600 and native.stat().st_size > 0
         send(root, "b"); send(root, "2"); send(root, str(plaintext), enter=True)
-        wait_text(root, "PLAINTEXT WARNING")
-        send(root, "EXPORT", enter=True); wait_text(root, "Plaintext export complete")
+        wait_information(root, "PLAINTEXT WARNING")
+        send(root, "EXPORT", enter=True); wait_information(root, "Plaintext export complete")
         assert plaintext.stat().st_mode & 0o777 == 0o600 and plaintext.read_bytes().startswith(b"PM-LOGICAL-JSONL/1\n")
 
         results = query(root, "Large stream")
@@ -249,29 +249,35 @@ def main():
         send(root, "D"); page = wait_text(root, "large-雪.bin")
         assert "Attachments (exact descriptor; values hidden)" in page, page
         assert "synthetic-ticket25" not in page, page
-        tmux(root, "send-keys", "Enter"); wait_text(root, "New destination path")
-        send(root, str(attachment), enter=True); wait_text(root, "Attachment streamed atomically")
+        tmux(root, "send-keys", "Enter"); wait_information(root, "New destination path")
+        send(root, str(attachment), enter=True); wait_information(root, "Attachment streamed atomically")
         assert attachment.stat().st_size == 16 * 1024 * 1024 + 4096
 
-        send(root, "z"); send(root, "1"); audit = wait_text(root, "Audit metadata:")
+        send(root, "z"); send(root, "1"); audit = wait_information(root, "Audit metadata:")
         match = re.search(r"records=(\d+)", audit); assert match and int(match.group(1)) > 0
         before_parts = sqlite3.connect(vault).execute("select count(*) from revision_parts").fetchone()[0]
         send(root, "z"); send(root, "2"); send(root, "1:2:PURGE AUDIT", enter=True)
-        wait_text(root, "discontinuity retained")
+        wait_information(root, "discontinuity retained")
         after_parts = sqlite3.connect(vault).execute("select count(*) from revision_parts").fetchone()[0]
         assert after_parts == before_parts
 
-        send(root, "b"); wait_text(root, "Backup/recovery:")
-        send(root, "3"); wait_text(root, "Archive path|RESTORE")
+        send(root, "b"); wait_information(root, "Backup/recovery:")
+        send(root, "3"); wait_information(root, "Archive path|RESTORE")
         send(root, f"{native}|RESTORE", enter=True)
-        wait_text(root, "Restore committed with new IDs/keys")
-        tmux(root, "resize-window", "-x", "240", "-y", "30")
+        wait_information(root, "Restore committed with new IDs/keys")
+        tmux(root, "resize-window", "-x", "80", "-y", "24")
         send(root, "b"); send(root, "5")
-        recovery = wait_text(root, "Recovery code shown temporarily")
-        match = re.search(r"Exposure: ([^\s]+)", recovery)
-        assert match and match.group(1) != "<hidden>", recovery
-        send(root, match.group(1), enter=True, hidden=True)
-        wait_text(root, "Recovery rotated after exact re-entry")
+        recovery = wait_information(root, "Recovery code shown temporarily")
+        deadline = time.monotonic() + 8
+        code = None
+        while time.monotonic() < deadline:
+            page = screen(root)
+            code = migration_fixtures.recovery_code(page)
+            if code is not None and "historical recovery paths" in migration_fixtures.information_text(page): break
+            time.sleep(0.05)
+        assert code is not None, "complete recovery code missing from panel"
+        send(root, code, enter=True, hidden=True)
+        wait_information(root, "Recovery rotated after exact re-entry; historical backups/copies remain usable")
         send(root, "l")
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and tmux(root, "has-session", check=False).returncode == 0:
@@ -279,7 +285,7 @@ def main():
         assert tmux(root, "has-session", check=False).returncode == 1
         start_tui(root, binary, profile, key, runtime, password, idle=90, reveal=10, copy=2)
         send(root, "b"); send(root, "4"); send(root, "synthetic-ticket25-new-master|ROTATE", enter=True, hidden=True)
-        wait_text(root, "Master password rotated")
+        wait_information(root, "Master password rotated; old backups and exposed copies retain historical paths")
         send(root, "l")
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and tmux(root, "has-session", check=False).returncode == 0:
