@@ -3640,6 +3640,14 @@ def main():
             with open(diagnostic_plist, "wb") as destination:
                 plistlib.dump(launchd_config, destination)
             plist_to_install = diagnostic_plist
+        # W2: inject only categorical sync timing into this owned service.
+        sync_timing_plist = scratch / "w2-sync-timing.plist"
+        launchd_config.setdefault("EnvironmentVariables", {})["PMW2_TIMING"] = "1"
+        if not diagnostic:
+            launchd_config["StandardErrorPath"] = str(STATE / "w2-sync-timing.log")
+        with open(sync_timing_plist, "wb") as destination:
+            plistlib.dump(launchd_config, destination)
+        plist_to_install = sync_timing_plist
         sudo(["install", "-o", "root", "-g", "wheel", "-m", "0644", plist_to_install, PLIST])
         owned_paths.append(("plist", PLIST))
         sudo(["plutil", "-lint", PLIST])

@@ -7,7 +7,7 @@ use pm_crypto::{ProtectedBytes, digest};
 use pm_native_channel::{
     WindowsClientPipe, WindowsServerPipe, WindowsStopEvent, WindowsSyncPipeInstance,
 };
-use pm_sync::{OpaqueSyncStore, SyncError};
+use pm_sync::{OpaqueSyncStore, SyncError, timing};
 use rustls::{
     CertificateError, DigitallySignedStruct, DistinguishedName, Error as TlsError, SignatureScheme,
     client::{
@@ -337,13 +337,17 @@ fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) ->
     if tls.conn.alpn_protocol() != Some(ALPN) {
         return Err(());
     }
+    let opening = timing::Span::new("server_sqlite_open");
     let store = OpaqueSyncStore::create(db).map_err(|_| ())?;
+    drop(opening);
+    let dispatching = timing::Span::new("server_dispatch");
     let response = dispatch(
         &store,
         &peer,
         std::str::from_utf8(&request).map_err(|_| ())?,
     )
     .unwrap_or_else(|()| "{\"ok\":false}".to_owned());
+    drop(dispatching);
     write_frame(&mut tls, response.as_bytes())
 }
 
@@ -473,6 +477,7 @@ fn string_array_field(json: &str, name: &str) -> Result<Vec<String>, ()> {
 #[allow(clippy::too_many_lines)]
 fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Result<(), ()> {
     let socket = take(a, "--socket")?;
+    let preparing = timing::Span::new("client_prepare");
     let key = read_key(&take(a, "--client-key")?)?;
     let server = read_public(&take(a, "--server-pub")?)?;
     let namespace = hex32(&take(a, "--namespace")?)?;
@@ -554,6 +559,7 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
         _ => return Err(()),
     };
     let config = client_config(&key, &server)?;
+    drop(preparing);
     let response = client_exchange(&socket, config, json.as_bytes())?;
     let response = String::from_utf8(response).map_err(|_| ())?;
     if !response.starts_with("{\"ok\":true") {
@@ -582,6 +588,13 @@ fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Resul
     )
     .map_err(|_| ())?;
     let mut tls = rustls::StreamOwned::new(conn, stream);
+    if timing::enabled() {
+        let _handshake = timing::Span::new("tls_handshake");
+        while tls.conn.is_handshaking() {
+            tls.conn.complete_io(&mut tls.sock).map_err(|_| ())?;
+        }
+    }
+    let _exchange = timing::Span::new("tls_exchange");
     write_frame(&mut tls, request)?;
     read_frame(&mut tls)
 }

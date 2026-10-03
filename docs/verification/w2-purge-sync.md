@@ -495,3 +495,28 @@ composición de todos los commits W2 anteriores; no se simuló ni realizó merge
 acotada con W1 (recomendada) o concreta la estrategia/método del cliente.
 El fix del digest, los gates Linux y el diagnóstico nativo están publicados;
 no pasar W2 como cerrado al merger mientras el happy sync TUI siga rojo.
+
+## Fase 4 — método de diagnóstico y regresión autorizado
+
+El encargo amplía la zona a transporte/servidor sync, `sync_job.rs` y solo
+instrumentación sync del fixture Mac. Hasta dos corridas diagnósticas y dos
+de verificación sobre SHAs exactos; no modificar plazos, límites ni wire.
+`PMW2_TIMING=1` se inyecta únicamente en los procesos propios del fixture.
+Categorías fijas, contadores y microsegundos, sin IDs, hashes, rutas ni payloads.
+El fixture agrega conteo, tiempo total y máximo por categoría y distingue
+servidor de job; no imprime stderr arbitrario. Se observan spawn, preparación,
+TLS por conexión, RPC por bloque, SQLite, exportación, fsync y backoff.
+Comparar spawn/preparación/handshake/exchange con wall time del mismo job;
+los scopes anidados no se suman como tiempos independientes. Al vencer 20 s
+solo hay fases completadas, una cota parcial explícita. PID solo se compara
+y se emite `same/missing/changed`; no se imprime.
+
+Si se confirma reconexión por bloque, regresión Linux con servidor TLS/RPK
+real: el workload restaurado de 39 eventos conserva todos sus objetos/RPCs,
+root real y convergencia; exigir una creación de proceso/handshake para
+la secuencia en una sesión autenticada. RED antes del fix, GREEN después.
+Errores de transporte deben seguir visibles; ningún ack antes de publicación.
+Ejecutar bajo flock los tests E2EE, check, clean offline y los mismos 40 gates
+de `/tmp/pmw2c-gate-results.json`, sin repetir fallos para esconderlos.
+Confirmar el happy TUI exacto dentro de 20 s en ambas CPU; un workflow puede
+seguir fallido por otra matriz y se registra separado.

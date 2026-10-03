@@ -21,6 +21,8 @@ use std::{
     time::Duration,
 };
 
+pub mod timing;
+
 pub const MAX_BLOCK_BYTES: usize = 512 * 1024;
 pub const MAX_LIST_LIMIT: usize = 256;
 pub const MAX_OBJECT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -109,7 +111,32 @@ impl ProcessTlsTransport {
         for (flag, value) in extra {
             command.arg(flag).arg(value);
         }
-        let output = command.output().map_err(|_| SyncError::Unavailable)?;
+        let _rpc = timing::Span::new(match method {
+            "put" => "rpc_put",
+            "get" => "rpc_get",
+            "publish" => "rpc_publish",
+            "list" => "rpc_list",
+            _ => "rpc_other",
+        });
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let started = timing::Span::new("process_spawn");
+        let child = command.spawn().map_err(|_| SyncError::Unavailable)?;
+        drop(started);
+        let waiting = timing::Span::new("process_wait");
+        let output = child
+            .wait_with_output()
+            .map_err(|_| SyncError::Unavailable)?;
+        drop(waiting);
+        if timing::enabled() {
+            for line in output.stderr.split(|byte| *byte == b'\n') {
+                if timing::valid_line(line) {
+                    let _ = std::io::stderr().lock().write_all(line);
+                    let _ = std::io::stderr().lock().write_all(b"\n");
+                }
+            }
+        }
         if !output.status.success() {
             return Err(match output.status.code() {
                 Some(5) => SyncError::Missing,
@@ -127,10 +154,12 @@ impl SyncTransport for ProcessTlsTransport {
         let temporary = parent.join(format!(".pm-sync-put-{}-{}", std::process::id(), hex(&h)));
         let mut file = pm_native_channel::create_private_file(&temporary, false, true)
             .map_err(|_| SyncError::Unavailable)?;
+        let writing = timing::Span::new("put_file_fsync");
         file.write_all(b)
             .and_then(|()| file.sync_all())
             .map_err(|_| SyncError::Unavailable)?;
         drop(file);
+        drop(writing);
         let result = self.call(
             "put",
             n,
@@ -414,11 +443,15 @@ impl SyncReplica {
         })
     }
     pub fn push(&mut self, server: &impl SyncTransport) -> Result<usize, SyncError> {
+        let _push = timing::Span::new("push");
+        let preparing = timing::Span::new("push_prepare");
         let reducer = CausalReducer::open(&self.vault)?;
         // Never acknowledge a locally corrupted ledger merely because an
         // availability-only server accepted opaque bytes.
         reducer.view()?;
         let (events, pending) = reducer.pending_sync_group()?;
+        drop(preparing);
+        timing::count("events", events.len());
         if events.is_empty() {
             return Ok(0);
         }
@@ -435,7 +468,10 @@ impl SyncReplica {
                 hashes.push(hash);
                 event_ids.push(event.digest());
                 let stage = sync_stage(&self.vault, event.digest())?;
-                if let Some(graph) = reducer.export_ciphertext_graph(event, &stage)? {
+                let exporting = timing::Span::new("graph_export");
+                let graph = reducer.export_ciphertext_graph(event, &stage)?;
+                drop(exporting);
+                if let Some(graph) = graph {
                     graph_hashes.push(self.upload_graph(server, &graph)?);
                 }
                 let _ = std::fs::remove_dir_all(stage);
@@ -451,6 +487,7 @@ impl SyncReplica {
             retry(|| server.put(namespace, hash, &sealed))?;
             pages.push(hash);
         }
+        timing::count("pages", pages.len());
         let descriptor = encode_transfer_root(events.len() as u64, &pages);
         if descriptor.len() > MAX_MANIFEST_BYTES {
             return Err(SyncError::Backpressure);
@@ -459,10 +496,12 @@ impl SyncReplica {
         let root = digest(&sealed);
         retry(|| server.put(namespace, root, &sealed))?;
         retry(|| server.publish(namespace, root))?;
+        let _ack = timing::Span::new("outbox_ack");
         reducer.acknowledge_outbox(&event_ids)?;
         Ok(pending)
     }
     pub fn pull(&mut self, server: &impl SyncTransport) -> Result<usize, SyncError> {
+        let _pull = timing::Span::new("pull");
         ensure_replica_schema(&self.vault)?;
         let namespace = *self.pairing.namespace();
         let mut cursor = 0_u64;
@@ -507,7 +546,9 @@ impl SyncReplica {
                     stages.push(stage);
                 }
                 let mut reducer = CausalReducer::open(&self.vault)?;
+                let activating = timing::Span::new("group_activate");
                 reducer.apply_received_group(&events, &graphs, Some(*root), &page_lengths)?;
+                drop(activating);
                 for stage in stages {
                     let _ = std::fs::remove_dir_all(stage);
                 }
@@ -612,7 +653,9 @@ impl SyncReplica {
                 let n = std::io::copy(&mut input, &mut out).map_err(|_| SyncError::Unavailable)?;
                 lengths.push(n);
             }
+            let syncing = timing::Span::new("joined_fsync");
             out.sync_all().map_err(|_| SyncError::Unavailable)?;
+            drop(syncing);
             drop(out);
             let root = self.upload_paged_file(t, &joined)?;
             streams.push((s.id, s.header.clone(), root, lengths));
@@ -688,7 +731,10 @@ const PAGE_ENTRIES: usize = 3;
 fn retry<T>(mut operation: impl FnMut() -> Result<T, SyncError>) -> Result<T, SyncError> {
     for delay in RETRY_SECONDS {
         match operation() {
-            Err(SyncError::Unavailable) => thread::sleep(Duration::from_secs(delay)),
+            Err(SyncError::Unavailable) => {
+                let _wait = timing::Span::new("backoff");
+                thread::sleep(Duration::from_secs(delay));
+            }
             result => return result,
         }
     }

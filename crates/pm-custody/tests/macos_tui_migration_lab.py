@@ -88,6 +88,7 @@ def launch(m, label, arguments, scratch, labels, session=None):
         "RunAtLoad": True, "KeepAlive": False, "Umask": 63,
         "SoftResourceLimits": {"Core": 0}, "HardResourceLimits": {"Core": 0},
         "StandardErrorPath": str(m.STATE / (label + ".stderr")),
+        "EnvironmentVariables": {"PMW2_TIMING": "1"} if label == SYNC_LABEL else {},
     }
     path.write_bytes(plistlib.dumps(config))
     m.sudo(["chown", "root:wheel", path]); m.sudo(["chmod", "0644", path])
@@ -200,6 +201,25 @@ def diagnose_service_exit(m, label, session):
           + " stderr=" + stderr, flush=True)
 
 
+def sync_phase_timings(m, session):
+    from collections import defaultdict
+    totals = defaultdict(lambda: [0, 0, 0])
+    for path, source in ((m.STATE / "w2-sync-timing.log", "job"),
+                         (m.STATE / (SYNC_LABEL + ".stderr"), "server")):
+        result = session.run_sudo_while_draining(["cat", path], check=False)
+        assert result.returncode == 0, "sync timing log unavailable"
+        for line in result.stdout.splitlines():
+            match = re.fullmatch(rb"PMW2_TIMING category=([a-z_]+) count=([0-9]+) us=([0-9]+)", line)
+            if match:
+                category, count, us = match.groups()
+                key = source + ":" + category.decode("ascii")
+                totals[key][0] += int(count); totals[key][1] += int(us)
+                totals[key][2] = max(totals[key][2], int(us))
+    assert totals, "sync timing measurements missing"
+    for category, (count, us, maximum) in sorted(totals.items()):
+        print(f"PMW2_PHASE category={category} count={count} total_us={us} max_us={maximum}", flush=True)
+
+
 def diagnose_sync_wait(m, session, since, sync_db, expected_pid):
     phases = ("invalid", "queued", "pushing", "pulling", "succeeded", "unavailable",
               "integrity", "backpressure", "journal-failure", "rejected")
@@ -234,6 +254,7 @@ with sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True) as db:
     blocks, roots = json.loads(counts.stdout)
     assert type(blocks) is int and type(roots) is int and blocks >= 0 and roots >= 0
     print(f"PM26_SYNC_OPAQUE blocks={blocks} roots={roots}", flush=True)
+    sync_phase_timings(m, session)
     if process != "same":
         diagnose_service_exit(m, SYNC_LABEL, session)
 
@@ -538,6 +559,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
             except BaseException as diagnostic_error:
                 raise error from diagnostic_error
             raise
+        diagnose_sync_wait(m, session, mark, sync_db, sync_pid)
         assert "pushed=" in complete and "pulled=" in complete
         job = re.search(r"job=([0-9a-f]{32})", complete); assert job
         mark = operation(session, "y", "4", "Exact sync job ID", job.group(1))
