@@ -84,6 +84,7 @@ def launch(m, label, arguments, scratch, labels, session=None):
         "UserName": m.CUSTODIAN, "GroupName": m.CUSTODIAN,
         "RunAtLoad": True, "KeepAlive": False, "Umask": 63,
         "SoftResourceLimits": {"Core": 0}, "HardResourceLimits": {"Core": 0},
+        "StandardErrorPath": str(m.STATE / (label + ".stderr")),
     }
     path.write_bytes(plistlib.dumps(config))
     m.sudo(["chown", "root:wheel", path]); m.sudo(["chmod", "0644", path])
@@ -165,14 +166,35 @@ def wait_service(m, label, endpoint, session=None):
         finally:
             probe.close()
         if pid is not None and connectable:
-            identity = m.run(["ps", "-o", "user=", "-p", str(pid)])
+            identity = m.run(["ps", "-o", "user=", "-p", str(pid)], check=False)
+            if identity.returncode != 0:
+                diagnose_service_exit(m, label, session)
+                raise AssertionError("native fixture PID disappeared during readiness")
             assert identity.stdout.strip() == m.CUSTODIAN.encode(), "native service UID mismatch"
             return pid
-        assert m.time.monotonic() < deadline, "native fixture service did not start"
+        if m.time.monotonic() >= deadline:
+            diagnose_service_exit(m, label, session)
+            raise AssertionError("native fixture service did not start")
         if session is not None:
             session._read_once(0.05)
         else:
             m.time.sleep(0.05)
+
+
+def diagnose_service_exit(m, label, session):
+    command = ["launchctl", "print", "system/" + label]
+    result = m.sudo(command, check=False) if session is None \
+        else session.run_sudo_while_draining(command, check=False)
+    exits = re.findall(rb"^\s*last exit code = (-?[0-9]+)\s*$", result.stdout, re.M)
+    signals = re.findall(rb"^\s*last terminating signal = ([0-9]+)\s*$", result.stdout, re.M)
+    exit_code = exits[0].decode("ascii") if len(exits) == 1 else "unavailable"
+    last_signal = signals[0].decode("ascii") if len(signals) == 1 else "unavailable"
+    log = m.sudo(["cat", m.STATE / (label + ".stderr")], check=False)
+    stderr = "unavailable" if log.returncode != 0 else (
+        "empty" if not log.stdout else "sync-unavailable" if log.stdout == b"SYNC_UNAVAILABLE\n" else "other"
+    )
+    print("PM26_SYNC_LIFECYCLE exit=" + exit_code + " signal=" + last_signal
+          + " stderr=" + stderr, flush=True)
 
 
 def assert_stream(path):

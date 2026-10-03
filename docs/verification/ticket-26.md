@@ -1830,3 +1830,57 @@ check subsequently passed (`/tmp/pm26-20261002-check-final.log`). This is local
 build/regression evidence, not native concurrency evidence. Python ASTs,
 existing VT/helper/pasteboard-parser regressions, shared 1PUX construction,
 CI guards and diff checks passed; no local macOS or provider result is claimed.
+
+
+### Recovered September 17 chronology
+
+The following URLs/SHAs were re-read from GitHub's run catalog and failure
+logs on October 2 (local date). Every listed workflow is completed FAILED;
+partial progression does not imply native acceptance.
+
+| Run | Exact SHA | Recovered failure/progression |
+| --- | --- | --- |
+| [35227363111](https://github.com/SantanaJcp/passwordmanager/actions/runs/35227363111) | `fa6038c3a44b79bed503ca1ac7cdcf4ce01b68b0` | Both CPUs timed out observing the favorite selected row. |
+| [35228456377](https://github.com/SantanaJcp/passwordmanager/actions/runs/35228456377) | `c92634a6e2878b5bfe5f65ad9119224f4b39c8e4` | FAILED; favorite status-render correction. No new root-cause attribution here. |
+| [35229959654](https://github.com/SantanaJcp/passwordmanager/actions/runs/35229959654) | `925112ec64eb38bf35bb16d5c6ce9fc16f894dbc` | Intel failed selecting the enrolled `ticket24-agent-c` row. |
+| [35231927929](https://github.com/SantanaJcp/passwordmanager/actions/runs/35231927929) | `665893da8e96bb3fda98ca9b0f49abe63c753a0b` | Intel fixture helper descendant readiness failed. |
+| [35233363436](https://github.com/SantanaJcp/passwordmanager/actions/runs/35233363436) | `5c1f257ea583e8d70d30fecdc12b7c939ef08db2` | Both CPUs timed out on a current-screen observation. |
+| [35235287689](https://github.com/SantanaJcp/passwordmanager/actions/runs/35235287689) | `ccaf17e996bea5626096bbc5325bf8ac70028eb9` | Intel discovery returned unavailable; ARM safe-metadata observation failed; PTY cleanup errors also retained. |
+| [35300789424](https://github.com/SantanaJcp/passwordmanager/actions/runs/35300789424) | `8951e6bab642edf5fe99ac51b48a963882b62c1c` | Both CPUs passed catalog/reveals/favorites, then failed concurrent discovery with unchanged custody PID and I/O-bound-or-later timing. |
+
+The new [Full25 driver](../../crates/pm-custody/tests/macos_tui_migration_lab.py)
+reuses the [shared migration fixtures](../../crates/pm-custody/tests/tui_migration_fixtures.py)
+and Linux [operations lab](../../crates/pm-custody/tests/tui_operations_lab.py).
+It is first dispatched on `4a2faec7ef613fba7f79bc2d6291de6c4e730617`,
+[run 37088951129](https://github.com/SantanaJcp/passwordmanager/actions/runs/37088951129).
+This ordinary-binary run enables only the existing harness pasteboard categories;
+no product diagnostic feature or environment is selected. The accidental test
+file execute-mode change in `7038e66` is restored in `4a2faec`; Python execution
+in that diagnostic run was unaffected.
+
+
+First Full25 ARM run advanced through remote signed-history setup, large
+attachment setup, invalid CSV/1PUX rejection, Chrome/Apple/mappable commits,
+duplicates/cancel, 1PUX3 commit and protected pairing. It then failed because
+`ps` no longer found the sync LaunchDaemon PID immediately after the readiness
+socket connected. No exit status/signal was captured, so neither a crash nor
+an ordinary failure is attributed. Before changing `pm-sync`, add owned
+fixture stderr capture and fixed launchd exit/signal categories at that exact
+boundary. Preserve the original raw readiness connection, all timeouts,
+program arguments and assertions. The capture must classify stderr only as
+empty, exact `SYNC_UNAVAILABLE`, other or unavailable; never dump it. A
+confirmed product crash requiring a design decision stops this continuation.
+
+
+Run [37088951129](https://github.com/SantanaJcp/passwordmanager/actions/runs/37088951129)
+completed FAILED on both CPUs, exact `4a2faec7ef613fba7f79bc2d6291de6c4e730617`.
+Both observed the corrected product control `completed-with-human-open` and
+the unchanged concurrent discovery gate `discovery=ok process=same result=zero
+elapsed=immediate`. Both completed the Ticket23 and partial Ticket24 assertions,
+and recorded the real second enrolled native identity as blocked by the single
+bootstrap transport. Both isolated clipboard jobs completed nonzero without
+the exact canary, with different system manager domain and human pre/post
+controls still positive. The September/earlier October indeterminate clipboard
+runs remain failure evidence; their cause is not inferred from this success.
+Full25 reached the same sync-readiness PID disappearance on both CPUs. No
+product or deadline correction to sync is made without its exit discriminant.
