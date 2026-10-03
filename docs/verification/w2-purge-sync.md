@@ -4,13 +4,40 @@ Fecha: 2026-10-03. Worktree exclusivo `.worktrees/w2-purge-sync`, rama
 `codex/pm-w2-purge-sync`, base
 `ee3c1fd31cad59060e4120f3e2518b1196a90c1a`.
 
-**Estado: RED confirmado; implementación detenida en la decisión de
-transferencia entre paquetes.** No hay GREEN, protocolo nuevo implementado,
-integración, cambio de tickets ni aceptación nativa W2. Esta entrega contiene
-solo este informe. La detención aplica la instrucción explícita del encargo:
-si hace falta elegir un aspecto del formato/protocolo no cubierto, detenerse
-y presentar opciones. No se reabre la decisión funcional de sincronizar
-headers firmados sin payload junto con el purge firmado.
+**Estado de reanudación: implementación de opción A y verificación focalizada
+GREEN; gates Linux completos y corrida macOS todavía pendientes.** El usuario
+transmitió la decisión del orquestador del 2026-10-03 conforme a G5: root
+paginado explícito v3, documentado en [G5 §9.1](../design/synchronization.md#91-tipos-y-autenticación-de-eventos).
+No hay integración ni cambios de tickets.
+
+La reanudación conservó el checkpoint documental `30398ae` y todos los cambios
+sin commit de fase 2. Primero verificó ese código: 11 pruebas E2EE y el
+reproductor pasaron en `/tmp/pmw2b-inherited-tests.log`. Al ampliar la prueba,
+la selección con únicamente el purge pendiente falló con `Reduction(Integrity)`
+en `/tmp/pmw2b-expanded-tests.log`; el fix incluye sus antecedentes aunque ya
+tengan acuse. Ahora pasan 25 pruebas E2EE, el reproductor integrado y Clippy:
+
+```sh
+flock /tmp/pm-cargo-window.lock bash -c './scripts/cargo-local.sh fmt --all && ./scripts/cargo-local.sh test -p pm-sync --test e2ee_replication --test shared_purge --locked --offline -- --nocapture && ./scripts/cargo-local.sh clippy -p pm-sync -p pm-vault --all-targets --locked --offline'
+# rc 0; /tmp/pmw2b-green5-tests.log
+```
+
+Incluyen 259 revisiones/eventos con purge en otra página, rechazo atómico de
+páginas incompletas o causales intercambiadas, firmas/`kind`/pertenencia,
+publicación interrumpida y recepción cuyo marcador no puede hacer commit,
+purga selectiva/replay, dos bóvedas reales con servidor TLS/RPK y la carrera
+ADR0002 + purge terminal. Cada rechazo compara autoridad, contenido, outbox y
+marcadores; varias negativas conservan además contenido válido independiente.
+No se usa un test ignorado para ocultar el RED. `check.sh` descubre los tests
+nuevos mediante `cargo test --workspace --all-targets`.
+
+## Registro histórico de fase 1 (antes de seleccionar A)
+
+El resto de este checkpoint conserva el informe inicial de `30398ae`. Sus
+menciones de A/B pendientes, ausencia de implementación y siguiente selección
+son históricas y quedan sustituidas por el estado de reanudación anterior.
+Faltan todavía la comparación RED sobre la base, los gates completos y CI;
+no se anuncia aceptación final por la suite focalizada.
 
 ## Contrato confirmado y formato disponible
 

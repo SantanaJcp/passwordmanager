@@ -852,3 +852,6 @@ impl Drop for TestDir {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+
+#[path = "e2ee_replication/purge_sync.rs"]
+mod purge_sync;
