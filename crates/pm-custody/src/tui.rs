@@ -219,6 +219,8 @@ struct App {
     csv_diagnostic: Option<console_diagnostic::Diagnostic>,
     #[cfg(windows)]
     transfer_diagnostic: Option<File>,
+    #[cfg(windows)]
+    geometry_diagnostic: console_diagnostic::GeometryState,
 }
 
 enum PendingOperation {
@@ -344,6 +346,8 @@ impl App {
             csv_diagnostic: None,
             #[cfg(windows)]
             transfer_diagnostic: None,
+            #[cfg(windows)]
+            geometry_diagnostic: console_diagnostic::GeometryState::default(),
         })
     }
 
@@ -2824,6 +2828,14 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
                 Line::raw(app.status.as_str()).width(),
             )?;
         }
+    }
+    #[cfg(windows)]
+    if let Some(report) = app.transfer_diagnostic.as_mut() {
+        console_diagnostic::record_geometry(
+            report,
+            &mut app.geometry_diagnostic,
+            completed.buffer.area,
+        )?;
     }
     #[cfg(not(windows))]
     let _ = completed;

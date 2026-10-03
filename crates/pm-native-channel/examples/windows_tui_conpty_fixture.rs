@@ -807,6 +807,14 @@ mod windows_fixture {
             expected: &str,
             predicate: impl Fn(&ScreenState) -> bool,
         ) -> Result<(), String> {
+            self.wait_for_checked_matching(expected, |state| Ok(predicate(state)))
+        }
+
+        fn wait_for_checked_matching(
+            &self,
+            expected: &str,
+            predicate: impl Fn(&ScreenState) -> Result<bool, String>,
+        ) -> Result<(), String> {
             let deadline = Instant::now() + SCREEN_WAIT;
             let mut state = self
                 .state
@@ -816,7 +824,7 @@ mod windows_fixture {
                 if let Some(error) = state.error.as_ref() {
                     return Err(error.clone());
                 }
-                if predicate(&state) {
+                if predicate(&state)? {
                     return Ok(());
                 }
                 if state.closed {
@@ -836,7 +844,7 @@ mod windows_fixture {
                     .wait_timeout(state, remaining)
                     .map_err(|_| "ConPTY screen observer wait poisoned".to_owned())?;
                 state = next;
-                if wait.timed_out() && !predicate(&state) {
+                if wait.timed_out() && !predicate(&state)? {
                     return Err(format!(
                         "ConPTY screen did not show expected text within 15 seconds: {expected}"
                     ));
@@ -1481,7 +1489,7 @@ mod windows_fixture {
                     }
                     (virtual_key, scan_code)
                 }
-                '0'..='9' | ' ' | '\r' => {
+                '0'..='9' | ' ' | '\r' | '\x1b' => {
                     let virtual_key = u32::from(character);
                     let scan_code = unsafe { MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC) };
                     if scan_code == 0 {
@@ -1618,6 +1626,7 @@ mod windows_fixture {
         onepux: &'a str,
         backup: &'a str,
         plaintext: &'a str,
+        geometry: &'a std::path::Path,
     }
 
     #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1696,7 +1705,7 @@ mod windows_fixture {
         match scenario {
             Scenario::Resize => {
                 exercise_types(fixture)?;
-                exercise_resize(fixture)?;
+                exercise_resize(fixture, paths.geometry)?;
                 press(fixture, "q")?;
                 return require_tui_exit(fixture.process);
             }
@@ -1825,7 +1834,7 @@ mod windows_fixture {
         eprintln!("TUI_STAGE stage=organization-history-copy result=pass");
         exercise_generator_access_audit(fixture)?;
         exercise_local_operations(fixture, &paths, b"synthetic-ticket27-rotated-master")?;
-        exercise_resize(fixture)?;
+        exercise_resize(fixture, paths.geometry)?;
         write_keyboard_input(fixture, b"q")?;
         require_tui_exit(fixture.process)
     }
@@ -2024,6 +2033,20 @@ mod windows_fixture {
         Ok(())
     }
 
+    fn assert_published_files(paths: &MatrixPaths<'_>) -> io::Result<()> {
+        for path in [paths.backup, paths.plaintext] {
+            let metadata = std::fs::symlink_metadata(path)
+                .map_err(|_| io::Error::other("human publication metadata unavailable"))?;
+            if !metadata.is_file() || metadata.len() == 0 {
+                return Err(io::Error::other(
+                    "TUI publication is not a nonempty regular file",
+                ));
+            }
+        }
+        eprintln!("TUI_STAGE stage=published-files-regular-nonempty result=pass");
+        Ok(())
+    }
+
     fn exercise_local_operations(
         fixture: &Fixture,
         paths: &MatrixPaths<'_>,
@@ -2075,7 +2098,7 @@ mod windows_fixture {
             .map_err(io::Error::other)?;
         eprintln!("TUI_STAGE stage=backup-export-trash result=pass");
         exercise_restore_rotations(fixture, paths, master)?;
-        Ok(())
+        assert_published_files(paths)
     }
 
     fn exercise_types(fixture: &Fixture) -> io::Result<()> {
@@ -2155,12 +2178,92 @@ mod windows_fixture {
         Ok(())
     }
 
-    fn exercise_resize(fixture: &Fixture) -> io::Result<()> {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct GeometryReport {
+        sequence: u64,
+        buffer: (u16, u16),
+        viewport: (u16, u16),
+        frame: (u16, u16),
+    }
+
+    fn parse_geometry_reports(text: &str) -> io::Result<Option<GeometryReport>> {
+        fn dimensions(text: &str, prefix: &str) -> io::Result<(u16, u16)> {
+            let value = text
+                .strip_prefix(prefix)
+                .ok_or_else(|| io::Error::other("invalid child geometry field"))?;
+            let (width, height) = value
+                .split_once('x')
+                .ok_or_else(|| io::Error::other("invalid child geometry dimensions"))?;
+            let dimension = |value: &str| -> io::Result<u16> {
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(io::Error::other("invalid child geometry number"));
+                }
+                value
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|n| *n > 0 && *n <= 32767)
+                    .ok_or_else(|| io::Error::other("child geometry out of native bounds"))
+            };
+            Ok((dimension(width)?, dimension(height)?))
+        }
+        let mut latest: Option<GeometryReport> = None;
+        for line in text.split_inclusive('\n') {
+            // A live file can end midway through the next write. Such a record
+            // is not yet a witness; only a complete, strictly parsed line counts.
+            if !line.ends_with('\n') {
+                break;
+            }
+            let Some(fields) = line
+                .trim_end_matches(['\r', '\n'])
+                .strip_prefix("TUI_PROBE geometry-seq=")
+            else {
+                continue;
+            };
+            let fields = fields.split_whitespace().collect::<Vec<_>>();
+            if fields.len() != 4
+                || fields[0].is_empty()
+                || !fields[0].bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(io::Error::other("invalid child geometry record"));
+            }
+            let sequence = fields[0]
+                .parse::<u64>()
+                .map_err(|_| io::Error::other("child geometry sequence overflow"))?;
+            if sequence == 0 || latest.is_some_and(|prior| prior.sequence >= sequence) {
+                return Err(io::Error::other("child geometry sequence is not fresh"));
+            }
+            latest = Some(GeometryReport {
+                sequence,
+                buffer: dimensions(fields[1], "buffer=")?,
+                viewport: dimensions(fields[2], "viewport=")?,
+                frame: dimensions(fields[3], "frame=")?,
+            });
+        }
+        Ok(latest)
+    }
+
+    fn read_geometry_report(path: &std::path::Path) -> io::Result<Option<GeometryReport>> {
+        let mut text = String::new();
+        std::fs::File::open(path)
+            .map_err(|_| io::Error::other("child geometry report unavailable"))?
+            .take(8193)
+            .read_to_string(&mut text)
+            .map_err(|_| io::Error::other("child geometry report read failed"))?;
+        if text.len() > 8192 {
+            return Err(io::Error::other("child geometry report exceeds its bound"));
+        }
+        parse_geometry_reports(&text)
+    }
+
+    fn exercise_resize(fixture: &Fixture, geometry: &std::path::Path) -> io::Result<()> {
         for (columns, rows, expected) in [
             (100, 30, "Items (selection is metadata only)"),
             (42, 12, "Password Manager"),
             (80, 24, "Items (selection is metadata only)"),
         ] {
+            let previous_native = read_geometry_report(geometry)?
+                .ok_or_else(|| io::Error::other("initial child native geometry witness absent"))?
+                .sequence;
             let (previous_positions, previous_reports) = {
                 let mut state = fixture
                     .observer
@@ -2194,18 +2297,24 @@ mod windows_fixture {
             };
             fixture
                 .observer
-                .wait_for_matching("fresh native resize repaint", |state| {
-                    state.cursor_positions > previous_positions
-                        && state.resize_reports > previous_reports
+                .wait_for_checked_matching("fresh native resize repaint", |state| {
+                    let native = read_geometry_report(geometry).map_err(|_| "child native geometry read failed".to_owned())?;
+                    Ok(state.cursor_positions > previous_positions
                         && state.contains(expected)
+                        && state.columns == columns as usize && state.rows == rows as usize
+                        && native.is_some_and(|native| native.sequence > previous_native
+                            && native.buffer == (columns as u16, rows as u16)
+                            && native.viewport == (columns as u16, rows as u16)
+                            && native.frame == (columns as u16, rows as u16)))
                 })
                 .map_err(|primary| {
                     let discriminants = fixture.observer.state.lock().map(|state| format!(
-                        "report-fresh={} cursor-fresh={} expected-present={} geometry-matches={}",
+                        "report-fresh={} cursor-fresh={} expected-present={} geometry-matches={} child-witness-valid={}",
                         state.resize_reports > previous_reports,
                         state.cursor_positions > previous_positions,
                         state.contains(expected),
                         state.columns == columns as usize && state.rows == rows as usize,
+                        read_geometry_report(geometry).is_ok_and(|native| native.is_some_and(|native| native.sequence > previous_native && native.buffer == (columns as u16, rows as u16) && native.viewport == (columns as u16, rows as u16) && native.frame == (columns as u16, rows as u16))),
                     ));
                     io::Error::other(format!(
                         "{primary}; resize={columns}x{rows}; discriminants={discriminants:?}; child={:?}; observer={:?}",
@@ -2461,14 +2570,16 @@ mod windows_fixture {
             "--rotations" => Scenario::Rotations,
             _ => return Err(io::Error::other("unknown native TUI scenario")),
         };
-        let diagnostic_path =
-            std::path::Path::new(&args[4]).with_file_name(if scenario == Scenario::EncodingExit {
-                "encoding-exit.txt"
-            } else {
-                "console-diagnostic.txt"
-            });
+        let diagnostic_path = std::path::Path::new(&args[4]).with_file_name(match scenario {
+            Scenario::EncodingExit => "encoding-exit.txt",
+            Scenario::Resize => "resize-diagnostic.txt",
+            _ => "console-diagnostic.txt",
+        });
         let mut child_arguments = args[9..].to_vec();
-        let diagnostics_enabled = matches!(args[3].as_str(), "--matrix-probe" | "--encoding-exit");
+        let diagnostics_enabled = matches!(
+            scenario,
+            Scenario::Matrix | Scenario::EncodingExit | Scenario::Resize
+        );
         if diagnostics_enabled {
             child_arguments.push("--console-diagnostics".into());
             child_arguments.push(
@@ -2492,6 +2603,7 @@ mod windows_fixture {
                     onepux: &args[5],
                     backup: &args[6],
                     plaintext: &args[7],
+                    geometry: &diagnostic_path,
                 },
                 scenario,
             )
@@ -2851,14 +2963,60 @@ mod windows_fixture {
 
         #[test]
         fn win32_input_encoder_preserves_key_fields_and_press_release() {
-            let encoded = encode_win32_key_events("a\ré").unwrap();
+            let encoded = encode_win32_key_events("a\r\x1bé").unwrap();
             let text = std::str::from_utf8(&encoded).unwrap();
             assert!(text.starts_with("\x1b[65;"));
             assert!(text.contains(";97;1;0;1_\x1b[65;"));
             assert!(text.contains(";97;0;0;1_"));
             assert!(text.contains(";13;1;0;1_"));
             assert!(text.contains(";13;0;0;1_"));
+            let scan = unsafe { MapVirtualKeyW(27, MAPVK_VK_TO_VSC) };
+            assert_ne!(scan, 0);
+            assert!(text.contains(&format!("\x1b[27;{scan};27;1;0;1_\x1b[27;{scan};27;0;0;1_")));
             assert!(text.ends_with("\x1b[0;0;233;0;0;1_"));
+        }
+
+        #[test]
+        fn child_geometry_requires_complete_monotonic_native_witnesses() {
+            let initial = "TUI_PROBE geometry-seq=1 buffer=80x24 viewport=80x24 frame=80x24\n";
+            let partial = "TUI_PROBE geometry-seq=2 buffer=42x12 viewport=42x12 frame=42x12";
+            assert_eq!(parse_geometry_reports(partial).unwrap(), None);
+            assert_eq!(
+                parse_geometry_reports(&format!("{initial}{partial}"))
+                    .unwrap()
+                    .unwrap()
+                    .sequence,
+                1
+            );
+            let complete = format!("{initial}{partial}\n");
+            let witness = parse_geometry_reports(&complete).unwrap().unwrap();
+            assert_eq!(
+                (
+                    witness.sequence,
+                    witness.buffer,
+                    witness.viewport,
+                    witness.frame
+                ),
+                (2, (42, 12), (42, 12), (42, 12))
+            );
+            assert!(parse_geometry_reports(&format!("{initial}{initial}")).is_err());
+            assert!(
+                parse_geometry_reports(
+                    "TUI_PROBE geometry-seq=2 buffer=42x12 viewport=42x12 frame=0x12\n"
+                )
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn native_witness_query_failure_is_explicit_without_waiting_for_timeout() {
+            let observer = TerminalObserver::new();
+            let error = observer
+                .wait_for_checked_matching("native geometry", |_| {
+                    Err("native query failed".to_owned())
+                })
+                .unwrap_err();
+            assert_eq!(error, "native query failed");
         }
 
         #[test]

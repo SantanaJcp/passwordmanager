@@ -558,6 +558,7 @@ try {
     $tuiFixture = $null
     $tuiCustody = $null
     $tuiSeed = $null
+    $identityFixture = $null
     if ($TuiConPtyRed) {
         $builtFixture = Join-Path $repo 'target\debug\examples\windows_tui_conpty_fixture.exe'
         Assert-NativeStaticMsvcBinary $dumpbin $builtFixture 'windows_tui_conpty_fixture.exe'
@@ -566,6 +567,9 @@ try {
         $tuiSeed = Join-Path $humanDir 'windows_human_tui_seed.exe'
         Copy-Item -LiteralPath $builtSeed -Destination $tuiSeed -ErrorAction Stop
         Add-OwnedPath $ownedPaths $tuiSeed
+        $identityFixture = Join-Path $agentDir 'windows_human_tui_seed.exe'
+        Copy-Item -LiteralPath $builtSeed -Destination $identityFixture -ErrorAction Stop
+        Add-OwnedPath $ownedPaths $identityFixture
         $tuiFixture = Join-Path $humanDir 'windows_tui_conpty_fixture.exe'
         $tuiCustody = Join-Path $humanDir 'pm-custody.exe'
         Copy-Item -LiteralPath $builtFixture -Destination $tuiFixture -ErrorAction Stop
@@ -705,6 +709,10 @@ try {
     Assert-True ($p.ExitCode -eq 0) 'human RPK channel failed after SCM restart'
 
     if ($TuiConPtyRed) {
+        $p = Start-AsUser $agentCredential $identityFixture @('--peer-negative', $vaultId) $emptyInput $badOut $badErr
+        Assert-True ($p.ExitCode -eq 0) ('native agent-to-human peer negative failed: ' + (Get-Content $badErr -Raw))
+        Assert-True ((Get-Content $badOut -Raw).Trim() -eq 'PASS windows-peer-negative agent-human-pipe=access-denied installed-connect=rejected') 'agent-to-human peer did not prove native access denial'
+        Write-Host (Get-Content $badOut -Raw)
         $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId) $humanInput $humanOut $humanErr
         Assert-True ($p.ExitCode -eq 0) ('ordinary human type seeding failed: ' + (Get-Content $humanErr -Raw))
         Assert-True ((Get-Content $humanOut -Raw).Trim() -eq 'PASS windows-tui-seed types=7 ordinary-human-wire=1 readback=exact') 'seven-type readback was not exact'
@@ -714,6 +722,7 @@ try {
         Add-OwnedPath $ownedPaths $consoleDiagnostic
         $encodingDiagnostic = Join-Path $humanDir 'encoding-exit.txt'
         Add-OwnedPath $ownedPaths $encodingDiagnostic
+        Add-OwnedPath $ownedPaths (Join-Path $humanDir 'resize-diagnostic.txt')
         if ($ServiceDiagnostics) {
             $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, '--encoding-exit', $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
             Write-Host (Get-Content $tuiErr -Raw)
@@ -765,10 +774,7 @@ try {
                 Write-Host "TUI_CASE case=$($case.Name) previous-master=denied new-master=accepted"
             }
             if ($p.ExitCode -eq 0 -and $case.Name -in @('matrix', 'local-operations')) {
-                Assert-True (Test-Path -LiteralPath $case.Backup -PathType Leaf) 'TUI native backup was not published'
-                Assert-True ((Get-Item -LiteralPath $case.Backup -ErrorAction Stop).Length -gt 0) 'TUI native backup is empty'
-                Assert-True (Test-Path -LiteralPath $case.Plaintext -PathType Leaf) 'TUI plaintext export was not published'
-                Assert-True ((Get-Item -LiteralPath $case.Plaintext -ErrorAction Stop).Length -gt 0) 'TUI plaintext export is empty'
+                Assert-True ($caseLog -match '(?m)^TUI_STAGE stage=published-files-regular-nonempty result=pass\r?$') 'human publication did not prove regular, nonempty backup and export files'
             }
         }
 

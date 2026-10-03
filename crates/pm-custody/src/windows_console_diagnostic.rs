@@ -189,3 +189,62 @@ impl Diagnostic {
         self.output.flush().map_err(|_| Failure::Unavailable)
     }
 }
+
+#[derive(Default)]
+pub(super) struct GeometryState {
+    last: Option<(i16, i16, i16, i16, u16, u16)>,
+    sequence: u64,
+}
+
+/// Records native geometry from the child's active console after a real draw.
+/// Query failures propagate; dimensions never come from the fixture request.
+pub(super) fn record_geometry(
+    report: &mut File,
+    state: &mut GeometryState,
+    frame: ratatui::layout::Rect,
+) -> Result<(), Failure> {
+    let active = super::open_terminal()?;
+    let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
+    if unsafe { GetConsoleScreenBufferInfo(active.as_raw_handle(), &raw mut info) } == 0 {
+        return Err(Failure::Unavailable);
+    }
+    let width = info
+        .srWindow
+        .Right
+        .checked_sub(info.srWindow.Left)
+        .and_then(|n| n.checked_add(1))
+        .filter(|n| *n > 0)
+        .ok_or(Failure::Unavailable)?;
+    let height = info
+        .srWindow
+        .Bottom
+        .checked_sub(info.srWindow.Top)
+        .and_then(|n| n.checked_add(1))
+        .filter(|n| *n > 0)
+        .ok_or(Failure::Unavailable)?;
+    if info.dwSize.X <= 0 || info.dwSize.Y <= 0 {
+        return Err(Failure::Unavailable);
+    }
+    let current = (
+        info.dwSize.X,
+        info.dwSize.Y,
+        width,
+        height,
+        frame.width,
+        frame.height,
+    );
+    if state.last == Some(current) {
+        return Ok(());
+    }
+    let sequence = state.sequence.checked_add(1).ok_or(Failure::Unavailable)?;
+    writeln!(
+        report,
+        "TUI_PROBE geometry-seq={sequence} buffer={}x{} viewport={width}x{height} frame={}x{}",
+        info.dwSize.X, info.dwSize.Y, frame.width, frame.height
+    )
+    .and_then(|()| report.flush())
+    .map_err(|_| Failure::Unavailable)?;
+    state.last = Some(current);
+    state.sequence = sequence;
+    Ok(())
+}

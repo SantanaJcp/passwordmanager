@@ -193,8 +193,66 @@ mod fixture {
             Ok(())
         }
     }
+    fn reject_agent_on_human_pipe(vault: &str) -> Result<(), Failure> {
+        use std::ptr;
+        use windows_sys::Win32::{
+            Foundation::{
+                CloseHandle, ERROR_ACCESS_DENIED, GENERIC_READ, GENERIC_WRITE, GetLastError,
+                INVALID_HANDLE_VALUE,
+            },
+            Storage::FileSystem::{
+                CreateFileW, OPEN_EXISTING, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+            },
+        };
+        let name = WindowsEndpoint::Human
+            .pipe_name(vault)
+            .map_err(|_| Failure::Unavailable)?;
+        let name = name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                ptr::null(),
+                OPEN_EXISTING,
+                SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                ptr::null_mut(),
+            )
+        };
+        if handle != INVALID_HANDLE_VALUE {
+            let closed = unsafe { CloseHandle(handle) } != 0;
+            eprintln!(
+                "NATIVE_PEER connected-unexpected=true cleanup-failed={}",
+                !closed
+            );
+            return Err(Failure::Unavailable);
+        }
+        if unsafe { GetLastError() } != ERROR_ACCESS_DENIED {
+            return Err(Failure::Unavailable);
+        }
+        match WindowsClientPipe::connect_installed(WindowsEndpoint::Human, vault) {
+            Err(_) => {}
+            Ok(pipe) => {
+                let pipe = std::mem::ManuallyDrop::new(pipe);
+                let closed = unsafe { CloseHandle(pipe.raw_handle()) } != 0;
+                eprintln!(
+                    "NATIVE_PEER installed-connect-unexpected=true cleanup-failed={}",
+                    !closed
+                );
+                return Err(Failure::Unavailable);
+            }
+        }
+        println!(
+            "PASS windows-peer-negative agent-human-pipe=access-denied installed-connect=rejected"
+        );
+        Ok(())
+    }
+
     pub(super) fn run() -> Result<(), Failure> {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
+        if args.len() == 2 && args[0] == "--peer-negative" {
+            return reject_agent_on_human_pipe(&args[1]);
+        }
         if !(args.len() == 3 || (args.len() == 5 && args[3] == "--transfer-negative")) {
             return Err(Failure::Unavailable);
         }

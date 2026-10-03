@@ -3434,3 +3434,86 @@ negativas se ejecutarán después de los casos TUI para que su primera falla
 no impida observar el pump ni los casos locales independientes. No cambian
 producto ni su autorización. Primer CSI gate sigue intacto, pendiente de
 decisión del usuario; no se ejecutó un oráculo alternativo.
+
+
+### Corrida 4 fase3 — GREEN acotado clipboard y operaciones locales
+
+[Windows 37137025546](https://github.com/SantanaJcp/passwordmanager/actions/runs/37137025546),
+SHA `1e533b93cd4f0412c92bec54646a5fe877f3240c`, FAIL terminado.
+Clipboard independiente PASS: replacement-crossed-lease=false,
+newer-owner-preserved=true/own-expiry-empty=true y salida natural rc0.
+RED37135925196→GREEN37137025546 con el único cambio de producto en ese flujo
+siendo dispatch_sent_messages antes de expire. El discriminante temporal y el
+status de cleanup pasan con el mismo lease1s y espera15s; causa acotada:
+notificación síncrona del owner sin despacho en el hilo TUI. El Drop heredado
+no se modifica. No acredita otros contextos de uso ni todo ticket27.
+
+Backup/export/trash, restore con IDs/keys nuevos y autoridad conservada,
+recovery exacto con warning completo, maestra oculta y antiguo-denied/nuevo-
+accepted pasan por teclado y canal humano ordinario. Después, el harness
+instalador intenta Test-Path del backup privado y recibe access denied.
+Ése es FAIL de observación del fixture, no prueba de backup fallido. Mover
+los mismos criterios de ambos ficheros (regular + no vacío) al fixture humano
+que conserva sus ACL exactos; el harness sólo exige el marker categórico.
+Ningún cambio de producto/backup ni concesión de acceso al instalador.
+
+Access pasa SUSPENDED→RESUMED pero no observa Content view tras Esc. El encoder
+histórico mapea los caracteres fuera de su lista a virtual_key0/scan0; Esc
+está fuera y termina ahí. Microsoft [VK_ESCAPE](https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes)
+y [KEY_EVENT_RECORD](https://learn.microsoft.com/en-us/windows/console/key-event-record-str)
+especifican su virtual key27. Se reportó esa sustitución heredada causal y se
+pidió autorización sólo para agregar Esc al mapeo explícito; no modificar
+su rama genérica mientras la respuesta esté pendiente. Resize conserva el
+mismo FAIL de reporte CSI; 1PUX conserva crypto-resource con restauración de
+lease. Rotations separado y las cuatro negativas aún no alcanzados por el
+Test-Path del instalador. Log `/tmp/pmw1c-windows4.log`.
+
+Linux final fresco en SHA1e533b9:40 casos,39 rc0, g7-matrix rc1 conocido,
+ningún mismatch; check y clean incluidos. JSON/logs
+`/tmp/pmw1c-final-gate-results.json`, `...summary.log` y logs por caso.
+No repetir Linux por cambios siguientes exclusivos de fixtures cfgWindows.
+
+Método de corrida5: comprobar publicación desde el humano real, regular y no
+vacío para backup y plaintext antes de terminar el caso. Observar rotations
+separado y las negativas preparadas. Añadir peer negativo con agente real no
+admin: mismo binario fixture copiado/sealed en agentDir; sin leer el profile/
+key humano, abrir el endpoint Human con los mismos parámetros CreateFileW
+que el cliente instalado y exigir ERROR_ACCESS_DENIED, luego exigir rechazo
+por WindowsClientPipe::connect_installed. Servicio running y probes positivos
+ordinarios previos ya comprobados. No cambiar DACL/rights/SCM/listener; error
+busy/unavailable no cuenta como denegación. Si una apertura inesperada
+sucede, CloseHandle explícito + booleano cleanup-failed y FAIL. Esta negativa
+es SID/ACL del peer; no demuestra RPK impostor ni PID erróneo/reparse TUI.
+El nativo primitives13 mantiene reparse real de file en open_regular_file,
+pero no se promueve a negativa integral TUI/transferencia.
+
+
+Autorizaciones del usuario antes de corrida5: reemplazar sólo la exigencia de
+CSI8 nuevo por geometría nativa directa del hijo + repaint fresco, manteniendo
+rechazo de CSI desconocidos; y agregar sólo Esc al mapeo VK_ESCAPE +
+MapVirtualKeyW, conservando Unicode y asserts. La rama histórica restante
+virtual_key0/scan0 no se modifica.
+
+Oráculo de resize autorizado: medición opt-in dentro de pm-custody después de
+un draw real, [GetConsoleScreenBufferInfo](https://learn.microsoft.com/en-us/windows/console/getconsolescreenbufferinfo)
+sobre CONOUT$ activo del propio hijo. Sólo dimensiones de buffer/viewport y
+frame, secuencia monotónica emitida al cambiar la tupla; ninguna celda,
+contenido, handle, PID ni petición recibida del fixture. Error de query/
+write/flush propaga FAIL sin sustituto. Archivo privado máximo8192, registros
+completos/monotónicos estrictos; parcial vivo nunca cuenta como witness.
+Cada resize conserva15s, cursor/repaint fresco, texto en pantalla y geometría
+observer; requiere witness nuevo con buffer=viewport=frame=tamaño solicitado.
+CSI8 presente aún exige opcode y geometría exacta; otras secuencias fallan.
+Pruebas adversas de witness parcial/duplicado/fuera de rango y error de lectura
+inmediato; regresión keyboard mantiene press/release Unicode y añade Esc27.
+El modo resize usa archivo propio registrado en cleanup, la matriz conserva
+archivo propio y --console-diagnostics opt-in. Windows solamente; código
+compartido TUI cambia sólo dentro de cfgWindows. Check5 inicial rc0 previo a
+estas autorizaciones (`/tmp/pmw1c-check5.log`); verificación final siguiente.
+
+Check5b después de aplicar ambas autorizaciones rc0 bajo flock,
+`/tmp/pmw1c-check5b.log`. Código Linux compilado conserva sus caminos; las
+nuevas mediciones y eventos son cfgWindows. Se publicará candidato5 y se
+esperarán Windows5 y Mac2 (último slot Mac, comprobación del archivo TUI
+compartido tras hooks nuevos). Un último barrido40 sobre ese SHA recoge
+check/clean/freshness final; no sustituye ningún FAIL nativo.
