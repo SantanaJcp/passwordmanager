@@ -520,7 +520,7 @@ mod fixture {
                 RecordKind::Note,
                 metadata(
                     "ticket05-e2e-search-canary 雪\u{1b}]52;c;dGlja2V0MjM=\u{7}",
-                    "note",
+                    "ticket27-native-note-canary",
                 )?,
                 vec![],
                 vec![],

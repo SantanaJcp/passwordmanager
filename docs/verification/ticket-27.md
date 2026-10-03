@@ -3082,3 +3082,32 @@ Preflight local: `check.sh` rc0 bajo flock,
 segundo build, antes de producto; corregido seleccionando ambos productos).
 Fmt y diff-check PASS. Linux no compila los cuerpos cfg Windows; la aceptación
 nativa del fixture nuevo y del resize sigue pendiente de la próxima corrida.
+
+### Corrida 4 fase2: fallo del oráculo de nota, sin fuga demostrada
+
+[Windows 37130523874](https://github.com/SantanaJcp/passwordmanager/actions/runs/37130523874),
+SHA `da2ace3bdb97a2b6342c7ab81c61892c3328eb02`, terminó FAIL.
+Build fixture seed/PE ARM64 static, preparación types7 por humano con igualdad
+LogicalRecord exacta, primitives13/pipe1/observer17/sync-lib1 y salida natural
+encoding PASS. Matriz falla en el grupo nuevo de tipos con
+`ConPTY screen exposed the synthetic password`, antes de emitir su PASS;
+no alcanza resize ni clipboard. Log `/tmp/pmw1b-windows3.log`.
+
+Defecto concreto del fixture encontrado: notes del registro Note era `note`;
+el oráculo buscaba esa subcadena en toda la pantalla después de expiry,
+donde está también el tipo público `[note]`. Esto garantiza falso positivo,
+no demuestra una fuga de contenido. Corregir el dato a
+`ticket27-native-note-canary` y conservar rechazo integral antes/tras selección
+más reveal exacto/expiry; todos los valores quedan distintos de labels públicos.
+Regresión nativa del observer exige rechazo del viejo `note` público,
+aceptación del canario oculto y rechazo si se dibuja en Exposure. GREEN real
+de los siete tipos queda todavía pendiente. Resize se mueve después de
+clipboard para discriminar primero la frontera conocida; ningún grupo ni
+aserción se elimina. Fixture seed cambia sólo la nota sintética respecto de
+los constructores Linux; readback sigue exacto. Cuatro corridas propias
+terminadas de máximo6, no una RED conductual del producto en esta corrida.
+
+Preflight de la corrección: check5 rc0 bajo flock,
+`/tmp/pmw1b-check5.log`; check6 incluye fmt/check/tests/clippy después de añadir
+la regresión cfgWindows, resultado en `/tmp/pmw1b-check6.log`. Native cfg
+Windows todavía requiere la corrida siguiente; no atribuirle ejecución Linux.

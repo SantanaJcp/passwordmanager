@@ -1846,6 +1846,7 @@ mod windows_fixture {
         }
 
         eprintln!("TUI_STAGE stage=organization-history-copy result=pass");
+        exercise_resize(fixture)?;
         open_menu(fixture, "g", "Generator length")?;
         type_visible_and_submit(fixture, "24", "24")?;
         fixture
@@ -1967,7 +1968,12 @@ mod windows_fixture {
             ),
             ("SSH", "auth[0].private_key", 14, "ticket05-e2e-ssh-canary"),
             ("Token", "auth[0].secret", 13, "ticket05-e2e-token-canary"),
-            ("ticket05-e2e-search-canary", "notes", 5, "note"),
+            (
+                "ticket05-e2e-search-canary",
+                "notes",
+                5,
+                "ticket27-native-note-canary",
+            ),
             (
                 "File",
                 "attachment[0].content",
@@ -1981,12 +1987,10 @@ mod windows_fixture {
                 .wait_for("Search returned 1 active items")
                 .map_err(io::Error::other)?;
             // Catalogue and explicit field labels expose no selected field value.
-            if value != "note" {
-                fixture
-                    .observer
-                    .rejects(value.as_bytes())
-                    .map_err(io::Error::other)?;
-            }
+            fixture
+                .observer
+                .rejects(value.as_bytes())
+                .map_err(io::Error::other)?;
             press(fixture, "r")?;
             fixture
                 .observer
@@ -1997,12 +2001,10 @@ mod windows_fixture {
                 .observer
                 .wait_for(&format!("› {field}"))
                 .map_err(io::Error::other)?;
-            if value != "note" {
-                fixture
-                    .observer
-                    .rejects(value.as_bytes())
-                    .map_err(io::Error::other)?;
-            }
+            fixture
+                .observer
+                .rejects(value.as_bytes())
+                .map_err(io::Error::other)?;
             press(fixture, "\r")?;
             fixture.observer.wait_for(value).map_err(io::Error::other)?;
             fixture
@@ -2015,6 +2017,10 @@ mod windows_fixture {
                 .map_err(io::Error::other)?;
         }
         eprintln!("TUI_STAGE stage=seven-types-explicit-fields result=pass");
+        Ok(())
+    }
+
+    fn exercise_resize(fixture: &Fixture) -> io::Result<()> {
         for (columns, rows, expected) in [
             (100, 30, "Items (selection is metadata only)"),
             (42, 12, "Password Manager"),
@@ -2387,6 +2393,22 @@ mod windows_fixture {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn observer_distinguishes_note_secret_from_its_public_type() {
+            let observer = TerminalObserver::new();
+            observer.feed(b"[note] synthetic public title").unwrap();
+            assert!(observer.rejects(b"note").is_err());
+            observer.rejects(b"ticket27-native-note-canary").unwrap();
+            observer
+                .feed(b"\x1b[22;2HExposure: ticket27-native-note-canary")
+                .unwrap();
+            assert!(observer.rejects(b"ticket27-native-note-canary").is_err());
+            observer
+                .feed(b"\x1b[22;2H\x1b[2KExposure: <hidden>")
+                .unwrap();
+            observer.rejects(b"ticket27-native-note-canary").unwrap();
+        }
 
         #[test]
         fn observer_requires_mandatory_information_in_main_panel() {
