@@ -3283,3 +3283,37 @@ g7-matrix rc1 conocido sin regresión. Logs nuevos `/tmp/pmw1c-*.log`;
 soltar el lock al esperar CI. Windows se ejecuta con inputs
 diagnostic_only=false/service_diagnostics=true/tui_conpty_red=true, estándar
 Win11 ARM64 sintético y sin caches/artifacts/secrets/certificados.
+
+### Corrida 1 fase3 — CSI t admitido, shrink todavía sin GREEN
+
+[Windows 37133763980](https://github.com/SantanaJcp/passwordmanager/actions/runs/37133763980),
+SHA `f67a0e409a30eb5ecab2fd034e3b74fba0d612f6`, FAIL terminado.
+Primitives13/pipe1/observer20/sync-lib1, seed exacto, encoding natural y tipos7
+PASS. Resize100×30 supera el gate estricto;42×12 agota15s con proceso vivo,
+parser ground y salida fresca presente. Ninguna secuencia desconocida ni
+error de parser. El reporte anterior no distingue cuál de reporte/cursor/
+texto faltó, por tanto aún no hay atribución causal de shrink.1PUX y
+clipboard no alcanzados. Log `/tmp/pmw1c-windows1.log`.
+
+Método antes de corrida2: conservar todos los asserts de resize y registrar
+report-fresh/cursor-fresh/expected-present/geometry-matches por booleanos.
+Mover el grupo completo después de imports/operaciones, sin omitirlo.
+Instrumentar exclusivamente el seam de transferencia Windows31 del handler
+único con callbacks cfgWindows después de preview, preparation, signature,
+frame-ready y write. No copiar handler ni modificar parser/vault/staging.
+La categoría de HumanCommitError es cerrada: ok/crypto-resource/crypto-other/
+invalid-input/io-permission/io-eof/io-input/io-other/storage/state-changed/
+wrong-channel/other. El error público sigue igual; un fallo de diagnóstico
+también se propaga, combinado con el primario. Callback inexistente significa
+diagnóstico opt-in apagado, no un camino alternativo de producto.
+Linux/Mac conservan el mismo handler y mapeo de errores, sin callback ni
+nuevas operaciones. Check2 fresco rc0 bajo flock,
+`/tmp/pmw1c-check2.log`; no acredita compilación cfgWindows. Se ejecutará la
+regresión40 y una corrida Mac del archivo común como comprobación adicional,
+sin aceptar el bloqueo sync W2 como GREEN integral.
+
+Fallbacks adicionales encontrados sin modificar: `token_sid` ignora LocalFree
+al convertir un SID y `installed_service_pid` ignora CloseServiceHandle; un
+fallo de liberación no cambia su resultado. `OwnedClipboard::copy_then` ignora
+GlobalFree/GlobalUnlock en sus caminos históricos de transferencia del HGLOBAL.
+No hay evidencia de que esas omisiones sean la causa del fallo de clipboard.

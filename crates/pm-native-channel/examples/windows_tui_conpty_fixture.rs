@@ -1681,7 +1681,6 @@ mod windows_fixture {
             return Ok(());
         }
         exercise_types(fixture)?;
-        exercise_resize(fixture)?;
         // Ticket 25 migration is driven through the real keyboard and common
         // human handler. The service result is awaited before the next input;
         // no operation is retried by the fixture.
@@ -1948,6 +1947,7 @@ mod windows_fixture {
             .map_err(io::Error::other)?;
         eprintln!("TUI_STAGE stage=backup-export-trash result=pass");
         exercise_restore_rotations(fixture, &paths)?;
+        exercise_resize(fixture)?;
         write_keyboard_input(fixture, b"q")?;
         require_tui_exit(fixture.process)
     }
@@ -2074,8 +2074,15 @@ mod windows_fixture {
                         && state.contains(expected)
                 })
                 .map_err(|primary| {
+                    let discriminants = fixture.observer.state.lock().map(|state| format!(
+                        "report-fresh={} cursor-fresh={} expected-present={} geometry-matches={}",
+                        state.resize_reports > previous_reports,
+                        state.cursor_positions > previous_positions,
+                        state.contains(expected),
+                        state.columns == columns as usize && state.rows == rows as usize,
+                    ));
                     io::Error::other(format!(
-                        "{primary}; resize={columns}x{rows}; child={:?}; observer={:?}",
+                        "{primary}; resize={columns}x{rows}; discriminants={discriminants:?}; child={:?}; observer={:?}",
                         child_diagnostic(fixture.process),
                         fixture.observer.diagnostic(),
                     ))

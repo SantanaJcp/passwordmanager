@@ -246,6 +246,47 @@ impl ServiceDiagnostics {
             .map_err(|_| Failure::Unavailable)?;
         file.sync_all().map_err(|_| Failure::Unavailable)
     }
+
+    fn record_1pux_result(
+        &self,
+        stage: crate::human_wire::OnePuxTransferStage,
+        error: Option<&pm_vault::HumanCommitError>,
+    ) -> Result<(), Failure> {
+        use crate::human_wire::OnePuxTransferStage;
+        use pm_vault::HumanCommitError;
+        let stage = match stage {
+            OnePuxTransferStage::Preview => "preview",
+            OnePuxTransferStage::Preparation => "preparation",
+            OnePuxTransferStage::Signature => "signature",
+            OnePuxTransferStage::FrameReady => "frame-ready",
+            OnePuxTransferStage::FrameSent => "frame-sent",
+            OnePuxTransferStage::FrameFailed => "frame-failed",
+        };
+        let category = match error {
+            None => "ok",
+            Some(HumanCommitError::Crypto(pm_crypto::CryptoError::ResourceUnavailable)) => {
+                "crypto-resource"
+            }
+            Some(HumanCommitError::Crypto(_)) => "crypto-other",
+            Some(HumanCommitError::InvalidInput) => "invalid-input",
+            Some(HumanCommitError::Io(error)) => match error.kind() {
+                std::io::ErrorKind::PermissionDenied => "io-permission",
+                std::io::ErrorKind::UnexpectedEof => "io-eof",
+                std::io::ErrorKind::InvalidInput => "io-input",
+                _ => "io-other",
+            },
+            Some(HumanCommitError::Storage(_)) => "storage",
+            Some(HumanCommitError::StateChanged) => "state-changed",
+            Some(HumanCommitError::WrongChannel) => "wrong-channel",
+            Some(_) => "other",
+        };
+        let mut file = self.file.lock().map_err(|_| Failure::Unavailable)?;
+        file.seek(SeekFrom::End(0))
+            .map_err(|_| Failure::Unavailable)?;
+        writeln!(file, "phase=onepux-{stage} category={category}")
+            .map_err(|_| Failure::Unavailable)?;
+        file.sync_all().map_err(|_| Failure::Unavailable)
+    }
 }
 
 fn validate_diagnostic_file(file: &File) -> Result<(), Failure> {
@@ -832,7 +873,16 @@ fn serve_human(
                     })?;
                 }
                 let source = duplicated.map_err(|_| Failure::Unavailable)?;
-                let preview = crate::human_wire::handle_1pux_file(&mut vault, tls, rest, source);
+                let preview = crate::human_wire::handle_1pux_file(
+                    &mut vault,
+                    tls,
+                    rest,
+                    source,
+                    |stage, error| match service.diagnostics.as_ref() {
+                        Some(diagnostics) => diagnostics.record_1pux_result(stage, error),
+                        None => Ok(()),
+                    },
+                );
                 let diagnostic = if let Some(diagnostics) = service.diagnostics.as_ref() {
                     diagnostics.record(if preview.is_ok() {
                         ServiceDiagnosticPhase::TransferPreviewSent

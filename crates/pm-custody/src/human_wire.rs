@@ -1851,21 +1851,56 @@ impl<S: std::io::Read + std::io::Write> std::io::Write for FrameWriter<'_, S> {
     }
 }
 
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+pub(crate) enum OnePuxTransferStage {
+    Preview,
+    Preparation,
+    Signature,
+    FrameReady,
+    FrameSent,
+    FrameFailed,
+}
+
+#[cfg(windows)]
+fn observe_1pux_result<T>(
+    result: Result<T, pm_vault::HumanCommitError>,
+    stage: OnePuxTransferStage,
+    observe: &mut impl FnMut(
+        OnePuxTransferStage,
+        Option<&pm_vault::HumanCommitError>,
+    ) -> Result<(), Failure>,
+) -> Result<T, Failure> {
+    let diagnostic = observe(stage, result.as_ref().err());
+    match (result, diagnostic) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(_), Ok(())) => Err(Failure::Unavailable),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(_), Err(error)) => Err(Failure::Unavailable.merge(error)),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn handle_1pux_file<S: std::io::Read + std::io::Write>(
     vault: &mut HumanVault,
     tls: &mut S,
     request: &[u8],
     source: std::fs::File,
+    #[cfg(windows)] mut observe: impl FnMut(
+        OnePuxTransferStage,
+        Option<&pm_vault::HumanCommitError>,
+    ) -> Result<(), Failure>,
 ) -> Result<(), Failure> {
     let replace_candidates = match request {
         [0] => false,
         [1] => true,
         _ => return Err(Failure::Unavailable),
     };
-    let preview = vault
-        .preview_1pux_file(source)
-        .map_err(|_| Failure::Unavailable)?;
+    let preview = vault.preview_1pux_file(source);
+    #[cfg(windows)]
+    let preview = observe_1pux_result(preview, OnePuxTransferStage::Preview, &mut observe)?;
+    #[cfg(not(windows))]
+    let preview = preview.map_err(|_| Failure::Unavailable)?;
     let mut decisions = Vec::with_capacity(preview.total());
     let mut offset = 0;
     while offset < preview.total() {
@@ -1884,12 +1919,16 @@ pub(crate) fn handle_1pux_file<S: std::io::Read + std::io::Write>(
         }
         offset += page.len();
     }
-    let prepared = vault
-        .prepare_1pux_import(preview, decisions)
-        .map_err(|_| Failure::Unavailable)?;
-    let signature = vault
-        .sign(prepared.prepared())
-        .map_err(|_| Failure::Unavailable)?;
+    let prepared = vault.prepare_1pux_import(preview, decisions);
+    #[cfg(windows)]
+    let prepared = observe_1pux_result(prepared, OnePuxTransferStage::Preparation, &mut observe)?;
+    #[cfg(not(windows))]
+    let prepared = prepared.map_err(|_| Failure::Unavailable)?;
+    let signature = vault.sign(prepared.prepared());
+    #[cfg(windows)]
+    let signature = observe_1pux_result(signature, OnePuxTransferStage::Signature, &mut observe)?;
+    #[cfg(not(windows))]
+    let signature = signature.map_err(|_| Failure::Unavailable)?;
     let report = prepared.report();
     let mut response = vec![0];
     for value in [
@@ -1920,7 +1959,27 @@ pub(crate) fn handle_1pux_file<S: std::io::Read + std::io::Write>(
     push_bytes(&mut response, prepared.prepared().command())?;
     push_bytes(&mut response, prepared.prepared().body())?;
     response.extend_from_slice(&signature);
-    write_frame(tls, &response)
+    #[cfg(windows)]
+    observe(OnePuxTransferStage::FrameReady, None)?;
+    let sent = write_frame(tls, &response);
+    #[cfg(windows)]
+    {
+        let diagnostic = observe(
+            if sent.is_ok() {
+                OnePuxTransferStage::FrameSent
+            } else {
+                OnePuxTransferStage::FrameFailed
+            },
+            None,
+        );
+        return match (sent, diagnostic) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(diagnostic)) => Err(error.merge(diagnostic)),
+        };
+    }
+    #[cfg(not(windows))]
+    sent
 }
 
 pub(crate) enum HumanResponse {

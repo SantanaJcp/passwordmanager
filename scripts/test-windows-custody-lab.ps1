@@ -163,6 +163,11 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
         'phase=transfer-preview-handler-failed'
         'phase=service-failed'
     )
+    foreach ($stage in @('preview', 'preparation', 'signature', 'frame-ready', 'frame-sent', 'frame-failed')) {
+        foreach ($category in @('ok', 'crypto-resource', 'crypto-other', 'invalid-input', 'io-permission', 'io-eof', 'io-input', 'io-other', 'storage', 'state-changed', 'wrong-channel', 'other')) {
+            $allowed += "phase=onepux-$stage category=$category"
+        }
+    }
     foreach ($line in $lines) {
         Assert-True ($allowed -contains [string]$line) 'unexpected service diagnostic phase'
         Write-Host "SERVICE_PHASE $line"
