@@ -3517,3 +3517,103 @@ nuevas mediciones y eventos son cfgWindows. Se publicará candidato5 y se
 esperarán Windows5 y Mac2 (último slot Mac, comprobación del archivo TUI
 compartido tras hooks nuevos). Un último barrido40 sobre ese SHA recoge
 check/clean/freshness final; no sustituye ningún FAIL nativo.
+
+### Corrida 5 fase3 — autorizaciones aplicadas; gates aún abiertos
+
+[Windows 37138641535](https://github.com/SantanaJcp/passwordmanager/actions/runs/37138641535),
+SHA `323012238412f21432afc9ee71ad726c9bf0052a`, FAIL terminado.
+Primitives13, pipe1, observer22 y sync-lib1 PASS nativos. Peer nuevo:
+agente real no admin → Human CreateFileW ERROR_ACCESS_DENIED y
+connect_installed rechazado, PASS. Clipboard independiente repite GREEN.
+Backup/export/trash/restore/recovery/master, ficheros regulares no vacíos
+observados por el humano y old-master denied/new-master accepted PASS.
+La frontera privada de Test-Path queda corregida sin cambiar ningún ACL.
+
+Resize100×30 observa geometry-seq2 buffer=viewport=frame100×30. Al reducir
+42×12, el observer falla inmediatamente `absolute cursor position outside
+screen`; aún no hay witness42 y no se llega a80×24. No atribuirlo al nuevo
+oráculo ni declarar resize GREEN. El output puede contener CUP de un frame
+anterior durante el cambio: inferencia, no discriminante de orden de bytes.
+Microsoft [cursor positioning](https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences)
+define movimiento limitado al viewport y parámetros hasta32767. Se preparó
+un diff sólo CUP/HVP: aplicar el borde real para parámetros válidos, rechazar
+>32767; ningún cambio a CSI desconocido, texto, witness fresco ni15s. Como
+reemplaza una aserción del observer, se consultó autorización adicional;
+no aplicado mientras esté pendiente. CHA/VPA y otras secuencias no cambian.
+
+Esc explícito llega a Content view y todo generator/access/pending/audit.
+El caso access falla después al intentar q dentro del menú Audit aún activo;
+query_audit conserva Mode::Operations y q ahí muestra ayuda, no sale.
+Corrección exclusivamente de fixture: Esc ordinario + status exacto Cancelled
+antes del siguiente browse/q. Rotations separado corta al exigir una única
+Password tras restore: restore añade IDs nuevos y deja el original, por lo
+que esa precondición ya no se conserva. Ejecutar la sesión rotations antes
+de la matriz/local-operations, conservando el mismo search1 y todos los
+oráculos de rotación/salida. No cambia producto ni elimina assertions.
+
+La primera negativa wire null falla con diagnóstico genérico del fixture,
+sin discriminante de fase disponible; no acredita rechazo, no se alcanzan
+las otras tres ni los gates finales SCM. Preparar categorías fijas por
+connect/magic/unlock/request31/ack31/token/peer-read/close y booleanos de
+lease antes/durante/finish/after. La regla de aceptación sigue siendo
+UnexpectedEof exclusivamente. Ejecutar las cuatro conexiones independientes
+antes de restore/rotaciones, retener cada FAIL y el FAIL global, sin repetir
+un caso ni aceptar errores genéricos. Así se distingue un problema de
+handshake/unlock, lease, transporte o del propio oráculo de cierre. Todos
+los diagnósticos nuevos excluyen secretos, rutas, handles y PIDs.
+
+1PUX integral vuelve a transfer-duplicated→preview crypto-resource→
+handler-failed, TUI preview-read-other-io→lease-restored, sin preparation ni
+frame-send. No tocar allocator/custodia/vault/staging W3. El punto exacto de
+asignación en parser/classification sigue sin localizar; duplicación/regular/
+reparse/link/fileID/size ya pasaron y envío de preview no se alcanzó.
+Log `/tmp/pmw1c-windows5.log`; el resultado agregado conserva todos los FAIL.
+
+[Mac 37138642938](https://github.com/SantanaJcp/passwordmanager/actions/runs/37138642938),
+mismo SHA, FAIL terminado ambas CPU; log `/tmp/pmw1c-macos2.log`.
+ARM: full25-import/offline+wrong-pin observados; restore no alcanza commit,
+delta-items0/authority-same, child alive/parser ground. Intel: full25-local
+observado, colisiones backup/plaintext rechazadas con destino intacto;
+sync20s no llega a complete, durable=integrity/screen=integrity/process=same,
+blocks8/roots0 y outbox-purged pending-revisions5/missing-items5. Registrar
+bloqueos W2/W3 y no inferir causa de rendimiento. Second-agent sigue
+blocked transport=single-bootstrap. Dos slots Mac agotados, sin repetirlos.
+
+Fallback heredado adicional visto en sólo lectura:
+windows.rs tests::create_owned_test_pipe ignora LocalFree del descriptor al
+crear su pipe sintético. No hubo falla observada de ese free ni es causa del
+CUP/access/wire; permanece intacto. No sustituye el cleanup explícito de los
+nuevos fixtures. Los otros fallbacks del inventario previo permanecen.
+
+Barrido final2 SHA3230122 concluido:40 casos,39 rc0, g7-matrix rc1 igual al
+baseline, ningún mismatch. Check/clean incluidos; JSON
+`/tmp/pmw1c-final2-gate-results.json`, summary y40 logs por caso. Sólo fixtures
+cfgWindows cambian después de ese barrido; no se cambia producto Linux/Mac.
+Check6 (fixture Audit/orden/wire categorías) rc0 bajo flock,
+`/tmp/pmw1c-check6.log`; PID fixture posterior requiere nuevo check.
+
+Método PID impostor adicional antes de seed: humano real crea una sola
+instancia FIRST_PIPE_INSTANCE del endpoint Human para un vault sintético
+separado, DACL explícita sólo SYSTEM+humano y handle no heredable. No modifica
+ningún pipe de producto ni permisos. Servicio SCM real sigue running; PID
+nativo del pipe sintético debe ser del fixture y distinto del servicio.
+WaitNamedPipe debe probar disponibilidad. connect_installed debe rechazarlo;
+GetNamedPipeClientProcessId debe corroborar que ese cliente abrió realmente
+esa instancia, sin aceptar not-found/access-denied como prueba del PID.
+CloseHandle del servidor y ERROR_FILE_NOT_FOUND posterior obligatorios;
+LocalFree del descriptor también comprobado. El caso preserva FAIL agregado
+si no obtiene todos los discriminantes. Es rechazo del PID servidor; no
+reemplaza negativas de PID cliente cambiado ni RPK impostor. Fuentes:
+[GetNamedPipeServerProcessId](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeserverprocessid)
+y [GetNamedPipeClientProcessId](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeclientprocessid).
+Constructor instalado conserva su Drop/CloseHandle heredado: no se modifica
+ni se atribuye fallo suyo sin evidencia; ausencia nativa del endpoint evita
+aceptar un handle cliente residual como cleanup correcto del fixture.
+
+Check6b rc0 tras añadir PID, `/tmp/pmw1c-check6b.log`; fmt6c y contrato
+estático Windows6 rc0 después de exigir descriptor no nulo y preparar el
+layout completo. Todos bajo flock. Estos cambios posteriores son sólo
+fixtures Windows; Linux40 ya fresco no se repite. La corrida6 se prepara
+sin aplicar el diff CUP/HVP mientras falta esa autorización; mantiene ese
+FAIL y todas las aserciones de cierre wire. No se reclama GREEN de nuevas
+ramas Windows antes de ejecutar y esperar la corrida.

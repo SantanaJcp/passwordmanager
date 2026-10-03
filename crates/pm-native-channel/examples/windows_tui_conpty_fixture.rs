@@ -2028,6 +2028,13 @@ mod windows_fixture {
             .observer
             .wait_for_information("Audit metadata:")
             .map_err(io::Error::other)?;
+        // Audit queries leave the operation menu open. Return through its
+        // ordinary Escape action before testing a browse action or quitting.
+        press(fixture, "\x1b")?;
+        fixture
+            .observer
+            .wait_for("Cancelled; nothing changed")
+            .map_err(io::Error::other)?;
 
         eprintln!("TUI_STAGE stage=generator-access-pending-audit result=pass");
         Ok(())

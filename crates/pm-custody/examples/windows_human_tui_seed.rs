@@ -60,6 +60,31 @@ mod fixture {
         }
     }
     type Tls = rustls::StreamOwned<ClientConnection, WindowsClientPipe>;
+    fn observe<T>(
+        stage: &'static str,
+        enabled: bool,
+        result: Result<T, Failure>,
+    ) -> Result<T, Failure> {
+        if enabled {
+            eprintln!(
+                "NATIVE_TRANSFER stage={stage} result={}",
+                if result.is_ok() { "pass" } else { "fail" }
+            );
+        }
+        result
+    }
+
+    fn io_category(error: &std::io::Error) -> &'static str {
+        match error.kind() {
+            std::io::ErrorKind::UnexpectedEof => "eof",
+            std::io::ErrorKind::BrokenPipe => "broken-pipe",
+            std::io::ErrorKind::PermissionDenied => "permission",
+            std::io::ErrorKind::InvalidData => "invalid-data",
+            std::io::ErrorKind::TimedOut => "timeout",
+            std::io::ErrorKind::ConnectionReset => "connection-reset",
+            _ => "other",
+        }
+    }
     fn bytes(request: &mut Vec<u8>, value: &[u8]) -> Result<(), Failure> {
         request.extend_from_slice(
             &u32::try_from(value.len())
@@ -248,10 +273,146 @@ mod fixture {
         Ok(())
     }
 
+    fn reject_impostor_server(vault: &str, sddl: &str, service_pid: u32) -> Result<(), Failure> {
+        use std::ptr;
+        use windows_sys::Win32::{
+            Foundation::{
+                CloseHandle, ERROR_FILE_NOT_FOUND, GetLastError, INVALID_HANDLE_VALUE, LocalFree,
+            },
+            Security::{
+                Authorization::{
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+                },
+                SECURITY_ATTRIBUTES,
+            },
+            Storage::FileSystem::{
+                FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
+            },
+            System::{
+                Pipes::{
+                    CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
+                    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+                    WaitNamedPipeW,
+                },
+                Threading::GetCurrentProcessId,
+            },
+        };
+        let current_pid = unsafe { GetCurrentProcessId() };
+        if service_pid == 0 || service_pid == current_pid {
+            return Err(Failure::Unavailable);
+        }
+        let name = WindowsEndpoint::Human
+            .pipe_name(vault)
+            .map_err(|_| Failure::Unavailable)?;
+        let name = name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let sddl = sddl.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let attributes_size = u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+            .map_err(|_| Failure::Unavailable)?;
+        let mut descriptor = ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+            || descriptor.is_null()
+        {
+            return Err(Failure::Unavailable);
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: attributes_size,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let server = unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                4096,
+                4096,
+                0,
+                &raw const attributes,
+            )
+        };
+        let descriptor_released = unsafe { LocalFree(descriptor) }.is_null();
+        if server == INVALID_HANDLE_VALUE {
+            eprintln!(
+                "NATIVE_PID stage=create result=fail descriptor-released={descriptor_released}"
+            );
+            return Err(Failure::Unavailable);
+        }
+        let operation = (|| {
+            if !descriptor_released {
+                return Err(Failure::Unavailable);
+            }
+            eprintln!("NATIVE_PID stage=create result=pass descriptor-released=true");
+            let mut observed_pid = 0;
+            if unsafe { GetNamedPipeServerProcessId(server, &raw mut observed_pid) } == 0
+                || observed_pid != current_pid
+                || observed_pid == service_pid
+            {
+                eprintln!("NATIVE_PID stage=native-server result=fail");
+                return Err(Failure::Unavailable);
+            }
+            if unsafe { WaitNamedPipeW(name.as_ptr(), 0) } == 0 {
+                eprintln!("NATIVE_PID stage=available result=fail");
+                return Err(Failure::Unavailable);
+            }
+            eprintln!(
+                "NATIVE_PID stage=native-server result=pass differs-from-scm=true available=true"
+            );
+            match WindowsClientPipe::connect_installed(WindowsEndpoint::Human, vault) {
+                Err(_) => {}
+                Ok(pipe) => {
+                    let pipe = std::mem::ManuallyDrop::new(pipe);
+                    let closed = unsafe { CloseHandle(pipe.raw_handle()) } != 0;
+                    eprintln!(
+                        "NATIVE_PID stage=installed-reject result=fail client-closed={closed}"
+                    );
+                    return Err(Failure::Unavailable);
+                }
+            }
+            // Require kernel evidence that the installed client actually opened
+            // this instance; an unavailable pipe or unrelated error cannot pass.
+            let mut client_pid = 0;
+            if unsafe { GetNamedPipeClientProcessId(server, &raw mut client_pid) } == 0
+                || client_pid != current_pid
+            {
+                eprintln!("NATIVE_PID stage=native-client result=fail");
+                return Err(Failure::Unavailable);
+            }
+            eprintln!("NATIVE_PID stage=installed-reject result=pass native-client-observed=true");
+            Ok(())
+        })();
+        let closed = unsafe { CloseHandle(server) } != 0;
+        let absent = unsafe { WaitNamedPipeW(name.as_ptr(), 0) } == 0
+            && unsafe { GetLastError() } == ERROR_FILE_NOT_FOUND;
+        eprintln!("NATIVE_PID stage=cleanup server-closed={closed} endpoint-absent={absent}");
+        if !closed || !absent {
+            return Err(Failure::Unavailable);
+        }
+        operation?;
+        println!(
+            "PASS windows-pid-negative native-server=impostor installed-connect=rejected client-observed=1 endpoint-absent=1"
+        );
+        Ok(())
+    }
+
     pub(super) fn run() -> Result<(), Failure> {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
         if args.len() == 2 && args[0] == "--peer-negative" {
             return reject_agent_on_human_pipe(&args[1]);
+        }
+        if args.len() == 4 && args[0] == "--pid-negative" {
+            return reject_impostor_server(
+                &args[1],
+                &args[2],
+                args[3].parse().map_err(|_| Failure::Unavailable)?,
+            );
         }
         if !(args.len() == 3 || (args.len() == 5 && args[3] == "--transfer-negative")) {
             return Err(Failure::Unavailable);
@@ -279,13 +440,22 @@ mod fixture {
         if used == 0 {
             return Err(Failure::Unavailable);
         }
-        let mut tls = connect(Path::new(&args[0]), Path::new(&args[1]), &args[2])?;
+        let negative = args.len() == 5;
+        let mut tls = observe(
+            "connect",
+            negative,
+            connect(Path::new(&args[0]), Path::new(&args[1]), &args[2]),
+        )?;
         let operation = (|| {
-            tls.write_all(b"PMH1\n").map_err(|_| Failure::Unavailable)?;
+            observe(
+                "magic",
+                negative,
+                tls.write_all(b"PMH1\n").map_err(|_| Failure::Unavailable),
+            )?;
             let mut unlock = zeroize::Zeroizing::new(vec![1]);
             bytes(&mut unlock, &password[..used])?;
-            send(&mut tls, &unlock)?;
-            if *success(&mut tls)? != [0] {
+            observe("unlock-sent", negative, send(&mut tls, &unlock))?;
+            if *observe("unlock-response", negative, success(&mut tls))? != [0] {
                 return Err(Failure::Unavailable);
             }
             if args.len() == 5 {
@@ -296,23 +466,37 @@ mod fixture {
                     "malformed-token" => &[0; 7],
                     _ => return Err(Failure::Unavailable),
                 };
-                send(&mut tls, &[31, 0])?;
-                if *success(&mut tls)? != [0] {
+                observe("request31", true, send(&mut tls, &[31, 0]))?;
+                if *observe("ack31", true, success(&mut tls))? != [0] {
                     return Err(Failure::Unavailable);
                 }
                 crate::acl::with_exact_human_lease(|| {
                     send(&mut tls, token).map_err(|_| {
+                        eprintln!("NATIVE_TRANSFER stage=token-sent result=fail");
                         std::io::Error::other("negative transfer token could not be sent")
                     })?;
+                    eprintln!("NATIVE_TRANSFER stage=token-sent result=pass");
                     let mut header = [0; 4];
                     match tls.read_exact(&mut header) {
-                        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(()),
-                        Err(_) => Err(std::io::Error::other(
-                            "negative transfer failed outside peer EOF",
-                        )),
-                        Ok(()) => Err(std::io::Error::other(
-                            "negative transfer returned a response instead of closing",
-                        )),
+                        Err(error) => {
+                            eprintln!(
+                                "NATIVE_TRANSFER stage=peer-read category={}",
+                                io_category(&error)
+                            );
+                            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                                Ok(())
+                            } else {
+                                Err(std::io::Error::other(
+                                    "negative transfer failed outside peer EOF",
+                                ))
+                            }
+                        }
+                        Ok(()) => {
+                            eprintln!("NATIVE_TRANSFER stage=peer-read category=response");
+                            Err(std::io::Error::other(
+                                "negative transfer returned a response instead of closing",
+                            ))
+                        }
                     }
                 })
                 .map_err(|_| Failure::Unavailable)?;
@@ -357,7 +541,7 @@ mod fixture {
             }
             Ok(())
         })();
-        let closed = close_tls(tls);
+        let closed = observe("close", negative, close_tls(tls));
         operation.and(closed)?;
         if args.len() == 5 {
             println!(

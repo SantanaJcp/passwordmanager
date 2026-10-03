@@ -34,6 +34,7 @@ pub(super) fn with_exact_human_lease(operation: impl FnOnce() -> io::Result<()>)
     if before.service_aces != 0 {
         return Err(io::Error::other("human fixture already has a transfer ACE"));
     }
+    eprintln!("HUMAN_LEASE phase=before exact=true");
     let lease = pm_native_channel::ProcessHandleTransferLease::begin().map_err(|error| {
         io::Error::other(format!(
             "human-token lease begin rejected; cleanup-failed={}",
@@ -50,8 +51,14 @@ pub(super) fn with_exact_human_lease(operation: impl FnOnce() -> io::Result<()>)
         }
     });
     let operation = match during {
-        Ok(()) => operation(),
-        Err(error) => Err(error),
+        Ok(()) => {
+            eprintln!("HUMAN_LEASE phase=during exact=true");
+            operation()
+        }
+        Err(error) => {
+            eprintln!("HUMAN_LEASE phase=during exact=false");
+            Err(error)
+        }
     };
     let restored = lease
         .finish()
@@ -65,6 +72,11 @@ pub(super) fn with_exact_human_lease(operation: impl FnOnce() -> io::Result<()>)
             Ok(())
         }
     });
+    eprintln!(
+        "HUMAN_LEASE phase=after finish-ok={} exact={}",
+        restored.is_ok(),
+        after.is_ok()
+    );
     let errors = [operation, restored, after]
         .into_iter()
         .filter_map(Result::err)

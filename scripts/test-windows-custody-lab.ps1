@@ -713,10 +713,52 @@ try {
         Assert-True ($p.ExitCode -eq 0) ('native agent-to-human peer negative failed: ' + (Get-Content $badErr -Raw))
         Assert-True ((Get-Content $badOut -Raw).Trim() -eq 'PASS windows-peer-negative agent-human-pipe=access-denied installed-connect=rejected') 'agent-to-human peer did not prove native access denial'
         Write-Host (Get-Content $badOut -Raw)
+        $pidStationSddl = "D:P(A;;GA;;;SY)(A;;GA;;;$humanSid)"
+        $pidService = Get-StoppableServicePid $serviceName
+        $p = Start-AsUser $humanCredential $tuiSeed @('--pid-negative', '27bb27bb27bb27bb27bb27bb27bb27bb', $pidStationSddl, [string]$pidService) $emptyInput $humanOut $humanErr
+        Write-Host (Get-Content $humanErr -Raw)
+        if ($p.ExitCode -eq 0 -and (Get-Content $humanOut -Raw).Trim() -eq 'PASS windows-pid-negative native-server=impostor installed-connect=rejected client-observed=1 endpoint-absent=1') {
+            Write-Host (Get-Content $humanOut -Raw)
+        }
+        else {
+            $tuiCaseFailures.Add('peer-pid')
+            Write-Host 'NATIVE_PID case=impostor result=fail'
+        }
         $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId) $humanInput $humanOut $humanErr
         Assert-True ($p.ExitCode -eq 0) ('ordinary human type seeding failed: ' + (Get-Content $humanErr -Raw))
         Assert-True ((Get-Content $humanOut -Raw).Trim() -eq 'PASS windows-tui-seed types=7 ordinary-human-wire=1 readback=exact') 'seven-type readback was not exact'
         Write-Host (Get-Content $humanOut -Raw)
+        # Invalid source frames are independent of restore and key rotations.
+        # Preserve every failure, then continue the other native cases once.
+        foreach ($negative in @('null', 'invalid-handle', 'thread-pseudohandle', 'malformed-token')) {
+            $diagnosticStart = if ($ServiceDiagnostics) { @(Get-Content -LiteralPath $diagnosticPath -ErrorAction Stop).Count } else { 0 }
+            $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId, '--transfer-negative', $negative) $humanInput $humanOut $humanErr
+            Write-Host (Get-Content $humanErr -Raw)
+            Write-ServiceSubphaseDiagnostics $diagnosticPath
+            try {
+                Assert-True ($p.ExitCode -eq 0) ('ordinary human transfer negative failed: ' + $negative + '; ' + (Get-Content $humanErr -Raw))
+                Assert-True ((Get-Content $humanOut -Raw).Trim() -eq "PASS windows-transfer-negative case=$negative ack31=accepted peer-eof=1 dacl-before-during-after=exact") 'negative transfer did not prove exact DACL and peer closure'
+                Write-Host (Get-Content $humanOut -Raw)
+                if ($ServiceDiagnostics) {
+                    $newPhases = @(Get-Content -LiteralPath $diagnosticPath -ErrorAction Stop | Select-Object -Skip $diagnosticStart)
+                    Assert-True (@($newPhases | Where-Object { $_ -eq 'phase=transfer-ack31' }).Count -eq 1) 'negative transfer lacks one native ack31'
+                    Assert-True ($newPhases -notcontains 'phase=transfer-duplicated') 'negative source was duplicated successfully'
+                    Assert-True (@($newPhases | Where-Object { $_ -like 'phase=onepux-*' }).Count -eq 0) 'negative source reached the 1PUX parser'
+                    if ($negative -eq 'malformed-token') {
+                        Assert-True ($newPhases -notcontains 'phase=transfer-token') 'malformed frame was accepted as a token'
+                    }
+                    else {
+                        Assert-True (@($newPhases | Where-Object { $_ -eq 'phase=transfer-token' }).Count -eq 1) 'negative transfer lacks one decoded token'
+                        Assert-True (@($newPhases | Where-Object { $_ -eq 'phase=transfer-duplicate-failed' }).Count -eq 1) 'negative token lacks a native duplication rejection'
+                    }
+                }
+                Write-Host "WIRE_CASE case=$negative result=pass"
+            }
+            catch {
+                $tuiCaseFailures.Add("wire-$negative")
+                Write-Host "WIRE_CASE case=$negative result=fail"
+            }
+        }
         $stationSddl = "D:P(A;;GA;;;SY)(A;;GA;;;$humanSid)"
         $consoleDiagnostic = Join-Path $humanDir 'console-diagnostic.txt'
         Add-OwnedPath $ownedPaths $consoleDiagnostic
@@ -737,9 +779,9 @@ try {
             @{ Name = 'resize'; Mode = '--resize'; Backup = $tuiBackup; Plaintext = $tuiPlaintext; RotatedMaster = $null },
             @{ Name = 'clipboard'; Mode = '--clipboard'; Backup = $tuiBackup; Plaintext = $tuiPlaintext; RotatedMaster = $null },
             @{ Name = 'access'; Mode = '--access'; Backup = $tuiBackup; Plaintext = $tuiPlaintext; RotatedMaster = $null },
+            @{ Name = 'rotations'; Mode = '--rotations'; Backup = $localBackup; Plaintext = $localPlaintext; RotatedMaster = 'synthetic-ticket27-independent-rotated-master' },
             @{ Name = 'matrix'; Mode = $matrixMode; Backup = $tuiBackup; Plaintext = $tuiPlaintext; RotatedMaster = 'synthetic-ticket27-rotated-master' },
-            @{ Name = 'local-operations'; Mode = '--local-operations'; Backup = $localBackup; Plaintext = $localPlaintext; RotatedMaster = 'synthetic-ticket27-local-rotated-master' },
-            @{ Name = 'rotations'; Mode = '--rotations'; Backup = $localBackup; Plaintext = $localPlaintext; RotatedMaster = 'synthetic-ticket27-independent-rotated-master' }
+            @{ Name = 'local-operations'; Mode = '--local-operations'; Backup = $localBackup; Plaintext = $localPlaintext; RotatedMaster = 'synthetic-ticket27-local-rotated-master' }
         )
         foreach ($case in $cases) {
             if ($case.Name -eq 'matrix') {
@@ -777,29 +819,6 @@ try {
                 Assert-True ($caseLog -match '(?m)^TUI_STAGE stage=published-files-regular-nonempty result=pass\r?$') 'human publication did not prove regular, nonempty backup and export files'
             }
         }
-
-        foreach ($negative in @('null', 'invalid-handle', 'thread-pseudohandle', 'malformed-token')) {
-            $diagnosticStart = if ($ServiceDiagnostics) { @(Get-Content -LiteralPath $diagnosticPath -ErrorAction Stop).Count } else { 0 }
-            $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId, '--transfer-negative', $negative) $humanInput $humanOut $humanErr
-            Assert-True ($p.ExitCode -eq 0) ('ordinary human transfer negative failed: ' + $negative + '; ' + (Get-Content $humanErr -Raw))
-            Assert-True ((Get-Content $humanOut -Raw).Trim() -eq "PASS windows-transfer-negative case=$negative ack31=accepted peer-eof=1 dacl-before-during-after=exact") 'negative transfer did not prove exact DACL and peer closure'
-            Write-Host (Get-Content $humanOut -Raw)
-            Write-ServiceSubphaseDiagnostics $diagnosticPath
-            if ($ServiceDiagnostics) {
-                $newPhases = @(Get-Content -LiteralPath $diagnosticPath -ErrorAction Stop | Select-Object -Skip $diagnosticStart)
-                Assert-True (@($newPhases | Where-Object { $_ -eq 'phase=transfer-ack31' }).Count -eq 1) 'negative transfer lacks one native ack31'
-                Assert-True ($newPhases -notcontains 'phase=transfer-duplicated') 'negative source was duplicated successfully'
-                Assert-True (@($newPhases | Where-Object { $_ -like 'phase=onepux-*' }).Count -eq 0) 'negative source reached the 1PUX parser'
-                if ($negative -eq 'malformed-token') {
-                    Assert-True ($newPhases -notcontains 'phase=transfer-token') 'malformed frame was accepted as a token'
-                }
-                else {
-                    Assert-True (@($newPhases | Where-Object { $_ -eq 'phase=transfer-token' }).Count -eq 1) 'negative transfer lacks one decoded token'
-                    Assert-True (@($newPhases | Where-Object { $_ -eq 'phase=transfer-duplicate-failed' }).Count -eq 1) 'negative token lacks a native duplication rejection'
-                }
-            }
-        }
-
     }
 
     $p = Start-AsUser $humanCredential $custody @('human-lock', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $humanInput $humanOut $humanErr
