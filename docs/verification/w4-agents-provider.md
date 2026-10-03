@@ -164,6 +164,17 @@ contiene fuentes versionadas; no instala dependencias ni modifica otra rama.
 El RED válido debe completar setup/discovery/control humano y fallar en el
 discovery con TUI abierta. Un error de build/setup no satisface el criterio.
 
+Ejecutado: `flock /tmp/pm-cargo-window.lock python3
+/tmp/pmw4-revalidate-red.py`, rc1,
+`/tmp/pmw4-resume-concurrency-red.log`. El encabezado registra base/cwd y
+`/tmp/pmw4-red-source-2kwgerl0`; build termina correctamente y la traza falla
+en el discovery con TUI abierta por `TimeoutExpired` a 15 s. El mismo lab
+actual pasa con los binarios W4 (GREEN de reanudación). También se revalida
+multiagente con `flock /tmp/pm-cargo-window.lock bash -c
+'./scripts/cargo-local.sh fmt --all --check && ./scripts/test-linux-concurrency-lab.sh multiagent'`:
+fmt rc0, lab rc1 en `/tmp/pmw4-resume-multiagent-red.log`, B recibe exit4 y
+`CUSTODY_UNAVAILABLE` tras enrolamiento y discovery de A, sin reiniciar.
+
 ## Decisiones necesarias antes de los correctivos 2–3
 
 ### 2. Binding nativo por agente
@@ -229,7 +240,8 @@ caches, artifacts o secrets. Ref de rama comprobado antes/después del dispatch;
 ambos headSha corresponden a `e4a8f49e62f1081875e821ea53b1dbe83d6fc7cc`.
 
 * [macOS 37123539350](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123539350):
-  pasteboard_diagnostic=false, final_phase_only=false; resultado pendiente.
+  pasteboard_diagnostic=false, final_phase_only=false; FAIL global,
+  discovery concurrente PASS acotado en ambas CPU (detalle abajo).
 * [Windows 37123541543](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123541543):
   diagnostic_only=false, service_diagnostics=false, tui_conpty_red=true.
   FAIL de compilación E0282 en `windows.rs::serve_role`, antes del lab:
@@ -240,3 +252,73 @@ ambos headSha corresponden a `e4a8f49e62f1081875e821ea53b1dbe83d6fc7cc`.
 Se anota `Result<(), Failure>` en ese cierre, sin cambiar comportamiento,
 errores, límites ni código Linux/macOS. Esa diferencia justifica una nueva
 corrida Windows en otro SHA; no se repite macOS por un cambio cfg(windows).
+
+[Windows 37123864276](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123864276)
+se despachó con los mismos inputs sobre
+`37c1bd82d2cf2c37f02c326397298715d23faed2`, comprobado por API antes/después.
+Registro `/tmp/pmw4-resume-dispatch-windows2.json`; FAIL global posterior a
+build/pool nativos PASS (detalle abajo).
+
+macOS ARM del primer run ya terminó: build/tests y discovery concurrente
+pasan (`control=completed-with-human-open`, `process=same`, discovery=ok).
+`second-agent=blocked transport=single-bootstrap` permanece explícito.
+Después de Full25-import/offline+wrong-pin/local falla el wait original de
+20 s de happy sync: durable=integrity, screen=integrity, missing-items=5,
+blocks=1, roots=0, en `macos_tui_migration_lab.py:534`. Coincide con la firma
+de fallo de integración 26–28, sin corregir ni atribuir una causa nueva al
+conteo blocks. Log `/tmp/pmw4-native-macos-arm-concurrency.log`.
+
+Run macOS finalizado **FAIL global en ambas CPU**, con el criterio W4 de
+discovery concurrente **PASS acotado** en Intel y ARM. Ambos conservan los
+marcadores anteriores y fallan en el mismo happy sync; comparación con
+[referencia 37110528957](https://github.com/SantanaJcp/passwordmanager/actions/runs/37110528957),
+SHA `272aac8f7383464fd1e0448717110cccfab0fa9f`, hecha contra logs reales.
+Logs completos `/tmp/pmw4-native-macos-concurrency.log`, metadata `.json`.
+Jobs [Intel 111204214131](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123539350/job/111204214131)
+y [ARM 111204214318](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123539350/job/111204214318).
+No se afirma aceptación de Full25 ni segundo agente/proveedor ordinario.
+
+Windows corregido también finalizó **FAIL global, sin la regresión de build**.
+Sobre `37c1bd8`, build nativo, 14/14 primitivas (incluido el nuevo pool de
+pipes), contrato de pipe 1/1, observador ConPTY 16/16 y sync lib 1/1 pasan.
+El servicio real llega a TUI first-prompt/hidden-input/unlock/footer-horizontal
+PASS; falla el resumen CSV por `exact-duplicates=0` dentro del plazo original
+de 15 s, misma firma que
+[referencia 37110536568](https://github.com/SantanaJcp/passwordmanager/actions/runs/37110536568),
+SHA `272aac8f7383464fd1e0448717110cccfab0fa9f`. El servicio se detiene/elimina
+y la raíz exacta se limpia sin fallo adicional reportado. No se anuncian
+pruebas del flujo posterior al resumen ni cuatro clientes TLS Windows
+simultáneos: el pool nativo comprueba ownership/capacidad y el lab Linux
+comprueba concurrencia/admisión reales del dispatcher compartido.
+Logs `/tmp/pmw4-native-windows-concurrency2.{log,json}`.
+
+| Entorno del run | Label / imagen observada | Toolchain y OS |
+| --- | --- | --- |
+| Mac Intel | macos-15-intel / macos15 20260824.0482.1 | Rust 1.98.1 x86_64-apple-darwin; macOS 15.7.9/kernel 24.6.0 |
+| Mac ARM | macos-15 / macos15 20260907.0337.1 | Rust 1.98.1 aarch64-apple-darwin; macOS 15.7.9/kernel 24.6.0 |
+| Windows ARM64, ambos runs | windows-11-vs2026-arm / win11-vs2026-arm64 20260924.168.1 | Rust 1.98.1 aarch64-pc-windows-msvc; Windows 11 Enterprise 10.0.26200/build 26200; libsodium 1.0.22 ARM64/MT |
+
+Los tres runs propios han terminado. La primera corrida Windows se conserva
+como FAIL de compilación; la segunda valida su corrección y el pool nativo.
+Comparación de marcadores con referencias:
+`/tmp/pmw4-native-comparison.json`; no cambia los oráculos de esos fixtures.
+Ninguna conclusión global se convierte en PASS ni acredita reboot/FDE,
+Windows x64, producto Chromium o aceptación humana.
+
+### Archivos y coordinación con W1–W3
+
+Producto: `pm-custody/src/{lib,main,linux,windows,connection_dispatch}.rs` y
+`pm-native-channel/src/windows.rs`. Fixtures: `tests/concurrency_lab.py`,
+`tests/tui_access_lab.py` y `scripts/test-linux-concurrency-lab.sh`;
+evidencia: este documento. No se modifica layout TUI, purge/sync, carga de
+custodia/vault/staging, tickets ni workflows.
+
+W1: posible conflicto textual en `windows.rs`/native-channel Windows y en
+fixtures compartidos; preservar su layout/TUI. W2: no se cambian archivos
+purge/sync. W3: se deja el punto de admisión inmediatamente antes de dispatch,
+tras verificar UID/SID; su gate de custodia en caliente debe combinarse allí,
+sin reimplementar carga ni aceptar conexiones antes de esa comprobación.
+Linux y Windows siguen descartando errores individuales de handler conforme
+al inventario heredado; no atribuir a W4 una política nueva de recuperación.
+El merger debe conservar los cambios de los tres workstreams y ejecutar su
+verificación de composición. W4 solo publica su rama, sin integrar ni merge.
