@@ -3317,3 +3317,57 @@ al convertir un SID y `installed_service_pid` ignora CloseServiceHandle; un
 fallo de liberación no cambia su resultado. `OwnedClipboard::copy_then` ignora
 GlobalFree/GlobalUnlock en sus caminos históricos de transferencia del HGLOBAL.
 No hay evidencia de que esas omisiones sean la causa del fallo de clipboard.
+
+
+### Corrida 2 fase3 — el 1PUX corta dentro de preview con recurso protegido
+
+[Windows 37134445641](https://github.com/SantanaJcp/passwordmanager/actions/runs/37134445641),
+SHA `1c490764c0cf2dae44d996243351d24101b90918`, FAIL terminado.
+Seed8/readback exacto, tipos7, CSV y negativas empty/directory/hardlink
+sin lease pasan; el discriminante human-token lease pasa. Servicio:
+`transfer-duplicated`, `onepux-preview category=crypto-resource`,
+`transfer-preview-handler-failed`. TUI: preview-read-other-io, lease-restored,
+child exited4. No preparation/signature/frame-ready/frame-sent.
+La duplicación acredita las validaciones de regular/reparse/single-link/
+fileID/tamaño; el error Crypto(ResourceUnavailable) aparece en preview,
+antes de preparación/envío. Preview incluye lectura/parser y clasificación
+contra registros existentes: el hook no localiza cuál solicitud protegida
+falló. No demuestra corrupción de 1PUX ni un límite de tamaño.
+Corrección de memoria/custodia W3 fuera de W1; no cambiar allocator, ocho
+registros, derechos, límites o protección. Este positivo sigue FAIL.
+Log `/tmp/pmw1c-windows2.log`.
+
+Linux fresco en ese SHA:40 casos,39 rc0, g7-matrix rc1 igual al baseline,
+ninguna regresión (`/tmp/pmw1c-gate-results.json`, summary2.log y logs por
+caso). Check/clean-offline-build incluidos. [Mac 37134462643](https://github.com/SantanaJcp/passwordmanager/actions/runs/37134462643),
+mismo SHA, FAIL terminado en ambas CPU: ARM corta esperando restore
+committed con delta-items0/authority-same; Intel alcanza full25-local y
+corta esperando sync complete pinned20s. Imports y offline/wrong-pin
+observados en ambas. No atribuir esos fallos al callback cfgWindows ni
+aceptarlos como soporte integral; W2/W3 conservan sus límites.
+
+Método de corrida3: abrir sesiones ordinarias independientes ConPTY para
+resize y clipboard sobre Password de seed8; luego la matriz integral
+sin omitir nada y operaciones locales en otra sesión con destinos nuevos.
+Factorizar los mismos helpers de teclado/oracles: tipos7, resize geometría/
+report/repaint fresco; campo auth[0].password index14/canary exacto;
+lease1s y dueño nuevo exacto; organización/historial/generador/acceso/
+pending/audit/backup/export/trash/restore/rotaciones. Warning recovery completo
+más PMR1 completo antes de confirmación; master nuevo oculto, antiguo denegado
+y nuevo aceptado por el canal humano ordinario tras observar commit.
+Cada caso falla sin retry. El harness conserva todos los FAIL, sigue sólo
+los casos independientes, y falla globalmente al final. No hay camino
+alternativo de producto ni transformación de la matriz integral en PASS.
+Los ficheros nuevos se registran antes del sellado DACL/cleanup estricto.
+No repetir corridas idénticas: esta separación permite observar los grupos
+que el positivo 1PUX bloqueado W3 impedía alcanzar.
+
+Check3 inicial falla sólo el contrato estático de fuente al reorganizar la
+invocación de la matriz; check3b detecta varias invocaciones literales de
+human-lock donde su guard espera la llamada base única. No son RED del
+producto. Se conserva la invocación matriz explícita y los argumentos
+ordinarios de las pruebas de rotación se nombran por separado, sin modificar
+el verificador. Check3c rc0 bajo flock (`/tmp/pmw1c-check3c.log`).
+Cambios exclusivos de fixture Windows: no cambian el binario Linux/Mac ni
+su barrido40 recién concluido; compilación y comportamiento cfgWindows aún
+pendientes de corrida3.

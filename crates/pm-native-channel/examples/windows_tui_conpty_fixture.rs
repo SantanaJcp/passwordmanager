@@ -769,7 +769,7 @@ mod windows_fixture {
             self.wait_for_matching(
                 "complete temporary recovery code and historical warning in panel",
                 |state| {
-                    state.information_contains("historical recovery paths")
+                    state.information_contains("Recovery code shown temporarily; store externally, then re-enter it exactly to commit: old backups and exposed copies retain historical recovery paths.")
                         && recovery_code(state).is_some()
                 },
             )?;
@@ -1618,6 +1618,15 @@ mod windows_fixture {
         plaintext: &'a str,
     }
 
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum Scenario {
+        Matrix,
+        EncodingExit,
+        Resize,
+        Clipboard,
+        LocalOperations,
+    }
+
     fn read_synthetic_password() -> io::Result<zeroize::Zeroizing<Vec<u8>>> {
         let mut password = zeroize::Zeroizing::new(Vec::new());
         std::io::stdin().take(1025).read_to_end(&mut password)?;
@@ -1640,7 +1649,7 @@ mod windows_fixture {
         fixture: &Fixture,
         password: &[u8],
         paths: MatrixPaths<'_>,
-        encoding_exit: bool,
+        scenario: Scenario,
     ) -> io::Result<()> {
         if let Err(primary) = fixture.observer.wait_for("Password required") {
             let observer = fixture.observer.diagnostic().map_err(io::Error::other)?;
@@ -1674,11 +1683,41 @@ mod windows_fixture {
             .map_err(io::Error::other)?;
 
         eprintln!("TUI_STAGE stage=unlock result=pass");
-        if encoding_exit {
+        if scenario == Scenario::EncodingExit {
             press(fixture, "q")?;
             require_tui_exit(fixture.process)?;
             eprintln!("TUI_STAGE stage=encoding-natural-exit result=pass");
             return Ok(());
+        }
+        match scenario {
+            Scenario::Resize => {
+                exercise_types(fixture)?;
+                exercise_resize(fixture)?;
+                press(fixture, "q")?;
+                return require_tui_exit(fixture.process);
+            }
+            Scenario::Clipboard | Scenario::LocalOperations => {
+                search(fixture, "Password")?;
+                fixture
+                    .observer
+                    .wait_for("Search returned 1 active items")
+                    .map_err(io::Error::other)?;
+                if scenario == Scenario::Clipboard {
+                    exercise_clipboard(fixture, 14, "ticket05-e2e-password-canary")?;
+                    eprintln!("TUI_STAGE stage=clipboard-independent result=pass");
+                } else {
+                    exercise_organization(fixture)?;
+                    exercise_local_operations(
+                        fixture,
+                        &paths,
+                        b"synthetic-ticket27-local-rotated-master",
+                    )?;
+                }
+                press(fixture, "q")?;
+                return require_tui_exit(fixture.process);
+            }
+            Scenario::Matrix => {}
+            Scenario::EncodingExit => unreachable!("encoding scenario returned after unlock"),
         }
         exercise_types(fixture)?;
         // Ticket 25 migration is driven through the real keyboard and common
@@ -1753,6 +1792,16 @@ mod windows_fixture {
             .map_err(io::Error::other)?;
 
         search(fixture, "Keyboard Windows")?;
+        exercise_organization(fixture)?;
+        exercise_clipboard(fixture, 7, "synthetic-ticket27-import")?;
+        eprintln!("TUI_STAGE stage=organization-history-copy result=pass");
+        exercise_local_operations(fixture, &paths, b"synthetic-ticket27-rotated-master")?;
+        exercise_resize(fixture)?;
+        write_keyboard_input(fixture, b"q")?;
+        require_tui_exit(fixture.process)
+    }
+
+    fn exercise_organization(fixture: &Fixture) -> io::Result<()> {
         open_menu(fixture, "t", "Tag (replaces tags):")?;
         type_visible_and_submit(fixture, "windows-keyboard", "windows-keyboard")?;
         fixture
@@ -1770,6 +1819,10 @@ mod windows_fixture {
             .wait_for_information("History:")
             .map_err(io::Error::other)?;
 
+        Ok(())
+    }
+
+    fn exercise_clipboard(fixture: &Fixture, index: usize, value: &str) -> io::Result<()> {
         // Exact-field reveal/copy always crosses the selection screen; merely
         // selecting an item never exposes its value.
         press(fixture, "r")?;
@@ -1777,7 +1830,7 @@ mod windows_fixture {
             .observer
             .wait_for("Fields (explicit selection; values hidden)")
             .map_err(io::Error::other)?;
-        press(fixture, "jjjjjjj")?;
+        press(fixture, &"j".repeat(index))?;
         fixture
             .observer
             .wait_for("› auth[0].password")
@@ -1787,12 +1840,13 @@ mod windows_fixture {
             .observer
             .wait_for("Secret revealed temporarily")
             .map_err(io::Error::other)?;
+        fixture.observer.wait_for(value).map_err(io::Error::other)?;
         press(fixture, "c")?;
         fixture
             .observer
             .wait_for("Fields (explicit selection; values hidden)")
             .map_err(io::Error::other)?;
-        press(fixture, "jjjjjjj")?;
+        press(fixture, &"j".repeat(index))?;
         fixture
             .observer
             .wait_for("› auth[0].password")
@@ -1802,11 +1856,7 @@ mod windows_fixture {
             .observer
             .wait_for("Copied explicitly")
             .map_err(io::Error::other)?;
-        let expected_clipboard = zeroize::Zeroizing::new(
-            "synthetic-ticket27-import"
-                .encode_utf16()
-                .collect::<Vec<_>>(),
-        );
+        let expected_clipboard = zeroize::Zeroizing::new(value.encode_utf16().collect::<Vec<_>>());
         if read_clipboard_utf16()?.as_slice() != expected_clipboard.as_slice() {
             return Err(io::Error::other(
                 "TUI clipboard did not contain the exact selected synthetic field",
@@ -1854,7 +1904,14 @@ mod windows_fixture {
             ));
         }
 
-        eprintln!("TUI_STAGE stage=organization-history-copy result=pass");
+        Ok(())
+    }
+
+    fn exercise_local_operations(
+        fixture: &Fixture,
+        paths: &MatrixPaths<'_>,
+        master: &[u8],
+    ) -> io::Result<()> {
         open_menu(fixture, "g", "Generator length")?;
         type_visible_and_submit(fixture, "24", "24")?;
         fixture
@@ -1946,10 +2003,8 @@ mod windows_fixture {
             .wait_for("Purged ")
             .map_err(io::Error::other)?;
         eprintln!("TUI_STAGE stage=backup-export-trash result=pass");
-        exercise_restore_rotations(fixture, &paths)?;
-        exercise_resize(fixture)?;
-        write_keyboard_input(fixture, b"q")?;
-        require_tui_exit(fixture.process)
+        exercise_restore_rotations(fixture, paths, master)?;
+        Ok(())
     }
 
     fn exercise_types(fixture: &Fixture) -> io::Result<()> {
@@ -2204,7 +2259,11 @@ mod windows_fixture {
         Some(value)
     }
 
-    fn exercise_restore_rotations(fixture: &Fixture, paths: &MatrixPaths<'_>) -> io::Result<()> {
+    fn exercise_restore_rotations(
+        fixture: &Fixture,
+        paths: &MatrixPaths<'_>,
+        master: &[u8],
+    ) -> io::Result<()> {
         open_menu(fixture, "b", "Backup/recovery:")?;
         open_menu(
             fixture,
@@ -2237,17 +2296,16 @@ mod windows_fixture {
             "4",
             "New master password|ROTATE (old backups and exposed copies retain historical recovery paths):",
         )?;
-        write_keyboard_input(fixture, b"synthetic-ticket27-rotated-master|ROTATE\r")?;
+        let mut request = zeroize::Zeroizing::new(master.to_vec());
+        request.extend_from_slice(b"|ROTATE\r");
+        write_keyboard_input(fixture, &request)?;
         fixture
             .observer
             .wait_for_information(
                 "Master password rotated; old backups and exposed copies retain historical paths",
             )
             .map_err(io::Error::other)?;
-        fixture
-            .observer
-            .rejects(b"synthetic-ticket27-rotated-master")
-            .map_err(io::Error::other)?;
+        fixture.observer.rejects(master).map_err(io::Error::other)?;
         eprintln!("TUI_STAGE stage=master-rotation result=pass");
         Ok(())
     }
@@ -2298,7 +2356,14 @@ mod windows_fixture {
         if args.len() < 11
             || !matches!(
                 args.get(3).map(String::as_str),
-                Some("--matrix" | "--matrix-probe" | "--encoding-exit")
+                Some(
+                    "--matrix"
+                        | "--matrix-probe"
+                        | "--encoding-exit"
+                        | "--resize"
+                        | "--clipboard"
+                        | "--local-operations"
+                )
             )
             || args.get(8).map(String::as_str) != Some("--")
         {
@@ -2309,12 +2374,20 @@ mod windows_fixture {
         }
         let password = read_synthetic_password()?;
         let mut fixture = Fixture::new();
-        let encoding_exit = args[3] == "--encoding-exit";
-        let diagnostic_path = std::path::Path::new(&args[4]).with_file_name(if encoding_exit {
-            "encoding-exit.txt"
-        } else {
-            "console-diagnostic.txt"
-        });
+        let scenario = match args[3].as_str() {
+            "--matrix" | "--matrix-probe" => Scenario::Matrix,
+            "--encoding-exit" => Scenario::EncodingExit,
+            "--resize" => Scenario::Resize,
+            "--clipboard" => Scenario::Clipboard,
+            "--local-operations" => Scenario::LocalOperations,
+            _ => return Err(io::Error::other("unknown native TUI scenario")),
+        };
+        let diagnostic_path =
+            std::path::Path::new(&args[4]).with_file_name(if scenario == Scenario::EncodingExit {
+                "encoding-exit.txt"
+            } else {
+                "console-diagnostic.txt"
+            });
         let mut child_arguments = args[9..].to_vec();
         let diagnostics_enabled = matches!(args[3].as_str(), "--matrix-probe" | "--encoding-exit");
         if diagnostics_enabled {
@@ -2341,7 +2414,7 @@ mod windows_fixture {
                     backup: &args[6],
                     plaintext: &args[7],
                 },
-                encoding_exit,
+                scenario,
             )
         })();
         let cleanup = fixture.cleanup();
@@ -2365,7 +2438,7 @@ mod windows_fixture {
                 ));
             }
             eprint!("{metrics}");
-            if encoding_exit {
+            if scenario == Scenario::EncodingExit {
                 let restoration = metrics
                     .lines()
                     .filter(|line| line.starts_with("TUI_PROBE stage=restore "))

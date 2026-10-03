@@ -615,10 +615,14 @@ try {
     $tuiOnePux = Join-Path $humanDir 'keyboard.1pux'
     $tuiBackup = Join-Path $humanDir 'keyboard.pmb1'
     $tuiPlaintext = Join-Path $humanDir 'keyboard.jsonl'
+    $localBackup = Join-Path $humanDir 'local-operations.pmb1'
+    $localPlaintext = Join-Path $humanDir 'local-operations.jsonl'
     Add-OwnedPath $ownedPaths $tuiCsv
     Add-OwnedPath $ownedPaths $tuiOnePux
     Add-OwnedPath $ownedPaths $tuiBackup
     Add-OwnedPath $ownedPaths $tuiPlaintext
+    Add-OwnedPath $ownedPaths $localBackup
+    Add-OwnedPath $ownedPaths $localPlaintext
     [IO.File]::WriteAllText(
         $tuiCsv,
         "name,url,username,password,note$([Environment]::NewLine)Keyboard Windows,https://keyboard-windows.invalid,synthetic-user,synthetic-ticket27-import,synthetic-note$([Environment]::NewLine)",
@@ -649,14 +653,18 @@ try {
     $emptyInput = Join-Path $harnessDir 'empty.in'
     $agentOut = Join-Path $harnessDir 'probe.out'; $agentErr = Join-Path $harnessDir 'probe.err'
     $humanInput = Join-Path $harnessDir 'master.in'
+    $previousMasterInput = Join-Path $harnessDir 'previous-master.in'
     $humanOut = Join-Path $harnessDir 'human.out'; $humanErr = Join-Path $harnessDir 'human.err'
     $tuiOut = Join-Path $harnessDir 'tui.out'; $tuiErr = Join-Path $harnessDir 'tui.err'
     $badOut = Join-Path $harnessDir 'bad.out'; $badErr = Join-Path $harnessDir 'bad.err'
-    foreach ($path in @($emptyInput, $agentOut, $agentErr, $humanInput, $humanOut, $humanErr, $tuiOut, $tuiErr, $badOut, $badErr)) {
+    foreach ($path in @($emptyInput, $agentOut, $agentErr, $humanInput, $previousMasterInput, $humanOut, $humanErr, $tuiOut, $tuiErr, $badOut, $badErr)) {
         Add-OwnedPath $ownedPaths $path
     }
     [IO.File]::WriteAllBytes($emptyInput, [byte[]]@())
     [IO.File]::WriteAllText($humanInput, $master + [Environment]::NewLine)
+    [IO.File]::WriteAllBytes($previousMasterInput, [byte[]]@())
+    $currentMaster = $master
+    $tuiCaseFailures = [Collections.Generic.List[string]]::new()
     foreach ($path in @($agentOut, $agentErr, $humanOut, $humanErr, $tuiOut, $tuiErr, $badOut, $badErr)) {
         [IO.File]::WriteAllText($path, [string]::Empty)
     }
@@ -713,18 +721,54 @@ try {
             Assert-TuiFixtureOutput $tuiOut 'encoding-exit'
         }
         $matrixMode = if ($ServiceDiagnostics) { '--matrix-probe' } else { '--matrix' }
-        $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, $matrixMode, $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
-        Write-Host (Get-Content $tuiErr -Raw)
-        Write-ServiceSubphaseDiagnostics $diagnosticPath
-        Assert-True ($p.ExitCode -eq 0) ('normal pm-custody TUI did not complete its ConPTY tracer: ' + (Get-Content $tuiErr -Raw))
-        Assert-TuiFixtureOutput $tuiOut 'matrix'
-        Assert-True (Test-Path -LiteralPath $tuiBackup -PathType Leaf) 'TUI native backup was not published'
-        Assert-True ((Get-Item -LiteralPath $tuiBackup -ErrorAction Stop).Length -gt 0) 'TUI native backup is empty'
-        Assert-True (Test-Path -LiteralPath $tuiPlaintext -PathType Leaf) 'TUI plaintext export was not published'
-        Assert-True ((Get-Item -LiteralPath $tuiPlaintext -ErrorAction Stop).Length -gt 0) 'TUI plaintext export is empty'
-        # Matrix ends with a real keyboard master rotation; subsequent unlock
-        # must use that exact synthetic password, never an alternative path.
-        [IO.File]::WriteAllText($humanInput, "synthetic-ticket27-rotated-master`n", [Text.UTF8Encoding]::new($false))
+        # Each case starts a separate ordinary TUI/ConPTY session. Failure is
+        # retained in the aggregate while independent cases remain observable;
+        # no case retries an operation or substitutes for the integral matrix.
+        $cases = @(
+            @{ Name = 'resize'; Mode = '--resize'; Backup = $tuiBackup; Plaintext = $tuiPlaintext; RotatedMaster = $null },
+            @{ Name = 'clipboard'; Mode = '--clipboard'; Backup = $tuiBackup; Plaintext = $tuiPlaintext; RotatedMaster = $null },
+            @{ Name = 'matrix'; Mode = $matrixMode; Backup = $tuiBackup; Plaintext = $tuiPlaintext; RotatedMaster = 'synthetic-ticket27-rotated-master' },
+            @{ Name = 'local-operations'; Mode = '--local-operations'; Backup = $localBackup; Plaintext = $localPlaintext; RotatedMaster = 'synthetic-ticket27-local-rotated-master' }
+        )
+        foreach ($case in $cases) {
+            if ($case.Name -eq 'matrix') {
+                $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, $matrixMode, $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
+            }
+            else {
+            $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, $case.Mode, $tuiCsv, $tuiOnePux, $case.Backup, $case.Plaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
+            }
+            $caseLog = Get-Content $tuiErr -Raw
+            Write-Host $caseLog
+            Write-ServiceSubphaseDiagnostics $diagnosticPath
+            if ($p.ExitCode -eq 0) {
+                Assert-TuiFixtureOutput $tuiOut $case.Name
+                Write-Host "TUI_CASE case=$($case.Name) result=pass"
+            }
+            else {
+                $tuiCaseFailures.Add($case.Name)
+                Write-Host "TUI_CASE case=$($case.Name) result=fail"
+            }
+            # A rotation can commit before a later fixture assertion fails.
+            # Track only the explicit native observation of that commit.
+            if ($caseLog -match '(?m)^TUI_STAGE stage=master-rotation result=pass\r?$') {
+                Assert-True ($null -ne $case.RotatedMaster) 'unexpected rotation in an independent case'
+                [IO.File]::WriteAllText($previousMasterInput, $currentMaster + [Environment]::NewLine)
+                $currentMaster = $case.RotatedMaster
+                [IO.File]::WriteAllText($humanInput, $currentMaster + [Environment]::NewLine)
+                $rotationLockArguments = @('human-lock') + @('--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId)
+                $old = Start-AsUser $humanCredential $custody $rotationLockArguments $previousMasterInput $humanOut $humanErr
+                Assert-True ($old.ExitCode -ne 0) 'previous master unexpectedly unlocked after native rotation'
+                $new = Start-AsUser $humanCredential $custody $rotationLockArguments $humanInput $humanOut $humanErr
+                Assert-True ($new.ExitCode -eq 0) 'exact new master failed ordinary human unlock after rotation'
+                Write-Host "TUI_CASE case=$($case.Name) previous-master=denied new-master=accepted"
+            }
+            if ($p.ExitCode -eq 0 -and $case.Name -in @('matrix', 'local-operations')) {
+                Assert-True (Test-Path -LiteralPath $case.Backup -PathType Leaf) 'TUI native backup was not published'
+                Assert-True ((Get-Item -LiteralPath $case.Backup -ErrorAction Stop).Length -gt 0) 'TUI native backup is empty'
+                Assert-True (Test-Path -LiteralPath $case.Plaintext -PathType Leaf) 'TUI plaintext export was not published'
+                Assert-True ((Get-Item -LiteralPath $case.Plaintext -ErrorAction Stop).Length -gt 0) 'TUI plaintext export is empty'
+            }
+        }
 
     }
 
@@ -763,6 +807,7 @@ try {
     Assert-True ($p.ExitCode -eq 0) 'human channel failed after intentional crash recovery'
     Write-ServiceSubphaseDiagnostics $diagnosticPath
 
+    Assert-True ($tuiCaseFailures.Count -eq 0) ('native TUI cases failed: ' + ($tuiCaseFailures -join ','))
     $passMessage = "PASS ticket27 windows=$product cpu=$osArch service-virtual-account=1 dacl=protected dpapi=machine pipe=bilateral tls=1.3-rpk human=unlock-lock restart=scm-stop+crash agent-admin=0"
 }
 catch {
