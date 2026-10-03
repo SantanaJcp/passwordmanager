@@ -681,7 +681,7 @@ fn serve_role(
     } = prepared;
     let mut next_pipe = Some(pipe);
     let mut connections = crate::connection_dispatch::AgentConnections::new();
-    let result = (|| {
+    let result: Result<(), Failure> = (|| {
         loop {
             let mut pipe = next_pipe.take().ok_or(Failure::Unavailable)?;
             if role == Role::Agent {

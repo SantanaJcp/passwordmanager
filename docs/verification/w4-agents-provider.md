@@ -152,3 +152,91 @@ Multiagente conserva RED rc1 en `/tmp/pmw4-multiagent-red2.log`: A descubre,
 B enrolado recibe `CUSTODY_UNAVAILABLE` contra ese mismo daemon/bootstrap.
 La decisión sobre bindings confiables permanece pendiente; no se interpreta
 `environment_binding=linux-lab` como UID/SID ni se amplía el listener.
+
+### Revalidación independiente del RED previo
+
+Sin sustituir archivos del worktree, se exporta `ee3c1fd` a una raíz propia
+`/tmp/pmw4-red-source-*`. Desde el cwd W4 y dentro del mismo flock se construyen
+pm-custody/pm-cli con `cargo-local.sh build --manifest-path ... --target-dir ...
+--locked --offline`; después el lab W4 actual recibe esos dos binarios bajo
+el mismo user/mount namespace, UIDs y límites del wrapper. La exportación solo
+contiene fuentes versionadas; no instala dependencias ni modifica otra rama.
+El RED válido debe completar setup/discovery/control humano y fallar en el
+discovery con TUI abierta. Un error de build/setup no satisface el criterio.
+
+## Decisiones necesarias antes de los correctivos 2–3
+
+### 2. Binding nativo por agente
+
+Verificado en `pm-vault/src/authorization.rs::AgentEnrollment::new`: solo
+comprueba longitud de `environment_binding`; el evento humano firma ese texto
+y `human.rs` lo persiste, pero no define un principal nativo. Unix y Windows
+seleccionan respectivamente `bootstrap.agent_uid`/`agent_sid` y su SPKI único.
+G1 exige principal confiable y G4 concesión vigente; ninguno permite inferir
+UID/SID del texto libre ni aprenderlo de la primera conexión.
+
+Opciones para decidir:
+
+| Opción | Consecuencia |
+| --- | --- |
+| Registro local instalado y versionado RPK → principal nativo, ligado a bóveda/dispositivo | Conserva la concesión humana y su revocación como autoridad; el instalador provisiona el entorno y el daemon valida ambas fuentes. No cambia eventos sincronizados existentes. Requiere definir provisión/reload y migración explícita del bootstrap. **Recomendación.** |
+| Binding nativo tipado en una nueva versión del enrolamiento firmado | Alta humana reúne concesión y vínculo en una transacción; exige representación por dispositivo, cambios de wire/evento/reductor y migración de etiquetas anteriores. Mayor superficie fuera del listener. |
+
+En ambas: no adoptar etiquetas antiguas como identidad, no activar TOFU ni
+permitir RPK nuevas solo por compartir UID/SID. La migración debe convertir
+explícitamente el par bootstrap ya confiable, verificarlo y mantener la
+continuidad de las instalaciones existentes; no elegir esa política sin el
+usuario. Tras decidir: peer obtenido de TLS, admisión vigente antes de operar,
+revocación caliente, aislamiento A/B y pool por identidad, con hook W3 previo
+a admisión. El RED A/B ordinario ya existe; los labs 07/24 aún alternan bootstrap
+y esa parte **no se declara corregida**.
+
+### 3. Composición del proveedor ordinario
+
+Verificado: `serve_vault` asigna `provider: None`; el worker y recover_inflight
+se habilitan exclusivamente con Some. `ControlledProvider` contiene un único
+socket/UID; el protocolo también se usa con pm-web-auth/pm-ssh-client reales
+desde `serve-attempt-lab`. pm-web-auth instala un perfil cerrado por proceso;
+P1/P2/P4/P5 y SSH necesitan endpoints/configuración propios. No existe registro
+de producción ni política de selección/provisión del daemon ordinario.
+
+| Opción | Consecuencia |
+| --- | --- |
+| Registro instalado de adaptadores reales por integración/perfil y binding nativo | Daemon usa worker/recuperación de 08, el adaptador mantiene su perfil privado y lifecycle externo. Config ausente/invalidada falla explícitamente; no deriva a lab. **Recomendación.** |
+| Daemon posee y supervisa procesos de adaptador desde configuración instalada | Control directo de readiness/parada, pero amplía lifecycle, permisos y empaquetado; exige decisiones adicionales por plataforma. |
+
+Antes de implementar deben fijarse schema/ubicación/owner de configuración,
+selección por integración/perfil y provisión de los endpoints confiables.
+Por el orden aprobado, el correctivo 3 queda pendiente tras el bloqueo del 2;
+no hay RED/GREEN real contra serve-vault para el proveedor ni P4 actualizado.
+Los PASS actuales de P1–P4 son regresión de los entrypoints existentes.
+
+Fallbacks adicionales inspeccionados, conservados: pm-web-auth `provider::serve`
+continúa tras accept/read fallidos e ignora write_frame fallido; `handle_github`
+y `handle_browser` sustituyen fallos de parsing por respuesta pública 4;
+`handle_exchange` sustituye reloj no convertible por respuesta 3 y agrupa
+errores de proveedor. `browser::Browser::stop` ignora kill/wait/removal de
+perfil, y sus diagnósticos de formulario sustituyen campos ausentes por
+false/"?"/vacío. No se usan para afirmar cleanup seguro ni se corrigen aquí.
+
+## CI nativa del checkpoint de concurrencia
+
+Repositorio público y workflows manuales activos verificados por API;
+[gratuidad de runners estándar públicos](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+y derechos individuales de [pipes Windows](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
+revalidados en fuentes primarias. Inputs normales, sin cambios de workflow,
+caches, artifacts o secrets. Ref de rama comprobado antes/después del dispatch;
+ambos headSha corresponden a `e4a8f49e62f1081875e821ea53b1dbe83d6fc7cc`.
+
+* [macOS 37123539350](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123539350):
+  pasteboard_diagnostic=false, final_phase_only=false; resultado pendiente.
+* [Windows 37123541543](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123541543):
+  diagnostic_only=false, service_diagnostics=false, tui_conpty_red=true.
+  FAIL de compilación E0282 en `windows.rs::serve_role`, antes del lab:
+  el cierre Result necesita tipo explícito para agregar Failure::merge.
+  Log `/tmp/pmw4-native-windows-concurrency.log`, metadata `.json` del mismo
+  prefijo. No es RED conductual ni evidencia de ejecución del pool.
+
+Se anota `Result<(), Failure>` en ese cierre, sin cambiar comportamiento,
+errores, límites ni código Linux/macOS. Esa diferencia justifica una nueva
+corrida Windows en otro SHA; no se repite macOS por un cambio cfg(windows).
