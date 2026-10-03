@@ -619,6 +619,14 @@ mod windows_fixture {
                     };
                     self.cells[from..through].fill(ScreenCell::Empty);
                 }
+                b'X' if parameters.len() <= 1 => {
+                    self.wrap_pending = false;
+                    let from = self.row * SCREEN_COLUMNS + self.column;
+                    let count = distance().min(SCREEN_COLUMNS - self.column);
+                    for index in from..from + count {
+                        self.erase_cell_footprint(index);
+                    }
+                }
                 b's' if parameters.is_empty() => {
                     self.saved_row = self.row;
                     self.saved_column = self.column;
@@ -1579,7 +1587,7 @@ mod windows_fixture {
         search(fixture, "Keyboard 1PUX")?;
         fixture
             .observer
-            .wait_for("Search returned 1 active items")
+            .wait_for("Search returned 2 active items")
             .map_err(io::Error::other)?;
 
         search(fixture, "Keyboard Windows")?;
@@ -2006,6 +2014,32 @@ mod windows_fixture {
                 state.cells[23 * SCREEN_COLUMNS + 79],
                 ScreenCell::Glyph("p".into())
             );
+        }
+
+        #[test]
+        fn observer_erases_characters_without_shifting_or_moving_the_cursor() {
+            let observer = TerminalObserver::new();
+            observer.feed(b"abcdef\x1b[1;3H\x1b[2X").unwrap();
+            {
+                let state = observer.state.lock().unwrap();
+                assert!(state.contains("ab  ef"));
+                assert_eq!((state.row, state.column), (0, 2));
+            }
+            observer.feed(b"\x1b[1;5H\x1b[X").unwrap();
+            assert!(observer.state.lock().unwrap().contains("ab   f"));
+            observer.feed(b"\x1b[1;6H\x1b[0X").unwrap();
+            assert!(!observer.state.lock().unwrap().contains("f"));
+            observer.feed("\x1b[2;1HA🌎Z\x1b[2;3H\x1b[X".as_bytes()).unwrap();
+            {
+                let state = observer.state.lock().unwrap();
+                assert!(state.contains("A  Z"));
+                assert_eq!((state.row, state.column), (1, 2));
+            }
+            observer.feed(b"\x1b[1;80Hz\x1b[32767X").unwrap();
+            let state = observer.state.lock().unwrap();
+            assert_eq!((state.row, state.column, state.wrap_pending), (0, 79, false));
+            assert_eq!(state.cells[79], ScreenCell::Empty);
+            assert_eq!(state.cells[SCREEN_COLUMNS], ScreenCell::Glyph("A".into()));
         }
 
         #[test]

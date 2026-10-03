@@ -2144,3 +2144,25 @@ avance por teclado de la matriz existente. Después se ejecutará el modo normal
 sin probes. No se fabrica RED: run40 es el RED nativo de encoding.
 Fuentes: [Console Code Pages](https://learn.microsoft.com/en-us/windows/console/console-code-pages)
 y [SetConsoleOutputCP](https://learn.microsoft.com/en-us/windows/console/setconsoleoutputcp).
+
+[Run41](https://github.com/SantanaJcp/passwordmanager/actions/runs/37089596976),
+SHA `2271fd550ea37eea6b2cf033e63ef1e6af1dff12`, job `111106894164`: build y
+12/1/14/1 PASS. GREEN del encoding/primer prompt: CP65001 en writer/activo,
+cuatro corners y cursor (4,0); frame y ambos buffers contienen prompt, y el
+observer verifica prompt e input oculto. Esto confirma la causa raíz CP437;
+no se agrandó pantalla ni plazo. La matriz termina FAIL después: el observer
+rechaza CSI final 0x58 (ECH) durante el redraw del unlock. No se observó unlock
+completo ni restauración natural; no se acredita la matriz ni restauración CP.
+
+Extensión del método antes de probar: implementar sólo ECH en el observer,
+según [Text Modification Microsoft](https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#text-modification)
+y el parser de [microsoft/terminal](https://github.com/microsoft/terminal/blob/main/src/terminal/parser/OutputStateMachineEngine.cpp).
+ECH sustituye las celdas pedidas por blancos desde el cursor, sin desplazarlas
+ni mover el cursor; se limita al margen derecho. Regresión sintética nativa:
+prefijo/sufijo preservados, posición constante, límite del margen y glyph ancho.
+Las secuencias desconocidas continúan fallando: no strip ni aceptación por raw.
+El próximo run usa modo normal service_diagnostics=false, para verificar que
+el prompt no depende de probes y avanzar la misma matriz por teclado.
+Inspección del fixture: `Keyboard 1PUX` es prefijo de los dos títulos importados
+(login y File), ambos activos; el assert heredado de un resultado era incorrecto.
+Se exige exactamente dos resultados, preservando ambos registros y el buscador.
