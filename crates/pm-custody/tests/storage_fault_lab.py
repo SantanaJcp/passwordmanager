@@ -8,12 +8,14 @@ import pathlib
 import shutil
 import signal
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 
 from linux_lab import AGENT, CUSTODIAN, HUMAN, as_uid, create_vault, start_as, wait_for_sockets, wire_fields
+from g7_canary_channels import scan_file
 
 
 DEVICE = "28282828282828282828282828282828"
@@ -87,11 +89,15 @@ def fill_until_enospc(path):
 
 
 def scan_canary(root, excluded):
-    for candidate in root.rglob("*"):
-        if candidate.is_file() and candidate != excluded:
-            with candidate.open("rb") as source:
-                while chunk := source.read(1024 * 1024):
-                    assert CANARY not in chunk, candidate.name
+    required = {root / name for name in ("server.key", "server.pub", "bootstrap", "vault.sqlite3", "vault.sqlite3.audit-custody")} | {excluded}
+    sidecars = {root / ("vault.sqlite3" + suffix) for suffix in ("-wal", "-shm", "-journal")}
+    inventory = set(root.rglob("*"))
+    assert required <= inventory <= required | sidecars, "incomplete/unclassified ENOSPC owned storage"
+    total = 0
+    for candidate in sorted(inventory):
+        assert stat.S_ISREG(candidate.lstat().st_mode), "non-regular ENOSPC owned channel"
+        total += scan_file(candidate, (CANARY,), "enospc-owned-storage")
+    print(f"PM28_ENOSPC_CANARY files={len(inventory)} bytes={total} complete=1 overlap=1", flush=True)
 
 
 def stop_owned(process):

@@ -1412,7 +1412,7 @@ se integra en principal, no se fusiona PR #1 ni se resuelve ticket 28.
 ### Estado histórico de criterios 28/G7 — fase 3 (checkpoint parcial)
 
 Esta tabla sustituyó el estado de fase 2. El estado vigente está al final de
-fase 4; se conserva esta cronología.
+fase 5; se conserva esta cronología.
 
 | Criterio | Estado y alcance vigente | Evidencia |
 |---|---|---|
@@ -1677,11 +1677,11 @@ Los readers rechazan truncamiento/exceso y sólo devuelven fuentes completas.
 Los controles nuevos usan datos sintéticos estáticos identificables; no se
 copian credenciales reales ni se imprimen payloads secretos en asserts.
 
-### Estado vigente de criterios 28/G7 — fase 4 (checkpoint parcial)
+### Estado histórico de criterios 28/G7 — fase 4 (checkpoint parcial)
 
-Esta tabla sustituye el estado vigente de fase 3. Ningún PASS acotado cierra G7
-ni el ticket. La integración y la revisión independiente siguen a cargo del
-orquestador.
+Esta tabla sustituyó el estado de fase 3; el estado vigente está al final de
+fase 5. Ningún PASS acotado cierra G7 ni el ticket. La integración y la revisión
+independiente siguen a cargo del orquestador.
 
 | Criterio | Estado y alcance vigente | Evidencia |
 |---|---|---|
@@ -1791,3 +1791,330 @@ AST de ambos fixtures Python, enlaces del documento, diff y estado del ticket
 sin cambios. La raíz conserva `.gitignore`, `.pi/` y `odd/` ajenos intactos.
 Se publica únicamente la rama propia; PR #1 continúa borrador y no se fusiona.
 Esto es **checkpoint parcial verificado, no cierre de fase 4 ni G7**.
+
+## Fase 5 — método concreto de §2 y §4
+
+Base `ae713db`, mismo worktree/rama de fase 4. Se reutiliza
+`verify-ticket28-custody-loss.sh` y el setup/teardown de
+`sqlite_sync_fault_lab.py`. Sin cambios de producto, estados de
+tickets, dependencias, límites o plazos.
+
+Antes de la matriz, un control de `human-streaming-file` pausa el custodio
+mediante el interposer **antes** de cada fsync/fdatasync del WAL exacto.
+PID, path y ordinal se comprueban en cada evento. Una copia de DB/WAL/SHM,
+hecha con el proceso detenido, identifica las filas pendientes sin abrir ni
+checkpointar el original. El control debe completar stream/receipt/outbox;
+la copia no acredita durabilidad, identifica el contenido del syscall.
+Cada EIO/ENOSPC usa vault nuevo y el ordinal confirmado por ese control,
+exigiendo el mismo contenido lógico antes de inyectar. Audit de unlock,
+staging y commit final son fronteras separadas. Commit/outbox/audit del cambio
+humano pertenecen a **una misma transacción física**: se comprueban juntos,
+sin inventar tres fsync independientes. Se compara contenido/hash de tablas
+de autoridad, revisión, outbox, receipt y audit; no solamente conteos. El lab
+ENOSPC del tmpfs finito existente conserva la comprobación de disco real.
+
+El inventario de canales es cerrado: cada archivo/directorio/socket owned
+debe estar registrado; un path desconocido, tipo inesperado, rotación o
+lectura parcial falla. Lecturas de archivos completas, con overlap entre
+chunks. Se enumeran stdout/stderr, logs, errores públicos, cmdline/environ,
+temporales, DB/WAL/SHM/journal, staging/audit, core/crash y recursos del agente.
+SQLite permanece quiescente durante escaneo/copia. Los assets inmutables del
+fixture (binarios/interposer/observer) se verifican por hash y se distinguen
+de artefactos producidos; no son un permiso para excluir archivos desconocidos.
+El observador UID agente prueba primero lectura process_vm_readv y attach/
+detach de su propio hijo con dirección válida; después exige EPERM sobre los
+PIDs sujetos y denegación de archivos privados. No cuenta dirección inválida,
+Yama sin control positivo, EOF parcial o inventario inaccesible como ausencia.
+La extensión de pérdidas en vuelo usa el proveedor controlado existente,
+con barrera después de registrar una llamada y antes de responder; no se
+reenvía start ni login. Los fallos relacionados con fallbacks/semántica
+prohibidos quedan RED separados de gates.
+
+Comandos iniciales, siempre cwd `.worktrees/28-g7-phase4`:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh matrix trace
+PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh matrix
+```
+
+Los resultados observados y la tabla vigente se recogen más abajo. Compilación,
+setup o timeout del fixture no son RED de producto.
+
+Extensiones concretadas antes de la barrida final:
+
+- Spill no confirmado: pwrite64 del WAL, ordinal 600, con WAL observado mayor
+  que 1 MiB antes de la llamada. Control completo y EIO/ENOSPC, tres vaults
+  nuevos; no sustituye ENOSPC físico del tmpfs existente.
+- Settling después de transmisión: la barrera del proveedor registra el
+  único send y mantiene la respuesta pendiente. Un archivo de control del
+  interposer arma el segundo fsync siguiente; su copia debe mostrar cambio
+  de intento y audit adicional, con autoridad intacta. Control sin fallo antes
+  de EIO y ENOSPC, cada uno con vault nuevo. No callbacks de motor, reenvío
+  de start ni reconexión de login.
+- Pérdida en vuelo: rename del bootstrap/audit o vault/sidecars mientras el
+  proveedor está detenido después de registrar `calls=1`, con intención
+  `running/provider_sent=1` ya durable. SIGKILL, arranque con custodia ausente,
+  ausencia de sustitutos, restitución de originales y get del mismo ID como
+  INDETERMINATE. Caso crash aparte usa SIGABRT real y exige WCOREDUMP=false.
+  Acredita **pérdida durante una llamada + crash/restart**, no detección de
+  retirada en caliente por un proceso que conserva claves en memoria.
+- Canarios históricos: `human-password-crud` existente crea, verifica, edita
+  y manda a papelera; dos revisiones cifradas deben persistir. Se escanean
+  canarios original/editado activos, históricos y tras reinicio, con los
+  mismos controles UID agente. Su replay explícito de receipt/body-change
+  pertenece al control público preexistente, no es retry de login oculto.
+- Scanner: positivos separados prueban detección de canario que cruza el
+  límite de chunk, EOF prematuro, archivo sin clasificar y archivo requerido
+  ausente. Todos deben fallar por su causa exacta. El control truncado altera
+  sólo el reader del scanner de prueba, nunca un syscall/reader productivo.
+- TMPDIR de cada UID apunta a un subdirectorio privado propio. Se inventarían
+  también todos los fd de sujetos vivos, rechazando archivos/temporales
+  desconocidos incluso fuera de la raíz. UID agente prueba fd/maps/mem además
+  de process_vm_readv/ptrace. Proceso crash con core soft/hard 0/0 y sin flag
+  de dump no genera un archivo de core propio; archivos desconocidos de crash
+  hacen fallar el inventario. Archivos históricos ajenos del colector del host,
+  dumps de administrador/kernel, swap/FDE y otros targets no se acreditan.
+- El lab físico ENOSPC existente ahora exige inventario cerrado de su estado,
+  tipos regulares, lectura completa estable y overlap; también lee su filler
+  owned de ceros. Su anterior filtro is_file y chunks sin overlap no probaban
+  ausencia completa. No cambia el fallo, mutación, conteos ni plazos del lab.
+
+Los fallbacks del fixture proveedor preexistente se conservan: `provider`
+retira socket con `missing_ok`, trata EOF/BrokenPipe como cierre y el main
+histórico de `attempts_lab.py` descarta errores de rmtree. La nueva barrera
+no cambia esos caminos. Las nuevas corridas usan el teardown estricto de
+SQLite-sync y Channels, sin invocar ese main/cleanup histórico. No se atribuye
+cleanup integral a los labs heredados solo por su rc0.
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh canaries
+PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh inflight result-sync
+PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh inflight bootstrap
+PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh inflight audit
+PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh inflight vault
+PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh inflight crash
+```
+
+Extensión de retirada **en caliente**, antes del gate final: los tres casos
+`inflight-live <bootstrap|audit|vault>` hacen una sola admisión nueva mientras
+el proceso original sigue vivo y el proveedor permanece detenido en la primera
+llamada. Exigen CUSTODY_UNAVAILABLE. Si el producto la admite, el fixture
+cancela explícitamente ese segundo intento antes de liberar al proveedor;
+esta contención del fixture no convierte la admisión en PASS y el RED se
+propaga después de restitución/scan/cleanup. No se repite el primer start,
+no se entrega un segundo login y no se corrige listener/admisión. Luego se
+ejecutan el mismo crash/restart y get originales. Se comparan hashes de raíces,
+autoridad/outbox/receipts, y journal con únicamente el primer ID/calls=1.
+
+### Evidencia de fronteras reales — fase 5
+
+Todas las corridas siguientes usan cwd `.worktrees/28-g7-phase4`, vault nuevo
+por caso y este prefijo. En las tablas, `V` abrevia exclusivamente el wrapper
+existente; no es otra ruta de ejecución del producto:
+
+```sh
+export PYTHONDONTWRITEBYTECODE=1
+V=./scripts/verify-ticket28-custody-loss.sh
+flock /tmp/pm-cargo-window.lock "$V" matrix
+flock /tmp/pm-cargo-window.lock "$V" canaries
+flock /tmp/pm-cargo-window.lock "$V" inflight result-sync
+flock /tmp/pm-cargo-window.lock "$V" inflight bootstrap
+flock /tmp/pm-cargo-window.lock "$V" inflight audit
+flock /tmp/pm-cargo-window.lock "$V" inflight vault
+flock /tmp/pm-cargo-window.lock "$V" inflight crash
+flock /tmp/pm-cargo-window.lock "$V" inflight-live bootstrap
+flock /tmp/pm-cargo-window.lock "$V" inflight-live audit
+flock /tmp/pm-cargo-window.lock "$V" inflight-live vault
+```
+
+El interposer comprueba el PID persistido y path del fd en cada syscall, cuenta
+su ordinal y registra una única inyección EIO o ENOSPC. El control positivo
+detiene el proceso antes de la llamada, verifica el contenido pendiente en
+copia y después deja completar la operación. La matriz confirma ordinales
+fsync 1/2/5/8 para este fixture, no un número universal de SQLite. Las copias
+se abren read-only; no crean/checkpointan el vault original. Los hashes cubren
+contenido de raíces, autoridad, objetos cifrados, items/revisiones, staging,
+outbox/receipts y tablas audit. Los distintos vaults usan identidades/nonce
+sintéticos; no hay retry de la operación ni del login tras inyectar el fallo.
+
+| Frontera/criterio | Resultado observado y control positivo | Comando después de flock | Log completo |
+|---|---|---|---|
+| WAL: primer fsync, ordinal 1 | **PASS** EIO y ENOSPC, una inyección por caso; rechazo rc4, rollback exacto, mismo vault tras restart | `"$V" matrix` | `/tmp/pm28p5-locked-witness-matrix.log` |
+| Spill sin commit: pwrite64 ordinal 600 | **PASS** control sin fallo y EIO/ENOSPC; WAL observado 1,178,376 bytes antes del syscall; rollback/restart exactos | `"$V" matrix` | `/tmp/pm28p5-locked-witness-matrix.log` |
+| Staging stream: fsync ordinal 5 | **PASS** EIO y ENOSPC; el control identifica 17 chunks pendientes; no staging durable tras el fallo | `"$V" matrix` | `/tmp/pm28p5-locked-witness-matrix.log` |
+| Commit final: fsync ordinal 8 | **PASS atomicidad y autoridad**, EIO/ENOSPC inyectados; **RED cleanup** de staging tras error y restart inmediato | `"$V" matrix` | `/tmp/pm28p5-locked-witness-matrix.log` (rc1) |
+| Outbox/receipt del cambio humano | **PASS atomicidad**, parte del mismo fsync 8; ningún efecto autorizado parcial. **RED cleanup** compartido, no frontera física independiente | `"$V" matrix` | `/tmp/pm28p5-locked-witness-matrix.log` (rc1) |
+| Audit del commit humano | **PASS atomicidad**, mismo fsync 8; audit/raíces exactos al prefijo durable. **RED cleanup** compartido | `"$V" matrix` | `/tmp/pm28p5-locked-witness-matrix.log` (rc1) |
+| Audit de unlock: fsync ordinal 2 | **PASS** EIO y ENOSPC; control con audit pendiente, rollback exacto | `"$V" matrix` | `/tmp/pm28p5-locked-witness-matrix.log` |
+| Resultado/audit después de una transmisión externa | **PASS** control y EIO/ENOSPC en segundo fsync posterior a barrera; pending-state cambiado y audit +1; rollback a intención durable, INDETERMINATE, calls=1 | `"$V" inflight result-sync` | `/tmp/pm28p5-outcome-both-errors.log` (rc0) |
+| Disco realmente lleno, tmpfs existente | **PASS** ENOSPC físico, WAL >1 MiB, rollback/restart; scanner reforzado lee los 6 archivos/65,843,744 bytes completos | `./scripts/test-linux-storage-fault-lab.sh` | `/tmp/pm28p5-gate-lab-storage-fault.log` (rc0) |
+| Bootstrap retirado en vuelo + crash/restart | **PASS** intención running/provider_sent=1, calls=1; arranque cerrado rc4, replacement=0, restitución exacta y mismo ID INDETERMINATE | `"$V" inflight bootstrap` | `/tmp/pm28p5-complete-inflight-bootstrap.log` (rc0) |
+| Audit retirado en vuelo + crash/restart | **PASS**, mismos controles; replacement=0, autoridad exacta, mismo ID INDETERMINATE/calls=1 | `"$V" inflight audit` | `/tmp/pm28p5-complete-inflight-audit.log` (rc0) |
+| Vault retirado en vuelo + crash/restart | **RED heredado**: rechazo rc4 pero replacement=1; restitución recupera INDETERMINATE/calls=1 y autoridad exacta | `"$V" inflight vault` | `/tmp/pm28p5-complete-inflight-vault.log` (rc1) |
+| Bootstrap retirado con proceso vivo | **RED nuevo**: nueva admisión CREATED, rc0; fixture cancela segundo intento antes de liberar proveedor. Luego restitución/INDETERMINATE/calls=1 | `"$V" inflight-live bootstrap` | `/tmp/pm28p5-live-bootstrap1.log` (rc1) |
+| Audit retirado con proceso vivo | **RED nuevo**, admisión CREATED/rc0 y cancelación explícita; calls=1, restitución exacta | `"$V" inflight-live audit` | `/tmp/pm28p5-live-audit1.log` (rc1) |
+| Vault retirado con proceso vivo | **PASS rechazo de admisión** rc4; **RED heredado** replacement=1 en recuperación | `"$V" inflight-live vault` | `/tmp/pm28p5-live-vault1.log` (rc1) |
+| Crash real mientras el proveedor está en vuelo | **PASS acotado** SIGABRT real, WCOREDUMP=false, canales propios vacíos de core/crash; mismo ID INDETERMINATE, calls=1 | `"$V" inflight crash` | `/tmp/pm28p5-complete-inflight-crash.log` (rc0) |
+
+La matriz completa termina rc1 únicamente por los dos RED de cleanup EIO/ENOSPC
+del commit final. Continúa todos los casos aislados después de esos RED; todos
+los teardown terminan `errors=0`. No se acredita cada variante futura de
+SQLite/FS ni todos los proveedores: el contador corresponde al proveedor
+controlado del lab. ENOSPC por frontera es errno del syscall real; el lab tmpfs
+demuestra aparte el límite físico del dispositivo.
+
+### Canales activos e históricos — fase 5
+
+`"$V" canaries` termina rc0 en `/tmp/pm28p5-complete-canaries.log`: dos revisiones
+cifradas, tres receipts/outbox y canarios original/editado tras create/check/
+edit/trash/restart. La matriz y los casos en vuelo repiten el mismo inventario
+durante operación, después de error/crash y tras restitución/restart. Se pausa
+el custodio antes de enumerar archivos/copies/SQL para impedir rotación
+concurrente de sidecars; el proveedor también se pausa cuando está sujeto al
+escaneo. Los archivos de captura propios contienen stdout/stderr completos,
+no sólo el resultado parseado. Un inventario desconocido, archivo requerido
+ausente, tipo inesperado, EOF corto o cambio de tamaño/inode/mtime falla.
+
+| Canal enumerado | Estado/control positivo y alcance | Comando después de flock | Logs |
+|---|---|---|---|
+| stdout, stderr, logs, errores públicos | **PASS acotado**: capturas completas activas/históricas, canarios ausentes; control de canario cruzando chunk detectado | `"$V" canaries`; `"$V" matrix`; `"$V" inflight result-sync` | `/tmp/pm28p5-complete-canaries.log`; `/tmp/pm28p5-locked-witness-matrix.log`; `/tmp/pm28p5-outcome-both-errors.log` |
+| `/proc/<pid>/cmdline,environ` | **PASS acotado**: lectura hasta EOF del PID vivo detenido o EPERM explícito; también desde UID agente | `"$V" canaries`; `"$V" inflight crash` | `/tmp/pm28p5-complete-canaries.log`; `/tmp/pm28p5-complete-inflight-crash.log` |
+| Temporales propios y fd de sujetos | **PASS acotado**: TMPDIR privado por UID; inventario cerrado de raíz y fd; archivo regular fuera del inventario falla | `"$V" canaries`; `"$V" matrix` | `/tmp/pm28p5-complete-canaries.log`; `/tmp/pm28p5-locked-witness-matrix.log` |
+| DB, WAL, SHM, journal y copias SQLite | **PASS acotado**: bytes completos, overlap, copias quiescentes y SQL sin canarios; sidecars ausentes se enumeran con files=0 | `"$V" matrix`; `"$V" canaries`; `"$V" inflight result-sync` | `/tmp/pm28p5-locked-witness-matrix.log`; `/tmp/pm28p5-complete-canaries.log`; `/tmp/pm28p5-outcome-both-errors.log` |
+| Staging, incluidos streams/chunks SQL | **PASS de ausencia de plaintext** aun en los dos RED de cleanup; staging residual cifrado no se reclasifica como cleanup correcto | `"$V" matrix` | `/tmp/pm28p5-locked-witness-matrix.log` |
+| Audit-custody y tablas audit | **PASS acotado**: archivos y filas de records/state/segments/manifests íntegros, activos/históricos | `"$V" matrix`; `"$V" inflight audit`; `"$V" inflight-live audit` | `/tmp/pm28p5-locked-witness-matrix.log`; `/tmp/pm28p5-complete-inflight-audit.log`; `/tmp/pm28p5-live-audit1.log` |
+| Core/crash propios | **PASS acotado** SIGABRT con WCOREDUMP=false y core soft/hard 0/0; inventario explicita files=0 y rechaza artefactos nuevos sin categoría | `"$V" inflight crash` | `/tmp/pm28p5-complete-inflight-crash.log` |
+| Archivos privados desde UID agente | **PASS acotado**: EACCES/EPERM para estado, keys humanas y capturas privadas; recursos propios legibles se escanean completos | `"$V" canaries`; `"$V" inflight crash` | `/tmp/pm28p5-complete-canaries.log`; `/tmp/pm28p5-complete-inflight-crash.log` |
+| process_vm_readv y ptrace desde UID agente | **PASS** del lab: hijo del mismo UID con dirección/contenido conocido se lee/attach-detach; custodio/proveedor dan EPERM | `"$V" canaries`; `"$V" inflight crash` | `/tmp/pm28p5-complete-canaries.log`; `/tmp/pm28p5-complete-inflight-crash.log` |
+| Recursos agente y `/proc/<pid>/{fd,maps,mem}` | **PASS acotado**: keys/profile propios sin canarios; fd/maps/mem de sujetos denegados explícitamente | `"$V" canaries`; `"$V" inflight result-sync` | `/tmp/pm28p5-complete-canaries.log`; `/tmp/pm28p5-outcome-both-errors.log` |
+| Scanner incompleto/truncado | **PASS de discriminación**: canario entre chunks detectado, EOF prematuro, archivo desconocido y requerido ausente rechazados por la causa exacta | `"$V" canaries`; `"$V" matrix` | Primer control en ambos logs |
+| Archivos ajenos del colector del host, dumps de administrador/kernel, swap/FDE; todos los demás flujos/native targets | **No demostrado** por este fixture; el log `collector-invoked=0` sólo deriva de ausencia del flag de core, no de una auditoría del servicio del host | No ejecutado | Sin evidencia atribuida |
+
+Los canarios que entran al producto sólo se aceptan como contenido de las
+revisiones/chunks cifrados esperados; se comprueban revisiones históricas y
+ausencia literal en todos los bytes/canales producidos. Los scripts/binarios
+inmutables del fixture incluyen constantes sintéticas de entrada y están
+identificados como assets con hash, separados del inventario generado. No se
+permite excluir outputs/artefactos del producto con ese criterio. Esta evidencia
+acotada no sustituye el inventario pendiente de owners/memoria del ticket.
+
+### Defectos, límites y autorización — fase 5
+
+- **Staging residual tras fallo del commit final (nuevo RED de §2):** queda
+  una fila human_staging, una human_staging_streams y 17 chunks, inmediatamente
+  tras EIO/ENOSPC y tras reinicio inmediato. Atomicidad de items/revisiones,
+  raíces, autoridad, audit/outbox/receipts se conserva. `HumanVault::commit`
+  elimina staging dentro de la misma transacción; su rollback conserva el
+  comando preparado anterior. No se demuestra persistencia indefinida ni
+  plaintext. G7 exige retirar parciales propios al arrancar; aplicar esa limpieza
+  sin romper el preparado/receipt G4 exige resolver su composición y obtener
+  autorización específica. No se reabre el control confirmado ni se decide
+  aquí si el preparado conserva autoridad para reanudarse.
+- **Bootstrap/audit retirados con custodio vivo (nuevo RED de §3):** el proceso
+  admite una autenticación nueva usando custodia previamente cargada. La
+  hipótesis causal concuerda con bootstrap leído una vez en `serve_loop` y
+  `audit_custody` conservada en memoria; la admisión rc0 es evidencia directa.
+  La cancelación del segundo intento es contención explícita del fixture, no
+  corrección. Resolver toca listener/admisión/custodia, fuera de autorización.
+- **Recreación SQLite al perder vault (RED heredado):** se confirma también
+  en vuelo y en caliente, replacement=1 aunque el request rechaza rc4. La
+  restauración exacta/INDETERMINATE no oculta ese sustituto. No se corrige.
+- **Purge/outbox (RED heredado):** continúa QueryReturnedNoRows con pending=4
+  y signed-headers=4, separado de gates; ninguna edición de pm-sync/pm-vault.
+- Los fallbacks de proveedor/cleanup del fixture descritos arriba y la lista
+  de fase 4 se conservan. No hay cambios de producto, nuevos fallbacks, límites,
+  KDF, deadlines, engine, memoria restante, footer ni resumen de importación.
+
+Los intentos intermedios no se cuentan como RED discriminantes: `matrix1/2`
+pararon antes de completar todas las verificaciones históricas; `matrix3/4`
+preceden al inventario/hash final; `result-sync1` esperaba erróneamente otro
+sync después del error y agotó el plazo. En `inflight-crash1` faltaba SIGCONT
+después de SIGABRT sobre proceso detenido; se reanudó únicamente el PID owned
+identificado y se corrigió el fixture. Las corridas finales aquí citadas usan
+el método completo. No se borran/renombran esos logs como GREEN ni se atribuye
+un defecto al producto por setup, timeout o compilación.
+
+### Gates y preservación — fase 5
+
+Se ejecutaron de nuevo los 36 comandos del baseline de integración, cada uno
+secuencial y con flock, sin reutilizar check/build previos. Runner enumerado en
+`/tmp/pm28p5-run-local.py`, resultados en `/tmp/pm28p5-local-results.json` y
+summary `/tmp/pm28p5-local-summary.log`. Las filas contienen comando completo,
+rc/expected/baseline_rc, comparación, duración, log y raíces residuales nuevas.
+
+```sh
+export PYTHONDONTWRITEBYTECODE=1
+export PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3
+export PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64
+flock /tmp/pm-cargo-window.lock ./scripts/check.sh
+flock /tmp/pm-cargo-window.lock ./scripts/clean-offline-build.sh
+# Runner: cada comando Cargo/lab con su propio flock; sólo artefactos aprobados.
+python3 /tmp/pm28p5-run-local.py > /tmp/pm28p5-local-summary.log 2>&1
+```
+
+Resultado: **36 casos, 33 rc0, BASELINE_CHANGES=0, mismatches=1**, 372.60 s
+totales registrados; ninguna raíz residual nueva observada. Check rc0 en
+42.98 s (`/tmp/pm28p5-gate-final-check.log`), build limpio locked/offline rc0 en
+43.54 s incluyendo ventana/runner (`/tmp/pm28p5-gate-final-clean.log`).
+Los 26 wrappers Linux tienen 25 rc0 y el mismo tui-operations rc1:
+`wait_text("exact-duplicates=1")` frente al resumen de importación recortado,
+observado en tmux, `/tmp/pm28p5-gate-lab-tui-operations.log`. No se cambia su
+esperado ni la interfaz. Publication backup/plaintext/attachment 3/3 rc0;
+custody-audit/sqlite-sync/bootstrap-completed 3/3 rc0. La compatibilidad del
+provider sin barrera y del interposer SQLite-sync original se verifica en
+esas corridas y attempts. Vault-loss y purge siguen rc1 fuera de gates en
+`/tmp/pm28p5-gate-red-{vault,purge}.log`; los nuevos RED también se mantienen
+fuera del gate de regresión. No se añaden wrappers test-linux duplicados.
+
+Cambios de esta fase: fixtures `attempts_lab.py` (barrera opcional),
+`sqlite_sync_fault_lab.py`/`sqlite_sync_interposer.c` (casos/reales syscalls),
+`storage_fault_lab.py` (lectura/inventario) y cuatro helpers
+`g7_{canary_channels,fault_matrix,inflight,result_sync}.py`; wrapper
+`verify-ticket28-custody-loss.sh` y este documento. No hay ediciones Rust/src,
+Cargo.lock/Toml, dependencias, workflows, tickets, integración ni reglas.
+Conflictos previsibles sólo en esos fixtures/wrapper/documento, especialmente
+provider del lab y contrato de variables del interposer. El orquestador debe
+revisar integración independientemente. Raíz ajena preservada, sin barridos
+de `/tmp/pm-*`; cleanup exacto y explícito en todos los focused finales.
+La verificación estática final (`/tmp/pm28p5-preservation.log`) comprueba diff,
+sintaxis shell, AST de los 29 fixtures Python, enlaces/tabla vigente, paths
+autorizados y logs finales completos sin canarios literales. Producto y
+estado del ticket permanecen idénticos a la base.
+
+### Estado vigente de criterios 28/G7 — fase 5 (checkpoint parcial)
+
+Esta tabla sustituye la de fase 4 sin cambiar acuerdos de [spec §15](../../.scratch/passwordmanager/spec.md)
+ni estado del [ticket 28](../../.scratch/passwordmanager/issues/28-fallos-operativos-canarios-y-crash-safety-integral.md).
+Se conserva el contrato de [G7](../design/security-operations.md).
+PASS significa evidencia con el alcance indicado; **G7 sigue
+abierto**, con defectos RED, memoria restante y revisión independiente pendientes.
+
+| Criterio | Estado y alcance vigente | Evidencia |
+|---|---|---|
+| Records/password/notas/Attachment, AuthRecord/serializers; CSV/JSON/PMF1; passkey 32 bytes | PASS acotado heredado | Fases 1–4; check de fase 5 |
+| Frames/responses custody/web, sources/requests propios HTTP/JSON/CDP y providers | PASS acotado heredado; no heaps TLS/Chromium/russh ni todo SSH | RED/GREEN anteriores y labs de fase 5 |
+| Owners TUI split y requests restore/rotate | PASS acotado heredado; footer/resumen intactos | Fase 4, labs TUI excepto mismatch conocido |
+| Memoria propia integral, wires y presentación restante | **FAIL de inventario**, trabajo posterior | SSH, recovery/snapshot/import/sync, Ratatui, ZIP/DEFLATE de fase 4 |
+| Presupuesto agregado | PASS contador test-only 64 KiB; 32 MiB físicos/overhead **no demostrados** | Host memlock 8 MiB, sin ampliación |
+| Guardas Linux/core/dumpable/stdin | PASS acotado heredado + SIGABRT real sin core del lab | fault-safety/protected-input; complete-inflight-crash |
+| 17.º RATE_LIMITED y CLOCK_UNTRUSTED | PASS acotado heredado | autorización y check; no cambia rate/clock |
+| Límites restantes, incluido techo custodial 128 | **No demostrado integralmente** | Sin nuevas pruebas de estos techos |
+| ENOSPC físico y spill WAL real EIO/ENOSPC | **PASS** acotado, rollback/restart y canales completos | gate-storage-fault y locked-witness-matrix |
+| Matriz WAL/staging/commit/outbox/audit con EIO/ENOSPC | **PASS atomicidad/autoridad con controles reales**; **RED cleanup** del commit final | fsync 1/2/5/8, pwrite64 600; staging 1/1/17 tras error/restart |
+| Resultado tras transmisión, crash/intención → INDETERMINATE, no doble login | **PASS acotado** con proveedor controlado calls=1; no todos los proveedores | outcome-both-errors y complete-inflight-crash |
+| Bootstrap/audit perdidos, intento completado y pérdida en vuelo + restart | **PASS acotado**: cierre rc4, replacement=0 y restitución exacta | labs heredados y complete-inflight-{bootstrap,audit} |
+| Bootstrap/audit retirados con custodio vivo | **RED nuevo**, admite nueva autenticación; corrección requiere autorización | live-{bootstrap,audit}1; segundo intento cancelado antes del proveedor |
+| Vault perdido, completado/en vuelo/en caliente | **RED heredado**, SQLite sustituto; corrección no autorizada | gate-red-vault, complete-inflight-vault y live-vault1 |
+| Canarios activos/históricos en canales propios y UID agente | **PASS acotado**, inventario cerrado y controles scanner/vm/ptrace; cobertura global **no demostrada** | complete-canaries, matriz y todos los inflight finales |
+| Purge/outbox de revisión purgada | **RED heredado separado de gates** | gate-red-purge: QueryReturnedNoRows, pending/signed-headers=4 |
+| Windows VirtualLock/WER y macOS nativo | Diferido | Sin evidencia nativa nueva; seams no acreditan soporte |
+| Check completo y build limpio | **PASS** | rc0 en 42.98/43.54 s, logs de fase 5 |
+| Barrida de los 36 casos de integración | **Sin regresión de rc**: 33 rc0, único mismatch TUI conocido, 2 RED heredados separados | local-results.json/summary, BASELINE_CHANGES=0 |
+| Integración/revisión independiente y cierre de 28/G7 | **Pendientes**, fuera de esta entrega | Rama propia publicada; PR #1 borrador sin fusionar, ticket sin cambio de estado |
+
+Siguiente acción: el orquestador revisa esta evidencia e integra la rama propia
+con sus gates, sin fusionar PR #1. Solicitar decisión/autorización específica
+para staging preparado y retirada de custodia en caliente; conservar RED y
+fallback SQLite/purge mientras tanto. Después continuar el inventario de memoria
+restante en su alcance separado. Esta entrega no acredita cierre de G7 ni
+soporte nativo Windows/macOS.

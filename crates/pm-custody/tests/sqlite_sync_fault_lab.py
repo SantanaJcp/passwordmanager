@@ -16,7 +16,7 @@ DEVICE = "28282828282828282828282828282828"
 CANARY = b"PM28_SYNTHETIC_SQLITE_SYNC_CANARY"
 
 
-def run_case(source_binary, source_cli, interposer_source, fault):
+def run_case(source_binary, source_cli, interposer_source, fault, exercise=None):
     root = pathlib.Path(tempfile.mkdtemp(prefix="pm28-sqlite-sync-linux-lab-"))
     state = root / "state"
     daemon = None
@@ -77,6 +77,11 @@ def run_case(source_binary, source_cli, interposer_source, fault):
         events.write_bytes(b"")
         os.chown(events, CUSTODIAN, CUSTODIAN)
         environment = {"LD_PRELOAD": str(interposer), "PM28_SYNC_TARGET": str(vault) + "-wal", "PM28_SYNC_PID": str(pid_path), "PM28_SYNC_LOG": str(events), "PM28_SYNC_FAIL": str(int(fault))}
+        if exercise is not None:
+            # Reuse the real multi-UID vault, keys, profiles and teardown for
+            # the full boundary matrix; no second engine or fixture setup.
+            exercise(locals())
+            return
         def identity():
             os.setgroups([])
             os.setgid(CUSTODIAN)
@@ -158,8 +163,12 @@ def run_case(source_binary, source_cli, interposer_source, fault):
 
 
 def main():
-    assert os.geteuid() == 0 and len(sys.argv) == 4
-    binary, cli, interposer = (pathlib.Path(value).resolve(strict=True) for value in sys.argv[1:])
+    assert os.geteuid() == 0 and len(sys.argv) in (4, 5, 6)
+    binary, cli, interposer = (pathlib.Path(value).resolve(strict=True) for value in sys.argv[1:4])
+    if len(sys.argv) > 4:
+        from g7_fault_matrix import matrix
+        matrix(binary, cli, interposer, sys.argv[4:])
+        return
     run_case(binary, cli, interposer, False)
     print("PM28_SQLITE_SYNC_CONTROL_READY", flush=True)
     run_case(binary, cli, interposer, True)

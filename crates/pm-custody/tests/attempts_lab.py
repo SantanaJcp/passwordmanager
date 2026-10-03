@@ -22,7 +22,7 @@ def fields(v):
     while p<len(v): n=struct.unpack(">I",v[p:p+4])[0];p+=4;out.append(v[p:p+n]);p+=n
     return out
 
-def provider(sock,journal,resolve):
+def provider(sock,journal,resolve,gate=None):
     pathlib.Path(sock).unlink(missing_ok=True); s=socket.socket(socket.AF_UNIX);s.bind(sock);os.chmod(sock,0o666);s.listen()
     data={}
     if pathlib.Path(journal).exists(): data=json.loads(pathlib.Path(journal).read_text())
@@ -35,6 +35,12 @@ def provider(sock,journal,resolve):
                 assert destination==b"https://ticket07.invalid/login" and username==b"ticket07-user" and password==b"ticket07-secret-canary"
                 mode=context.decode(); row=data.setdefault(aid,{"calls":0,"mode":mode,"revision":revision});row["calls"]+=1
                 tmp=journal+".tmp";pathlib.Path(tmp).write_text(json.dumps(data,sort_keys=True));os.replace(tmp,journal)
+                if gate is not None:
+                    pathlib.Path(gate + ".sent").write_text(aid)
+                    deadline = time.monotonic() + 15
+                    while not pathlib.Path(gate + ".release").exists():
+                        assert time.monotonic() < deadline, "controlled provider barrier deadline"
+                        time.sleep(0.002)
                 if mode in ("ambiguous","response-loss"): c.close();continue
                 if mode=="challenge": response=b"\x01"+field(b"provider-challenge-ref")
                 elif mode=="reject": response=b"\x02"+field(b"rejected")
