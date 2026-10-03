@@ -29,7 +29,7 @@ def snapshot(m, session=None):
 with sqlite3.connect('file:'+sys.argv[1]+'?mode=ro', uri=True) as db:
  state={t:db.execute('select count(*) from '+t).fetchone()[0]
   for t in ('vault_items','revision_parts','authority_events','audit_purge_ranges')}
- rows=db.execute("select event_digest from authority_events where kind not in ('item-revision','trash','restore','purge-item','purge-revisions','audit-purge') order by event_digest")
+ rows=db.execute("select event_digest from authority_events where kind not in ('item-revision','trash') order by event_digest")
  state['authority_state']=hashlib.sha256(b''.join(row[0] for row in rows)).hexdigest()
  print(json.dumps(state))
 """
@@ -270,6 +270,38 @@ def expect_output_collision(session, kind, path, expected_digest, *, since):
     assert source_digest(path) == expected_digest, "collision changed the original output"
 
 
+def wait_recovery_code(m, session, *, since):
+    deadline = m.time.monotonic() + 8
+    grammar = r"Exposure: (PMR1-[0-9a-f]{32}-[0-9]+(?:-[0-9a-f]{8}){9})"
+    while True:
+        page = session._current_text_after(since)
+        if page is not None and "Recovery code shown temporarily" in page:
+            codes = [match.group(1) for row in m.exposure_rows(page)
+                     if (match := re.fullmatch(grammar, row)) is not None]
+            if len(codes) == 1:
+                return codes[0]
+        remaining = deadline - m.time.monotonic()
+        if remaining <= 0:
+            raise AssertionError("complete recovery exposure did not paint within the original bound")
+        session._read_once(min(0.1, remaining))
+
+
+def diagnose_restore_wait(m, session, before, *, since):
+    def status():
+        page = session._current_text_after(since)
+        if page is not None and "Restore committed with new IDs/keys" in page:
+            return "complete"
+        if page is not None and "Operation failed explicitly" in page:
+            return "explicit-failure"
+        return "unclassified"
+    previous = status()
+    after = snapshot(m, session)
+    current = status()
+    authority = "same" if after["authority_state"] == before["authority_state"] else "changed"
+    delta = after["vault_items"] - before["vault_items"]
+    print(f"PM26_RESTORE_WAIT before-ui={previous} after-ui={current} delta-items={delta} authority={authority}", flush=True)
+
+
 def rejected_source(m, binary, profile, private, endpoint, path, *, onepux_source):
     before = snapshot(m)["vault_items"]
     session = start(m, binary, profile, private, endpoint)
@@ -455,14 +487,20 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         session.wait_text("Confirmation mismatch", since=mark)
         assert snapshot(m, session)["vault_items"] == before_count
         mark = operation(session, "b", "3", "Archive path|RESTORE", f"{native}|RESTORE")
-        session.wait_text("Restore committed with new IDs/keys", since=mark)
+        try:
+            session.wait_text("Restore committed with new IDs/keys", since=mark)
+        except BaseException as error:
+            try:
+                diagnose_restore_wait(m, session, after, since=mark)
+            except BaseException as diagnostic_error:
+                raise error from diagnostic_error
+            raise
         restored = snapshot(m, session)
         assert restored["vault_items"] > before_count and restored["authority_events"] > authority
         assert restored["authority_state"] == authority_state, "restore changed current authority"
         mark = operation(session, "b", "5", "Recovery code shown temporarily")
-        page = session.wait_text("Exposure:", since=mark)
-        code = re.search(r"Exposure: ([^\s│]+)", page); assert code and code.group(1) != "<hidden>"
-        submit(session, code.group(1), hidden=True)
+        code = wait_recovery_code(m, session, since=mark)
+        submit(session, code, hidden=True)
         page = session.wait_text("Recovery rotated after exact re-entry", since=mark)
         assert "historical backups/copies remain usable" in page
         lock(m, session); session = None

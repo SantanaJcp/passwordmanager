@@ -2027,3 +2027,40 @@ and then uses `fs::rename` onto the destination; the next fixed UI/digest
 discriminant must distinguish actual overwrite from an observer failure.
 Neither shared path is changed. Intel retained its independent clipboard
 indeterminacy/`-1700`; ARM had no core error. Both strict cleanups completed.
+
+Recovery observer method: the first `Exposure:` substring can still be the
+previous hidden row while the recovery prompt repaints. Require the recovery
+prompt and a complete canonical `PMR1` code together on the current bordered
+exposure row within the original eight seconds. Its grammar is derived from
+`pm_crypto::RecoveryCode::fmt`: 16-byte vault ID, decimal generation, eight
+four-byte key groups and one four-byte checksum. Return that same observed
+code only for hidden exact re-entry; never log it, regenerate it, use a direct
+command, extend reveal=10, or accept `<hidden>`/a partial code. Server mandatory
+exact confirmation and subsequent rotation assertions remain intact.
+
+Tighten the restore authority fingerprint to exclude only the two new event
+kinds actually produced by `commit_backup_restore`: `item-revision` and
+`trash`. Existing purge/restore/audit and all grant/root/device events must
+remain unchanged. This strengthens the existing authority-preservation check.
+
+Run [37092669202](https://github.com/SantanaJcp/passwordmanager/actions/runs/37092669202),
+exact `0a8e339be9066806f2b70fba0bf8aa86e887f41e`, completed FAILED on both
+CPUs. Both completed Ticket23/partial Ticket24, concurrent discovery, Full25
+imports, causal retirement, protected pairing, original sync readiness,
+explicit offline and fixed wrong-pin rejection. Both retained the five pending
+purged revisions. Both passed first backup/export (including warning and wrong
+confirmation), exact >16 MiB streamed download, audit query/purge and wrong
+restore confirmation. ARM additionally completed real native restore, new
+item/event counts and the authority fingerprint, then hit the partial/hidden
+recovery exposure assertion. Intel timed out at the original eight-second
+restore wait with a live TUI and pending VT control; no completed restore is
+claimed there. Intel retained clipboard indeterminacy/`-1700`. Neither reached
+the collision discriminant. Both strict cleanups completed without new errors.
+
+Intel restore-timeout discriminant: retain that request and eight-second wait.
+On failure only, record fixed current UI status before/after one read-only
+durable snapshot, item-count delta and unchanged/changed authority fingerprint,
+then re-raise the original timeout. No screen, ID, digest or archive content is
+printed. Do not retry restore or extend its observation into a success. This
+distinguishes committed state/late repaint from an incomplete or explicitly
+failed operation; any original timeout still fails the matrix.
