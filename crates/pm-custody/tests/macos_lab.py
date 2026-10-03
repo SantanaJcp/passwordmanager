@@ -1414,6 +1414,12 @@ def assert_information_panel_regression():
         boundary.screen.feed(f"\x1b[{y};1H│{row:<78}│".encode(), final=True)
     assert "exact-duplicates=1" in boundary.wait_information("exact-duplicates=1", timeout=0)
     assert recovery_code(boundary.screen.application_text()) == code
+    boundary.screen.feed(b"\x1b[5;2H\x1b[Krejected its fixed authority/request context;\x1b[6;2H\x1b[Kno success recorded", final=True)
+    for y in (5, 6):
+        boundary.screen.feed(f"\x1b[{y};80H│".encode(), final=True)
+    assert "rejected its fixed authority/request context; no success recorded" in boundary.wait_information(
+        "rejected its fixed authority/request context; no success recorded", timeout=0,
+    )
 
     class AlreadyUnlocked:
         screen = SimpleNamespace(columns=80, rows=24)

@@ -441,7 +441,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         negative_count = snapshot(m, session)["vault_items"]
         wrong = "00" * 44
         mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value.replace(pin + "|SYNC", wrong + "|SYNC"))
-        rejected = session.wait_text("rejected its fixed authority/request context; no success recorded", since=mark)
+        rejected = session.wait_information("rejected its fixed authority/request context; no success recorded", since=mark)
         assert "no success recorded" in rejected
         assert snapshot(m, session)["vault_items"] == negative_count
         print("PM26_MATRIX full25-offline+wrong-pin=observed", flush=True)
@@ -470,7 +470,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         assert_stream(attachment)
 
         mark = operation(session, "z", "1", "Audit metadata:")
-        page = session.wait_text("records=", since=mark)
+        page = session.wait_information("records=", since=mark)
         records = re.search(r"records=(\d+)", page); assert records and int(records.group(1)) > 0
         before = snapshot(m, session)
         mark = operation(session, "z", "2", "generation:through-sequence", "1:2:PURGE AUDIT")
@@ -551,7 +551,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         m.sudo(["launchctl", "kickstart", "-k", "system/" + m.LABEL]); m.wait_for_service()
         session = start(m, binary, profile, private, endpoint, idle=1, password=NEW_PASSWORD)
         mark = operation(session, "y", "4", "Exact sync job ID", failed_job.group(1))
-        progress = session.wait_text("Sync job", since=mark)
+        progress = session.wait_information("Sync job", since=mark)
         assert "complete through" not in progress
         assert session.wait_exit(timeout=8) == 0
         m.close_session_preserving_primary(session); session = None
@@ -561,7 +561,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         queried = m.time.monotonic()
         while True:
             page = session._current_text_after(mark)
-            if page is not None and "unavailable after bounded transport" in page:
+            if page is not None and "unavailable after bounded transport" in information_text(page):
                 break
             assert m.time.monotonic() < deadline, "same sync job did not reach bounded unavailability"
             if m.time.monotonic() - queried >= 20:

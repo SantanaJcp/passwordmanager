@@ -16,8 +16,56 @@ use windows_sys::Win32::{
         Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT},
         DACL_SECURITY_INFORMATION, GetAce, LookupAccountNameW,
     },
-    System::Threading::{PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION},
+    System::Threading::{GetCurrentProcess, PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION},
 };
+
+/// Discriminate elevated unit-test results from the real human fixture token.
+/// This changes only this disposable fixture's DACL, never the TUI's DACL.
+pub(super) fn probe_human_token_lease() -> io::Result<()> {
+    let process = unsafe { GetCurrentProcess() };
+    let service = service_sid()?;
+    let before = snapshot(process, &service)?;
+    if before.service_aces != 0 {
+        return Err(io::Error::other("human fixture already has a transfer ACE"));
+    }
+    let lease = pm_native_channel::ProcessHandleTransferLease::begin().map_err(|error| {
+        io::Error::other(format!(
+            "human-token lease begin rejected; cleanup-failed={}",
+            error.cleanup_result().is_err()
+        ))
+    })?;
+    let during = snapshot(process, &service).and_then(|during| {
+        if during.service_aces != 1 || during.bytes == before.bytes {
+            Err(io::Error::other(
+                "human-token lease did not install its exact ACE",
+            ))
+        } else {
+            Ok(())
+        }
+    });
+    let restored = lease
+        .finish()
+        .map_err(|_| io::Error::other("human-token lease finish failed"));
+    let after = snapshot(process, &service).and_then(|after| {
+        if after.service_aces != 0 || after.bytes != before.bytes {
+            Err(io::Error::other(
+                "human-token lease DACL not restored exactly",
+            ))
+        } else {
+            Ok(())
+        }
+    });
+    let errors = [during, restored, after]
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(errors.join("; ")))
+    }
+}
 
 fn release(value: *mut std::ffi::c_void) -> io::Result<()> {
     if value.is_null() || unsafe { LocalFree(value) }.is_null() {

@@ -2663,3 +2663,57 @@ operations1→0; g7-matrix conserva1. Check/clean y los 26 wrappers Linux,
 publicación y los nueve modos G7 conservan sus aserciones. No se convierte
 el RED de G7 ni purge/outbox pendiente en aceptación. La próxima CI usa
 el checkpoint corregido, no repite el SHA inicial.
+
+### Candidata W1 50fff66: frontera nativa observada
+
+SHA exacto `50fff66d2c75664cb4e9bff15483590c0dd2aae3`, HEAD remoto comprobado
+antes de dispatch. Inputs normales, sin diagnóstico de storage ni modo Mac
+final-only. Ambas corridas terminaron:
+
+- [Windows 37123518728](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123518728),
+  FAIL. Build ARM64; primitives13, pipe1, observer17, sync-lib1 PASS.
+  ConPTY prompt/hidden/unlock/footer/CSV confirmado con siete contadores
+  completos PASS. Hardlink propio de 1PUX rechazado con error explícito, cero
+  lease observada y DACL exacta antes/después PASS. Después el 1PUX positivo no
+  llega a preview: `CUSTODY_UNAVAILABLE`; no se observa la lease real. El
+  sampler propaga ambos errores, no rebaja la aserción. Log
+  `/tmp/pmw1-native-windows2.log`. Esto no determina todavía si el rechazo
+  precede al grant o si existe otra falla del canal; no parchear producto sin
+  discriminante.
+- [macOS 37123520473](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123520473),
+  FAIL Intel y Apple silicon. Ambos llegan a `full25-import=observed` y luego
+  fallan en el mismo `wait_text` del rechazo de pin/contexto. Producto vivo,
+  parser ground, repaint real posterior al mark. Log
+  `/tmp/pmw1-native-macos2.log`. Discriminante: `decode_sync_status(phase9)`
+  envía el literal completo al panel; `wait_text` busca una subcadena que cruza
+  líneas físicas a80×24. Cambiar exclusivamente al `wait_information` conserva
+  literal/plazo/freshness. Audit records y estado de job consultado también
+  deben venir del panel; el polling final aplica la misma normalización.
+
+Método antes de la siguiente candidata: regresión sintética de aviso de rechazo
+partido en dos filas dentro del panel y rechazo del footer falso; helpers
+macOS existentes. Windows: probar `ProcessHandleTransferLease` con el token
+humano real del fixture (los unit tests anteriores usan el installer elevado),
+capturar DACL propia antes/durante/después sin pausa y exigir ACE exacto/restauración.
+Este caso cambia sólo el proceso fixture efímero, nunca la DACL de la TUI ni
+permisos de producto. Conservar después el caso real TUI y su sampler; emitir
+diagnóstico categórico de proceso/parser si falla. Un PASS del discriminante
+no es PASS de la transferencia TUI. No cambiar deadlines ni repetir50fff66.
+
+La matriz de Windows aún no alcanza tipos completos/resize, restore/rotaciones
+ni pair-sync-retire. El fixture actual ni siquiera contiene los dos primeros
+grupos completos ni el último; no declarar cobertura por menús, Linux o tests
+de primitives. Primero discriminar el bloqueo1PUX real; extender fixtures
+posteriores sin sustituir esa operación. Sync tiene además el bloqueo conocido
+purge/outbox de W2 y pendientes nativos de firma/DACL ya inventariados.
+
+Linux tras reanudar: clean offline rc0, `/tmp/pmw1-resume-clean.log`;
+operations completo rc0, `/tmp/pmw1-resume-operations.log`, con restore,
+rotaciones desde panel y todo el recorrido de sync histórico. Mismo comando
+del barrido, flock, artefactos existentes y oráculos/plazos originales.
+
+Fallback heredado adicional observado durante la relectura, sin cambio:
+`tui.rs::display_secret`, ante bytes que no forman UTF-8, sustituye su
+presentación por `<binary secret: N bytes>`. El panel de recovery recibe un
+código textual, pero la función también sirve a otras exposiciones existentes.
+No se usa este descriptor como evidencia de un valor binario revelado completo.

@@ -1699,6 +1699,8 @@ mod windows_fixture {
 
         eprintln!("TUI_STAGE stage=csv-import result=pass");
         reject_multilink_source(fixture, paths.onepux)?;
+        crate::acl::probe_human_token_lease()?;
+        eprintln!("TUI_STAGE stage=human-token-lease-discriminant result=pass");
         open_menu(fixture, "m", "Migration:")?;
         open_menu(fixture, "2", "1PUX source")?;
         let onepux_request = format!("{}|keep", encode_operation_field(paths.onepux));
@@ -1712,6 +1714,13 @@ mod windows_fixture {
                 .observer
                 .wait_for_import_review(2, 2, 4)
                 .map_err(io::Error::other)
+        })
+        .map_err(|primary| {
+            let child = child_diagnostic(fixture.process);
+            let screen = fixture.observer.diagnostic();
+            io::Error::other(format!(
+                "{primary}; 1PUX child={child:?}; observer={screen:?}"
+            ))
         })?;
         eprintln!("TUI_STAGE stage=real-transfer-dacl-before-during-after result=pass");
         type_visible_and_submit(fixture, "IMPORT", "IMPORT")?;
