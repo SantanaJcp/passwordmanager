@@ -3722,3 +3722,73 @@ asignación crypto-resource sin reducir seed8/protecciones/limites. Componer
 W2 y el transporte normal de segundo dispositivo antes de la matriz sync/
 retire; acordar fixture reparse sin cambiar guards genéricos. No repetir Mac
 con la ventana actual agotada ni cambiar estados de tickets.
+
+## W1 fase 4 — composición y método (2026-10-03)
+
+Reanudación limpia `aa41c650911ec5a7be8d9a381c4031644b6ca7c8` en
+`codex/pm-w1-tui-panel`, exclusivamente en su worktree. Merge commit
+`c8325fbce2b572767fa4a606239d939cff938467`: padres aa41c65 y
+`893074af5192217d313fce12ea81ca3351aa22ea`. Sin rebase/force ni conflictos
+textuales; Git compuso automáticamente `pm-custody/src/windows.rs` y
+`pm-native-channel/src/windows.rs`. Se conservan el handler único, W1 fase3,
+W2 root v3/digest/transportes, W3 fail-closed/errores tipados y W4 concurrencia.
+No se borran tests ni se cambian aserciones para componer.
+
+Barrido congelado sobre c8325fb: **52 casos, 49 rc0, tres RED conocidos y cero
+regresiones de rc/oráculos**. Driver `/tmp/pmw1d-run-local.py`, copia acotada
+del driver pmint5 con cwd/prefijo propios; mismos comandos de integración.
+Cada invocación bajo `flock /tmp/pm-cargo-window.lock`, un bloque a la vez,
+Keycloak26.7.3 y Chrome de los artefactos absolutos autorizados. Resultados
+`/tmp/pmw1d-composition-local-results.json`, resumen `...-summary.log` y
+`...-local-summary.json`, logs por caso. `check.sh` rc0 (76.449 s), clean
+locked/offline rc0 (45.302 s), operations/bootstrap rc0 y concurrencia rc0.
+G7 matrix conserva RED/ProductRed EIO/ENOSPC commit-outbox-audit y cleanup0;
+los dos g7-extra conservan autoridad/receipts, replacement0/closed1 y cleanup0.
+No se ejecuta multiagente W4 ni se lo agrega a los gates. Los 591.993 s
+agregados incluyen esperas del lock; no son rendimiento del producto.
+
+La integración documenta [Mac37139870950](https://github.com/SantanaJcp/passwordmanager/actions/runs/37139870950)
+PASS completo en ambas CPU sobre6e6ee7a. Margen Intel previo **0.955 s** en
+wait20, panel completo19.045 s; no ampliar el plazo. La composición de esta
+rama requiere su propia corrida exacta, todavía no ejecutada en este punto.
+
+Autorizaciones nuevas del encargo, presupuesto máximo6 Windows y2 Mac,
+sólo SHAs publicados de esta rama, conforme [native-ci.md](native-ci.md),
+workflows normales gratuitos/sintéticos sin caches/artifacts/secrets. Soltar
+lock local durante la espera y esperar terminación; ningún repeat idéntico.
+
+Método de las dos propuestas aprobadas por el orquestador:
+
+* CUP/HVP: parámetros válidos hasta32767 limitados al viewport, según
+  [Microsoft Cursor Positioning](https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning).
+  Sólo esas dos secuencias cambian. Contador monotónico con overflow fallido,
+  diagnóstico total y por tamaño; no confundir clamps con fallo del parser.
+  Conservar witness nuevo buffer=viewport=frame=tamaño solicitado y los15s.
+  Añadir repaint completo: todas las celdas escritas/borradas por salida nueva,
+  parser ground y contorno de frame completo en la geometría exacta después
+  de vaciar la pantalla al resize. Control adverso de frame100×30 cortado a
+  42×12 y título nuevo parcial; ninguno satisface el oráculo. CSI desconocidos,
+  CHA/VPA y reportes de geometría incorrecta conservan rechazo estricto.
+* Cierre: aceptar UnexpectedEof o BrokenPipe con raw109 sólo con cierre
+  corroborado por [PeekNamedPipe](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-peeknamedpipe),
+  retorno0/GetLastError109. Respuesta, timeout u otro error fallan. Los cuatro
+  casos mantienen connect/magic/unlock/request31/ack31, rechazo observado del
+  servicio, cero duplicado/parser, DACL antes/durante/después exacta y cierre
+  explícito propio. No cambiar lease, ACL del servicio ni listener.
+
+1PUX positivo seed8 `crypto-resource` continúa **bloqueo conocido de W5**;
+no editar memoria protegida/custodia ni reducir el seed. Las métricas previas
+no localizan la asignación protegida. Los fallbacks heredados de fase3 y
+[W2](w2-purge-sync.md)/[W4](w4-agents-provider.md) siguen intactos: cleanup
+nativo omitido, errores de handler descartados y parser/cleanup sync que agrupa
+u omite errores. Windows `ProcessTlsTransport` sigue usando procesos por RPC;
+la sesión reutilizada de W2 está cfgUnix. No se sustituye ni se declara
+validada en Windows por el PASS de Mac.
+
+La extensión de método para reparse y segundo dispositivo se consultó al
+usuario conforme al acuerdo de verificación de AGENTS.md: alias preparado por
+instalador con vida/cleanup explícitos sin seguimiento ni privilegios del
+humano/agente; segundo ID mediante servicio SCM normal alternado y paquetes
+de auditoría conservados/restaurados, equivalente al método Mac. Mientras no
+haya respuesta, estos casos no se implementan ni ejecutan. Es un pendiente
+de método, no una autorización para modificar W2/W4. Tickets sin cambios.
