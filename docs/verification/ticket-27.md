@@ -2832,3 +2832,88 @@ cambio de asserts Mac/Linux no
 interviene en su frontera de transferencia1PUX. El barrido40 anterior queda
 ligado a cae2a4a; el fixture reforzado recibe evidencia nueva separada, sin
 atribuirle una barrida que no se ejecutó.
+
+### Matriz 27 al checkpoint W1 de reanudación
+
+Esta tabla sustituye el estado de las tablas históricas del footer anterior;
+no modifica el ticket `claimed` ni declara aceptación integral.
+
+| Criterio de aceptación de 27 | Estado actual | Evidencia y pendiente |
+| --- | --- | --- |
+| Servicio virtual/DACL/DPAPI y peer bilateral G1 por proceso real | PASS parcial | Windows ARM64 real compone servicio/RPK/unlock y primitives; falta defensa integral G1. |
+| Rechazos de sustitución/impersonación/dump/lectura/fallos de custodia | no demostrado integral | Hardlink source rechazado y tests nativos de permisos pasan; no sustituyen toda la matriz de ataques/transferencia real. |
+| ConPTY/clipboard/persistencia sin admin del agente; ambos CPU/reboot en32 | PASS parcial | Prompt/input oculto/unlock/CSV por teclado ARM64 y token humano real; clipboard/persistencia integrales posteriores no alcanzados en esta corrida; x64/reboot/FDE/Windows Terminal humano pendientes. |
+| TDD RED/GREEN, comandos exactos, sin skip/stubs | PASS del cambio W1 | RED ef820a2/render y omisión Audit nativa; GREEN render/Linux y Audit Intel. No equivale a TDD integral de27. |
+| Revisión contractual e integración por merger antes de resolver | pendiente | Decisión del usuario aplicada; sólo checkpoint W1, no integración ni merge PR#1. |
+
+| Matriz Windows solicitada a W1 | Estado y frontera observada |
+| --- | --- |
+| CSV largo por teclado, preview completo antes de IMPORT y commit | PASS nativo ARM64; los siete contadores exactos vienen del panel80×24. |
+| 1PUX grande positivo por teclado | FAIL antes del preview, hijo rc4/CUSTODY_UNAVAILABLE; no atribuirlo al render. |
+| Fuente hardlink negativa1PUX | PASS explícito; cero lease observada y DACL exacta antes/después; alias propio retirado. |
+| Lease real de la TUI y ACL antes/durante/después | no demostrado; sampler1ms no observa la lease y falla. Discriminante de lease API con token humano real PASS; no se toma como lease TUI. |
+| Segundo lease/DACL nulo/cambio externo | PASS de tests nativos; falta composición con transferencia TUI fallida y toda la matriz de errores Win32. |
+| Peer/PID/source/reparse/multilink/fallo transferencia completos | no demostrado integral; negativa hardlink no acredita el resto. |
+| Tipos completos y resize Windows | no alcanzados; fixture aún necesita ese grupo. Siete tipos/Unicode/resize sólo acreditados por Linux. |
+| Restore/recovery/master y avisos completos Windows | no alcanzados; oráculos preparados, no ejecutados tras la frontera1PUX. |
+| Pair-sync-retire y sync E2E/restart/offline Windows | no alcanzados; fixture necesita el grupo completo. Además hay bloqueo conocido purge/outbox W2 y límites de firma/DACL. |
+
+Siguiente paso del coordinador: asignar el discriminante Windows
+ack31→begin lease del hijo→transferencia en la zona transporte/custodia; W1
+no altera esa zona ni permisos para forzar un GREEN. Después extender y
+ejecutar los grupos nativos restantes sin omitir1PUX. Componer W2 para el
+purge/outbox y W3 para G7, preservando el panel y las guardas. La reanudación
+no toca listener/dispatcher/admisión/`provider: None` de W4. Conflictos
+previsibles: `tui.rs` App/render/begin_prompt con cambios de protección W3;
+fixtures de operations/migración y este documento con W2; coordinar fixture
+Windows/ACL si W4 modifica su harness. No hay segundo engine ni dependencias
+nuevas. Los fallbacks heredados inventariados permanecen sin autorización de
+cambio.
+
+### Cierre del checkpoint W1 — oráculos reforzados ejecutados
+
+Candidata exacta `7d8ba007729bd637add676a6a34429b176ef7d11`, HEAD remoto
+comprobado antes del dispatch. Inputs `pasteboard_diagnostic=false` y
+`final_phase_only=false`:
+[macOS 37126535485](https://github.com/SantanaJcp/passwordmanager/actions/runs/37126535485)
+concluyó FAIL; ambos jobs terminaron. No se repitió Windows por estos asserts
+que no afectan su frontera1PUX. Logs completos
+`/tmp/pmw1-native-macos5.log`, y por CPU
+`/tmp/pmw1-native-macos5-{intel,arm}.log`.
+
+Ambos CPU emiten `full25-import=observed`,
+`full25-offline+wrong-pin=observed` y `full25-local=observed`. Quedan observados
+por teclado/panel real80×24 los cuatro avisos completos antes de confirmar,
+incluido todo el warning histórico junto al código recovery exacto, y los
+resultados completos después de ambas rotaciones. Maestra anterior rechazada,
+nueva maestra desbloquea; restore preserva el estado de autoridad. Este PASS
+acotado satisface el objetivo W1 de avisos macOS, no la aceptación integral26.
+Mismos OS/CPU/Rust e imágenes registrados para la candidata anterior.
+
+- Intel: ambas negativas de colisión de salida pasan; después el sync feliz
+  vuelve a `durable=integrity screen=integrity process=same`, ahora
+  `blocks=6 roots=0`. Conserva `PM26_OUTBOX_PURGED ... missing-items=5`.
+  Bloqueo conocido W2, panel válido y proceso vivo; wait20s intacto.
+- Apple silicon: después de Full25 local falla la negativa de colisión de
+  backup en el wait8s. Diagnóstico `result=unclassified destination=same`,
+  panel de información actual, repaint posterior al mark, parser ground,
+  proceso vivo. No se observó ni éxito ni rechazo explícito; no declarar
+  superada esa negativa porque el destino no cambió. Lectura estática del
+  camino compartido Unix `rpc_download_atomic`: solicita y descarga todo el
+  backup, sincroniza el temporal y sólo entonces `publish_new_file` detecta
+  la colisión y propaga DestinationExists. Por tanto un backup todavía en
+  curso es una hipótesis compatible con el panel pendiente, no una causa
+  acreditada por este log. Discriminar operación/fin de stream/publicación
+  antes de cualquier parche; no ampliar el wait, anticipar el rechazo ni
+  modificar persistencia desde W1. El PASS del backup inicial aquí no explica
+  retrospectivamente los fallos ARM previos de unlock/backup.
+
+Verificación documental al entregar: AST de todos los fixtures Python
+modificados, enlaces locales de isolation/ticket27 y `git diff --check` PASS.
+Comparación por nombre y comando exacto de los40 casos confirma único delta
+operations1→0. La única modificación de producto tras c0d6485 es la ayuda del
+menú Audit en cae2a4a; la barrida40 incluye ese cambio. 7d8ba00 sólo fortalece
+fixtures y añade evidencia: helpers y operations reforzados PASS separados.
+No queda Cargo/lab/CI propio activo; worktree entregado con checkpoint normal,
+sin integración ni cambio de estado de tickets. La documentación posterior
+de resultados no altera el SHA de código ejecutado por las corridas.
