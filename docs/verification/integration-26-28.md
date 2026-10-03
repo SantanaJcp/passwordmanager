@@ -679,8 +679,8 @@ captura parcial. El observador conserva el mismo wait20, panel actual y mark,
 y añade el patrón completo ID32/pushed/pulled a su condición de devolución;
 las aserciones originales se conservan. Helpers con repaint partido rc0:
 `/tmp/pmint5-final-macos-helpers.log`. El producto TUI y sync no reciben cambios
-de rendimiento. CI medirá submit y espera por separado, prefijo frente a panel
-completo; la evidencia nativa todavía está pendiente de ejecución.
+de rendimiento. La medición nativa de submit/espera y prefijo/panel completo
+se registra abajo.
 
 Fallos heredados inspeccionados y conservados: `serve_one` sustituye un error
 parser/dispatch por `ok=false` genérico; `sync_job::record_journal_failure`
@@ -688,3 +688,111 @@ descarta el error secundario al persistir el estado de emergencia; los accept
 loops descartan errores de handler y el worker de proveedor descarta errores
 de ejecución/settle. Se activan en esas respectivas fallas y mantienen el
 comportamiento documentado en W2/W4. No se usan para aceptar esta remediación.
+
+### Barrido congelado y checkpoint publicado
+
+Código verificado/publicado:
+`6e6ee7ad0022713245e139fe7d322d954670a353` (hijo de `7e34eb7`).
+El primer intento parcial se conservó: check rc101 por dos casts del test
+nuevo rechazados por Clippy, tras tests de comportamiento verdes. Clean rc0;
+se interrumpió sólo el driver propio y se dejó concluir su hijo activo antes
+de editar. Logs `/tmp/pmint5-final-{check,clean}.log` y summary parcial. No se
+presenta esa barrida incompleta como evidencia de integración.
+
+Después de sustituir esos casts por `u32::try_from`, y de añadir un control
+que rechaza un panel completo llegado después del deadline, se repitió todo
+el barrido sobre HEAD/árbol congelados. Driver
+`/tmp/pmint5-verified-run-local.py`, resultados
+`/tmp/pmint5-verified-local-results.json`, resumen
+`/tmp/pmint5-verified-local-summary.{log,json}`. **52 casos / 49 rc0 / tres
+RED conocidos / cero diferencias inesperadas**, runner rc0. Los únicos cambios
+de rc frente a pmint4 son operations1→0 y bootstrap1→0. Son exactamente los
+52 comandos anteriores; no se reutilizaron filas/logs del primer intento.
+
+| Gate | Resultado sobre 6e6ee7a; log bajo `/tmp/pmint5-verified-` |
+| --- | --- |
+| check / clean locked-offline | rc0 / rc0, 107.763 / 89.936 s; `final-check.log`, `final-clean.log`. |
+| operations / inflight bootstrap | rc0 / rc0, 77.846 / 4.091 s; `lab-tui-operations.log`, `g7-inflight-bootstrap.log`. |
+| 26 labs Linux base / tres publicaciones | 26/26 y 3/3 rc0; oráculos originales conservados. |
+| G7 inflight result-sync/audit/crash, vault/live y canaries | rc0; autoridad/calls/replacement y cleanup intactos. |
+| Concurrencia / purge / E2EE / digest | rc0; 33 E2EE + 1 shared-purge y dos comparaciones digest. |
+| g7-matrix | rc1 conocido; mismos RED/ProductRed de commit-outbox-audit EIO/ENOSPC, cleanup0. |
+| g7-extra-bootstrap / g7-extra-vault | rc1 diagnósticos conocidos de autoridad/receipts, replacement0/closed1, cleanup0; fuera de gates. |
+
+974.049 s agregados **incluyen las esperas del lock compartido**; no son
+medición de rendimiento. Helpers finales con deadline:
+`/tmp/pmint5-verified-macos-helpers.log`, rc0. Diff/AST/enlaces locales PASS;
+sin cambios de Windows/resize, workflows, dependencias, KDF, límites, tickets
+ni rama raíz. No quedan probes DEBUG en fuentes. Multiagente W4 no se ejecutó
+ni se reclasifica; conserva su decisión de binding pendiente.
+
+Push normal sólo a `codex/pm-integration-26-28`. El helper instalado falló por
+gh ausente y se usó exactamente el override por comando autorizado; ningún
+cambio persistente de credenciales/reglas ni force. GitHub anunció el bypass
+de permisos previamente autorizado. Raíz verificada en b3577d2 con
+`.gitignore`, `.pi/`, `odd/` intactos. PR#1 continúa borrador, sin fusionar.
+
+### CI nativa pmint5
+
+Una corrida macOS y una Windows sobre el SHA exacto anterior, inputs normales
+(Mac false/false; Windows false/false/true), workflows sin cambios. Repo público
+y labels estándar comprobados por API; [facturación primaria](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+reconfirmada. Sin caches/artifacts/secrets, sin lock local retenido al esperar.
+Hipótesis nueva Mac: captura parcial del mensaje terminal; exigir el mismo
+panel completo dentro de wait20. Windows verifica compatibilidad previa al
+resize conocido, cuyo dueño continúa en otra rama.
+
+| Run | SHA | Estado |
+| --- | --- | --- |
+| [Mac 37139870950](https://github.com/SantanaJcp/passwordmanager/actions/runs/37139870950) | `6e6ee7ad0022713245e139fe7d322d954670a353` | **Completed/success, Intel y ARM: lab completo PASS.** |
+| [Windows 37139887157](https://github.com/SantanaJcp/passwordmanager/actions/runs/37139887157) | mismo SHA | **Completed/failure**, mismo resize42×12 conocido. |
+
+Metadata final `/tmp/pmint5-native-{macos,windows}1.json` y `...-jobs.json`;
+logs completos `...macos1.log`, `...macos1-{intel,arm}.log` y `...windows1.log`.
+Ambos runs terminados: **1/3 Mac y 1/1 Windows**, sin repeats. API de artifacts
+confirma total0 para ambos; workflows, permisos y flags originales intactos.
+
+| CPU / job, todos en SHA6e6ee7a | Evidencia y resultado |
+| --- | --- |
+| [Intel 111251887983](https://github.com/SantanaJcp/passwordmanager/actions/runs/37139870950/job/111251887983) | **PASS completo.** Prefijo19.044 s incompleto (`complete-at-prefix=0`); panel completo19.045 s, dentro del wait20 original. Submit1.710 s y span total20.755 s. Durable/screen succeeded, pushed59/pulled59, blocks287/roots1, mismo custodio/servidor. Full25, same-job/restart/lock/idle/bounded-unavailable/retire/offline y fase final/cleanup PASS. |
+| [Apple Silicon 111251888417](https://github.com/SantanaJcp/passwordmanager/actions/runs/37139870950/job/111251888417) | **PASS completo.** Primera captura del prefijo incompleta; panel completo9.550 s, submit0.912 s y span10.461 s. Mismos59/59, blocks287/roots1 y PIDs estables; Full25/core/fase final/cleanup PASS. |
+| [Windows ARM64 111251937146](https://github.com/SantanaJcp/passwordmanager/actions/runs/37139887157/job/111251937146) | **FAIL global conocido** en `fresh native resize repaint`,42×12, wait15s; hijo vivo/parser ground/output presente. Build/static, primitivas14 (pool incluido), pipe1, observer20, sync-lib1 y prompt/hidden/unlock/siete tipos PASS. No hay nueva regresión observada antes de resize; los grupos posteriores no se alcanzan ni se validan. Sin cambios de producto/fixture Windows en esta entrega. |
+
+**Discriminación Intel cerrada:** la primera captura del mensaje terminal era
+parcial. La captura completa llega dentro del mismo deadline,1ms después del
+prefijo en la medición redondeada; no después de20s. El span20.755 incluye la
+interacción1.710 y no es duración del wait ni del job. No hay un perfil nuevo
+de duración interna del job en esta corrida normal. Margen observado Intel
+**0.955 s**: este PASS no garantiza margen de rendimiento para toda carga o
+futura composición, y cualquier incumplimiento del wait20 sigue siendo FAIL.
+No se modifica rendimiento de sync ni se aumenta un plazo. Ambas CPU pasan
+las dos colisiones con destino intacto,33 E2EE y todos los gates nativos del
+modo normal; no se requiere otra corrida idéntica.
+
+Entorno observado: macOS15.7.9/kernel24.6.0, Intel imagen20260824.0482.1 y
+ARM20260907.0337.1, Rust1.98.1 por host/Mach-O nativos. Windows11 Enterprise
+10.0.26200/build26200 ARM64, imagen20260924.168.1, UAC_ENABLE_LUA1,
+Rust1.98.1-aarch64-pc-windows-msvc, libsodium1.0.22 ARM64/MT v145 verificado.
+Preflight permanece evidencia de entorno; reboot/FDE/firma y aceptación
+humana externa permanecen pendientes, sin cambios de estado de tickets.
+
+### Entrega y siguiente acción pmint5
+
+Remediación autorizada: las dos regresiones locales vuelven a rc0 y la
+aserción Intel pasa con panel completo dentro de20s. Las causas y límites de
+identificación del descriptor antiguo están explícitos arriba. Gates locales
+sin empeoramiento, y objetivo macOS completo **ambas CPU PASS**. El commit de
+evidencia posterior cambia sólo este informe; su árbol de código/fixtures es
+idéntico a6e6ee7a y no se le atribuye otra corrida.
+
+FAIL restantes: tres RED locales conocidos (staging de matriz, dos diagnósticos
+de autoridad/receipts) y resize Windows42×12 fuera de esta remediación. W4
+multiagente/proveedor, G7 integral y evidencia externa conservan su frontera;
+no se convierten en PASS por estas corridas. La aceptación integral del
+producto/Windows sigue pendiente.
+
+Siguiente acción: el coordinador integra la candidata W1 fase3 cuando sea
+verificada y revalida la composición, manteniendo el wait20 y vigilando el
+margen Intel. Resolver decisiones de binding/proveedor/staging corresponde a
+sus dueños, sin abrir esas funciones desde esta rama de remediación. PR#1
+continúa borrador; no merge ni cambio de tickets/reglas.
