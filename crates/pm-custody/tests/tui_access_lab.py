@@ -317,8 +317,12 @@ def main():
         enrollment = "c3" * 16 + "|" + "24" * 16 + "|" + keys[AGENT_C][1].read_bytes().hex() + "|ticket24-agent-c|linux-lab"
         send(root, enrollment, enter=True)
         wait_text(root, "ticket24-agent-c")
+        # Persistent human traffic must not occupy the delegated accept lane.
+        open_tui_baseline = discover(binary, AGENT_A, keys[AGENT_A][0], agent_profile, runtime / "agent.sock")
+        assert daemon.poll() is None and "Delegated authority" in screen(root)
         close_tui(root)
         baseline = discover(binary, AGENT_A, keys[AGENT_A][0], agent_profile, runtime / "agent.sock")
+        assert baseline == open_tui_baseline
 
         # Human lock is independent; TUI suspend/resume and common-set changes are immediate.
         start_tui(root, binary, human_profile, human_key, runtime, password)

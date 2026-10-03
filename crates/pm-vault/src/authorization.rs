@@ -910,7 +910,12 @@ fn decode_event_header(
 }
 
 fn open_connection(path: &Path) -> Result<Connection, AuthorizationError> {
-    let c = Connection::open(path)?;
+    // Opening an existing custody domain must never provision a replacement.
+    // First creation belongs exclusively to the vault initialization path.
+    let c = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+    )?;
     crate::configure_platform_durability(&c)?;
     c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")?;
     Ok(c)

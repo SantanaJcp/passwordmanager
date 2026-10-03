@@ -319,6 +319,7 @@ struct VaultService {
     audit_custody: Arc<AuditDeviceCustody>,
     diagnostics: Option<ServiceDiagnostics>,
     sync_jobs: Arc<crate::sync_job::Manager>,
+    admission: Arc<crate::custody_admission::CustodyAdmission>,
 }
 
 struct PreparedRole {
@@ -602,6 +603,12 @@ fn serve_vault(
         let sync_jobs = crate::sync_job::Manager::open(&vault_path)?;
         sync_jobs.resume()?;
         let service = Arc::new(VaultService {
+            admission: Arc::new(crate::custody_admission::CustodyAdmission::load(
+                &bootstrap_path,
+                &audit_path,
+                bootstrap_custody_fingerprint,
+                audit_custody_fingerprint,
+            )?),
             path: vault_path,
             device,
             audit_custody,
@@ -680,14 +687,14 @@ fn prepare_role(
             Role::Human => ServiceDiagnosticPhase::HumanTlsOk,
         })?;
     }
-    let pipe = WindowsServerPipe::create(
-        role.endpoint(),
+    let pipe = create_role_pipe(
+        role,
         vault_id,
         &bootstrap.service_sid,
         client_sid,
         stop,
-    )
-    .map_err(|_| Failure::Unavailable)?;
+        true,
+    )?;
     if let Some(diagnostics) = service.diagnostics.as_ref() {
         diagnostics.record(match role {
             Role::Agent => ServiceDiagnosticPhase::AgentPipeOk,
@@ -733,21 +740,102 @@ fn serve_role(
         client_sid,
     } = prepared;
     let mut next_pipe = Some(pipe);
-    loop {
-        let pipe = next_pipe.take().ok_or(Failure::Unavailable)?;
-        let _ = handle_server_connection(pipe, role, &config, service, &peer_rpk);
-        if stop.is_signalled().map_err(|_| Failure::Unavailable)? {
-            return Ok(());
+    let mut connections = crate::connection_dispatch::AgentConnections::new();
+    let result: Result<(), Failure> = (|| {
+        loop {
+            let mut pipe = next_pipe.take().ok_or(Failure::Unavailable)?;
+            if role == Role::Agent {
+                connections.reap()?;
+                // Accept and verify the kernel SID before handing off TLS.
+                let accepted = pipe.accept().is_ok();
+                if stop.is_signalled().map_err(|_| Failure::Unavailable)? {
+                    drop(pipe);
+                    return Ok(());
+                }
+                // Keep an acceptor alive even after rejected native admission.
+                // Two transient acceptor handles coexist while replacing an instance;
+                // neither is a TLS/domain worker and both share the fixed DACL.
+                next_pipe = Some(create_role_pipe(
+                    role,
+                    vault_id,
+                    &service_sid,
+                    &client_sid,
+                    stop,
+                    false,
+                )?);
+                if accepted && service.admission.verify().is_ok() {
+                    let config = Arc::clone(&config);
+                    let service = service.clone();
+                    let peer_rpk = peer_rpk.clone();
+                    connections.dispatch(move || {
+                        // The existing connection-error disposition is preserved.
+                        let _ = handle_server_connection(pipe, role, &config, &service, &peer_rpk);
+                    })?;
+                }
+            } else {
+                let _ = handle_server_connection(pipe, role, &config, service, &peer_rpk);
+            }
+            if stop.is_signalled().map_err(|_| Failure::Unavailable)? {
+                return Ok(());
+            }
+            if next_pipe.is_none() {
+                next_pipe = Some(create_role_pipe(
+                    role,
+                    vault_id,
+                    &service_sid,
+                    &client_sid,
+                    stop,
+                    true,
+                )?);
+            }
         }
-        next_pipe = Some(
-            WindowsServerPipe::create(role.endpoint(), vault_id, &service_sid, &client_sid, stop)
-                .map_err(|_| Failure::Unavailable)?,
-        );
+    })();
+    let signalled = if result.is_err() {
+        stop.signal().map_err(|_| Failure::Unavailable)
+    } else {
+        Ok(())
+    };
+    let joined = connections.finish();
+    let mut failure = result.err();
+    for error in [signalled.err(), joined.err()].into_iter().flatten() {
+        failure = Some(match failure {
+            Some(previous) => previous.merge(error),
+            None => error,
+        });
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
+fn create_role_pipe(
+    role: Role,
+    vault_id: &str,
+    service_sid: &str,
+    client_sid: &str,
+    stop: &WindowsStopEvent,
+    first: bool,
+) -> Result<WindowsServerPipe, Failure> {
+    match role {
+        Role::Agent => WindowsServerPipe::create_agent_instance(
+            vault_id,
+            service_sid,
+            client_sid,
+            stop,
+            first,
+            u32::try_from(crate::connection_dispatch::MAX_AGENT_CONNECTIONS + 2)
+                .map_err(|_| Failure::Unavailable)?,
+        ),
+        Role::Human => {
+            WindowsServerPipe::create(role.endpoint(), vault_id, service_sid, client_sid, stop)
+        }
+    }
+    .map_err(|_| Failure::Unavailable)
+}
+
 fn handle_server_connection(
-    mut pipe: WindowsServerPipe,
+    pipe: WindowsServerPipe,
     role: Role,
     config: &Arc<ServerConfig>,
     service: &VaultService,
@@ -767,10 +855,14 @@ fn handle_server_connection(
         }
         (tls_pipe, Some(channel), Some(transfer_pipe))
     } else {
-        pipe.accept().map_err(|_| Failure::Unavailable)?;
+        // Agent accept/authentication already happened in the native acceptor.
+        pipe.verify().map_err(|_| Failure::Unavailable)?;
         let tls_pipe = pipe.try_clone().map_err(|_| Failure::Unavailable)?;
         (tls_pipe, None, None)
     };
+    // Both native roles verify W3 custody before TLS/domain admission; the
+    // agent acceptor also checks before reserving a bounded worker.
+    service.admission.verify()?;
     let connection = ServerConnection::new(Arc::clone(config)).map_err(|_| Failure::Unavailable)?;
     let mut tls = rustls::StreamOwned::new(connection, tls_pipe);
     let mut magic = [0_u8; 5];
@@ -786,6 +878,7 @@ fn handle_server_connection(
                 path: &service.path,
                 device: service.device,
                 audit_custody: &service.audit_custody,
+                admission: &service.admission,
             },
             peer_rpk,
         ),
@@ -1809,6 +1902,25 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, Failure> {
         return Err(Failure::Unavailable);
     }
     Ok(bytes)
+}
+
+fn bootstrap_custody_fingerprint(path: &Path) -> Result<[u8; 32], Failure> {
+    let bootstrap = read_bootstrap(path)?;
+    crate::custody_admission::fingerprint_parts(&[
+        &bootstrap.server.private,
+        &bootstrap.server.spki,
+        bootstrap.service_sid.as_bytes(),
+        bootstrap.agent_sid.as_bytes(),
+        &bootstrap.agent_spki,
+        bootstrap.human_sid.as_bytes(),
+        &bootstrap.human_spki,
+    ])
+}
+
+fn audit_custody_fingerprint(path: &Path) -> Result<[u8; 32], Failure> {
+    let bytes = read_protected(path)?;
+    AuditDeviceCustody::from_protected_bytes(&bytes).map_err(|_| Failure::Unavailable)?;
+    Ok(pm_crypto::digest(&bytes))
 }
 
 fn load_or_create_audit_custody(

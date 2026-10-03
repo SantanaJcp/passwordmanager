@@ -142,6 +142,7 @@ class Channels:
             self.register(fixture[name], "database" if name == "vault" else "logs" if name == "events" else "agent-resources" if name.startswith("agent_") else "owned-temporaries")
         self.required.update(fixture[name] for name in ("server_key", "server_pub", "bootstrap", "human_key", "human_pub", "agent_key", "agent_pub", "human_profile", "events", "pid_path", "vault"))
         vault = fixture["vault"]
+        self.shm_path = pathlib.Path(str(vault) + "-shm")
         self.register(pathlib.Path(str(vault) + ".audit-custody"), "audit")
         for suffix, channel in (("-wal", "wal"), ("-shm", "shm"), ("-journal", "journal")):
             self.register(pathlib.Path(str(vault) + suffix), channel)
@@ -192,6 +193,24 @@ class Channels:
         paths = next(paths for subject, paths, _ in self.processes if subject is process)
         return subprocess.CompletedProcess(process.args, process.returncode, *[path.read_bytes() for path in paths])
 
+    def scan_process_resource(self, descriptor):
+        target = os.readlink(descriptor)
+        scan_bytes(os.fsencode(target), self.canaries, "proc-fd")
+        if target.startswith(("socket:[", "pipe:[", "anon_inode:")) or target == "/dev/null":
+            return None
+        if target == str(self.shm_path) + " (deleted)":
+            # SQLite unixShmUnmap unlinks its last SHM before unixShmPurge
+            # unmaps/closes it. SIGSTOP can freeze that real close interval.
+            # Only this vault's exact inventoried SHM alias is classified;
+            # scan the still-open inode completely, even if its path is gone.
+            metadata = descriptor.stat()
+            assert self.files.get(self.shm_path) == "shm", "unclassified process file/temporary resource"
+            assert stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 0, "invalid unlinked SQLite SHM resource"
+            assert metadata.st_uid == self.shm_path.parent.stat().st_uid, "foreign SQLite SHM resource"
+            return scan_file(descriptor, self.canaries, "proc-shm-unlinked")
+        assert pathlib.Path(target) in self.files or pathlib.Path(target) in self.assets, "unclassified process file/temporary resource"
+        return None
+
     def scan(self, phase, live=()):
         inventory = set(self.root.rglob("*"))
         allowed = set(self.files) | self.directories | self.sockets | set(self.assets)
@@ -233,12 +252,13 @@ class Channels:
                     scan_bytes(value, self.canaries, "proc-" + channel)
                     print(f"PM28_CANARY phase={phase} channel=proc-{channel} pid={process.pid} bytes={len(value)} complete=1", flush=True)
             descriptors = list(pathlib.Path(f"/proc/{process.pid}/fd").iterdir())
+            unlinked_shm, unlinked_files = 0, 0
             for descriptor in descriptors:
-                target = os.readlink(descriptor)
-                scan_bytes(os.fsencode(target), self.canaries, "proc-fd")
-                if target.startswith(("socket:[", "pipe:[", "anon_inode:")) or target == "/dev/null":
-                    continue
-                assert pathlib.Path(target) in self.files or pathlib.Path(target) in self.assets, "unclassified process file/temporary resource"
+                size = self.scan_process_resource(descriptor)
+                if size is not None:
+                    unlinked_shm += size
+                    unlinked_files += 1
+            print(f"PM28_CANARY phase={phase} channel=proc-shm-unlinked files={unlinked_files} bytes={unlinked_shm} complete=1", flush=True)
             print(f"PM28_CANARY phase={phase} channel=proc-fd pid={process.pid} descriptors={len(descriptors)} complete=1", flush=True)
         if live:
             request = dict(private=[str(path) for path in inventory if path in self.files and (path.parent == self.root / "state" or path.parent == self.logdir or path == self.root / "human/human.key")],
@@ -289,6 +309,37 @@ def scanner_controls(fixture):
         else:
             raise AssertionError("scanner missed cross-chunk positive canary")
         probe.write_bytes(b"!" * 4096)
+        # A stopped SQLite close can be between unlink(SHM) and close(fd).
+        # Reproduce that descriptor lifetime with an owned synthetic file.
+        original_shm = channels.shm_path
+        channels.shm_path = probe
+        channels.files[probe] = "shm"
+        with probe.open("r+b") as retained:
+            descriptor = pathlib.Path(f"/proc/{os.getpid()}/fd/{retained.fileno()}")
+            probe.unlink()
+            try:
+                assert channels.scan_process_resource(descriptor) == 4096
+                channels.shm_path = original_shm
+                try:
+                    channels.scan_process_resource(descriptor)
+                except AssertionError as error:
+                    assert str(error) == "unclassified process file/temporary resource"
+                else:
+                    raise AssertionError("scanner admitted another deleted resource")
+                channels.shm_path = probe
+                retained.seek(0)
+                retained.write(b"!" * (1024 * 1024 - 7) + canary + b"!")
+                retained.flush()
+                try:
+                    channels.scan_process_resource(descriptor)
+                except AssertionError as error:
+                    assert str(error) == "plaintext canary in proc-shm-unlinked"
+                else:
+                    raise AssertionError("scanner missed canary in unlinked SHM inode")
+            finally:
+                probe.write_bytes(b"!" * 4096)
+                channels.shm_path = original_shm
+                channels.files[probe] = "owned-temporaries"
         # A fixture reader that returns premature EOF must fail against the
         # actual file size. It changes no product reader or engine callback.
         class ShortStream:

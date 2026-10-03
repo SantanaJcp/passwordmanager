@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use pm_crypto::{KdfProfile, SyncPairing};
 use pm_sync::{
@@ -835,7 +835,13 @@ fn contains(h: &[u8], n: &[u8]) -> bool {
 struct TestDir(PathBuf);
 impl TestDir {
     fn new() -> Self {
-        let p = std::env::temp_dir().join(format!(
+        // Native macOS Unix sockets need an explicit short fixture path;
+        // this is selected by platform, never after a failed bind.
+        #[cfg(target_os = "macos")]
+        let parent = PathBuf::from("/private/var/tmp");
+        #[cfg(target_os = "linux")]
+        let parent = std::env::temp_dir();
+        let p = parent.join(format!(
             "pm-ticket17-{}-{}",
             process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -852,3 +858,6 @@ impl Drop for TestDir {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+
+#[path = "e2ee_replication/purge_sync.rs"]
+mod purge_sync;

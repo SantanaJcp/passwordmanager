@@ -83,6 +83,7 @@ TUI23_FIELD_CATALOG = {
 }
 DIAGNOSTIC_ENV = "PM_MACOS_TICKET26_DIAGNOSTIC"
 DIAGNOSTIC_LOG = STATE / "ticket26-diagnostic.log"
+SYNC_TIMING_ENABLED = False
 AGENT_MANAGER_COMMAND_TIMEOUT = 10
 AGENT_PASTEBOARD_PROBE_TIMEOUT = 30
 AGENT_LAUNCH_WAIT_TIMEOUT = (
@@ -907,13 +908,22 @@ class MacPtySession:
                 )
             self._read_once(min(0.1, remaining))
 
-    def wait_information(self, expected, *, timeout=8, since=0):
+    def wait_information(self, expected, *, timeout=8, since=0, pattern=None):
         from tui_migration_fixtures import information_text
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
+        prefix_at = None
+        prefix_complete = None
         while True:
             rendered = self._current_text_after(since)
             value = "" if rendered is None else information_text(rendered)
-            if expected in value:
+            if pattern is not None and expected in value and prefix_at is None:
+                prefix_at = time.monotonic()
+                prefix_complete = bool(re.search(pattern, value))
+            if expected in value and (pattern is None or re.search(pattern, value)):
+                if pattern is not None:
+                    assert timeout == 0 or time.monotonic() <= deadline, "mandatory TUI panel completion exceeded observation deadline"
+                    print(f"PMINT5_SYNC_PANEL prefix_ms={round((prefix_at - started) * 1000)} complete_ms={round((time.monotonic() - started) * 1000)} complete-at-prefix={int(prefix_complete)}", flush=True)
                 return value
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1424,6 +1434,35 @@ def assert_information_panel_regression():
     assert "rejected its fixed authority/request context; no success recorded" in boundary.wait_information(
         "rejected its fixed authority/request context; no success recorded", timeout=0,
     )
+    from macos_tui_migration_lab import SYNC_COMPLETE_PATTERN
+    for y in range(5, 18):
+        row = "Sync complete through pinned TLS:" if y == 5 else ""
+        boundary.screen.feed(f"\x1b[{y};1H│{row:<78}│".encode(), final=True)
+    try:
+        boundary.wait_information("Sync complete through pinned TLS", timeout=0,
+                                  pattern=SYNC_COMPLETE_PATTERN)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("sync prefix repaint passed before job and both counters")
+    reads = []
+    def finish_sync_repaint(timeout):
+        reads.append(timeout)
+        row = "job=" + "ab" * 16 + " pushed=59 pulled=59"
+        boundary.screen.feed(f"\x1b[6;1H│{row:<78}│".encode(), final=True)
+    boundary._read_once = finish_sync_repaint
+    complete = boundary.wait_information("Sync complete through pinned TLS", timeout=1,
+                                         pattern=SYNC_COMPLETE_PATTERN)
+    assert len(reads) == 1 and "pushed=59 pulled=59" in complete
+    from unittest.mock import patch
+    with patch("macos_lab.time.monotonic", side_effect=[0, 2, 2]):
+        try:
+            boundary.wait_information("Sync complete through pinned TLS", timeout=1,
+                                      pattern=SYNC_COMPLETE_PATTERN)
+        except AssertionError as error:
+            assert str(error) == "mandatory TUI panel completion exceeded observation deadline"
+        else:
+            raise AssertionError("late sync completion passed the original deadline")
     import textwrap
     warning = "Recovery code shown temporarily; store externally, then re-enter it exactly to commit: old backups and exposed copies retain historical recovery paths."
     rows = textwrap.wrap(warning, width=78) + ["Recovery code:", code[:78], code[78:]]
@@ -3705,6 +3744,17 @@ def main():
             with open(diagnostic_plist, "wb") as destination:
                 plistlib.dump(launchd_config, destination)
             plist_to_install = diagnostic_plist
+        # W2: inject only categorical sync timing into this owned service.
+        global SYNC_TIMING_ENABLED
+        SYNC_TIMING_ENABLED = (os.environ.get("PMW2_TIMING") == "1"
+                               and not diagnostic and not final_phase_only)
+        if SYNC_TIMING_ENABLED:
+            sync_timing_plist = scratch / "w2-sync-timing.plist"
+            launchd_config["EnvironmentVariables"] = {"PMW2_TIMING": "1"}
+            launchd_config["StandardErrorPath"] = str(STATE / "w2-sync-timing.log")
+            with open(sync_timing_plist, "wb") as destination:
+                plistlib.dump(launchd_config, destination)
+            plist_to_install = sync_timing_plist
         sudo(["install", "-o", "root", "-g", "wheel", "-m", "0644", plist_to_install, PLIST])
         owned_paths.append(("plist", PLIST))
         sudo(["plutil", "-lint", PLIST])

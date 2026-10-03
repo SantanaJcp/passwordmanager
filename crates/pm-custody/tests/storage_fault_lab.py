@@ -44,11 +44,12 @@ def pause_owned(process, timeout=5):
     assert process.poll() is None, "owned custodian exited before the fault checkpoint"
     process.send_signal(signal.SIGSTOP)
     deadline = time.monotonic() + timeout
-    status = pathlib.Path(f"/proc/{process.pid}/status")
+    tasks = pathlib.Path(f"/proc/{process.pid}/task")
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise AssertionError("owned custodian exited instead of acknowledging SIGSTOP")
-        if any(line.startswith("State:\tT") for line in status.read_text().splitlines()):
+        states = [task.joinpath("status").read_text() for task in tasks.iterdir()]
+        if states and all(any(line.startswith("State:\tT") for line in status.splitlines()) for status in states):
             return
         time.sleep(0.01)
     raise AssertionError("owned custodian did not acknowledge SIGSTOP before fixture deadline")

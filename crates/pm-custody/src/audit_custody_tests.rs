@@ -151,3 +151,74 @@ fn missing_or_unclassifiable_vault_never_creates_audit_custody() {
         assert!(!fixture.custody.exists());
     });
 }
+
+#[test]
+fn admission_rejects_lost_unreadable_corrupt_and_replaced_custody() {
+    with_fixture(|fixture| {
+        initialize(fixture);
+        let other = fixture.custody.with_extension("admission-original");
+        fs::copy(&fixture.custody, &other).unwrap();
+        let guard = crate::custody_admission::CustodyAdmission::load(
+            &other,
+            &fixture.custody,
+            audit_custody_fingerprint,
+            audit_custody_fingerprint,
+        )
+        .unwrap();
+        assert!(guard.verify().is_ok());
+        fs::set_permissions(&fixture.custody, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(matches!(guard.verify(), Err(Failure::Unavailable)));
+        fs::set_permissions(&fixture.custody, fs::Permissions::from_mode(0o400)).unwrap();
+        fs::remove_file(&fixture.custody).unwrap();
+        assert!(matches!(guard.verify(), Err(Failure::Unavailable)));
+        assert!(!fixture.custody.exists());
+        write_new(&fixture.custody, b"PMW3_SYNTHETIC_CORRUPT_CUSTODY", 0o400).unwrap();
+        assert!(matches!(guard.verify(), Err(Failure::Unavailable)));
+        fs::remove_file(&fixture.custody).unwrap();
+        let replacement = AuditDeviceCustody::generate().unwrap();
+        let encoded = Zeroizing::new(replacement.to_protected_bytes());
+        write_new(&fixture.custody, &encoded, 0o400).unwrap();
+        assert!(matches!(guard.verify(), Err(Failure::Unavailable)));
+        fs::remove_file(&fixture.custody).unwrap();
+        fs::copy(&other, &fixture.custody).unwrap();
+        assert!(guard.verify().is_ok());
+        fs::remove_file(&other).unwrap();
+        assert!(matches!(guard.verify(), Err(Failure::Unavailable)));
+        assert!(!other.exists());
+    });
+}
+
+#[test]
+fn initialized_vault_loss_and_unreadability_never_provision_sqlite() {
+    with_fixture(|fixture| {
+        initialize(fixture);
+        let custody = Arc::new(
+            load_or_create_audit_custody(&fixture.custody, &fixture.vault, DEVICE).unwrap(),
+        );
+        let delegated = DelegatedVault::open(&fixture.vault, DEVICE, Arc::clone(&custody)).unwrap();
+        let before = fs::read(&fixture.vault).unwrap();
+        fs::set_permissions(&fixture.vault, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(DelegatedVault::open(&fixture.vault, DEVICE, Arc::clone(&custody)).is_err());
+        let (server, _peer) = UnixStream::pair().unwrap();
+        let channel = HumanChannel::authenticate(server, current_uid()).unwrap();
+        assert!(
+            HumanVault::unlock(
+                &fixture.vault,
+                MASTER,
+                DEVICE,
+                channel,
+                Arc::clone(&custody)
+            )
+            .is_err()
+        );
+        fs::set_permissions(&fixture.vault, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(before.eq(&fs::read(&fixture.vault).unwrap()));
+        fs::remove_file(&fixture.vault).unwrap();
+        assert!(delegated.authority_headers().is_err());
+        assert!(DelegatedVault::open(&fixture.vault, DEVICE, Arc::clone(&custody)).is_err());
+        let (server, _peer) = UnixStream::pair().unwrap();
+        let channel = HumanChannel::authenticate(server, current_uid()).unwrap();
+        assert!(HumanVault::unlock(&fixture.vault, MASTER, DEVICE, channel, custody).is_err());
+        assert!(!fixture.vault.exists());
+    });
+}

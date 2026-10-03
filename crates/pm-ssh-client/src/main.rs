@@ -15,7 +15,7 @@ fn run() -> Result<(), pm_ssh_client::Error> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|_| pm_ssh_client::Error::Io)?;
+        .map_err(pm_ssh_client::Error::from)?;
     match command.to_str() {
         Some("serve") => {
             let profile_path = take_path(&mut args, "--profile")?;

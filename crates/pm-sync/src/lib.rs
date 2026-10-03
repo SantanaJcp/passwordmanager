@@ -11,6 +11,8 @@ use pm_vault::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
+    cell::Cell,
+    collections::BTreeSet,
     fmt,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -18,6 +20,10 @@ use std::{
     thread,
     time::Duration,
 };
+
+#[cfg(unix)]
+mod session;
+pub mod timing;
 
 pub const MAX_BLOCK_BYTES: usize = 512 * 1024;
 pub const MAX_LIST_LIMIT: usize = 256;
@@ -76,6 +82,8 @@ pub struct ProcessTlsTransport {
     socket: PathBuf,
     client_key: PathBuf,
     server_public: PathBuf,
+    #[cfg(unix)]
+    session: Option<std::sync::Mutex<Option<session::Session>>>,
 }
 impl ProcessTlsTransport {
     #[must_use]
@@ -85,8 +93,89 @@ impl ProcessTlsTransport {
             socket: socket.to_owned(),
             client_key: client_key.to_owned(),
             server_public: server_public.to_owned(),
+            #[cfg(unix)]
+            session: None,
         }
     }
+    /// Reuse one mutually authenticated TLS connection for sequential sync RPCs.
+    /// Request/frame/block limits and replica-level retry policy remain unchanged.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn authenticated_session(
+        program: &Path,
+        socket: &Path,
+        client_key: &Path,
+        server_public: &Path,
+    ) -> Self {
+        let mut transport = Self::new(program, socket, client_key, server_public);
+        transport.session = Some(std::sync::Mutex::new(None));
+        transport
+    }
+
+    /// Close and reap the owned session before reporting job success.
+    ///
+    /// # Errors
+    /// Reports a failed client exit, deadline or cleanup explicitly.
+    #[cfg(unix)]
+    pub fn finish(&self) -> Result<(), SyncError> {
+        if let Some(state) = &self.session
+            && let Some(session) = state.lock().map_err(|_| SyncError::Unavailable)?.take()
+        {
+            return session.finish();
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn session_call(&self, request: &str) -> Result<String, SyncError> {
+        let mut state = self
+            .session
+            .as_ref()
+            .ok_or(SyncError::InvalidRequest)?
+            .lock()
+            .map_err(|_| SyncError::Unavailable)?;
+        if state.is_none() {
+            let mut command = Command::new(&self.program);
+            command
+                .arg("session")
+                .arg("--socket")
+                .arg(&self.socket)
+                .arg("--client-key")
+                .arg(&self.client_key)
+                .arg("--server-pub")
+                .arg(&self.server_public);
+            *state = Some(session::Session::spawn(&mut command)?);
+        }
+        let response = state
+            .as_mut()
+            .ok_or(SyncError::Unavailable)?
+            .exchange(request.as_bytes());
+        let unavailable = response
+            .as_ref()
+            .is_ok_and(|value| value == "{\"ok\":false,\"code\":\"unavailable\"}");
+        if response.is_err() || unavailable {
+            // Reconnection is only on a subsequent explicit caller attempt (the
+            // existing replica retry/backoff); never replay inside this call.
+            let mut session = state.take().ok_or(SyncError::Unavailable)?;
+            if session.abort().is_err() {
+                eprintln!("SYNC_SESSION_CLEANUP_FAILED");
+            }
+        }
+        if unavailable {
+            return Err(SyncError::Unavailable);
+        }
+        let response = response?;
+        if !response.starts_with("{\"ok\":true") {
+            return Err(match json_string(&response, "code") {
+                Some("missing") => SyncError::Missing,
+                Some("backpressure") => SyncError::Backpressure,
+                Some("integrity") => SyncError::Integrity,
+                _ => SyncError::Unavailable,
+            });
+        }
+        Ok(response)
+    }
+
     fn call(
         &self,
         method: &str,
@@ -107,7 +196,32 @@ impl ProcessTlsTransport {
         for (flag, value) in extra {
             command.arg(flag).arg(value);
         }
-        let output = command.output().map_err(|_| SyncError::Unavailable)?;
+        let _rpc = timing::Span::new(match method {
+            "put" => "rpc_put",
+            "get" => "rpc_get",
+            "publish" => "rpc_publish",
+            "list" => "rpc_list",
+            _ => "rpc_other",
+        });
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let started = timing::Span::new("process_spawn");
+        let child = command.spawn().map_err(|_| SyncError::Unavailable)?;
+        drop(started);
+        let waiting = timing::Span::new("process_wait");
+        let output = child
+            .wait_with_output()
+            .map_err(|_| SyncError::Unavailable)?;
+        drop(waiting);
+        if timing::enabled() {
+            for line in output.stderr.split(|byte| *byte == b'\n') {
+                if timing::valid_line(line) {
+                    let _ = std::io::stderr().lock().write_all(line);
+                    let _ = std::io::stderr().lock().write_all(b"\n");
+                }
+            }
+        }
         if !output.status.success() {
             return Err(match output.status.code() {
                 Some(5) => SyncError::Missing,
@@ -121,14 +235,24 @@ impl ProcessTlsTransport {
 }
 impl SyncTransport for ProcessTlsTransport {
     fn put(&self, n: [u8; 32], h: [u8; 32], b: &[u8]) -> Result<(), SyncError> {
+        #[cfg(unix)]
+        if self.session.is_some() {
+            let _rpc = timing::Span::new("rpc_put");
+            if b.is_empty() || b.len() > MAX_BLOCK_BYTES || digest(b) != h {
+                return Err(SyncError::Integrity);
+            }
+            return self.session_call(&format!("{{\"method\":\"sync.put\",\"namespace\":\"{}\",\"hash\":\"{}\",\"bytes\":\"{}\"}}", hex(&n), hex(&h), STANDARD.encode(b))).map(drop);
+        }
         let parent = self.client_key.parent().ok_or(SyncError::Unavailable)?;
         let temporary = parent.join(format!(".pm-sync-put-{}-{}", std::process::id(), hex(&h)));
         let mut file = pm_native_channel::create_private_file(&temporary, false, true)
             .map_err(|_| SyncError::Unavailable)?;
+        let writing = timing::Span::new("put_file_fsync");
         file.write_all(b)
             .and_then(|()| file.sync_all())
             .map_err(|_| SyncError::Unavailable)?;
         drop(file);
+        drop(writing);
         let result = self.call(
             "put",
             n,
@@ -141,6 +265,18 @@ impl SyncTransport for ProcessTlsTransport {
         result.map(drop)
     }
     fn get(&self, n: [u8; 32], h: [u8; 32]) -> Result<Vec<u8>, SyncError> {
+        #[cfg(unix)]
+        let response = if self.session.is_some() {
+            let _rpc = timing::Span::new("rpc_get");
+            self.session_call(&format!(
+                "{{\"method\":\"sync.get\",\"namespace\":\"{}\",\"hash\":\"{}\"}}",
+                hex(&n),
+                hex(&h)
+            ))?
+        } else {
+            self.call("get", n, &[("--hash", hex(&h))])?
+        };
+        #[cfg(not(unix))]
         let response = self.call("get", n, &[("--hash", hex(&h))])?;
         let encoded = json_string(&response, "bytes").ok_or(SyncError::Integrity)?;
         let bytes = STANDARD.decode(encoded).map_err(|_| SyncError::Integrity)?;
@@ -149,6 +285,17 @@ impl SyncTransport for ProcessTlsTransport {
             .ok_or(SyncError::Integrity)
     }
     fn publish(&self, n: [u8; 32], h: [u8; 32]) -> Result<(), SyncError> {
+        #[cfg(unix)]
+        if self.session.is_some() {
+            let _rpc = timing::Span::new("rpc_publish");
+            return self
+                .session_call(&format!(
+                    "{{\"method\":\"sync.publish\",\"namespace\":\"{}\",\"root_hash\":\"{}\"}}",
+                    hex(&n),
+                    hex(&h)
+                ))
+                .map(drop);
+        }
         self.call("publish", n, &[("--hash", hex(&h))]).map(drop)
     }
     fn list(
@@ -157,6 +304,18 @@ impl SyncTransport for ProcessTlsTransport {
         c: Option<u64>,
         l: usize,
     ) -> Result<Vec<(u64, [u8; 32])>, SyncError> {
+        #[cfg(unix)]
+        if self.session.is_some() {
+            let _rpc = timing::Span::new("rpc_list");
+            let cursor = c
+                .map(|v| format!(",\"cursor\":\"{v}\""))
+                .unwrap_or_default();
+            let response = self.session_call(&format!(
+                "{{\"method\":\"sync.list\",\"namespace\":\"{}\"{cursor},\"limit\":{l}}}",
+                hex(&n)
+            ))?;
+            return parse_roots(&response);
+        }
         let mut extra = vec![("--limit", l.to_string())];
         if let Some(cursor) = c {
             extra.push(("--cursor", cursor.to_string()));
@@ -412,41 +571,65 @@ impl SyncReplica {
         })
     }
     pub fn push(&mut self, server: &impl SyncTransport) -> Result<usize, SyncError> {
+        let _push = timing::Span::new("push");
+        let preparing = timing::Span::new("push_prepare");
         let reducer = CausalReducer::open(&self.vault)?;
         // Never acknowledge a locally corrupted ledger merely because an
         // availability-only server accepted opaque bytes.
         reducer.view()?;
-        let events = reducer.pending_outbox()?;
+        let (events, pending) = reducer.pending_sync_group()?;
+        drop(preparing);
+        timing::count("events", events.len());
         if events.is_empty() {
             return Ok(0);
         }
         let namespace = *self.pairing.namespace();
-        let mut hashes = Vec::with_capacity(events.len());
-        let mut graph_hashes = Vec::new();
+        let mut pages = Vec::new();
         let mut event_ids = Vec::with_capacity(events.len());
-        for event in &events {
-            let sealed = self.pairing.seal(&event.to_bytes())?;
+        for batch in events.chunks(256) {
+            let mut hashes = Vec::with_capacity(batch.len());
+            let mut graph_hashes = Vec::new();
+            for event in batch {
+                let sealed = self.pairing.seal(&event.to_bytes())?;
+                let hash = digest(&sealed);
+                retry(|| server.put(namespace, hash, &sealed))?;
+                hashes.push(hash);
+                event_ids.push(event.digest());
+                let stage = sync_stage(&self.vault, event.digest())?;
+                let exporting = timing::Span::new("graph_export");
+                let graph = reducer.export_ciphertext_graph(event, &stage)?;
+                drop(exporting);
+                if let Some(graph) = graph {
+                    graph_hashes.push(self.upload_graph(server, &graph)?);
+                }
+                let _ = std::fs::remove_dir_all(stage);
+            }
+            hashes.sort_unstable();
+            graph_hashes.sort_unstable();
+            let descriptor = encode_descriptor(&hashes, &graph_hashes);
+            if descriptor.len() > MAX_MANIFEST_BYTES {
+                return Err(SyncError::Backpressure);
+            }
+            let sealed = self.pairing.seal(&descriptor)?;
             let hash = digest(&sealed);
             retry(|| server.put(namespace, hash, &sealed))?;
-            hashes.push(hash);
-            event_ids.push(event.digest());
-            let stage = sync_stage(&self.vault, event.digest())?;
-            if let Some(graph) = reducer.export_ciphertext_graph(event, &stage)? {
-                graph_hashes.push(self.upload_graph(server, &graph)?);
-            }
-            let _ = std::fs::remove_dir_all(stage);
+            pages.push(hash);
         }
-        hashes.sort_unstable();
-        hashes.dedup();
-        let descriptor = encode_descriptor(&hashes, &graph_hashes);
+        timing::count("pages", pages.len());
+        let descriptor = encode_transfer_root(events.len() as u64, &pages);
+        if descriptor.len() > MAX_MANIFEST_BYTES {
+            return Err(SyncError::Backpressure);
+        }
         let sealed = self.pairing.seal(&descriptor)?;
         let root = digest(&sealed);
         retry(|| server.put(namespace, root, &sealed))?;
         retry(|| server.publish(namespace, root))?;
+        let _ack = timing::Span::new("outbox_ack");
         reducer.acknowledge_outbox(&event_ids)?;
-        Ok(events.len())
+        Ok(pending)
     }
     pub fn pull(&mut self, server: &impl SyncTransport) -> Result<usize, SyncError> {
+        let _pull = timing::Span::new("pull");
         ensure_replica_schema(&self.vault)?;
         let namespace = *self.pairing.namespace();
         let mut cursor = 0_u64;
@@ -461,28 +644,45 @@ impl SyncReplica {
                 if root_seen(&self.vault, *root)? {
                     continue;
                 }
+                let server = ReceiveBudget {
+                    inner: server,
+                    received: Cell::new(0),
+                };
                 let sealed_root = retry(|| server.get(namespace, *root))?;
                 let descriptor = self.pairing.open(&sealed_root)?;
-                let (hashes, graph_hashes) = decode_descriptor(&descriptor)?;
+                let TransferHashes {
+                    events: hashes,
+                    graphs: graph_hashes,
+                    page_lengths,
+                } = self.transfer_hashes(&server, &descriptor)?;
                 let mut events = Vec::with_capacity(hashes.len());
+                let mut event_ids = BTreeSet::new();
                 for hash in hashes {
                     let sealed = retry(|| server.get(namespace, hash))?;
                     let bytes = self.pairing.open(&sealed)?;
-                    events.push(SignedCausalEvent::from_bytes(&bytes)?);
+                    let event = SignedCausalEvent::from_bytes(&bytes)?;
+                    if !event_ids.insert(event.digest()) {
+                        return Err(SyncError::Integrity);
+                    }
+                    events.push(event);
                 }
                 let mut graphs = Vec::new();
                 let mut stages = Vec::new();
                 for hash in graph_hashes {
                     let stage = sync_stage(&self.vault, hash)?;
-                    graphs.push(self.download_graph(server, hash, &stage)?);
+                    graphs.push(self.download_graph(&server, hash, &stage)?);
                     stages.push(stage);
                 }
+                let opening = timing::Span::new("pull_reducer_open");
                 let mut reducer = CausalReducer::open(&self.vault)?;
-                reducer.apply_received_package(&events, &graphs)?;
+                drop(opening);
+                timing::count("group_activate_started", 1);
+                let activating = timing::Span::new("group_activate");
+                reducer.apply_received_group(&events, &graphs, Some(*root), &page_lengths)?;
+                drop(activating);
                 for stage in stages {
                     let _ = std::fs::remove_dir_all(stage);
                 }
-                mark_root_seen(&self.vault, *root)?;
                 applied = applied
                     .checked_add(events.len())
                     .ok_or(SyncError::Backpressure)?;
@@ -495,6 +695,68 @@ impl SyncReplica {
     }
     pub fn reducer(&self) -> Result<CausalReducer, SyncError> {
         Ok(CausalReducer::open(&self.vault)?)
+    }
+
+    fn transfer_hashes(
+        &self,
+        server: &impl SyncTransport,
+        bytes: &[u8],
+    ) -> Result<TransferHashes, SyncError> {
+        let mut d = Decoder::new(bytes);
+        if bytes.len() > MAX_MANIFEST_BYTES
+            || d.array().map_err(|_| SyncError::Integrity)? != Some(3)
+        {
+            return Err(SyncError::Integrity);
+        }
+        match d.u64().map_err(|_| SyncError::Integrity)? {
+            2 => {
+                let (events, graphs) = decode_descriptor(bytes)?;
+                let lengths = vec![events.len()];
+                Ok(TransferHashes {
+                    events,
+                    graphs,
+                    page_lengths: lengths,
+                })
+            }
+            3 => {
+                let (count, pages) = decode_transfer_root(bytes)?;
+                let mut events = Vec::new();
+                let mut graphs = Vec::new();
+                let mut page_lengths = Vec::new();
+                let mut unique_events = BTreeSet::new();
+                let mut unique_graphs = BTreeSet::new();
+                for hash in pages {
+                    let sealed = retry(|| server.get(*self.pairing.namespace(), hash))?;
+                    let (page_events, page_graphs) =
+                        decode_descriptor(&self.pairing.open(&sealed)?)?;
+                    if page_events.is_empty() {
+                        return Err(SyncError::Integrity);
+                    }
+                    page_lengths.push(page_events.len());
+                    for hash in page_events {
+                        if !unique_events.insert(hash) {
+                            return Err(SyncError::Integrity);
+                        }
+                        events.push(hash);
+                    }
+                    for hash in page_graphs {
+                        if !unique_graphs.insert(hash) {
+                            return Err(SyncError::Integrity);
+                        }
+                        graphs.push(hash);
+                    }
+                }
+                if events.len() as u64 != count {
+                    return Err(SyncError::Integrity);
+                }
+                Ok(TransferHashes {
+                    events,
+                    graphs,
+                    page_lengths,
+                })
+            }
+            _ => Err(SyncError::Integrity),
+        }
     }
 
     fn upload_graph(
@@ -522,7 +784,9 @@ impl SyncReplica {
                 let n = std::io::copy(&mut input, &mut out).map_err(|_| SyncError::Unavailable)?;
                 lengths.push(n);
             }
+            let syncing = timing::Span::new("joined_fsync");
             out.sync_all().map_err(|_| SyncError::Unavailable)?;
+            drop(syncing);
             drop(out);
             let root = self.upload_paged_file(t, &joined)?;
             streams.push((s.id, s.header.clone(), root, lengths));
@@ -540,6 +804,8 @@ impl SyncReplica {
         root: [u8; 32],
         stage: &Path,
     ) -> Result<ReceivedCiphertextGraph, SyncError> {
+        timing::count("graph_download_started", 1);
+        let _download = timing::Span::new("graph_download");
         std::fs::create_dir_all(stage).map_err(|_| SyncError::Unavailable)?;
         let sealed = retry(|| t.get(*self.pairing.namespace(), root))?;
         let wire = decode_graph(&self.pairing.open(&sealed)?)?;
@@ -598,7 +864,10 @@ const PAGE_ENTRIES: usize = 3;
 fn retry<T>(mut operation: impl FnMut() -> Result<T, SyncError>) -> Result<T, SyncError> {
     for delay in RETRY_SECONDS {
         match operation() {
-            Err(SyncError::Unavailable) => thread::sleep(Duration::from_secs(delay)),
+            Err(SyncError::Unavailable) => {
+                let _wait = timing::Span::new("backoff");
+                thread::sleep(Duration::from_secs(delay));
+            }
             result => return result,
         }
     }
@@ -774,7 +1043,9 @@ fn publish_staged_file(
     temporary: &Path,
     output: &Path,
 ) -> Result<(), SyncError> {
+    let syncing = timing::Span::new("download_file_fsync");
     file.sync_all().map_err(|_| SyncError::Unavailable)?;
+    drop(syncing);
     drop(file);
     pm_vault::publish_new_file(temporary, output).map_err(|error| {
         if error.kind() == std::io::ErrorKind::AlreadyExists {
@@ -895,6 +1166,114 @@ fn decode_object_root(bytes: &[u8]) -> Result<(u64, [u8; 32], Vec<[u8; 32]>), Sy
     Ok((total, full, pages))
 }
 
+const MAX_MANIFEST_BYTES: usize = 256 * 1024;
+const MAX_RECEIVE_BYTES: usize = 256 * 1024 * 1024;
+struct TransferHashes {
+    events: Vec<[u8; 32]>,
+    graphs: Vec<[u8; 32]>,
+    page_lengths: Vec<usize>,
+}
+fn encode_transfer_root(count: u64, pages: &[[u8; 32]]) -> Vec<u8> {
+    let mut e = Encoder::new(Vec::new());
+    e.array(3)
+        .unwrap()
+        .u64(3)
+        .unwrap()
+        .u64(count)
+        .unwrap()
+        .array(pages.len() as u64)
+        .unwrap();
+    for (index, hash) in pages.iter().enumerate() {
+        e.array(2)
+            .unwrap()
+            .u64(index as u64)
+            .unwrap()
+            .bytes(hash)
+            .unwrap();
+    }
+    e.into_writer()
+}
+fn decode_transfer_root(bytes: &[u8]) -> Result<(u64, Vec<[u8; 32]>), SyncError> {
+    let mut d = Decoder::new(bytes);
+    if bytes.len() > MAX_MANIFEST_BYTES
+        || d.array().map_err(|_| SyncError::Integrity)? != Some(3)
+        || d.u64().map_err(|_| SyncError::Integrity)? != 3
+    {
+        return Err(SyncError::Integrity);
+    }
+    let count = d.u64().map_err(|_| SyncError::Integrity)?;
+    let n = d
+        .array()
+        .map_err(|_| SyncError::Integrity)?
+        .ok_or(SyncError::Integrity)?;
+    if count == 0
+        || n == 0
+        || n > count
+        || count > n.checked_mul(256).ok_or(SyncError::Backpressure)?
+        || n > MAX_MANIFEST_BYTES as u64 / 36
+    {
+        return Err(SyncError::Integrity);
+    }
+    let mut pages = Vec::new();
+    let mut unique = BTreeSet::new();
+    for index in 0..n {
+        if d.array().map_err(|_| SyncError::Integrity)? != Some(2)
+            || d.u64().map_err(|_| SyncError::Integrity)? != index
+        {
+            return Err(SyncError::Integrity);
+        }
+        let hash = d
+            .bytes()
+            .map_err(|_| SyncError::Integrity)?
+            .try_into()
+            .map_err(|_| SyncError::Integrity)?;
+        if !unique.insert(hash) {
+            return Err(SyncError::Integrity);
+        }
+        pages.push(hash);
+    }
+    if d.position() != bytes.len() || encode_transfer_root(count, &pages) != bytes {
+        return Err(SyncError::Integrity);
+    }
+    Ok((count, pages))
+}
+struct ReceiveBudget<'a, T> {
+    inner: &'a T,
+    received: Cell<usize>,
+}
+impl<T: SyncTransport> SyncTransport for ReceiveBudget<'_, T> {
+    fn put(&self, n: [u8; 32], h: [u8; 32], b: &[u8]) -> Result<(), SyncError> {
+        self.inner.put(n, h, b)
+    }
+    fn get(&self, n: [u8; 32], h: [u8; 32]) -> Result<Vec<u8>, SyncError> {
+        let bytes = self.inner.get(n, h)?;
+        let total = self
+            .received
+            .get()
+            .checked_add(bytes.len())
+            .ok_or(SyncError::Backpressure)?;
+        if bytes.len() > MAX_BLOCK_BYTES || total > MAX_RECEIVE_BYTES {
+            return Err(SyncError::Backpressure);
+        }
+        if digest(&bytes) != h {
+            return Err(SyncError::Integrity);
+        }
+        self.received.set(total);
+        Ok(bytes)
+    }
+    fn publish(&self, n: [u8; 32], h: [u8; 32]) -> Result<(), SyncError> {
+        self.inner.publish(n, h)
+    }
+    fn list(
+        &self,
+        n: [u8; 32],
+        c: Option<u64>,
+        l: usize,
+    ) -> Result<Vec<(u64, [u8; 32])>, SyncError> {
+        self.inner.list(n, c, l)
+    }
+}
+
 fn encode_descriptor(hashes: &[[u8; 32]], graphs: &[[u8; 32]]) -> Vec<u8> {
     let mut e = Encoder::new(Vec::new());
     e.array(3)
@@ -915,7 +1294,8 @@ fn encode_descriptor(hashes: &[[u8; 32]], graphs: &[[u8; 32]]) -> Vec<u8> {
 #[allow(clippy::type_complexity)]
 fn decode_descriptor(bytes: &[u8]) -> Result<(Vec<[u8; 32]>, Vec<[u8; 32]>), SyncError> {
     let mut d = Decoder::new(bytes);
-    if d.array().map_err(|_| SyncError::Integrity)? != Some(3)
+    if bytes.len() > MAX_MANIFEST_BYTES
+        || d.array().map_err(|_| SyncError::Integrity)? != Some(3)
         || d.u64().map_err(|_| SyncError::Integrity)? != 2
     {
         return Err(SyncError::Integrity);
@@ -1143,13 +1523,6 @@ fn root_seen(path: &Path, root: [u8; 32]) -> Result<bool, SyncError> {
         )
         .optional()?
         .is_some())
-}
-fn mark_root_seen(path: &Path, root: [u8; 32]) -> Result<(), SyncError> {
-    Connection::open(path)?.execute(
-        "INSERT OR IGNORE INTO sync_received_roots(root_hash)VALUES(?1)",
-        [root.as_slice()],
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]

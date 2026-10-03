@@ -8,6 +8,11 @@ extern crate self as pm_custody;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod agent_wire;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod connection_dispatch;
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod custody_admission;
 
 #[cfg(unix)]
 pub use pm_native_channel::unix_peer_uid;

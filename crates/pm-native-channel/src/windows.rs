@@ -31,9 +31,10 @@ use windows_sys::Win32::{
     },
     Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
-        GetFileInformationByHandle, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
-        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_CREATE_PIPE_INSTANCE, FILE_FLAG_FIRST_PIPE_INSTANCE,
+        FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, GetFileInformationByHandle,
+        OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, SECURITY_IDENTIFICATION,
+        SECURITY_SQOS_PRESENT, WriteFile,
     },
     System::{
         Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole},
@@ -81,7 +82,25 @@ use windows_sys::Win32::System::Threading::PROCESS_TERMINATE;
 use crate::{ChannelAuthenticationError, WindowsEndpoint, windows_pipe_sddl};
 
 const PIPE_BUFFER: u32 = 1024 * 1024;
+// FILE_GENERIC_WRITE includes FILE_CREATE_PIPE_INSTANCE. The delegated client
+// needs data/attribute I/O, never authority to create another server instance.
+const AGENT_PIPE_CLIENT_ACCESS: u32 =
+    FILE_GENERIC_READ | (FILE_GENERIC_WRITE & !FILE_CREATE_PIPE_INSTANCE);
 const SYNC_PIPE_PREFIX: &str = r"\\.\pipe\pm-sync-";
+
+fn agent_pipe_sddl(
+    service_sid: &str,
+    client_sid: &str,
+) -> Result<String, ChannelAuthenticationError> {
+    let canonical = windows_pipe_sddl(service_sid, client_sid)?;
+    let client = format!("(A;;GRGW;;;{client_sid})");
+    let prefix = canonical
+        .strip_suffix(&client)
+        .ok_or(ChannelAuthenticationError)?;
+    Ok(format!(
+        "{prefix}(A;;0x{AGENT_PIPE_CLIENT_ACCESS:08x};;;{client_sid})"
+    ))
+}
 
 fn validate_sync_pipe_name(name: &str) -> Result<(), ChannelAuthenticationError> {
     let suffix = name
@@ -272,8 +291,54 @@ impl WindowsServerPipe {
         client_sid: &str,
         stop: &WindowsStopEvent,
     ) -> Result<Self, ChannelAuthenticationError> {
+        Self::create_role_instance(endpoint, vault, service_sid, client_sid, stop, true, 1)
+    }
+
+    /// Creates one instance of the local agent endpoint's bounded accept pool.
+    /// The first instance alone claims the name; subsequent instances retain
+    /// the same protected DACL and native SID verification.
+    ///
+    /// # Errors
+    /// Rejects an invalid bound, identity, descriptor or native handle failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_agent_instance(
+        vault: &str,
+        service_sid: &str,
+        client_sid: &str,
+        stop: &WindowsStopEvent,
+        first: bool,
+        instances: u32,
+    ) -> Result<Self, ChannelAuthenticationError> {
+        if !(2..255).contains(&instances) {
+            return Err(ChannelAuthenticationError);
+        }
+        Self::create_role_instance(
+            WindowsEndpoint::Agent,
+            vault,
+            service_sid,
+            client_sid,
+            stop,
+            first,
+            instances,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_role_instance(
+        endpoint: WindowsEndpoint,
+        vault: &str,
+        service_sid: &str,
+        client_sid: &str,
+        stop: &WindowsStopEvent,
+        first: bool,
+        instances: u32,
+    ) -> Result<Self, ChannelAuthenticationError> {
         let name = wide(&endpoint.pipe_name(vault)?);
-        let sddl = wide(&windows_pipe_sddl(service_sid, client_sid)?);
+        let descriptor_text = match endpoint {
+            WindowsEndpoint::Agent => agent_pipe_sddl(service_sid, client_sid)?,
+            WindowsEndpoint::Human => windows_pipe_sddl(service_sid, client_sid)?,
+        };
+        let sddl = wide(&descriptor_text);
         let mut descriptor = ptr::null_mut();
         let converted = unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -292,7 +357,7 @@ impl WindowsServerPipe {
             lpSecurityDescriptor: descriptor,
             bInheritHandle: 0,
         };
-        let creation = create_pipe_instance(name.as_ptr(), &raw const security);
+        let creation = create_pipe_instance(name.as_ptr(), &raw const security, first, instances);
         unsafe { LocalFree(descriptor) };
         let handle = creation.map_err(|_| ChannelAuthenticationError)?;
         Ok(Self {
@@ -538,13 +603,21 @@ fn validate_transfer_handle(
 fn create_pipe_instance(
     name: *const u16,
     security: *const SECURITY_ATTRIBUTES,
+    first: bool,
+    instances: u32,
 ) -> Result<HANDLE, u32> {
     let handle = unsafe {
         CreateNamedPipeW(
             name,
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+            PIPE_ACCESS_DUPLEX
+                | if first {
+                    FILE_FLAG_FIRST_PIPE_INSTANCE
+                } else {
+                    0
+                }
+                | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-            1,
+            instances,
             PIPE_BUFFER,
             PIPE_BUFFER,
             0,
@@ -819,10 +892,14 @@ impl WindowsClientPipe {
             return Err(ChannelAuthenticationError);
         }
         let name = wide(&endpoint.pipe_name(vault)?);
+        let access = match endpoint {
+            WindowsEndpoint::Agent => AGENT_PIPE_CLIENT_ACCESS,
+            WindowsEndpoint::Human => GENERIC_READ | GENERIC_WRITE,
+        };
         let handle = unsafe {
             CreateFileW(
                 name.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
+                access,
                 0,
                 ptr::null(),
                 OPEN_EXISTING,
@@ -1917,16 +1994,42 @@ mod tests {
         service_sid: &str,
         client_sid: &str,
     ) -> Result<OwnedTestPipe, u32> {
+        create_owned_test_pipe_with_capacity(vault, owner_sid, service_sid, client_sid, true, 1)
+    }
+
+    fn create_owned_test_pipe_with_capacity(
+        vault: &str,
+        owner_sid: &str,
+        service_sid: &str,
+        client_sid: &str,
+        first: bool,
+        instances: u32,
+    ) -> Result<OwnedTestPipe, u32> {
         let name = wide(
             &WindowsEndpoint::Agent
                 .pipe_name(vault)
                 .expect("the test vault identifier is valid"),
         );
-        let canonical = windows_pipe_sddl(service_sid, client_sid)
-            .expect("the test service and client SIDs are valid");
+        let canonical = if instances > 1 {
+            agent_pipe_sddl(service_sid, client_sid)
+        } else {
+            windows_pipe_sddl(service_sid, client_sid)
+        }
+        .expect("the test service and client SIDs are valid");
         let service_owner = format!("O:{service_sid}G:{service_sid}");
         let creator_owner = format!("O:{owner_sid}G:{owner_sid}");
         let owned_sddl = canonical.replacen(&service_owner, &creator_owner, 1);
+        // Model the trusted custodian creator with GA; the client ACE keeps
+        // the exact production data-I/O mask without server-creation rights.
+        let owned_sddl = if instances > 1 {
+            owned_sddl.replacen(
+                &format!("(A;;GA;;;{service_sid})"),
+                &format!("(A;;GA;;;{owner_sid})"),
+                1,
+            )
+        } else {
+            owned_sddl
+        };
         assert!(owned_sddl.starts_with(&creator_owner));
         let sddl = wide(&owned_sddl);
         let mut descriptor = ptr::null_mut();
@@ -1947,7 +2050,7 @@ mod tests {
             lpSecurityDescriptor: descriptor,
             bInheritHandle: 0,
         };
-        let result = create_pipe_instance(name.as_ptr(), &raw const security);
+        let result = create_pipe_instance(name.as_ptr(), &raw const security, first, instances);
         unsafe { LocalFree(descriptor) };
         result.map(|handle| OwnedTestPipe(Some(handle)))
     }
@@ -1994,6 +2097,37 @@ mod tests {
         first.close().unwrap_or_else(|error| {
             panic!("first named pipe cleanup failed with GetLastError={error}")
         });
+    }
+
+    #[test]
+    fn agent_pipe_pool_preserves_first_owner_and_bounds_additional_instances() {
+        assert_eq!(AGENT_PIPE_CLIENT_ACCESS & FILE_CREATE_PIPE_INSTANCE, 0);
+        assert_eq!(
+            AGENT_PIPE_CLIENT_ACCESS | FILE_CREATE_PIPE_INSTANCE,
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE
+        );
+        let owner = current_process_sid().unwrap();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let vault = format!("{stamp:032x}");
+        let service_sid = "S-1-5-80-27027";
+        let create = |first| {
+            create_owned_test_pipe_with_capacity(&vault, &owner, service_sid, &owner, first, 6)
+        };
+        let mut owned = vec![create(true).unwrap()];
+        assert_eq!(create(true).err(), Some(ERROR_ACCESS_DENIED));
+        for _ in 1..6 {
+            owned.push(create(false).unwrap());
+        }
+        assert!(
+            create(false).is_err(),
+            "the seventh native instance must be rejected"
+        );
+        for pipe in owned {
+            pipe.close().unwrap();
+        }
     }
 
     #[test]

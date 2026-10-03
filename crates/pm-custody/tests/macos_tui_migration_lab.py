@@ -13,6 +13,8 @@ import zipfile
 from tui_migration_fixtures import onepux, pairing_namespace, information_text, recovery_code
 from tui_operations_lab import ClosingEndpoint
 
+SYNC_COMPLETE_PATTERN = r"Sync complete through pinned TLS: job=[0-9a-f]{32} pushed=[0-9]+ pulled=[0-9]+(?:\s|$)"
+
 REMOTE_DEVICE = "25252525252525252525252525252525"
 SYNC_LABEL = "com.santanajcp.passwordmanager.ticket26.sync"
 REMOTE_LABEL = "com.santanajcp.passwordmanager.ticket26.remote"
@@ -87,6 +89,7 @@ def launch(m, label, arguments, scratch, labels, session=None):
         "RunAtLoad": True, "KeepAlive": False, "Umask": 63,
         "SoftResourceLimits": {"Core": 0}, "HardResourceLimits": {"Core": 0},
         "StandardErrorPath": str(m.STATE / (label + ".stderr")),
+        "EnvironmentVariables": {"PMW2_TIMING": "1"} if label == SYNC_LABEL and m.SYNC_TIMING_ENABLED else {},
     }
     path.write_bytes(plistlib.dumps(config))
     m.sudo(["chown", "root:wheel", path]); m.sudo(["chmod", "0644", path])
@@ -199,6 +202,28 @@ def diagnose_service_exit(m, label, session):
           + " stderr=" + stderr, flush=True)
 
 
+def sync_phase_timings(m, session):
+    if not m.SYNC_TIMING_ENABLED:
+        return
+    from collections import defaultdict
+    totals = defaultdict(lambda: [0, 0, 0])
+    for path, source in ((m.STATE / "w2-sync-timing.log", "job"),
+                         (m.STATE / (SYNC_LABEL + ".stderr"), "server")):
+        result = session.run_sudo_while_draining(["cat", path], check=False)
+        assert result.returncode == 0, "sync timing log unavailable"
+        value = result.stdout[session.w2_timing_offsets[source]:]
+        for line in value.splitlines():
+            match = re.fullmatch(rb"PMW2_TIMING category=([a-z_]+) count=([0-9]+) us=([0-9]+)", line)
+            if match:
+                category, count, us = match.groups()
+                key = source + ":" + category.decode("ascii")
+                totals[key][0] += int(count); totals[key][1] += int(us)
+                totals[key][2] = max(totals[key][2], int(us))
+    assert totals, "sync timing measurements missing"
+    for category, (count, us, maximum) in sorted(totals.items()):
+        print(f"PMW2_PHASE category={category} count={count} total_us={us} max_us={maximum}", flush=True)
+
+
 def diagnose_sync_wait(m, session, since, sync_db, expected_pid):
     phases = ("invalid", "queued", "pushing", "pulling", "succeeded", "unavailable",
               "integrity", "backpressure", "journal-failure", "rejected")
@@ -223,6 +248,14 @@ def diagnose_sync_wait(m, session, since, sync_db, expected_pid):
     pid = m.running_launchd_pid(record)
     process = "same" if pid == expected_pid else "missing" if pid is None else "changed"
     print(f"PM26_SYNC_WAIT durable={phase} screen={screen} process={process}", flush=True)
+    if len(value) == 38 and value[:5] == b"PMSS1" and 1 <= value[21] <= 9:
+        pushed = int.from_bytes(value[22:30], "big")
+        pulled = int.from_bytes(value[30:38], "big")
+        print(f"PMW2_DURABLE pushed={pushed} pulled={pulled}", flush=True)
+    record = session.run_sudo_while_draining(["launchctl", "print", "system/" + m.LABEL], check=False)
+    custody_pid = m.running_launchd_pid(record)
+    custody = "same" if custody_pid == session.w2_custodian_pid else "missing" if custody_pid is None else "changed"
+    print(f"PMW2_LAUNCHD custodian={custody} server={process}", flush=True)
     code = """import json,sqlite3,sys
 with sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True) as db:
  print(json.dumps([db.execute('select count(*) from '+t).fetchone()[0]
@@ -233,6 +266,7 @@ with sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True) as db:
     blocks, roots = json.loads(counts.stdout)
     assert type(blocks) is int and type(roots) is int and blocks >= 0 and roots >= 0
     print(f"PM26_SYNC_OPAQUE blocks={blocks} roots={roots}", flush=True)
+    sync_phase_timings(m, session)
     if process != "same":
         diagnose_service_exit(m, SYNC_LABEL, session)
 
@@ -575,15 +609,31 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         submit(session, "EXPORT")
         expect_output_collision(session, "plaintext", plaintext, plaintext_digest, since=mark, m=m)
 
+        session.w2_custodian_pid = m.running_launchd_pid(
+            session.run_sudo_while_draining(["launchctl", "print", "system/" + m.LABEL]))
+        assert session.w2_custodian_pid is not None, "sync custodian was not running"
+        session.w2_timing_offsets = {}
+        if m.SYNC_TIMING_ENABLED:
+            for source, path in (("job", m.STATE / "w2-sync-timing.log"),
+                                 ("server", m.STATE / (SYNC_LABEL + ".stderr"))):
+                value = session.run_sudo_while_draining(["cat", path])
+                session.w2_timing_offsets[source] = len(value.stdout)
+        sync_started = m.time.monotonic()
         mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value)
+        wait_started = m.time.monotonic()
         try:
-            complete = session.wait_information("Sync complete through pinned TLS", timeout=20, since=mark)
+            complete = session.wait_information("Sync complete through pinned TLS", timeout=20,
+                                                since=mark, pattern=SYNC_COMPLETE_PATTERN)
         except BaseException as error:
+            print(f"PMINT5_SYNC_OBSERVER submit_ms={round((wait_started - sync_started) * 1000)} wait_ms={round((m.time.monotonic() - wait_started) * 1000)} complete-panel=0", flush=True)
             try:
                 diagnose_sync_wait(m, session, mark, sync_db, sync_pid)
             except BaseException as diagnostic_error:
                 raise error from diagnostic_error
             raise
+        print(f"PMW2_TUI elapsed_ms={round((m.time.monotonic() - sync_started) * 1000)}", flush=True)
+        print(f"PMINT5_SYNC_OBSERVER submit_ms={round((wait_started - sync_started) * 1000)} wait_ms={round((m.time.monotonic() - wait_started) * 1000)} complete-panel=1", flush=True)
+        diagnose_sync_wait(m, session, mark, sync_db, sync_pid)
         assert "pushed=" in complete and "pulled=" in complete
         job = re.search(r"job=([0-9a-f]{32})", complete); assert job
         mark = operation(session, "y", "4", "Exact sync job ID", job.group(1))

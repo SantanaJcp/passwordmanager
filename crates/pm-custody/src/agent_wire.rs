@@ -14,12 +14,13 @@ use pm_vault::{
 };
 
 use crate::Failure;
-use crate::human_wire::{Cursor, read_frame, write_frame};
+use crate::human_wire::{Cursor, write_frame};
 
 pub(crate) struct AgentService<'a> {
     pub path: &'a Path,
     pub device: [u8; 16],
     pub audit_custody: &'a Arc<AuditDeviceCustody>,
+    pub admission: &'a crate::custody_admission::CustodyAdmission,
 }
 
 pub(crate) fn serve_agent(
@@ -62,12 +63,120 @@ pub(crate) fn serve_agent(
         }
     }
     write_frame(tls, &response)?;
+    serve_agent_requests(tls, service, &peer)
+}
+
+fn serve_agent_requests(
+    tls: &mut (impl Read + Write),
+    service: &AgentService<'_>,
+    peer: &AgentPeer,
+) -> Result<(), Failure> {
     loop {
-        let Ok(request) = read_frame(tls) else {
+        let Some(request) = read_agent_frame(tls).map_err(AgentReadFailure::public_failure)? else {
             return Ok(());
         };
-        write_frame(tls, &handle_attempt_request(service, &peer, &request)?)?;
+        write_frame(tls, &handle_attempt_request(service, peer, &request)?)?;
     }
+}
+
+// Preserve the existing shared reader's bound; changing it is outside (5).
+const MAX_AGENT_FRAME: usize = 18 * 1024 * 1024;
+
+#[derive(Debug)]
+enum ReadPhase {
+    Header,
+    Body,
+}
+
+enum AgentReadFailure {
+    Io {
+        phase: ReadPhase,
+        at_boundary: bool,
+        source: std::io::Error,
+    },
+    Memory(pm_crypto::CryptoError),
+    MalformedFrame,
+}
+
+// Preserve the original typed cause after conversion at the existing public
+// boundary, without widening Failure or the native dispatcher (W4).
+// Bounded to the last failure on this connection worker thread.
+std::thread_local! {
+    static LAST_READ_FAILURE: std::cell::RefCell<Option<AgentReadFailure>> = const { std::cell::RefCell::new(None) };
+}
+
+impl AgentReadFailure {
+    fn public_failure(self) -> Failure {
+        // Only fixed categories, phase, OS code and ErrorKind reach diagnostics.
+        // The original I/O/crypto cause remains owned by this typed boundary.
+        match &self {
+            // Existing clients may close TLS without close_notify between
+            // requests. Retain this as a failure in state, with no stderr noise.
+            Self::Io {
+                at_boundary: true,
+                source,
+                ..
+            } if source.kind() == std::io::ErrorKind::UnexpectedEof => {}
+            Self::Io { phase, source, .. } => eprintln!(
+                "PM_AGENT_READ_FAILURE category=CUSTODY_UNAVAILABLE cause=io phase={phase:?} kind={:?} os_code={:?}",
+                source.kind(),
+                source.raw_os_error()
+            ),
+            Self::Memory(source) => eprintln!(
+                "PM_AGENT_READ_FAILURE category=RESOURCE_UNAVAILABLE cause=protected-memory source={source:?}"
+            ),
+            Self::MalformedFrame => {
+                eprintln!("PM_AGENT_READ_FAILURE category=INVALID_ARGUMENT cause=malformed-frame");
+            }
+        }
+        LAST_READ_FAILURE.with(|last| {
+            *last.borrow_mut() = Some(self);
+        });
+        Failure::Unavailable
+    }
+}
+
+fn read_agent_frame(
+    input: &mut impl Read,
+) -> Result<Option<pm_crypto::ProtectedBytes>, AgentReadFailure> {
+    let mut header = [0_u8; 4];
+    // A zero-byte read between frames is an orderly close, not a failed read.
+    // Interrupted reads retain read_exact's existing retry semantics.
+    loop {
+        match input.read(&mut header[..1]) {
+            Ok(0) => return Ok(None),
+            Ok(_) => break,
+            Err(source) if source.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(source) => {
+                return Err(AgentReadFailure::Io {
+                    phase: ReadPhase::Header,
+                    at_boundary: true,
+                    source,
+                });
+            }
+        }
+    }
+    input
+        .read_exact(&mut header[1..])
+        .map_err(|source| AgentReadFailure::Io {
+            phase: ReadPhase::Header,
+            at_boundary: false,
+            source,
+        })?;
+    let length = usize::try_from(u32::from_be_bytes(header))
+        .map_err(|_| AgentReadFailure::MalformedFrame)?;
+    if length == 0 || length > MAX_AGENT_FRAME {
+        return Err(AgentReadFailure::MalformedFrame);
+    }
+    let mut frame = pm_crypto::ProtectedBytes::zeroed(length).map_err(AgentReadFailure::Memory)?;
+    input
+        .read_exact(&mut frame)
+        .map_err(|source| AgentReadFailure::Io {
+            phase: ReadPhase::Body,
+            at_boundary: false,
+            source,
+        })?;
+    Ok(Some(frame))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -77,6 +186,7 @@ fn handle_attempt_request(
     request: &[u8],
 ) -> Result<Vec<u8>, Failure> {
     let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
+    verify_admission_custody(service, opcode)?;
     let attempts = AttemptVault::open(
         DelegatedVault::open(
             service.path,
@@ -188,6 +298,15 @@ fn handle_attempt_request(
     }
 }
 
+// A narrow seam shared by all transports. W4 can change dispatch/identity
+// admission independently; every new authentication still crosses this check.
+fn verify_admission_custody(service: &AgentService<'_>, opcode: u8) -> Result<(), Failure> {
+    if matches!(opcode, 30 | 33 | 40 | 41) {
+        service.admission.verify()?;
+    }
+    Ok(())
+}
+
 fn push_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), Failure> {
     output.extend_from_slice(
         &u32::try_from(value.len())
@@ -258,5 +377,169 @@ fn record_kind_name(kind: RecordKind) -> &'static str {
         RecordKind::Token => "token",
         RecordKind::Note => "note",
         RecordKind::File => "file",
+    }
+}
+
+#[cfg(test)]
+mod error_propagation_tests {
+    use super::*;
+
+    struct BrokenWire {
+        input: std::io::Cursor<Vec<u8>>,
+        kind: Option<std::io::ErrorKind>,
+    }
+    impl Read for BrokenWire {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(kind) = self.kind {
+                return Err(std::io::Error::new(
+                    kind,
+                    "PMW3C_SYNTHETIC_PRIVATE_PATH_PAYLOAD",
+                ));
+            }
+            self.input.read(output)
+        }
+    }
+    impl Write for BrokenWire {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            panic!("response after read failure")
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            panic!("flush after read failure")
+        }
+    }
+    #[test]
+    fn failed_agent_read_is_never_a_successful_connection() {
+        let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+        let unused = Path::new("PMW3C_UNUSED_SYNTHETIC_PATH");
+        let admission = crate::custody_admission::CustodyAdmission::load(
+            unused,
+            unused,
+            |_| Ok([0; 32]),
+            |_| Ok([0; 32]),
+        )
+        .unwrap();
+        let service = AgentService {
+            path: unused,
+            device: [0x28; 16],
+            audit_custody: &custody,
+            admission: &admission,
+        };
+        let peer = AgentPeer::from_transport_rpk(&[0x28; 44]).unwrap();
+        for (name, bytes, kind) in [
+            ("timeout", vec![], Some(std::io::ErrorKind::TimedOut)),
+            ("io", vec![], Some(std::io::ErrorKind::BrokenPipe)),
+            ("eof-error", vec![], Some(std::io::ErrorKind::UnexpectedEof)),
+            ("partial-header", vec![0, 0], None),
+            ("partial-body", vec![0, 0, 0, 2, 1], None),
+            ("malformed", vec![0, 0, 0, 0], None),
+        ] {
+            let mut tls = BrokenWire {
+                input: std::io::Cursor::new(bytes),
+                kind,
+            };
+            let result = serve_agent_requests(&mut tls, &service, &peer);
+            println!(
+                "PMW3C_AGENT_READ_OBSERVED mode={name} success={}",
+                result.is_ok()
+            );
+            assert!(
+                matches!(result, Err(Failure::Unavailable)),
+                "read failure became successful connection: {name}"
+            );
+            if name == "eof-error" {
+                LAST_READ_FAILURE.with(|last| {
+                    assert!(matches!(last.borrow().as_ref(), Some(AgentReadFailure::Io { at_boundary: true, source, .. })
+                        if source.kind() == std::io::ErrorKind::UnexpectedEof && source.to_string() == "PMW3C_SYNTHETIC_PRIVATE_PATH_PAYLOAD"));
+                });
+            }
+        }
+
+        let mut normal_close = BrokenWire {
+            input: std::io::Cursor::new(vec![]),
+            kind: None,
+        };
+        assert!(serve_agent_requests(&mut normal_close, &service, &peer).is_ok());
+        println!("PMW3C_AGENT_ORDERLY_CLOSE success=true diagnostics=none");
+    }
+    #[test]
+    fn classified_agent_reader_preserves_io_phase_and_original_cause() {
+        let marker = "PMW3C_SYNTHETIC_PRIVATE_PATH_PAYLOAD";
+        let mut wire = BrokenWire {
+            input: std::io::Cursor::new(vec![]),
+            kind: Some(std::io::ErrorKind::TimedOut),
+        };
+        let Err(failure) = read_agent_frame(&mut wire) else {
+            panic!("read accepted")
+        };
+        assert!(
+            matches!(&failure, AgentReadFailure::Io { phase: ReadPhase::Header, source, .. } if source.kind() == std::io::ErrorKind::TimedOut && source.to_string() == marker)
+        );
+        assert!(matches!(failure.public_failure(), Failure::Unavailable));
+        let mut body = [0, 0, 0, 2, 1].as_slice();
+        assert!(
+            matches!(read_agent_frame(&mut body), Err(AgentReadFailure::Io { phase: ReadPhase::Body, source, .. }) if source.kind() == std::io::ErrorKind::UnexpectedEof)
+        );
+        let mut valid = [0, 0, 0, 1, 0x28].as_slice();
+        let Ok(Some(frame)) = read_agent_frame(&mut valid) else {
+            panic!("valid frame rejected")
+        };
+        assert_eq!(&*frame, &[0x28]);
+        let too_large = u32::try_from(MAX_AGENT_FRAME + 1)
+            .unwrap()
+            .to_be_bytes()
+            .as_slice()
+            .to_owned();
+        assert!(matches!(
+            read_agent_frame(&mut too_large.as_slice()),
+            Err(AgentReadFailure::MalformedFrame)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agent_memory_failure_retains_its_internal_category() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agent_wire::error_propagation_tests::agent_memory_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stdout.contains("PMW3C_AGENT_MEMORY_CONTROL_READY"));
+        assert!(output.status.success(), "{stderr}");
+        assert!(stderr.contains("category=RESOURCE_UNAVAILABLE"));
+        assert!(!stderr.contains("PMW3C_SYNTHETIC_PRIVATE_PATH_PAYLOAD"));
+        println!("{stdout}{stderr}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "isolated RLIMIT_MEMLOCK child, invoked by the parent"]
+    fn agent_memory_child() {
+        let mut control = [0, 0, 0, 1, 0x28].as_slice();
+        assert!(matches!(read_agent_frame(&mut control), Ok(Some(_))));
+        println!("PMW3C_AGENT_MEMORY_CONTROL_READY");
+        let limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: only the isolated child changes its limit.
+        assert_eq!(
+            unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const limit) },
+            0
+        );
+        let mut header_only = [0, 0, 0, 1].as_slice();
+        let Err(error) = read_agent_frame(&mut header_only) else {
+            panic!("unlocked frame accepted")
+        };
+        assert!(matches!(
+            &error,
+            AgentReadFailure::Memory(pm_crypto::CryptoError::ResourceUnavailable)
+        ));
+        assert!(matches!(error.public_failure(), Failure::Unavailable));
     }
 }
