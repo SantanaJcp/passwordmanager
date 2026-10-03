@@ -1671,7 +1671,8 @@ mod windows_fixture {
             eprintln!("TUI_STAGE stage=encoding-natural-exit result=pass");
             return Ok(());
         }
-        exercise_types_and_resize(fixture)?;
+        exercise_types(fixture)?;
+        exercise_resize(fixture)?;
         // Ticket 25 migration is driven through the real keyboard and common
         // human handler. The service result is awaited before the next input;
         // no operation is retried by the fixture.
@@ -1846,7 +1847,6 @@ mod windows_fixture {
         }
 
         eprintln!("TUI_STAGE stage=organization-history-copy result=pass");
-        exercise_resize(fixture)?;
         open_menu(fixture, "g", "Generator length")?;
         type_visible_and_submit(fixture, "24", "24")?;
         fixture
@@ -1943,7 +1943,7 @@ mod windows_fixture {
         require_tui_exit(fixture.process)
     }
 
-    fn exercise_types_and_resize(fixture: &Fixture) -> io::Result<()> {
+    fn exercise_types(fixture: &Fixture) -> io::Result<()> {
         for kind in [
             "Password", "TOTP", "Passkey", "SSH", "Token", "Note", "File",
         ] {
@@ -2061,7 +2061,13 @@ mod windows_fixture {
                 .wait_for_matching("fresh native resize repaint", |state| {
                     state.cursor_positions > previous_positions && state.contains(expected)
                 })
-                .map_err(io::Error::other)?;
+                .map_err(|primary| {
+                    io::Error::other(format!(
+                        "{primary}; resize={columns}x{rows}; child={:?}; observer={:?}",
+                        child_diagnostic(fixture.process),
+                        fixture.observer.diagnostic(),
+                    ))
+                })?;
         }
         eprintln!("TUI_STAGE stage=resize-native-100x30-42x12-80x24 result=pass");
         Ok(())

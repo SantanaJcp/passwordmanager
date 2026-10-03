@@ -3111,3 +3111,43 @@ Preflight de la corrección: check5 rc0 bajo flock,
 `/tmp/pmw1b-check5.log`; check6 incluye fmt/check/tests/clippy después de añadir
 la regresión cfgWindows, resultado en `/tmp/pmw1b-check6.log`. Native cfg
 Windows todavía requiere la corrida siguiente; no atribuirle ejecución Linux.
+
+### Corrida 5 fase2: tipos GREEN; nueva frontera posterior a duplicación
+
+[Windows 37131169505](https://github.com/SantanaJcp/passwordmanager/actions/runs/37131169505),
+SHA `f49bec2dd1f1db693a22727c80bc4bf287f18273`, terminó FAIL global.
+Primitives13/pipe1/observer18/sync-lib1, seed con readback exacto, salida natural
+encoding, **siete tipos con selección/reveal/expiry**, CSV, empty/directory y
+hardlink negativos con cero lease/DACL exacta PASS. Corrige el falso positivo
+de la nota del run4. Log `/tmp/pmw1b-windows4.log`.
+
+El positivo1PUX ahora llega a ack31, lease del hijo y handle enviado; servicio
+`transfer-duplicated`. Falla leyendo preview, restaura DACL, luego hijo rc4.
+No hay `preview-received`. Esto **no reproduce el fallo previo al grant** de
+la negativa hardlink del run1. No puede atribuirse a SID/PID, derechos o
+restauración. La nueva composición con ocho registros previos requiere
+localizar si el handler común falla o si el receptor rechaza/no puede leer el
+frame. No atribuir causa a memoria, staging o contenido sin ese discriminante;
+ningún producto de W3 se modifica. Resize y clipboard aún no alcanzados.
+
+Método de la última corrida autorizada: categorías cerradas adicionales sólo
+en la rama Windows31: handler-preview-sent/handler-preview-failed. La TUI usa
+el **mismo reader clasificado existente** con el mismo límite18MiB y convierte
+su error a la misma Failure pública; registra sólo timeout/eof/other-io/
+malformed antes del checked restore. Conserva errors/cleanup y todos los
+oráculos. Resize se ejecuta tras tipos para dar evidencia independiente antes
+de la frontera de import; ninguna acción de import ni de clipboard se omite.
+No implementar la hipótesis de pump del clipboard porque run5 no la discrimina.
+Cinco corridas propias terminadas, queda1 de máximo6.
+
+Fallbacks adicionales inspeccionados, sin cambio: `onepux::preview_source`
+selecciona el nombre de adjunto del sufijo tras `___` y, cuando falta ese
+separador en una entrada files/, usa el nombre tras files/; el último valor
+sustituto es `unreferenced`. `Source::Descriptor` usa try_clone del descriptor,
+no una alternativa por path. Ninguno está demostrado como causa de esta nueva
+frontera. No cambiar parser, vault/staging, listener/admisión ni purge/sync.
+
+Preflight último candidato: check7 rc0 bajo flock,
+`/tmp/pmw1b-check7.log`, fmt/diff-check PASS. Repetir barrido40 y clean mediante
+los mismos comandos del baseline, con logs distintos final-gate para preservar
+la evidencia anterior; no declarar sus resultados mientras estén en curso.

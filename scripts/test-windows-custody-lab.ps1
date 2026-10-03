@@ -159,6 +159,8 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
         'phase=transfer-token'
         'phase=transfer-duplicated'
         'phase=transfer-duplicate-failed'
+        'phase=transfer-preview-sent'
+        'phase=transfer-preview-handler-failed'
         'phase=service-failed'
     )
     foreach ($line in $lines) {

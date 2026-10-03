@@ -51,7 +51,7 @@ use crate::linux::{
 };
 #[cfg(target_os = "windows")]
 use crate::windows::{
-    HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared,
+    HUMAN_MAGIC, KeyMaterial, MAX_FRAME, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared,
     connect_tui as connect, decode_prepared_response, finish_arguments, hex, open_1pux_source,
     push_bytes, read_import_source, read_profile, rpc_commit, rpc_download_atomic, rpc_history,
     rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore, rpc_unlock,
@@ -1503,7 +1503,23 @@ fn transfer_import_file(
         transfer_phase(app, "child-lease-installed")?;
         send_file_handle(tls, source)?;
         transfer_phase(app, "handle-sent")?;
-        let response = read_frame(tls)?;
+        let response = match crate::human_wire::read_frame_bounded_classified(tls, MAX_FRAME) {
+            Ok(response) => response,
+            Err(error) => {
+                use crate::human_wire::FrameReadFailure;
+                let phase = match error {
+                    FrameReadFailure::Timeout => "preview-read-timeout",
+                    FrameReadFailure::Eof => "preview-read-eof",
+                    FrameReadFailure::OtherIo => "preview-read-other-io",
+                    FrameReadFailure::MalformedFrame => "preview-read-malformed",
+                };
+                let failure = error.public_failure();
+                return Err(match transfer_phase(app, phase) {
+                    Ok(()) => failure,
+                    Err(diagnostic) => failure.merge(diagnostic),
+                });
+            }
+        };
         transfer_phase(app, "preview-received")?;
         Ok(response)
     })();

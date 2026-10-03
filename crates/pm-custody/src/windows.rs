@@ -70,7 +70,7 @@ const ED25519_SPKI_PREFIX: &[u8] = &[
 ];
 const SPKI_BYTES: usize = 44;
 const MAX_PROTECTED_BYTES: usize = 64 * 1024;
-const MAX_FRAME: usize = 18 * 1024 * 1024;
+pub(super) const MAX_FRAME: usize = 18 * 1024 * 1024;
 pub(super) const STREAM_CHUNK_BYTES: usize = 1024 * 1024;
 pub(super) const HUMAN_MAGIC: &[u8; 5] = b"PMH1\n";
 const AGENT_MAGIC: &[u8; 5] = b"PMA1\n";
@@ -180,6 +180,8 @@ enum ServiceDiagnosticPhase {
     TransferToken,
     TransferDuplicated,
     TransferDuplicateFailed,
+    TransferPreviewSent,
+    TransferPreviewFailed,
     ServiceFailed,
 }
 
@@ -211,6 +213,8 @@ impl ServiceDiagnosticPhase {
             Self::TransferToken => b"phase=transfer-token\n",
             Self::TransferDuplicated => b"phase=transfer-duplicated\n",
             Self::TransferDuplicateFailed => b"phase=transfer-duplicate-failed\n",
+            Self::TransferPreviewSent => b"phase=transfer-preview-sent\n",
+            Self::TransferPreviewFailed => b"phase=transfer-preview-handler-failed\n",
             Self::ServiceFailed => b"phase=service-failed\n",
         }
     }
@@ -828,7 +832,21 @@ fn serve_human(
                     })?;
                 }
                 let source = duplicated.map_err(|_| Failure::Unavailable)?;
-                crate::human_wire::handle_1pux_file(&mut vault, tls, rest, source)?;
+                let preview = crate::human_wire::handle_1pux_file(&mut vault, tls, rest, source);
+                let diagnostic = if let Some(diagnostics) = service.diagnostics.as_ref() {
+                    diagnostics.record(if preview.is_ok() {
+                        ServiceDiagnosticPhase::TransferPreviewSent
+                    } else {
+                        ServiceDiagnosticPhase::TransferPreviewFailed
+                    })
+                } else {
+                    Ok(())
+                };
+                match (preview, diagnostic) {
+                    (Ok(()), Ok(())) => {}
+                    (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+                    (Err(error), Err(diagnostic)) => return Err(error.merge(diagnostic)),
+                }
                 continue;
             }
             17 => {
