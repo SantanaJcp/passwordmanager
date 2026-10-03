@@ -197,6 +197,44 @@ def diagnose_service_exit(m, label, session):
           + " stderr=" + stderr, flush=True)
 
 
+def diagnose_sync_wait(m, session, since, sync_db, expected_pid):
+    phases = ("invalid", "queued", "pushing", "pulling", "succeeded", "unavailable",
+              "integrity", "backpressure", "journal-failure", "rejected")
+    result = session.run_sudo_while_draining(
+        ["cat", m.STATE / "vault.sqlite3.sync-status"], check=False)
+    value = result.stdout
+    phase = "unavailable-record" if result.returncode != 0 else (
+        phases[value[21]] if len(value) == 38 and value[:5] == b"PMSS1"
+        and 1 <= value[21] <= 9 else "invalid-record")
+    page = session._current_text_after(since)
+    labels = (("authorized and queued", "queued"), ("pushing ciphertext", "pushing"),
+              ("pulling ciphertext", "pulling"), ("Sync complete through pinned TLS", "succeeded"),
+              ("unavailable after bounded transport", "unavailable"),
+              ("rejected integrity", "integrity"), ("stopped by backpressure", "backpressure"),
+              ("journal/cleanup failed", "journal-failure"),
+              ("rejected its fixed authority/request context", "rejected"),
+              ("Sync endpoint offline", "offline"), ("Operation failed explicitly", "explicit-failure"))
+    matches = [label for text, label in labels if page is not None and text in page]
+    screen = matches[0] if len(matches) == 1 else "unclassified"
+    record = session.run_sudo_while_draining(
+        ["launchctl", "print", "system/" + SYNC_LABEL], check=False)
+    pid = m.running_launchd_pid(record)
+    process = "same" if pid == expected_pid else "missing" if pid is None else "changed"
+    print(f"PM26_SYNC_WAIT durable={phase} screen={screen} process={process}", flush=True)
+    code = """import json,sqlite3,sys
+with sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True) as db:
+ print(json.dumps([db.execute('select count(*) from '+t).fetchone()[0]
+  for t in ('blocks','roots')]))
+"""
+    counts = session.run_sudo_while_draining([sys.executable, "-c", code, sync_db], check=False)
+    assert counts.returncode == 0 and counts.stderr == b"", "sync durable diagnostic failed"
+    blocks, roots = json.loads(counts.stdout)
+    assert type(blocks) is int and type(roots) is int and blocks >= 0 and roots >= 0
+    print(f"PM26_SYNC_OPAQUE blocks={blocks} roots={roots}", flush=True)
+    if process != "same":
+        diagnose_service_exit(m, SYNC_LABEL, session)
+
+
 def assert_stream(path):
     size = 16 * 1024 * 1024 + 4096
     canary = b"ticket05-large-stream-canary-"
@@ -321,10 +359,17 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         namespace = pairing_namespace(pairing.read_bytes())
         launch(m, SYNC_LABEL, [sync_binary, "serve", "--db", sync_db, "--socket", sync_socket,
             "--server-key", server_key, "--namespace", namespace, "--client-pub", client_pub], scratch, labels)
-        wait_service(m, SYNC_LABEL, sync_socket, session)
+        sync_pid = wait_service(m, SYNC_LABEL, sync_socket, session)
         sync_value = f"{pairing}|{sync_binary}|{sync_socket}|{client_key}|{server_pub}|{pin}|SYNC"
         mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value)
-        complete = session.wait_text("Sync complete through pinned TLS", timeout=20, since=mark)
+        try:
+            complete = session.wait_text("Sync complete through pinned TLS", timeout=20, since=mark)
+        except BaseException as error:
+            try:
+                diagnose_sync_wait(m, session, mark, sync_db, sync_pid)
+            except BaseException as diagnostic_error:
+                raise error from diagnostic_error
+            raise
         assert "pushed=" in complete and "pulled=" in complete
         job = re.search(r"job=([0-9a-f]{32})", complete); assert job
         mark = operation(session, "y", "4", "Exact sync job ID", job.group(1))

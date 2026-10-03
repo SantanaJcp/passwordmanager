@@ -1765,6 +1765,16 @@ only agent listener. The second enrolled RPK cannot use that endpoint. Running
 ordinary service's provider worker or multi-agent transport. No substitute is
 introduced; WAITING, passkey UP/UV and a second working agent remain open.
 
+Happy-sync timeout isolation, before any further correction: preserve the
+same keyboard request and original 20-second wait, then on its failure record
+only fixed current-screen and durable `PMSS1` phase categories, whether the
+sync PID is the original readiness PID, and read-only opaque block/root
+counts. Do not print paths, job IDs, RPKs, ciphertext, stdout, or screen
+contents. Retain and re-raise the original failure; diagnostics never perform
+sync, extend the wait, or retry authentication/operations. This distinguishes
+an observer failure, worker rejection, unavailable transport, or incomplete
+progress without guessing a product correction.
+
 
 Discriminant run [37087372922](https://github.com/SantanaJcp/passwordmanager/actions/runs/37087372922),
 exact `c5735f66d923eee2ce92931a0ac171e6e7e3786d`, completed FAILED on both CPUs.
@@ -1922,3 +1932,23 @@ Local verification of the listener correction:
 owned `/tmp/pm26-20261002-sync-check.log`. This Linux host verifies compilation
 and regressions; the native closed-peer case still requires the next exact
 Mac candidate on both architectures.
+
+Additional inherited behavior encountered and preserved: `pm-sync::serve_one`
+uses `dispatch(...).unwrap_or_else(...)` to send `{"ok":false}` when dispatch
+returns an error, omitting the underlying cause in the wire response. It is
+not introduced or changed by the socket-guard correction. The existing
+provider recovery conditional in `serve_loop` runs recovery only if opening
+the delegated vault succeeds; an open error skips that block. Ordinary
+`serve_vault` has no provider, so this is not activated by the native matrix.
+
+Run [37090294105](https://github.com/SantanaJcp/passwordmanager/actions/runs/37090294105),
+exact `244be8743b8864847642e561036c7eecf2b60cb6`, completed FAILED on both
+CPUs. Both passed the ordinary native build/test/architecture gates, retained
+`completed-with-human-open`, passed the unchanged concurrent discovery gate,
+and completed Ticket23/partial Ticket24 after the current-screen pending
+correction. Full25 passed the original readiness probe and reached its happy
+pinned-sync wait; both timed out at its original 20 seconds with the TUI alive.
+No cause is attributed before the durable/UI/server discriminant. ARM had no
+independent core error; Intel also retained isolated clipboard indeterminacy
+and its post-control AppleScript `-1700`. Strict cleanup ran and no cleanup
+error was reported. Neither job emitted overall acceptance PASS.
