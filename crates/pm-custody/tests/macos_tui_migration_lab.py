@@ -73,9 +73,8 @@ def start(m, binary, profile, private, endpoint, *, password=None, idle=30):
     session = m.start_macos_tui(binary, profile, private, endpoint,
                               idle=idle, reveal=10, copy=2,
                               password=m.PASSWORD if password is None else password)
-    mark = session.mark()
-    session.resize(80, 24)
-    session.wait_text("Items (selection is metadata only)", since=mark)
+    assert (session.screen.columns, session.screen.rows) == (80, 24)
+    session.wait_text("Items (selection is metadata only)")
     return session
 
 

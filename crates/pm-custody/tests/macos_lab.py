@@ -1386,8 +1386,43 @@ def assert_screen_observer_regression():
     assert wait_stable_reveal_expiry(
         split_expiry, forbidden="note", forbidden_in_exposure=True, timeout=0,
     ).find("Exposure: <hidden>") >= 0
+    assert_information_panel_regression()
     assert_pasteboard_diagnostic_regression()
     assert_pty_helper_drain_regression()
+
+
+def assert_information_panel_regression():
+    """Mandatory values must come from the current panel, never the footer."""
+    from types import SimpleNamespace
+    from tui_migration_fixtures import recovery_code
+    from macos_tui_migration_lab import start
+    boundary = object.__new__(MacPtySession)
+    boundary.screen = VtScreen(80, 24)
+    boundary.eof = False
+    boundary._screen_events = [(1, "post-unlock")]
+    boundary.screen.feed(b"\x1b[20;2Hexact-duplicates=1", final=True)
+    try:
+        boundary.wait_information("exact-duplicates=1", timeout=0)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("footer counterfeit satisfied the mandatory panel oracle")
+    boundary.screen.feed("\x1b[4;1H┌Information┐".encode(), final=True)
+    code = "PMR1-" + "ab" * 16 + "-1" + "-abcd1234" * 9
+    rows = ["exact-duplicates=1", "Recovery code:", code[:78], code[78:]] + [""] * 9
+    for y, row in enumerate(rows, 5):
+        boundary.screen.feed(f"\x1b[{y};1H│{row:<78}│".encode(), final=True)
+    assert "exact-duplicates=1" in boundary.wait_information("exact-duplicates=1", timeout=0)
+    assert recovery_code(boundary.screen.application_text()) == code
+
+    class AlreadyUnlocked:
+        screen = SimpleNamespace(columns=80, rows=24)
+        def wait_text(self, text, **options):
+            assert text == "Items (selection is metadata only)" and options == {}
+            return text
+    session = AlreadyUnlocked()
+    fixture = SimpleNamespace(PASSWORD=b"synthetic-start-fixture", start_macos_tui=lambda *args, **kwargs: session)
+    assert start(fixture, "binary", "profile", "key", "endpoint") is session
 
 
 def assert_pty_helper_drain_regression():

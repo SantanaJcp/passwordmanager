@@ -2589,3 +2589,77 @@ rotaciones por teclado con código PMR1 completo en panel y máscara conservada.
 La lease reveal/copy nativa permanece1s. Se exige unlock posterior con la nueva
 maestra sintética. Mac Full25 observa los mismos avisos a 80×24 con las
 aserciones históricas completas y el timeout original.
+
+Discriminante estático posterior al primer dispatch W1: la nueva regresión del
+observer referencia `ScreenObserver`, pero el tipo real del fixture es
+`TerminalObserver` (declaración y todos los tests previos). Linux no compila
+ese bloque `cfg(windows)`. Corregir sólo el nombre preservando la aserción;
+la corrida ya aceptada conserva su SHA y se espera su conclusión. Un eventual
+fallo de compilación es defecto de fixture, no RED de producto ni aceptación
+TUI. Una siguiente corrida se justificará por este cambio verificado, no por
+repetir el commit idéntico.
+
+Extensión de lease real TUI antes de la segunda candidata: sampler de sólo
+lectura del HANDLE del proceso ConPTY, SID resuelto para el servicio instalado,
+DACL no nulo, ausencia del ACE antes, exactamente un ACE no heredable de sólo
+PROCESS_DUP_HANDLE|PROCESS_QUERY_LIMITED_INFORMATION durante la transferencia,
+y bytes exactos originales/ausencia de ACE tras el preview. Se muestrea cada1ms
+sin pausa del custodio, inyección, cambio de producto o ampliación de plazo;
+no observar la ventana es FAIL/no demostrado. El sampler se une siempre antes
+de cerrar el HANDLE; errores de consulta/cleanup fallan. Tests nativos previos
+conservan matriz de segundo lease/DACL nulo/cambio externo; esos tests no se
+confunden con la lease del proceso TUI. La matriz de fracaso TUI/source se
+extenderá sobre el resultado observado, sin declarar PASS por ausencia de datos.
+
+Negativa fuente preparada antes de candidata2: crear un único hardlink propio
+al 1PUX sintético (colisión falla), pedir import del origen por teclado y exigir
+error explícito antes de preview/IMPORT. Sampler exige DACL original exacta y
+cero lease durante ese rechazo local; retirar sólo el alias propio y propagar
+su cleanup. La posterior importación del origen ya de nuevo single-link es un
+caso positivo independiente, nunca un camino alternativo para aceptar la
+negativa. No se relajan owner/reparse/multilink ni controles peer del producto.
+
+Mac run1 W1: ambos CPU fallan en `Full25.start`, antes de los importadores:
+`event=none`, parser ground, catálogo desbloqueado y proceso vivo. Causa
+comprobable en fixture: `MacPtySession.start` fija80×24; W1 cambió el posterior
+resize240×30 por80×24, por tanto solicita un resize sin cambio de dimensiones y
+exige un repaint posterior al mark que nunca tiene por qué existir. Método
+antes del arreglo: mantener la sesión inicial80×24 y exigir su catálogo actual
+ya observado tras unlock, sin un nuevo mark/resize ficticio. No se altera
+producto, timeout ni freshness de las acciones posteriores (mantienen sus
+marks previos a teclas reales). Añadir regresión sintética del start que rechaza
+cualquier resize extra y exige catálogo en el tamaño fijado. Ejecutar los
+helpers existentes y repetir macOS sólo sobre el fixture corregido.
+
+### Reanudación W1 — checkpoint de fixtures
+
+Estado reconstruido con status/log/diff sobre `ee3c1fd`: `ef820a2` y
+`c0d6485` conservados, sin revertir cambios pendientes ni tocar otros worktrees.
+Corridas iniciales terminadas, SHA `c0d6485dc8e73f28ce7dcc390f3d528c150cc6dc`:
+[Windows 37122500286](https://github.com/SantanaJcp/passwordmanager/actions/runs/37122500286)
+FAIL de compilación `ScreenObserver`, no RED conductual;
+[macOS 37122500281](https://github.com/SantanaJcp/passwordmanager/actions/runs/37122500281)
+FAIL en ambos CPU por el repaint ficticio descrito arriba, antes de Full25.
+Logs `/tmp/pmw1-native-{windows,macos}1.log`.
+
+El sampler pendiente se encapsuló en `Sampling::observe`: siempre termina y
+une el thread antes de retornar, combina error de operación y observación/
+cleanup, y exige el resultado DACL aunque el oráculo de teclado falle. La
+guarda Drop sólo protege unwinding de panic (que ya falla el fixture); no
+convierte un error ordinario de sampling en diagnóstico con éxito.
+
+Verificación fresca tras reanudar:
+`flock /tmp/pm-cargo-window.lock ./scripts/check.sh` rc0, incluido fmt,
+build/tests/clippy y los seis casos de panel más siete de footer en lib/bin;
+log `/tmp/pmw1-resume-check.log`. Helpers macOS por import local, bajo el mismo
+flock y `PYTHONDONTWRITEBYTECODE=1`: observer, panel, start y PTY helpers PASS,
+`/tmp/pmw1-resume-macos-helpers.log`. Esto verifica el fixture; no acredita
+ejecución macOS o Windows. Los bloques Windows necesitan la próxima CI nativa.
+
+Barrido anterior de W1 revisado caso por caso y contra sus logs:
+`/tmp/pmw1-gate-results.json`, 40 casos, 39 rc0; baseline
+`/tmp/pmrs-gate-results.json`, 40 casos, 38 rc0. Único cambio de rc:
+operations1→0; g7-matrix conserva1. Check/clean y los 26 wrappers Linux,
+publicación y los nueve modos G7 conservan sus aserciones. No se convierte
+el RED de G7 ni purge/outbox pendiente en aceptación. La próxima CI usa
+el checkpoint corregido, no repite el SHA inicial.

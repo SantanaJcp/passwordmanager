@@ -7,6 +7,10 @@ fn main() {
 }
 
 #[cfg(target_os = "windows")]
+#[path = "windows_tui_fixture/acl.rs"]
+mod acl;
+
+#[cfg(target_os = "windows")]
 mod windows_fixture {
     use std::{
         ffi::c_void,
@@ -1694,18 +1698,22 @@ mod windows_fixture {
             .map_err(io::Error::other)?;
 
         eprintln!("TUI_STAGE stage=csv-import result=pass");
+        reject_multilink_source(fixture, paths.onepux)?;
         open_menu(fixture, "m", "Migration:")?;
         open_menu(fixture, "2", "1PUX source")?;
         let onepux_request = format!("{}|keep", encode_operation_field(paths.onepux));
-        type_visible_and_submit(fixture, &onepux_request, "|keep")?;
-        fixture
-            .observer
-            .wait_for_information("Preview values hidden")
-            .map_err(io::Error::other)?;
-        fixture
-            .observer
-            .wait_for_import_review(2, 2, 4)
-            .map_err(io::Error::other)?;
+        crate::acl::Sampling::observe(fixture.process, true, || {
+            type_visible_and_submit(fixture, &onepux_request, "|keep")?;
+            fixture
+                .observer
+                .wait_for_information("Preview values hidden")
+                .map_err(io::Error::other)?;
+            fixture
+                .observer
+                .wait_for_import_review(2, 2, 4)
+                .map_err(io::Error::other)
+        })?;
+        eprintln!("TUI_STAGE stage=real-transfer-dacl-before-during-after result=pass");
         type_visible_and_submit(fixture, "IMPORT", "IMPORT")?;
         fixture
             .observer
@@ -1899,6 +1907,36 @@ mod windows_fixture {
         exercise_restore_rotations(fixture, &paths)?;
         write_keyboard_input(fixture, b"q")?;
         require_tui_exit(fixture.process)
+    }
+
+    fn reject_multilink_source(fixture: &Fixture, source: &str) -> io::Result<()> {
+        let alias = std::path::Path::new(source).with_extension("negative-hardlink.1pux");
+        if alias.try_exists()? {
+            return Err(io::Error::other("owned 1PUX negative alias collision"));
+        }
+        std::fs::hard_link(source, &alias)?;
+        let operation = (|| {
+            crate::acl::Sampling::observe(fixture.process, false, || {
+                open_menu(fixture, "m", "Migration:")?;
+                open_menu(fixture, "2", "1PUX source")?;
+                let request = format!("{}|keep", encode_operation_field(source));
+                type_visible_and_submit(fixture, &request, "|keep")?;
+                fixture
+                    .observer
+                    .wait_for("Operation failed explicitly; no success was recorded")
+                    .map_err(io::Error::other)
+            })?;
+            eprintln!("TUI_STAGE stage=source-multilink-rejected-dacl-unchanged result=pass");
+            Ok(())
+        })();
+        let cleanup = std::fs::remove_file(&alias);
+        match (operation, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(io::Error::other(format!(
+                "{error}; negative-source cleanup: {cleanup}"
+            ))),
+        }
     }
 
     fn recovery_code(state: &ScreenState) -> Option<zeroize::Zeroizing<String>> {
@@ -2138,7 +2176,7 @@ mod windows_fixture {
 
         #[test]
         fn observer_requires_mandatory_information_in_main_panel() {
-            let observer = ScreenObserver::new();
+            let observer = TerminalObserver::new();
             observer
                 .feed(b"\x1b[20;2HPreview values hidden: exact-duplicates=1")
                 .unwrap();
