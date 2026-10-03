@@ -2570,9 +2570,9 @@ diagnóstico browser con sustitutos, etiqueta binaria TUI, provider serve/handle
 Browser::stop, ProcessTlsTransport::put, sync_stage, from_utf8_lossy,
 WindowsServerPipe y DestroyWindow se conservan en su alcance heredado.
 
-### Estado vigente de criterios 28/G7 — W3 reanudado (checkpoint parcial)
+### Estado vigente de criterios 28/G7 — W3 (5) verificado (checkpoint parcial)
 
-Esta tabla sustituye la tabla de fase 5 y sólo actualiza evidencia; conserva
+Esta tabla sustituye la tabla de fase 5 e incorpora W3 (5); conserva
 [spec §15](../../.scratch/passwordmanager/spec.md), G4/G7 y `Status: claimed`.
 
 | Criterio | Estado y alcance vigente | Evidencia |
@@ -2592,11 +2592,11 @@ Esta tabla sustituye la tabla de fase 5 y sólo actualiza evidencia; conserva
 | Bootstrap/audit ausentes con restart/ilegibilidad/restauración | PASS acotado heredado y regresión de función | audit, bootstrap completed, inflight, 7/7 función |
 | (2) Vault perdido completado/en vuelo/con custodio vivo e ilegibilidad | **PASS acotado Linux**, rechazo sin SQLite sustituto; primera creación conserva su camino | Tres RED/GREEN frescos de vault y función; incluido en gates |
 | (7) Retirada de bootstrap/audit con custodio vivo | **PASS acotado Linux**, nuevas admisiones cerradas, calls=1 | RED/GREEN inflight-live y gates |
-| (5) Categorías/propagación SSH y agente | **PASS enfocado Linux**; gates del candidato en ejecución | RED/GREEN y método W3 (5) al final; autorización posterior independiente de (6) |
+| (5) Categorías/propagación SSH y agente | **PASS acotado Linux**, RED/GREEN y gates sin regresión; wire existente conservado | W3 (5) al final; causas tipadas y estado/logs seguros, sin ampliar W4 |
 | Canarios/canales propios, activos/históricos y UID agente | PASS acotado de controles/scanner; cobertura global **no demostrada** | canaries/matrix/inflight frescos |
 | Purge/outbox de revisión purgada | **Pendiente de W2**, RED heredado no reejecutado ni corregido por W3 | Fase 5/integración; fuera de este workstream |
 | macOS/Windows, VirtualLock/WER, reboot/FDE, firma y aceptación humana | **Diferido/no acreditado**; seams del engine común preparadas | No CI nativa ejecutada por W3 |
-| Check/build limpio/barrido Linux | PASS de check/build; 40 comparables con 38 rc0 y cero regresiones; aceptación global sigue **FAIL** | Gates frescos, 48/44 ampliados y causas explícitas |
+| Check/build limpio/barrido Linux | PASS check/build; **48 casos, 44 rc0, cero regresiones** frente al baseline; aceptación global sigue **FAIL** | Gates W3 (5) finales frescos, mismos cuatro rc1 conocidos |
 | Integración/revisión independiente y cierre de 28/G7 | **Pendientes**, fuera de esta entrega | Rama propia publicada; PR #1 borrador, ticket claimed |
 
 macOS conserva el mismo engine y readers Unix de bootstrap/audit; Windows
@@ -2785,3 +2785,64 @@ también pasan. El manifiesto `/tmp/pmw3c-final-source-manifest.json` y patch
 no se modifica producto durante el barrido. Los 48 casos siguen en ejecución
 con logs frescos; este checkpoint sustituye el candidato incompatible eba3000,
 pero no adelanta aceptación integral.
+
+
+### Gates finales de W3 (5) y entrega al coordinador
+
+Código verificado y publicado: `daada55` (correctivo de `eba3000`), sobre
+`1df6319`. El commit documental final no modifica esos cuatro Rust.
+Runner `/tmp/pmw3c-run-final.py`, resultados `/tmp/pmw3c-final-results.json`,
+resumen `/tmp/pmw3c-final-summary.log`. Los **48 casos se reejecutaron**,
+ningún log reutilizado, una invocación local por bloque bajo el mismo flock.
+El manifiesto de fuentes permaneció exacto desde el inicio hasta el fin.
+Artefactos PM_KEYCLOAK_DIST y PM_CFT_DIR absolutos del despacho.
+
+| Gate | Resultado final frente a `/tmp/pmw3-resume-gate-results.json` | Log propio |
+| --- | --- | --- |
+| `scripts/check.sh` | rc0, fmt/check/test/clippy workspace/all-targets locked/offline | `/tmp/pmw3c-final-final-check.log` |
+| `scripts/clean-offline-build.sh` | rc0, build limpio locked/offline | `/tmp/pmw3c-final-final-clean.log` |
+| 26 wrappers funcionales Linux, incluido SSH | 25 rc0; TUI operations conserva su rc1 y causa exact-duplicates=1/preview recortado | `/tmp/pmw3c-final-lab-*.log` |
+| Wrapper publication, tres modos backup/plaintext/attachment | 3/3 rc0; juntos con los anteriores cubren los 27 wrappers `test-linux-*-lab.sh` existentes | `/tmp/pmw3c-final-publication-*.log` |
+| Custody audit, sqlite-sync, bootstrap completed | 3/3 rc0 | `/tmp/pmw3c-final-custody-audit.log`, `final-sqlite-sync.log`, `final-bootstrap-completed.log` |
+| Matrix EIO/ENOSPC | rc1, exactamente los dos RED staging commit-outbox-audit; ningún otro defecto, cleanup errors=0 | `/tmp/pmw3c-final-g7-matrix.log` |
+| Inflight result-sync/bootstrap/audit/crash y canaries | 5/5 rc0, causes/control/scanners completos dentro del método vigente | `/tmp/pmw3c-final-g7-inflight-*.log`, `final-g7-canaries.log` |
+| Vault completed/inflight vault, tres inflight-live | 5/5 rc0; se preservan los GREEN (2)/(7) | `/tmp/pmw3c-final-g7-extra-*.log` |
+| Matrix trace | rc0, control de fronteras conservado | `/tmp/pmw3c-final-g7-extra-matrix-trace.log` |
+| Bootstrap/vault sin completed, modos ambiguos | mismos dos rc1 diagnósticos: unchanged=(1,0,1,1,1), replacement=0, closed=1, cleanup errors=0 | `/tmp/pmw3c-final-g7-extra-bootstrap.log`, `final-g7-extra-vault.log` |
+
+Total: **48 casos / 44 rc0 / cero regresiones de rc o causa**. Duración agregada
+390.101 s (cada invocación incluye espera de lock); rc0 del runner acredita
+coincidencia con el baseline, **no** aceptación global de G7. El RED de (6)
+sigue intacto y no hay implementación de staging. Las comprobaciones
+enfocadas adicionales de (5) no se agregan artificialmente al conteo de 48.
+Los GREEN enfocados definitivos no contienen canarios de password/path/payload,
+no tienen warnings y los fixtures de sockets propios restantes son cero.
+No hubo cambios de aserciones/oráculos heredados, límites/KDF/deadlines,
+dependencias, credenciales reales, estados de tickets ni otros worktrees.
+
+Archivos de este despacho y conflictos previsibles:
+
+- `crates/pm-ssh-client/src/lib.rs`: errores, firmante y brazo consumidor.
+- `crates/pm-ssh-client/src/main.rs`: conversión del error del runtime.
+- `crates/pm-ssh-client/src/error_propagation_tests.rs`: nuevas regresiones Linux.
+- `crates/pm-custody/src/agent_wire.rs`: sólo loop/reader/causa de lectura y tests;
+  `AgentService`, discovery, dispatcher de opcodes y admisión quedan iguales.
+- `docs/verification/ticket-28.md`: método, evidencia y tabla vigente.
+
+W1/W2 no comparten Rust tocado por este despacho. W4 puede entrar en conflicto
+textual en `serve_agent`/loop de conexión; conservar discovery existente, campos
+actuales, `verify_admission_custody` y la propagación/estado acotados de lectura.
+El informe común ticket-28 requiere composición documental con los otros
+workstreams. No se integra ninguna rama ni se fusiona el PR borrador #1.
+
+Siguiente acción: revisión e integración por el coordinador/merger independiente
+del **HEAD final completo** de esta rama, comprobando el net diff desde 1df6319;
+no seleccionar sólo eba3000. (6) queda para decisión del usuario y su despacho
+posterior. W3/G7 globales siguen incompletos y 28 conserva `claimed`.
+macOS/Windows/VirtualLock/WER/reboot/FDE/firma y aceptación humana no se
+acreditan con esta ejecución Linux x86_64.
+
+El único bytecode generado por los labs correctivos sin PYTHONDONTWRITEBYTECODE,
+`crates/pm-custody/tests/__pycache__/linux_lab.cpython-314.pyc`, se verificó como
+archivo regular owned del worktree inicialmente limpio y se retiró por esa
+ruta exacta junto al directorio ya vacío; no se barrió ninguna ruta ajena.
