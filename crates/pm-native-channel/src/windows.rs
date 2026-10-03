@@ -56,13 +56,16 @@ use windows_sys::Win32::{
             SERVICE_STATUS_PROCESS,
         },
         Threading::{
-            CreateEventW, GetCurrentProcess, GetCurrentThread, GetProcessId, INFINITE, OpenProcess,
-            OpenProcessToken, OpenThreadToken, PROCESS_DUP_HANDLE,
+            CreateEventW, GetCurrentProcess, GetCurrentThread, GetCurrentThreadId, GetProcessId,
+            INFINITE, OpenProcess, OpenProcessToken, OpenThreadToken, PROCESS_DUP_HANDLE,
             PROCESS_QUERY_LIMITED_INFORMATION, SetEvent, WaitForMultipleObjects,
             WaitForSingleObject,
         },
     },
-    UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE},
+    UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, GetWindowThreadProcessId, HWND_MESSAGE, MSG, PM_NOREMOVE,
+        PM_QS_SENDMESSAGE, PeekMessageW,
+    },
 };
 use zeroize::Zeroizing;
 
@@ -1524,6 +1527,33 @@ impl OwnedClipboard {
             Ok(sequence)
         })?;
         Ok(Self { sequence, owner })
+    }
+
+    /// Dispatches sent window messages on the owner thread without consuming
+    /// queued input. Clipboard ownership changes send WM_DESTROYCLIPBOARD;
+    /// the TUI must service that notification while its lease is alive.
+    ///
+    /// # Errors
+    /// Returns an opaque error for a missing window or a different owner thread.
+    pub fn dispatch_sent_messages(&self) -> Result<(), ChannelAuthenticationError> {
+        let thread = unsafe { GetWindowThreadProcessId(self.owner.0, ptr::null_mut()) };
+        if self.owner.0.is_null() || thread == 0 || thread != unsafe { GetCurrentThreadId() } {
+            return Err(ChannelAuthenticationError);
+        }
+        let mut message = MSG::default();
+        // PeekMessage dispatches pending nonqueued sent messages internally.
+        // Its BOOL describes queued-message availability, not dispatch success;
+        // zero is the documented no-queued-message result, not an API error.
+        unsafe {
+            PeekMessageW(
+                &raw mut message,
+                self.owner.0,
+                0,
+                0,
+                PM_NOREMOVE | PM_QS_SENDMESSAGE,
+            );
+        }
+        Ok(())
     }
 
     /// Clears only if the clipboard owner and sequence still belong to this lease.

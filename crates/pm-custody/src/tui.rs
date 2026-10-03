@@ -419,6 +419,16 @@ struct ClipboardLease {
 }
 
 impl ClipboardLease {
+    #[cfg(windows)]
+    fn dispatch_sent_messages(&self) -> Result<(), Failure> {
+        let ClipboardBackend::Windows(owner) = &self.backend;
+        owner
+            .as_ref()
+            .ok_or(Failure::Unavailable)?
+            .dispatch_sent_messages()
+            .map_err(|_| Failure::Unavailable)
+    }
+
     fn stop_if_owner(&mut self) -> Result<(), Failure> {
         if !begin_cleanup(&mut self.cleanup_attempted) {
             return Ok(());
@@ -936,6 +946,10 @@ fn event_loop(
     tls: &mut HumanTls,
 ) -> Result<(), Failure> {
     loop {
+        #[cfg(windows)]
+        if let Some(lease) = app.clipboard.as_ref() {
+            lease.dispatch_sent_messages()?;
+        }
         app.expire();
         if Instant::now().duration_since(app.idle_at) >= app.idle {
             app.status = "Locked after 5 minutes without human input".into();

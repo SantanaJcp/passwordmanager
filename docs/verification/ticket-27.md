@@ -3371,3 +3371,66 @@ el verificador. Check3c rc0 bajo flock (`/tmp/pmw1c-check3c.log`).
 Cambios exclusivos de fixture Windows: no cambian el binario Linux/Mac ni
 su barrido40 recién concluido; compilación y comportamiento cfgWindows aún
 pendientes de corrida3.
+
+
+### Corrida 3 fase3 — tres fallos separados, sin conversión a PASS
+
+[Windows 37135925196](https://github.com/SantanaJcp/passwordmanager/actions/runs/37135925196),
+SHA `4be629d2dea22a53e50242ed7ce5f6f8b5778a09`, FAIL terminado.
+Resize42×12: report-fresh=false/cursor-fresh=true/expected-present=true/
+geometry-matches=true. Child running, parser ground. El shrink pinta el texto
+correcto, pero el gate exige otro CSI8 que no llega. No eliminar ese assert:
+se consultó al usuario la sustitución por geometría nativa directa del hijo
+más repaint fresco; pendiente de respuesta. [ResizePseudoConsole](https://learn.microsoft.com/en-us/windows/console/resizepseudoconsole)
+garantiza dimensiones consultables por Console APIs, no especifica un reporte
+CSI8 por cada cambio. Hasta decidir/ejecutar el oráculo, resize sigue FAIL.
+
+Clipboard sobre el campo exacto Password de seed8 reproduce el RED anterior:
+replacement-crossed-lease=true y expired=false/cleanup-not-confirmed=true,
+proceso vivo y parser ground. El nuevo owner y la expiración compiten mientras
+la ventana del owner TUI no procesa mensajes. [WM_DESTROYCLIPBOARD](https://learn.microsoft.com/en-us/windows/win32/dataxchg/wm-destroyclipboard)
+es enviado al owner por EmptyClipboard; [PeekMessageW](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-peekmessagew)
+despacha mensajes sent no encolados en el hilo dueño. Candidata acotada:
+OwnedClipboard::dispatch_sent_messages exige ventana viva en el mismo hilo,
+usa PM_NOREMOVE|PM_QS_SENDMESSAGE y se llama antes de expire en cada vuelta
+TUI sólo Windows. No consume input, cambia lease1s, reintenta OpenClipboard ni
+modifica Drop/DestroyWindow heredado. BOOL0 de PeekMessage significa sin
+mensajes queued y no un error: no es un fallback. GREEN nativo pendiente.
+Conservar caso exacto nuevo owner y añadir propia expiración con status de
+cleanup correcto + CountClipboardFormats0/GetLastError0/CloseClipboard real.
+
+Matriz integral corta de nuevo con preview crypto-resource y lease-restored;
+no preparation/frame-send. Operaciones locales cortan al exigir estado inicial
+RESUMED: el vault nuevo no tiene estado explícito de acceso y el contrato
+existente inicial es SUSPENDED (`human.rs::delegated_access_view`, None o
+suspended). No modificar esa política. Preparar una sesión access por teclado
+que observe SUSPENDED, haga resume explícito y ejecute el mismo recorrido
+RESUMED→SUSPENDED→RESUMED/generator/pending/audit. Mantener la exigencia
+RESUMED original en la matriz, ahora con precondición real observada. Separar
+backup/restore y rotaciones en sesiones propias sin retirar esos grupos de
+la matriz integral. La sesión rotations usa otra maestra sintética exacta.
+Tras los cuatro FAIL, el harness aún acreditó human-lock ordinario, rechazo
+cross-role y SCM stop+crash/restart; el agregado terminó FAIL como debía.
+Log `/tmp/pmw1c-windows3.log`.
+
+Método antes de corrida4: negativas wire de null, INVALID_HANDLE_VALUE,
+thread pseudohandle y token malformado7 bytes sobre conexiones humanas TLS-RPK
+ordinarias independientes. Ack31 exacto antes de lease; operación con snapshot
+DACL antes/durante/después y ACE único exacto, restauración incluso ante error.
+Sólo EOF nativo es rechazo aceptado, no timeout/error genérico. Diagnóstico de
+esa conexión exige ack31 único, no duplicado ni parser; token válido requiere
+transfer-token + duplicate-failed, malformado requiere ausencia de token.
+Cerrar explícitamente el pipe propio. Reutilizar el helper de ACL sin copiar
+un handler ni modificar listener/admisión. Es evidencia parcial de fracaso,
+no acredita peer/PID/reparse, transferencias TUI completas ni custodia W3.
+El agregado conserva los gates anteriores y toda la matriz en FAIL ante
+cualquier error, sin retries ni secretos/rutas/handles/identidades en los logs
+nuevos. Linux: check + clean + barrido40 exacto antes de aceptación final;
+ningún comportamiento Mac/Linux se modifica con el pump cfgWindows.
+
+Check4 rc0 (`/tmp/pmw1c-check4.log`) y contrato Windows después de ordenar
+los casos rc0 (`/tmp/pmw1c-source-contract4.log`), ambos bajo flock. Las cuatro
+negativas se ejecutarán después de los casos TUI para que su primera falla
+no impida observar el pump ni los casos locales independientes. No cambian
+producto ni su autorización. Primer CSI gate sigue intacto, pendiente de
+decisión del usuario; no se ejecutó un oráculo alternativo.

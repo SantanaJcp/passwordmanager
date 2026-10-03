@@ -22,6 +22,12 @@ use windows_sys::Win32::{
 /// Discriminate elevated unit-test results from the real human fixture token.
 /// This changes only this disposable fixture's DACL, never the TUI's DACL.
 pub(super) fn probe_human_token_lease() -> io::Result<()> {
+    with_exact_human_lease(|| Ok(()))
+}
+
+/// Exercises one fixture operation under the exact lease and checks restoration
+/// even when that operation fails. This does not sample or pause the service.
+pub(super) fn with_exact_human_lease(operation: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     let process = unsafe { GetCurrentProcess() };
     let service = service_sid()?;
     let before = snapshot(process, &service)?;
@@ -43,6 +49,10 @@ pub(super) fn probe_human_token_lease() -> io::Result<()> {
             Ok(())
         }
     });
+    let operation = match during {
+        Ok(()) => operation(),
+        Err(error) => Err(error),
+    };
     let restored = lease
         .finish()
         .map_err(|_| io::Error::other("human-token lease finish failed"));
@@ -55,7 +65,7 @@ pub(super) fn probe_human_token_lease() -> io::Result<()> {
             Ok(())
         }
     });
-    let errors = [during, restored, after]
+    let errors = [operation, restored, after]
         .into_iter()
         .filter_map(Result::err)
         .map(|error| error.to_string())

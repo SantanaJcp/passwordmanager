@@ -727,8 +727,10 @@ try {
         $cases = @(
             @{ Name = 'resize'; Mode = '--resize'; Backup = $tuiBackup; Plaintext = $tuiPlaintext; RotatedMaster = $null },
             @{ Name = 'clipboard'; Mode = '--clipboard'; Backup = $tuiBackup; Plaintext = $tuiPlaintext; RotatedMaster = $null },
+            @{ Name = 'access'; Mode = '--access'; Backup = $tuiBackup; Plaintext = $tuiPlaintext; RotatedMaster = $null },
             @{ Name = 'matrix'; Mode = $matrixMode; Backup = $tuiBackup; Plaintext = $tuiPlaintext; RotatedMaster = 'synthetic-ticket27-rotated-master' },
-            @{ Name = 'local-operations'; Mode = '--local-operations'; Backup = $localBackup; Plaintext = $localPlaintext; RotatedMaster = 'synthetic-ticket27-local-rotated-master' }
+            @{ Name = 'local-operations'; Mode = '--local-operations'; Backup = $localBackup; Plaintext = $localPlaintext; RotatedMaster = 'synthetic-ticket27-local-rotated-master' },
+            @{ Name = 'rotations'; Mode = '--rotations'; Backup = $localBackup; Plaintext = $localPlaintext; RotatedMaster = 'synthetic-ticket27-independent-rotated-master' }
         )
         foreach ($case in $cases) {
             if ($case.Name -eq 'matrix') {
@@ -767,6 +769,28 @@ try {
                 Assert-True ((Get-Item -LiteralPath $case.Backup -ErrorAction Stop).Length -gt 0) 'TUI native backup is empty'
                 Assert-True (Test-Path -LiteralPath $case.Plaintext -PathType Leaf) 'TUI plaintext export was not published'
                 Assert-True ((Get-Item -LiteralPath $case.Plaintext -ErrorAction Stop).Length -gt 0) 'TUI plaintext export is empty'
+            }
+        }
+
+        foreach ($negative in @('null', 'invalid-handle', 'thread-pseudohandle', 'malformed-token')) {
+            $diagnosticStart = if ($ServiceDiagnostics) { @(Get-Content -LiteralPath $diagnosticPath -ErrorAction Stop).Count } else { 0 }
+            $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId, '--transfer-negative', $negative) $humanInput $humanOut $humanErr
+            Assert-True ($p.ExitCode -eq 0) ('ordinary human transfer negative failed: ' + $negative + '; ' + (Get-Content $humanErr -Raw))
+            Assert-True ((Get-Content $humanOut -Raw).Trim() -eq "PASS windows-transfer-negative case=$negative ack31=accepted peer-eof=1 dacl-before-during-after=exact") 'negative transfer did not prove exact DACL and peer closure'
+            Write-Host (Get-Content $humanOut -Raw)
+            Write-ServiceSubphaseDiagnostics $diagnosticPath
+            if ($ServiceDiagnostics) {
+                $newPhases = @(Get-Content -LiteralPath $diagnosticPath -ErrorAction Stop | Select-Object -Skip $diagnosticStart)
+                Assert-True (@($newPhases | Where-Object { $_ -eq 'phase=transfer-ack31' }).Count -eq 1) 'negative transfer lacks one native ack31'
+                Assert-True ($newPhases -notcontains 'phase=transfer-duplicated') 'negative source was duplicated successfully'
+                Assert-True (@($newPhases | Where-Object { $_ -like 'phase=onepux-*' }).Count -eq 0) 'negative source reached the 1PUX parser'
+                if ($negative -eq 'malformed-token') {
+                    Assert-True ($newPhases -notcontains 'phase=transfer-token') 'malformed frame was accepted as a token'
+                }
+                else {
+                    Assert-True (@($newPhases | Where-Object { $_ -eq 'phase=transfer-token' }).Count -eq 1) 'negative transfer lacks one decoded token'
+                    Assert-True (@($newPhases | Where-Object { $_ -eq 'phase=transfer-duplicate-failed' }).Count -eq 1) 'negative token lacks a native duplication rejection'
+                }
             }
         }
 

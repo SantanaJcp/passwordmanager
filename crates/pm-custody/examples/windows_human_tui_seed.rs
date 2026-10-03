@@ -13,6 +13,9 @@ fn main() {
     }
 }
 #[cfg(windows)]
+#[path = "../../pm-native-channel/examples/windows_tui_fixture/acl.rs"]
+mod acl;
+#[cfg(windows)]
 mod fixture {
     use pm_crypto::{NativeStdin, ProtectedBytes};
     use pm_native_channel::{WindowsClientPipe, WindowsEndpoint};
@@ -192,7 +195,7 @@ mod fixture {
     }
     pub(super) fn run() -> Result<(), Failure> {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
-        if args.len() != 3 {
+        if !(args.len() == 3 || (args.len() == 5 && args[3] == "--transfer-negative")) {
             return Err(Failure::Unavailable);
         }
         let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
@@ -226,6 +229,36 @@ mod fixture {
             send(&mut tls, &unlock)?;
             if *success(&mut tls)? != [0] {
                 return Err(Failure::Unavailable);
+            }
+            if args.len() == 5 {
+                let token: &[u8] = match args[4].as_str() {
+                    "null" => &[0; 8],
+                    "invalid-handle" => &[0xff; 8],
+                    "thread-pseudohandle" => &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe],
+                    "malformed-token" => &[0; 7],
+                    _ => return Err(Failure::Unavailable),
+                };
+                send(&mut tls, &[31, 0])?;
+                if *success(&mut tls)? != [0] {
+                    return Err(Failure::Unavailable);
+                }
+                crate::acl::with_exact_human_lease(|| {
+                    send(&mut tls, token).map_err(|_| {
+                        std::io::Error::other("negative transfer token could not be sent")
+                    })?;
+                    let mut header = [0; 4];
+                    match tls.read_exact(&mut header) {
+                        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(()),
+                        Err(_) => Err(std::io::Error::other(
+                            "negative transfer failed outside peer EOF",
+                        )),
+                        Ok(()) => Err(std::io::Error::other(
+                            "negative transfer returned a response instead of closing",
+                        )),
+                    }
+                })
+                .map_err(|_| Failure::Unavailable)?;
+                return Ok(());
             }
             let records = content_fixture_records()?;
             for expected in records {
@@ -268,7 +301,14 @@ mod fixture {
         })();
         let closed = close_tls(tls);
         operation.and(closed)?;
-        println!("PASS windows-tui-seed types=7 ordinary-human-wire=1 readback=exact");
+        if args.len() == 5 {
+            println!(
+                "PASS windows-transfer-negative case={} ack31=accepted peer-eof=1 dacl-before-during-after=exact",
+                args[4]
+            );
+        } else {
+            println!("PASS windows-tui-seed types=7 ordinary-human-wire=1 readback=exact");
+        }
         Ok(())
     }
     fn crypto_provider() -> CryptoProvider {

@@ -37,7 +37,9 @@ mod windows_fixture {
         },
         System::{
             Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole},
-            DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
+            DataExchange::{
+                CloseClipboard, CountClipboardFormats, GetClipboardData, OpenClipboard,
+            },
             Memory::{GlobalLock, GlobalSize, GlobalUnlock},
             Pipes::CreatePipe,
             StationsAndDesktops::{
@@ -1625,6 +1627,8 @@ mod windows_fixture {
         Resize,
         Clipboard,
         LocalOperations,
+        Access,
+        Rotations,
     }
 
     fn read_synthetic_password() -> io::Result<zeroize::Zeroizing<Vec<u8>>> {
@@ -1696,7 +1700,10 @@ mod windows_fixture {
                 press(fixture, "q")?;
                 return require_tui_exit(fixture.process);
             }
-            Scenario::Clipboard | Scenario::LocalOperations => {
+            Scenario::Clipboard
+            | Scenario::LocalOperations
+            | Scenario::Access
+            | Scenario::Rotations => {
                 search(fixture, "Password")?;
                 fixture
                     .observer
@@ -1705,6 +1712,27 @@ mod windows_fixture {
                 if scenario == Scenario::Clipboard {
                     exercise_clipboard(fixture, 14, "ticket05-e2e-password-canary")?;
                     eprintln!("TUI_STAGE stage=clipboard-independent result=pass");
+                } else if scenario == Scenario::Access {
+                    // A new vault explicitly defaults to suspended. Resume by
+                    // real keyboard before the unchanged access regression.
+                    press(fixture, "a")?;
+                    fixture
+                        .observer
+                        .wait_for("Delegated access: SUSPENDED")
+                        .map_err(io::Error::other)?;
+                    press(fixture, "s")?;
+                    fixture
+                        .observer
+                        .wait_for("Delegated access: RESUMED")
+                        .map_err(io::Error::other)?;
+                    press(fixture, "\x1b")?;
+                    fixture
+                        .observer
+                        .wait_for("Content view")
+                        .map_err(io::Error::other)?;
+                    exercise_generator_access_audit(fixture)?;
+                } else if scenario == Scenario::Rotations {
+                    exercise_rotations(fixture, b"synthetic-ticket27-independent-rotated-master")?;
                 } else {
                     exercise_organization(fixture)?;
                     exercise_local_operations(
@@ -1795,6 +1823,7 @@ mod windows_fixture {
         exercise_organization(fixture)?;
         exercise_clipboard(fixture, 7, "synthetic-ticket27-import")?;
         eprintln!("TUI_STAGE stage=organization-history-copy result=pass");
+        exercise_generator_access_audit(fixture)?;
         exercise_local_operations(fixture, &paths, b"synthetic-ticket27-rotated-master")?;
         exercise_resize(fixture)?;
         write_keyboard_input(fixture, b"q")?;
@@ -1904,14 +1933,48 @@ mod windows_fixture {
             ));
         }
 
+        press(fixture, "c")?;
+        fixture
+            .observer
+            .wait_for("Fields (explicit selection; values hidden)")
+            .map_err(io::Error::other)?;
+        press(fixture, &"j".repeat(index))?;
+        fixture
+            .observer
+            .wait_for("› auth[0].password")
+            .map_err(io::Error::other)?;
+        press(fixture, "\r")?;
+        fixture
+            .observer
+            .wait_for("Copied explicitly")
+            .map_err(io::Error::other)?;
+        if read_clipboard_utf16()?.as_slice() != expected_clipboard.as_slice() {
+            return Err(io::Error::other(
+                "own-expiry copy did not contain the exact synthetic field",
+            ));
+        }
+        thread::sleep(Duration::from_millis(1_200));
+        fixture
+            .observer
+            .wait_for("Clipboard custody expired")
+            .map_err(io::Error::other)?;
+        if unsafe { OpenClipboard(ptr::null_mut()) } == 0 {
+            return Err(win32("OpenClipboard(own-expiry observer)"));
+        }
+        unsafe { SetLastError(0) };
+        let formats = unsafe { CountClipboardFormats() };
+        let counted = formats != 0 || unsafe { GetLastError() } == 0;
+        let closed = unsafe { CloseClipboard() } != 0;
+        if !counted || !closed || formats != 0 {
+            return Err(io::Error::other(
+                "own clipboard expiry did not prove an empty private clipboard",
+            ));
+        }
+        eprintln!("TUI_CLIPBOARD newer-owner-preserved=true own-expiry-empty=true");
         Ok(())
     }
 
-    fn exercise_local_operations(
-        fixture: &Fixture,
-        paths: &MatrixPaths<'_>,
-        master: &[u8],
-    ) -> io::Result<()> {
+    fn exercise_generator_access_audit(fixture: &Fixture) -> io::Result<()> {
         open_menu(fixture, "g", "Generator length")?;
         type_visible_and_submit(fixture, "24", "24")?;
         fixture
@@ -1958,6 +2021,14 @@ mod windows_fixture {
             .map_err(io::Error::other)?;
 
         eprintln!("TUI_STAGE stage=generator-access-pending-audit result=pass");
+        Ok(())
+    }
+
+    fn exercise_local_operations(
+        fixture: &Fixture,
+        paths: &MatrixPaths<'_>,
+        master: &[u8],
+    ) -> io::Result<()> {
         // New-file backup/export paths are distinct. Existing destinations are
         // intentionally not removed or truncated by this fixture.
         open_menu(fixture, "b", "Backup/recovery:")?;
@@ -2274,6 +2345,10 @@ mod windows_fixture {
         type_visible_and_submit(fixture, &restore, "|RESTORE")?;
         fixture.observer.wait_for_information("Restore committed with new IDs/keys; current authority preserved and imported grants inactive").map_err(io::Error::other)?;
         eprintln!("TUI_STAGE stage=restore result=pass");
+        exercise_rotations(fixture, master)
+    }
+
+    fn exercise_rotations(fixture: &Fixture, master: &[u8]) -> io::Result<()> {
         open_menu(fixture, "b", "Backup/recovery:")?;
         open_menu(fixture, "5", "Recovery code shown temporarily")?;
         let code = fixture
@@ -2363,6 +2438,8 @@ mod windows_fixture {
                         | "--resize"
                         | "--clipboard"
                         | "--local-operations"
+                        | "--access"
+                        | "--rotations"
                 )
             )
             || args.get(8).map(String::as_str) != Some("--")
@@ -2380,6 +2457,8 @@ mod windows_fixture {
             "--resize" => Scenario::Resize,
             "--clipboard" => Scenario::Clipboard,
             "--local-operations" => Scenario::LocalOperations,
+            "--access" => Scenario::Access,
+            "--rotations" => Scenario::Rotations,
             _ => return Err(io::Error::other("unknown native TUI scenario")),
         };
         let diagnostic_path =
