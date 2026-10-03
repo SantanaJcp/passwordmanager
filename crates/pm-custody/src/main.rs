@@ -9,7 +9,8 @@ use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod agent_wire;
-
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod connection_dispatch;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod custody_admission;
 mod failure;
