@@ -42,8 +42,15 @@ def stopped(process):
     return any(line.startswith("State:\tT") for line in pathlib.Path(f"/proc/{process.pid}/status").read_text().splitlines())
 
 
-def witness(f, channels):
-    """Open only a copied WAL view; never checkpoint or mutate the real vault."""
+def witness(f, channels, *, committed_source=None):
+    """Copy pending WAL frames or snapshot the live committed SQLite view.
+
+    Raw DB/WAL copies deliberately recover pending frames for syscall controls.
+    A fresh copy has no live SHM locks and can recover a rejected commit marker;
+    it is not an oracle for the committed view after a failed fsync. The latter
+    uses SQLite backup from a read-only source, without source writes/checkpoint.
+    Callers must keep the owned custodian quiescent during either observation.
+    """
     folder = channels.logdir / "sqlite-witness"
     folder.mkdir(mode=0o700)
     channels.directories.add(folder)
@@ -52,9 +59,17 @@ def witness(f, channels):
         source = pathlib.Path(str(f["vault"]) + suffix)
         destination = pathlib.Path(str(copy) + suffix)
         channels.register(destination, category)
-        if source.exists():
+        if committed_source is None and source.exists():
             shutil.copyfile(source, destination)
             scan_file(destination, channels.canaries, category)
+    if committed_source is not None:
+        destination = sqlite3.connect(copy)
+        try:
+            def complete(status, remaining, total):
+                assert status == sqlite3.SQLITE_DONE and remaining == 0, "committed SQLite snapshot incomplete or busy"
+            committed_source.backup(destination, pages=-1, progress=complete, sleep=0)
+        finally:
+            destination.close()
     assert copy.is_file(), "missing main SQLite witness"
     database = sqlite3.connect(copy.resolve().as_uri() + "?mode=ro", uri=True)
     try:

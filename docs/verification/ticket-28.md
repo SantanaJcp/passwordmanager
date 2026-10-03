@@ -2118,3 +2118,208 @@ para staging preparado y retirada de custodia en caliente; conservar RED y
 fallback SQLite/purge mientras tanto. Después continuar el inventario de memoria
 restante en su alcance separado. Esta entrega no acredita cierre de G7 ni
 soporte nativo Windows/macOS.
+
+## Result-sync — método discriminante 2026-10-03
+
+Alcance autorizado: clasificar únicamente el FAIL intermitente de
+`inflight result-sync` sobre la integración `055fd9e`, sin integrar ni cambiar
+producto/fallbacks/tickets. Cwd `.worktrees/g7-result-sync`; cada comando de
+Cargo/check/lab bajo `flock /tmp/pm-cargo-window.lock`, liberado entre corridas.
+Se conserva el control sin fallo, segundo fsync, EIO/ENOSPC, vaults nuevos,
+una sola llamada al proveedor, hashes completos y plazos 8/15 segundos.
+
+La discriminación compara dos observaciones del mismo vault: recuperación de
+una copia cruda DB/WAL/SHM y snapshot SQLite de su vista viva confirmada. La
+conexión fuente se abre `mode=ro`, se inicializa durante la pausa del syscall
+y se conserva para fijar el WAL index original; nunca escribe ni checkpointa
+el vault. El snapshot usa backup SQLite en un único paso; busy/incomplete falla
+sin retry. Se confirma primero que el writer lock está ocupado en el syscall.
+Tras reanudar se adquieren los locks Unix WAL writer/checkpoint/recovery
+(bytes 120..122 en SQLite 3.53.2 fijado), dentro de los mismos 8 segundos, y
+se confirma SIGSTOP en **todos** los tasks del custodio antes de observar.
+La adquisición sólo cerca la observación y no escribe contenido. Los demás
+modos conservan la copia cruda que identifica frames pendientes de syscall.
+La instrumentación registra sólo categorías, booleanos y orden, sin payloads.
+
+### Clasificación y cronología del FAIL
+
+**(b), carrera del fixture/observación de SQLite.** El texto
+`partial state settlement after fsync failure` sólo acredita desigualdad del
+hash completo de `authentication_attempts` frente a la intención previa; no
+identifica el campo ni prueba que se haya asentado únicamente parte de una
+transacción. En el control discriminante, intento **y** audit de la copia cruda
+son exactamente los pendientes del syscall. La vista viva confirmada, después
+del rollback, conserva ambos hashes originales y autoridad exacta, calls=1.
+
+La condición antigua `running/provider_sent=1` + proceso no detenido se podía
+cumplir antes de retornar del syscall/terminar el rollback. `pause_owned`
+comprobaba sólo el task líder. Además, abrir la copia DB/WAL/SHM sin los locks
+vivos del original reconstruye su WAL index desde los frames: puede observar
+el commit marker no confirmado del fsync fallido. La quiescencia por sí sola,
+o abrir una fuente nueva después de cerrar/recuperar ese index, no demuestra
+qué veía la conexión original. Por eso se conserva una fuente `mode=ro`
+inicializada **antes** de reanudar el syscall, sin una transacción de lectura
+congelada: cada SELECT/snapshot observa la vista confirmada actual.
+
+Evidencia discriminante `/tmp/pmrs-pinned-red.log` (rc1): el control sin fallo
+completa antes del caso EIO; en EIO aparecen `writer-busy=1`,
+`state-equals-pending=1`, `audit-equals-pending=1` para la observación antigua.
+Tras liberar los locks y detener todos los tasks, la fuente fijada muestra
+`state-exact=1 audit-exact=1 authority-exact=1 provider-calls=1`. Se conserva
+la aserción antigua y su rc1, aunque el snapshot discrimine su falsa lectura.
+No se atribuye este RED al producto. La instrumentación/fixture exactos están
+preservados en `/tmp/pmrs-pinned-red.patch` (SHA256
+`665ca7333aad8f62460addb4efe5083c712472046165d2dcf7ccd136a670cac5`), aplicable
+a la base `055fd9e`; copias `/tmp/pmrs-pinned-red-{result-sync,fault-matrix}.py`.
+
+Cronología sin borrar diagnósticos anteriores:
+
+- Base sin cambios, 30 invocaciones completas del modo: **1/30 FAIL (3.33%)**,
+  iteración 16, mismo mensaje. `/tmp/pmrs-before-results.json`,
+  `/tmp/pmrs-before-summary.log`, `/tmp/pmrs-before-16.log`; las otras 29 pasan.
+- Primera instrumentación: 1/30, iteración 29,
+  `/tmp/pmrs-diagnose-{results.json,summary.log,29.log}`. Registró writer libre
+  y copia igual al pending; no bastaba para separar recuperación del WAL de
+  estado confirmado. Una fuente reabierta después también dejó 1/30,
+  iteración 20, `/tmp/pmrs-committed-diagnose-{results.json,summary.log,20.log}`.
+  Esas observaciones no fundamentan una acusación de atomicidad del producto.
+- Control RO fijado antes del syscall: RED discriminante anterior, con vista
+  confirmada íntegra en el mismo caso, antes de modificar la aserción/observación.
+- Corrección exclusiva del fixture: fuente RO fijada, fence de locks, todos los
+  tasks detenidos y snapshot confirmado. Las aserciones de hashes, autoridad,
+  calls=1, INDETERMINATE y resultado vacío se conservan. GREEN enfocado rc0,
+  `/tmp/pmrs-focused-green.log`, para control, EIO y ENOSPC; cleanup errors=0.
+
+Comando RED (con fixture diagnóstico preservado) y GREEN (con fixture corregido):
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh inflight result-sync
+# RED: /tmp/pmrs-pinned-red.log; GREEN: /tmp/pmrs-focused-green.log
+python3 /tmp/pmrs-repeat.py before > /tmp/pmrs-before-summary.log 2>&1
+python3 /tmp/pmrs-repeat.py after > /tmp/pmrs-after-summary.log 2>&1
+# El runner adquiere/libera flock en cada una de sus 30 invocaciones.
+```
+
+El interposer C y el producto son idénticos a la integración; el control sigue
+verificando PID, WAL exacto, contador secuencial, offset=2 y una inyección por
+fault. Proveedor detenido, journal calls=1 y fuente viva íntegra excluyen una
+segunda llamada/recuperación compitiendo como causa de este control. La ventana
+Cargo se serializa en todas las corridas; no se ha demostrado interferencia
+externa/CPU como causa. Estos hechos clasifican el FAIL estudiado, no prueban
+atomicidad universal ni cierran G7.
+
+Se conservan los fallbacks inspeccionados de `linux.rs::serve_loop` (descarta
+el error de `run_provider_once` y continúa el worker), y
+`linux.rs::run_provider_once` (descarta error de settle AUTHORITY_REVOKED y
+retorna Ok), ya inventariados en la integración. No se corrigen ni se usan para
+justificar éxito; tampoco se cambia la semántica de intentos. Los fallbacks de
+provider/cleanup históricos de fase 5 siguen intactos.
+
+### Quiescencia del tramo tras reinicio
+
+La primera corrección completó las comprobaciones de atomicidad en 30/30, pero
+el **modo completo** quedó 29/30 rc0: `/tmp/pmrs-after-12.log` (rc1) falla
+posteriormente en `settlement-historical-restarted`, por
+`unclassified process file/temporary resource`. `/tmp/pmrs-after-results.json`
+y `/tmp/pmrs-after-summary.log` conservan **1/30 FAIL**, sin reinterpretarlo
+como GREEN. El log no identificaba la categoría del descriptor; la rotación
+de sidecars durante el cierre de conexiones es una explicación compatible,
+no una ruta concreta demostrada por ese log.
+
+La observación final conserva también la fuente RO original desde la readiness
+tras reiniciar, aplica el mismo fence de locks y detiene todos los tasks antes
+de snapshot/scan. Mantiene los 15 segundos para observar INDETERMINATE y el
+presupuesto previo de **5 segundos** para detener al custodio; no añade una
+espera fija ni tolera archivos desconocidos, sidecars ausentes/deleted o lecturas
+parciales. El scanner y su aserción no se modifican. GREEN enfocado final rc0:
+`/tmp/pmrs-final-focused-green.log`, control + EIO + ENOSPC, calls=1, ambos hashes
+exactos tras cada fault, autoridad exacta y cleanup errors=0. La repetición del
+candidato final usa `/tmp/pmrs-after-final-{results.json,summary.log}` y logs
+`/tmp/pmrs-after-final-01.log` … `30.log`; los resultados se registran abajo.
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh inflight result-sync
+# /tmp/pmrs-final-focused-green.log
+python3 /tmp/pmrs-repeat.py after-final > /tmp/pmrs-after-final-summary.log 2>&1
+```
+
+La segunda tanda (`after-final`) conserva **1/30 FAIL**, iteración 03,
+`/tmp/pmrs-after-final-03.log`: `sqlite3.OperationalError: database is locked`
+al inicializar la fuente nueva tras readiness, durante el control sin fallo.
+No alcanza el caso EIO y no es una pérdida de atomicidad. El timeout=0 añadido
+al observador era más estricto que los **5 segundos** heredados de `query`.
+Se restablecen explícitamente esos 5 segundos de espera SQLite por lock para
+la fuente RO; la inicialización ahora cuenta **dentro** del deadline original
+de 15 segundos. El backup sigue siendo un único paso: busy/incomplete falla
+inmediatamente, sin repetir backup. No se reenvía start/login ni se repite un get fallido para ocultar
+un error ni se repite el modo dentro de una aserción; cada repetición externa
+mide un vault nuevo. El candidato definitivo y sus logs usan el prefijo
+`/tmp/pmrs-candidate-`, distinto de ambas tandas intermedias fallidas.
+
+### Repetición final y gates
+
+Candidato definitivo: **0/30 FAIL (0%)**, frente a **1/30 (3.33%)** en la base
+sin cambios, mismo modo/oráculo/plazos y un flock distinto por invocación.
+`/tmp/pmrs-candidate-results.json` y `/tmp/pmrs-candidate-summary.log`;
+30 logs `/tmp/pmrs-candidate-01.log` … `30.log`. Cada invocación completa
+control + EIO + ENOSPC sobre vaults nuevos: **90 casos, 60 faults y 30 controles**.
+Los 60 faults conservan hashes exactos de intento/audit, todos los casos
+terminan INDETERMINATE/result vacío/calls=1; 90 teardown con errors=0.
+El GREEN enfocado del candidato está en `/tmp/pmrs-candidate-focused-green.log`.
+Las tandas intermedias fallidas anteriores no se incluyen en ese 0/30 ni se
+borran. Una tasa 0/30 es evidencia acotada, no prueba de ausencia universal.
+
+```sh
+export PYTHONDONTWRITEBYTECODE=1
+export PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3
+export PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64
+python3 /tmp/pmrs-repeat.py candidate > /tmp/pmrs-candidate-summary.log 2>&1
+# Cada comando del runner siguiente adquiere su propio flock, cwd este worktree.
+python3 /tmp/pmrs-run-gates.py > /tmp/pmrs-gate-summary.log 2>&1
+```
+
+El runner de gates enumera los mismos 34 casos no excluidos del baseline
+`/tmp/pmint3-local-results.json`: check, clean-offline-build, 26 wrappers Linux,
+publication backup/plaintext/attachment, custody audit/sqlite-sync/bootstrap
+completed. No repite vault-loss ni purge/outbox, fuera de gates. Añade los seis
+modos requeridos: matrix, inflight result-sync/bootstrap/audit/crash y canaries.
+El rc1 esperado de TUI y matrix sólo coincide si conserva **también** la causa
+original: exact-duplicates=1 con preview recortado y los mismos dos RED de
+staging commit-outbox-audit EIO/ENOSPC, respectivamente. Todos los modos G7
+exigen teardown errors=0. Los resultados completos se registran al terminar
+este barrido; un rc igual aislado no se usa como evidencia de no regresión.
+
+Resultado del barrido final: **40 casos, 38 rc0, cero regresiones**, runner rc0,
+417.92 segundos acumulados. Los 34 casos comparables conservan exactamente
+los rc de `/tmp/pmint3-local-results.json`; los dos RED conocidos adicionales
+vault/purge se excluyeron explícitamente. Evidencia por comando y causa:
+`/tmp/pmrs-gate-results.json`, `/tmp/pmrs-gate-summary.log` y logs individuales
+`/tmp/pmrs-gate-*.log`.
+
+| Comprobación | Resultado observado | Log en `/tmp/` |
+| --- | --- | --- |
+| check.sh | PASS rc0, 70.169 s | `pmrs-gate-final-check.log` |
+| clean-offline-build.sh | PASS rc0, 43.224 s | `pmrs-gate-final-clean.log` |
+| 26 wrappers Linux | 25 PASS; TUI operations mismo FAIL `exact-duplicates=1`/preview recortado | `pmrs-gate-lab-*.log`; `pmrs-gate-lab-tui-operations.log` |
+| publication backup/plaintext/attachment | 3/3 PASS | `pmrs-gate-publication-*.log` |
+| audit/sqlite-sync/bootstrap completed | 3/3 PASS | `pmrs-gate-{custody-audit,sqlite-sync,bootstrap-completed}.log` |
+| matrix | Mismo rc1 y exactamente los dos RED staging EIO/ENOSPC; sin nuevos defectos ni cleanup errors | `pmrs-gate-g7-matrix.log` |
+| inflight result-sync | PASS control/EIO/ENOSPC, rc0 5.034 s, calls=1 y estado/audit exactos | `pmrs-gate-g7-inflight-result-sync.log` |
+| inflight bootstrap/audit/crash | 3/3 PASS, custodia restaurada exacta/crash sin core, calls=1 | `pmrs-gate-g7-inflight-*.log` |
+| canaries | PASS rc0, canales/controles completos en el alcance del lab | `pmrs-gate-g7-canaries.log` |
+
+Preservación final: `git diff --check`, AST de los 29 fixtures, enlaces locales
+de este documento y allowlist de tres paths pasan; registro
+`/tmp/pmrs-preservation.log`. Únicamente cambian `g7_result_sync.py`, el modo
+explícito de snapshot de `g7_fault_matrix.py` y este documento. El modo crudo
+sigue identificando frames pendientes; no se cambia su oracle ni los demás
+métodos. Producto/Rust, interposer C, Cargo/dependencias, workflows, deadlines,
+KDF, fallbacks y estados de tickets permanecen intactos. La raíz sigue en
+`b3577d2` con sus cambios ajenos y no se editó el worktree de integración.
+
+El FAIL estudiado queda clasificado y el fixture verificado localmente. G7 y
+el ticket 28 siguen parciales; aceptación global conserva TUI/staging y los
+otros RED fuera de gates, memoria restante, gates humanos/reboot/FDE y targets
+no acreditados. No hay integración ni merge del PR. Siguiente acción del
+orquestador: revisión independiente de la rama `codex/pm-g7-result-sync` y,
+si se acepta, integración/verificación por el merger designado.
