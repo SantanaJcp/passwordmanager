@@ -91,12 +91,7 @@ pub fn serve(
         let Ok(request) = read_frame(&mut stream) else {
             continue;
         };
-        let response = Zeroizing::new(handle(
-            &profile,
-            &request,
-            &mut waiting,
-            &mut passkey_sessions,
-        ));
+        let response = handle(&profile, &request, &mut waiting, &mut passkey_sessions)?;
         let _ = write_frame(&mut stream, &response);
     }
     Err(ServeError)
@@ -113,7 +108,7 @@ fn handle(
     request: &[u8],
     waiting: &mut BTreeSet<[u8; 16]>,
     passkey_sessions: &mut BTreeMap<[u8; 16], browser::PasskeySession>,
-) -> Vec<u8> {
+) -> Result<pm_crypto::ProtectedBytes, ()> {
     let mut cursor = Cursor::new(request);
     let Ok(opcode) = cursor.byte() else {
         return response(4, b"");
@@ -153,7 +148,10 @@ fn handle(
     }
 }
 
-fn handle_github(profile: &GithubProfile, mut cursor: Cursor<'_>) -> Vec<u8> {
+fn handle_github(
+    profile: &GithubProfile,
+    mut cursor: Cursor<'_>,
+) -> Result<pm_crypto::ProtectedBytes, ()> {
     let parsed = (|| {
         let integration = cursor.text()?;
         let method = cursor.text()?;
@@ -187,7 +185,7 @@ fn handle_browser(
     mut cursor: Cursor<'_>,
     attempt: [u8; 16],
     waiting: &mut BTreeSet<[u8; 16]>,
-) -> Vec<u8> {
+) -> Result<pm_crypto::ProtectedBytes, ()> {
     let parsed = (|| {
         let integration = cursor.text()?;
         let method = cursor.text()?;
@@ -255,7 +253,10 @@ fn handle_browser(
     }
 }
 
-fn handle_exchange(profile: &ExchangeProfile, mut cursor: Cursor<'_>) -> Vec<u8> {
+fn handle_exchange(
+    profile: &ExchangeProfile,
+    mut cursor: Cursor<'_>,
+) -> Result<pm_crypto::ProtectedBytes, ()> {
     let parsed = (|| {
         let integration = cursor.text()?;
         let method = cursor.text()?;
@@ -307,7 +308,7 @@ fn reconcile(
     attempt: [u8; 16],
     waiting: &BTreeSet<[u8; 16]>,
     sessions: &mut BTreeMap<[u8; 16], browser::PasskeySession>,
-) -> Vec<u8> {
+) -> Result<pm_crypto::ProtectedBytes, ()> {
     let Some(session) = sessions.get_mut(&attempt) else {
         return if waiting.contains(&attempt) {
             response(1, b"KEYCLOAK_HUMAN_REQUIRED")
@@ -333,7 +334,7 @@ fn handle_passkey(
     attempt: [u8; 16],
     cursor: &mut Cursor<'_>,
     sessions: &mut BTreeMap<[u8; 16], browser::PasskeySession>,
-) -> Vec<u8> {
+) -> Result<pm_crypto::ProtectedBytes, ()> {
     let parsed = (|| {
         let integration = cursor.text()?;
         let method = cursor.text()?;
@@ -443,17 +444,23 @@ fn write_frame(stream: &mut UnixStream, value: &[u8]) -> Result<(), ()> {
         .map_err(|_| ())
 }
 
-fn response(status: u8, value: &[u8]) -> Vec<u8> {
-    let mut response = vec![status];
-    response.extend_from_slice(&u32::try_from(value.len()).unwrap().to_be_bytes());
-    response.extend_from_slice(value);
-    response
+fn response(status: u8, value: &[u8]) -> Result<pm_crypto::ProtectedBytes, ()> {
+    let length = u32::try_from(value.len()).map_err(|_| ())?;
+    let size = 5_usize.checked_add(value.len()).ok_or(())?;
+    let mut response = pm_crypto::ProtectedWriter::new(size).map_err(|_| ())?;
+    response.put(&[status]).map_err(|_| ())?;
+    response.put(&length.to_be_bytes()).map_err(|_| ())?;
+    response.put(value).map_err(|_| ())?;
+    response.finish_exact().map_err(|_| ())
 }
 
 struct Cursor<'a> {
     bytes: &'a [u8],
     at: usize,
 }
+
+#[cfg(test)]
+mod protected_response_tests;
 
 impl<'a> Cursor<'a> {
     const fn new(bytes: &'a [u8]) -> Self {

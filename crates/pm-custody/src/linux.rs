@@ -419,10 +419,15 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
     let device = decode_hex_16(&device_value)?;
     let audit_path = std::path::PathBuf::from(format!("{}.audit-custody", vault_path.display()));
     let sync_jobs = sync_job::Manager::open(&vault_path)?;
+    let audit_custody = Arc::new(load_or_create_audit_custody(
+        &audit_path,
+        &vault_path,
+        device,
+    )?);
     let service = VaultService {
         path: vault_path,
         device,
-        audit_custody: Arc::new(load_or_create_audit_custody(&audit_path)?),
+        audit_custody,
         provider: None,
         sync_jobs,
     };
@@ -447,10 +452,15 @@ fn serve_attempt_lab(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
     let device = decode_hex_16(&device_value)?;
     let audit_path = std::path::PathBuf::from(format!("{}.audit-custody", vault_path.display()));
     let sync_jobs = sync_job::Manager::open(&vault_path)?;
+    let audit_custody = Arc::new(load_or_create_audit_custody(
+        &audit_path,
+        &vault_path,
+        device,
+    )?);
     let service = VaultService {
         path: vault_path,
         device,
-        audit_custody: Arc::new(load_or_create_audit_custody(&audit_path)?),
+        audit_custody,
         provider: Some(ControlledProvider {
             socket: provider_socket,
             uid: provider_uid,
@@ -466,10 +476,40 @@ fn serve_attempt_lab(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
     )
 }
 
-fn load_or_create_audit_custody(path: &Path) -> Result<AuditDeviceCustody, Failure> {
-    if path.exists() {
-        let bytes = read_regular(path, current_uid(), 0o400)?;
-        return AuditDeviceCustody::from_protected_bytes(&bytes).map_err(|_| Failure::Unavailable);
+fn load_or_create_audit_custody(
+    path: &Path,
+    vault_path: &Path,
+    device: [u8; 16],
+) -> Result<AuditDeviceCustody, Failure> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            let bytes = read_regular(path, current_uid(), 0o400)?;
+            return AuditDeviceCustody::from_protected_bytes(&bytes)
+                .map_err(|_| Failure::Unavailable);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(Failure::Unavailable),
+    }
+    // An initialized generation survives loss of the native private file.
+    // Only a successful read proving this device has no generation permits
+    // first provisioning. Never create a database to answer that question.
+    let connection = rusqlite::Connection::open_with_flags(
+        vault_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    connection
+        .execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")
+        .map_err(|_| Failure::Unavailable)?;
+    let initialized: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM audit_keys WHERE device_id=?1)",
+            [device.as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(|_| Failure::Unavailable)?;
+    if initialized {
+        return Err(Failure::Unavailable);
     }
     let custody = AuditDeviceCustody::generate().map_err(|_| Failure::Unavailable)?;
     let mut bytes = Zeroizing::new(custody.to_protected_bytes());
@@ -478,6 +518,9 @@ fn load_or_create_audit_custody(path: &Path) -> Result<AuditDeviceCustody, Failu
     result?;
     Ok(custody)
 }
+
+#[cfg(test)]
+mod audit_custody_tests;
 
 fn serve_loop(
     bootstrap_path: &Path,

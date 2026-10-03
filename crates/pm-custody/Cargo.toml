@@ -27,6 +27,7 @@ pm-sync.workspace = true
 pm-vault.workspace = true
 rustls.workspace = true
 ratatui.workspace = true
+rusqlite.workspace = true
 russh.workspace = true
 signature = "=3.0.0"
 zeroize.workspace = true

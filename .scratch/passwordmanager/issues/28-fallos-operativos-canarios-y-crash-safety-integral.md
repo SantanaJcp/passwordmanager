@@ -204,3 +204,23 @@ rc1 separados, ambos con control/restauración/cleanup válidos y sus fallbacks
 sin corregir. Enlaces/sintaxis/estado y función audit custody intacta comprobados;
 el método conserva todos los logs intermedios y el inventario de criterios
 no cumplidos. Este checkpoint sigue parcial y no resuelve 28/G7.
+
+
+2026-10-03 — Fase 3 desde d4550ce: corrección acotada autorizada de
+load_or_create_audit_custody. Consulta audit_keys read-only para el dispositivo
+antes de generar; pérdida/ilegibilidad rechaza CUSTODY_UNAVAILABLE sin claves
+sustitutas. RED público rc1 → GREEN rc0 y cinco tests de función pasan,
+incluida primera creación y restitución exacta con autoridad conservada.
+El ajuste necesario del fixture observa rechazo antes de sockets, sin cambiar
+las aserciones finales. Se protege además el serializer final de respuestas
+web-auth con RED válido → GREEN; fuentes HTTP/JSON/CDP y requests aún pendientes.
+Nuevo GREEN existente de fsync real de SQLite WAL: EIO único, rc4, DB/conteos
+intactos e integridad/restart. Check completo, clean offline (36.73 s), audit-loss,
+SQLite-sync y 26/26 labs Linux secuenciales pasan; vault-loss conserva RED por
+SQLite sustituto, sin corrección no autorizada. Inventario integral sigue FAIL;
+matriz completa de fronteras, límites/canarios y nativos siguen pendientes.
+Nuevos silenciamientos heredados de provider/Browser se documentan y conservan.
+Cronología, comandos/logs y tabla vigente en
+[la fase 3 del método](../../../docs/verification/ticket-28.md#fase-3--2026-10-03-custodia-audit-autorizada).
+Entrega parcial en codex/pm-28; claimed, sin integrar principal,
+sin fusionar PR #1 ni tocar worktrees/zonas concurrentes 26/27.

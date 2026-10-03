@@ -1625,6 +1625,7 @@ dependencies = [
  "pm-sync",
  "pm-vault",
  "ratatui",
+ "rusqlite",
  "russh",
  "rustls",
  "signature",

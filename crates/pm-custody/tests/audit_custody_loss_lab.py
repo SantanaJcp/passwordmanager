@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from linux_lab import AGENT, CUSTODIAN, HUMAN, as_uid, create_vault, start_as, wait_for_sockets, wire_fields
 from storage_fault_lab import stop_owned
 DEVICE = "28282828282828282828282828282828"
@@ -86,18 +87,34 @@ def main():
         print("PM28_AUDIT_LOSS_INITIALIZED_CONTROL_READY", flush=True)
         stop_owned(daemon)
         daemon = None
+        # SIGTERM leaves these fixture-owned socket names. Remove the exact
+        # paths so old listeners cannot be mistaken for a successful restart.
+        agent_socket.unlink()
+        human_socket.unlink()
         custody = pathlib.Path(str(vault) + ".audit-custody")
         retained = state / "owned-original-audit-custody"
         custody.rename(retained)
         daemon = start_as(CUSTODIAN, serve)
-        wait_for_sockets(daemon, [agent_socket, human_socket])
+        # The corrected loader rejects before listeners exist. Observe that
+        # exact failure or the original live-daemon path under the same bound.
+        deadline = time.monotonic() + 10
+        while daemon.poll() is None and not all(path.exists() for path in (agent_socket, human_socket)):
+            assert time.monotonic() < deadline, "custodian produced neither rejection nor listeners"
+            time.sleep(0.02)
         replacement_created = custody.exists()
-        denied = as_uid(HUMAN, crud, input=payload, check=False)
-        admission_closed = denied.returncode == 4 and denied.stdout == b"" and denied.stderr == b"CUSTODY_UNAVAILABLE\n"
-        assert CANARY not in denied.stdout and CANARY not in denied.stderr
-        print("PM28_AUDIT_LOSS_ADMISSION rc=" + str(denied.returncode) + " closed=" + str(int(admission_closed)), flush=True)
-        stop_owned(daemon)
-        daemon = None
+        if daemon.poll() is not None:
+            stdout, stderr = daemon.communicate(timeout=8)
+            rc = daemon.returncode
+            daemon = None
+        else:
+            wait_for_sockets(daemon, [agent_socket, human_socket])
+            denied = as_uid(HUMAN, crud, input=payload, check=False)
+            rc, stdout, stderr = denied.returncode, denied.stdout, denied.stderr
+            stop_owned(daemon)
+            daemon = None
+        admission_closed = rc == 4 and stdout == b"" and stderr == b"CUSTODY_UNAVAILABLE\n"
+        assert CANARY not in stdout and CANARY not in stderr
+        print("PM28_AUDIT_LOSS_ADMISSION rc=" + str(rc) + " closed=" + str(int(admission_closed)), flush=True)
         if replacement_created:
             custody.unlink()
         retained.rename(custody)

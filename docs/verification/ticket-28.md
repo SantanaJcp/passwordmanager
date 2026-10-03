@@ -1156,10 +1156,10 @@ y `crates/pm-custody/src/linux.rs`. Los cambios en pm-sync son únicamente
 fixtures de tests. Los fixtures y documentación nuevos no constituyen otra
 implementación del engine.
 
-### Estado vigente de criterios 28/G7 — fase 2
+### Estado de criterios 28/G7 al entregar fase 2 — histórico
 
-Esta tabla actualiza el checkpoint de fase 1; las tablas anteriores son
-históricas. Ticket sigue `claimed`; ninguna casilla integral queda resuelta.
+Esta tabla registró el checkpoint de fase 2 y actualizó fase 1. Su estado es
+histórico desde fase 3. Ticket sigue `claimed`; ninguna casilla integral queda resuelta.
 
 | Criterio | Estado y alcance vigente | Evidencia |
 |---|---|---|
@@ -1227,3 +1227,224 @@ en memoria, matriz de fallos y canarios enumerados arriba. Siguiente acción del
 orquestador: resolver las autorizaciones acotadas, componer los tipos con 26/27
 y continuar esos verticales sobre el engine único. No integrar este checkpoint
 como cierre de seguridad ni marcar 28 resolved.
+
+## Fase 3 — 2026-10-03: custodia audit autorizada
+
+Base limpia `d4550ce`. El usuario autoriza cambiar el comportamiento sólo de
+`load_or_create_audit_custody`: si el dispositivo tiene una generación en
+`audit_keys`, ausencia/ilegibilidad de su archivo exige `CUSTODY_UNAVAILABLE`.
+Primera inicialización puede crear. No cambia formato ni los demás fallbacks.
+La consulta será read-only para el device exacto, antes de generar claves;
+no se trata un error de lectura/schema como estado nuevo. Se usa `rusqlite`
+ya fijado en el workspace/lockfile, sin instalar dependencias ni tocar pm-vault.
+Sólo se añaden los parámetros vault/device a los dos callers del loader.
+
+Método de función (§3): vaults sintéticos independientes; primera creación y
+relectura exacta; inicialización humana real con generación audit y evento de
+autoridad antes del control; archivo ausente o modo 000 rechaza sin sustituto;
+rename/restauración del original permite reabrir autoridad con DB idéntica.
+Vault ausente o schema ilegible no puede habilitar generación de audit keys.
+Cleanup checked incluso tras panic, sin imprimir secretos.
+
+El lab existente exige sockets tras el reinicio; el loader corregido rechaza
+antes de crearlos. Se ajustará únicamente la observación para admitir ese
+rc4/diagnóstico exacto al arrancar, conservando rechazo de admisión, prohibición
+de reemplazo, original restituido y restart. No se debilita el oráculo. Un
+arranque fallido se consume y valida, nunca se anuncia vivo ni se reintenta.
+
+Siguiente seam (§1, providers): serializer real `pm-web-auth::provider::response`,
+compartido por browser/exchange/GitHub/passkey/reconcile. Subprocess con memlock
+32 KiB verifica un campo pequeño y emite control; un canario estático de 64 KiB
+(dentro del límite wire de 128 KiB) debe rechazarse antes de copiar. Baseline
+infalible se envuelve sólo en `Ok` dentro del test; al migrar la API a fallible
+se retira ese `Ok`, conservando exactamente la aserción. Parent sólo muestra
+marcadores/status. GREEN usará `ProtectedWriter` de tamaño checked exacto y
+propagará fallo al loop del proveedor sin frame sustituto. Esto sólo acredita
+el owner final del response, no JSON/browser/HTTP ni todos sus buffers fuente.
+
+Seam real adicional de §2: control CRUD íntegro y caso EIO, cada uno en un vault
+nuevo. Interposer del fixture observa `fsync`/`fdatasync` del WAL exacto, comprueba
+PID propio mediante archivo persistido antes de enviar la request y falla sólo
+el primero; registra operación/contador/PID, sin contenido. Error de registro
+termina el sujeto, nunca da evidencia silenciosa. El caso negativo exige rc4,
+DB byte a byte idéntica y conteos de items/revisions/streams/authority/outbox/
+receipts/audit_keys/audit_records originales, staging vacío e integridad/restart.
+No reenvía CRUD ni usa proveedor. Acredita primera frontera WAL de admisión
+humana/audit, no todas las fronteras ni intención después de transmisión.
+Escaneo de almacenamiento propio quiescente con inventario explícito, conteo
+completo de bytes y overlap entre chunks; falla por lectura parcial/canario.
+No se presenta como todos los canales activos/históricos de §4.
+
+### Cronología y alcance verificado de fase 3
+
+- Audit-loss RED válido rc1 sobre `d4550ce`:
+  `/tmp/pm28-20261003-red-audit-custody-loss.log`, con control inicializado,
+  CRUD rc0/closed=0, replacement-created=1, restitución y cleanup errors=0.
+- Función: `red-audit-function.log` y `red-audit-function2.log` son errores de
+  API del fixture y no RED. `red-audit-function3.log` rc101 compila y falla
+  después del control audit+autoridad al regenerar custodia ausente. El GREEN
+  `green-audit-function.log` rc0 pasa cinco casos; primera inicialización y
+  archivo ilegible ya pasaban en el baseline, no se inventa RED para ellos.
+- Audit-loss GREEN rc0: `green-audit-custody-loss.log`, rc4/closed=1,
+  replacement-created=0, original-restored=1, restart y cleanup errors=0.
+  El fixture ahora observa el rechazo exacto antes de sockets y retira sólo los
+  dos nombres de socket propios dejados por SIGTERM para no confundirlos con
+  listeners nuevos. Conserva las dos aserciones finales de ausencia de
+  sustitución y admisión cerrada; no usa proveedor.
+- Response web: `red-web-response.log` rc101, compilación/control confirmados,
+  destino ordinario aceptado bajo memlock. `green-web-response.log` rc0, 8/8
+  unidades web; response final protegido hasta write_frame, sin Clone/Debug
+  ni conversiones a Vec. Los parseos y buffers fuente siguen pendientes.
+- SQLite real: `sqlite-sync.log` rc0, control íntegro y EIO único del syscall
+  WAL en vaults nuevos, rechazo/rollback/integridad/restart. Es GREEN de
+  comportamiento existente y no originó corrección productiva ni RED ficticio.
+- `check.log` llegó a completar las suites y falló sólo en tres lints de
+  igualdad en los fixtures. Se cambiaron a booleanos `.eq`, preservando que un
+  fallo no imprima claves privadas. `check2.log` rc0: configuración, build
+  inputs, fmt, check/test/clippy workspace all-targets locked/offline.
+
+Los nombres abreviados de esta fase llevan `/tmp/pm28-20261003-`.
+Comandos exactos, siempre cwd `.worktrees/28-fault-safety`:
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh audit
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody --lib linux::audit_custody_tests --locked --offline -- --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-web-auth --lib provider::protected_response_tests::provider_response_requires_locked_destination --locked --offline -- --exact --nocapture
+# GREEN web agrupado:
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-web-auth --lib --locked --offline -- --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh sqlite-sync
+flock /tmp/pm-cargo-window.lock ./scripts/check.sh
+flock /tmp/pm-cargo-window.lock ./scripts/clean-offline-build.sh
+```
+
+### Inventario restante, límites y fallbacks de fase 3
+
+Memoria integral sigue **FAIL**, con evidencia estática concreta:
+
+| Owner/copia pendiente | Ubicación | Alcance que falta |
+|---|---|---|
+| Request al proveedor y secreto SSH temporal | `linux.rs::call_controlled_provider/call_ssh_provider` | Zeroizing<Vec>/Vec; responses entrantes ya usan reader protegido, no las requests |
+| Access/id token, form y HTTP body propios | `pm-web-auth/src/{exchange,oidc,github}.rs` | Strings/JSON/Vec y clones propios antes del response migrado |
+| Scripts, escape JS y mensajes CDP | `browser.rs::authenticate/command/read_message` | Copias propias plaintext; la excepción Chromium no cubre el cliente CDP |
+| Perfil provider y copias de parseo | `provider.rs::read_private/handle_browser/handle_passkey` | Perfil Vec y algorithm/username ordinarios; clasificación integral pendiente |
+| Metadata, búsquedas, prepared commands y backup | `pm-vault/src/{content,human,backup}.rs` | String/to_lowercase, serializers/chunks y owners ordinarios heredados de fase 2 |
+| ZIP/DEFLATE y readers de import | `onepux.rs` y fuentes locked de zlib-rs | Estado/window ordinarios sin excepción G7; seleccionar solución que conserve ZIP |
+| Presentación TUI y requests/split_exact | `linux/tui.rs` y Ratatui | Cell/String y requests propios; se conserva reveal/copy/search y no se refactorean zonas concurrentes |
+| Lecturas de claves/inputs y otros serializers | `linux.rs::read_regular/read_import_source/read_tty_password/...` | Memoria ordinaria previa a owners finales protegidos; inventario no cerrado |
+
+Puntos que requieren coordinación antes de tocarse: la presentación intersecta
+las zonas TUI extraídas por 26/27, que este encargo prohíbe refactorizar. Opciones:
+componer luego un renderer protegido conservando capacidades, o añadir una
+excepción/reducir reveal. Se recomienda la primera; las otras no están
+aprobadas. ZIP/DEFLATE también requiere una solución de ingeniería validada;
+no se cambia backend ni se amplían excepciones en este checkpoint.
+
+Fallbacks/silenciamientos heredados adicionales inspeccionados y **conservados**:
+
+- `provider.rs::serve`: error de read_frame continúa sin responder; fallo de
+  write_frame se descarta y sigue el loop. Puede ocultar una request truncada o
+  una respuesta perdida. No se cambia ninguna de esas ramas.
+- `provider.rs::handle_{github,browser,exchange}`: el error al copiar un campo
+  secreto a ProtectedBytes se agrupa con parseo inválido y responde status4
+  (`UNSUPPORTED_INTEGRATION`). No se presenta eso como denegación integral de
+  recursos ni se reclasifica el error sin autorización acotada. Opciones:
+  separar error de recursos y cerrar la operación, o preservar el status
+  sustituto; se recomienda lo primero para un futuro cambio autorizado.
+- `browser.rs::Browser::stop`: descarta errores de kill/wait/remove_dir_all;
+  puede ocultar proceso/perfil residual al cerrar. No se amplía la autorización
+  histórica de los cuatro cleanups a este lugar.
+
+Las autorizaciones pendientes de vault SQLite vacío, notesPlain/favIndex,
+TOTP→source_fields, respuesta vacía→DENIED, ProcessTlsTransport::put, sync_stage,
+from_utf8_lossy y demás handoff siguen vigentes. Ninguna se considera concedida.
+
+Archivos de producto de fase 3: `crates/pm-custody/src/linux.rs` (loader y sus
+2 callers), `crates/pm-web-auth/src/provider.rs` (serializer/propagación),
+`crates/pm-custody/Cargo.toml` y `Cargo.lock` (dependencia directa de rusqlite ya
+fijada). No cambia pm-vault, formato, KDF, deadlines, limits, cfg nativo,
+tui.rs/human_wire.rs/agent_wire.rs/sync_job.rs ni otros worktrees.
+Conflicto previsto de composición con 26/27: mover loader/callers de linux.rs
+al único engine extraído; Cargo.lock puede requerir composición mecánica. No
+se integra en principal, no se fusiona PR #1 ni se resuelve ticket 28.
+
+### Estado vigente de criterios 28/G7 — fase 3 (checkpoint parcial)
+
+Esta tabla sustituye el estado vigente de fase 2, sin borrar su cronología.
+
+| Criterio | Estado y alcance vigente | Evidencia |
+|---|---|---|
+| Records/password/notas/Attachment, decoder AuthRecord y serializers acotados | PASS acotado heredado; no todos los owners | RED/GREEN de fase 2; check2 |
+| Parsers CSV/JSON e inline PMF1 | PASS acotado heredado | Fase 2; check2 |
+| Invariancia passkey 32 bytes | PASS del constructor/decoder | Fase 2; check2 |
+| Response sensible custody y frames protegidos ya migrados | PASS acotado; no todos los caminos | Fase 1; check2 |
+| Response final web-auth compartido | PASS: owner exacto locked antes de copiar, control 32 KiB y rechazo 64 KiB | red/green-web-response; check2 |
+| Memoria propia integral/providers/presentación/owners restantes | FAIL de inventario; zonas TUI concurrentes y ZIP aún sin solución integrada | Tabla de inventario fase 3 |
+| Presupuesto agregado | PASS contador test-only 64 KiB; 32 MiB físicos/overhead no demostrados con host memlock 8 MiB | Fase 2; check2 |
+| Guardas Linux/core/dumpable/stdin | PASS acotado heredado | final-test-linux-fault-safety-lab; final-test-linux-custody-protected-input-lab |
+| 17.º RATE_LIMITED y CLOCK_UNTRUSTED | PASS acotado heredado | delegated_authorization; check2 |
+| Resto de límites, incluido techo custodial 128 | No demostrado integralmente | No extrapolar los controles acotados |
+| ENOSPC en WAL + atomicidad/restart | PASS acotado heredado | final-test-linux-storage-fault-lab.log |
+| Primera sincronización WAL de admisión humana/audit | PASS acotado: EIO real único, rc4, DB/conteos intactos y restart | sqlite-sync.log; final-sqlite-sync.log |
+| Matriz fsync/WAL/staging/commit/outbox/audit y ENOSPC por frontera | No demostrado integralmente | Primera frontera nueva no sustituye todas las restantes |
+| Crash/intención sin resultado → INDETERMINATE, no doble login | PASS acotado heredado de attempts | final-test-linux-attempts-lab.log; no todos los proveedores |
+| Bootstrap perdido con intento completado | PASS: claves/conteos originales, sustituto=0, proveedor=1 | final-bootstrap-completed-loss.log |
+| Vault perdido con intento completado | FAIL bloqueado por autorización: crea SQLite vacío aunque rechaza rc4 | Test sin modificar; final-vault-completed-loss.log rc1 |
+| Audit-custody perdido/ilegible; primera inicialización; restitución exacta | PASS acotado autorizado: sin generación sustituta; loader falla antes de listeners | RED/GREEN audit; 5 tests función; check2 |
+| Pérdidas en vivo/en vuelo/ambiguas | No demostrado integralmente | Audit-loss no tiene proveedor; no atribuirle no-doble-login |
+| Canarios activos/históricos en todos los canales, agente y core/crash | No demostrado integralmente | Escaneo completo nuevo sólo de almacenamiento propio quiescente y salidas CRUD |
+| Windows VirtualLock/WER y macOS nativo | Diferido | 26/27 y gates 30–32; sin evidencia inferida de Linux |
+| Check completo y build limpio | PASS | check2.log rc0; clean.log rc0 en 36.73 s |
+| 26 labs Linux secuenciales + audit-loss + SQLite-sync | PASS acotado: 26/26 rc0, audit-loss y SQLite-sync rc0 | final-labs-summary.log; final-focused-summary.log |
+| Integración por merger/revisión independiente | Pendiente, fuera de esta entrega | Ticket claimed; PR #1 borrador sin fusionar |
+
+La matriz completa de fallos y los canales integrales de canarios **no se
+completaron en esta fase**. Se entrega el checkpoint verificado solicitado,
+no un cierre de fase 3/G7. Siguiente vertical: migrar requests de proveedor y
+fuentes HTTP/JSON/CDP con RED propio; coordinar presentación después de componer
+26/27; continuar cada frontera real de §2 y cada canal de §4 sin retries,
+lecturas truncadas ni oráculos reducidos. El fallback SQLite perdido continúa
+bloqueado por autorización del usuario a través del orquestador.
+
+
+### Gate final y entrega del checkpoint de fase 3
+
+Sin cambios posteriores de producto ni fixtures de los 26 labs:
+
+- `check2.log` rc0 y `clean.log` rc0, build en **36.73 s**.
+- `final-audit-custody-loss.log` rc0: rc4/closed=1, reemplazo=0,
+  original restituido, restart y cleanup errors=0.
+- `final-sqlite-sync.log` rc0: control CRUD rc0 con 24 llamadas WAL;
+  caso EIO en el primer `fsync`, llamadas=1/inyecciones=1, cliente rc4,
+  DB y 9 conteos intactos, staging vacío, siete archivos propios leídos
+  completos, canario ausente, integridad/restart y cleanup errors=0.
+- `final-bootstrap-completed-loss.log` rc0: proveedor=1, sustituto=0,
+  cinco conteos/claves exactos y restitución/cleanup verificados.
+- `final-vault-completed-loss.log` **rc1 esperado y separado**: rechaza rc4,
+  main-vault=1; proveedor=1 y cinco conteos/claves/restauración exactos,
+  cleanup errors=0. Continúa RED bloqueado por autorización; no se oculta
+  dentro de un summary de labs verdes.
+- Barrida única final de los 26 scripts existentes: **count=26 failures=0**,
+  **1085.97 s**, `final-labs-summary.log`. Logs individuales
+  `final-test-linux-<nombre>-lab.log`. Ese tiempo y los tiempos por caso incluyen
+  espera del lock compartido con 26/27; no indican ampliación de deadlines.
+  Se adquirió un flock por invocación, sin paralelismo/retries de producto.
+  Audit-loss y SQLite-sync corren aparte del 26/26, ambos rc0.
+
+Se comprobaron AST Python, shell syntax, enlaces locales, diff, estado claimed,
+y conservación exacta de pm-vault, zonas TUI/sync/cfg y custody_loss_lab.py
+respecto a d4550ce. Las regiones propias centrales siguen sin Debug/Clone y
+sus excepciones G7 no se amplían. Se retienen los logs para el orquestador;
+cleanup de cada fixture se comprobó antes de PASS. Se retiraron los dos
+archivos propios linux_lab/storage_fault_lab.cpython-314.pyc y su __pycache__
+exacto, verificando ausencia. No se barreron temporales
+ajenos ni se retiró el worktree. La integración/revisión independiente sigue
+fuera de esta entrega.
+
+Comandos adicionales del gate final:
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh bootstrap completed
+flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh vault completed # RED esperado, no corregido
+# Por cada uno de los 26 scripts enumerados, con log propio y rc propagado:
+PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3 PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64 PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/test-linux-storage-fault-lab.sh
+```
