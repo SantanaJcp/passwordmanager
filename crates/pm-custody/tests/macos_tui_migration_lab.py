@@ -253,6 +253,23 @@ def assert_stream(path):
     assert offset == size and actual.digest() == expected.digest()
 
 
+def expect_output_collision(session, kind, path, expected_digest, *, since):
+    try:
+        session.wait_text("Operation failed explicitly; no success was recorded", since=since)
+    except BaseException as error:
+        try:
+            page = session._current_text_after(since)
+            complete = {"backup": "Native encrypted backup complete",
+                        "plaintext": "Plaintext export complete"}[kind]
+            result = "unexpected-complete" if page is not None and complete in page else "unclassified"
+            destination = "same" if source_digest(path) == expected_digest else "changed"
+            print(f"PM26_OUTPUT_COLLISION kind={kind} result={result} destination={destination}", flush=True)
+        except BaseException as diagnostic_error:
+            raise error from diagnostic_error
+        raise
+    assert source_digest(path) == expected_digest, "collision changed the original output"
+
+
 def rejected_source(m, binary, profile, private, endpoint, path, *, onepux_source):
     before = snapshot(m)["vault_items"]
     session = start(m, binary, profile, private, endpoint)
@@ -381,13 +398,28 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
             m.STATE / "vault.sqlite3", REMOTE_DEVICE])
         assert result.stdout == b"1\n" and result.stderr == b""
 
+        mark = operation(session, "y", "1", "Observed server RPK", f"{pin}|{pairing}|PAIR")
+        session.wait_text("Protected pairing created", since=mark)
+        assert pairing.stat().st_mode & 0o777 == 0o600
+        namespace = pairing_namespace(pairing.read_bytes())
+        sync_value = f"{pairing}|{sync_binary}|{sync_socket}|{client_key}|{server_pub}|{pin}|SYNC"
+        mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value)
+        session.wait_text("Sync endpoint offline; no sync was performed", since=mark)
+        launch(m, SYNC_LABEL, [sync_binary, "serve", "--db", sync_db, "--socket", sync_socket,
+            "--server-key", server_key, "--namespace", namespace, "--client-pub", client_pub], scratch, labels)
+        sync_pid = wait_service(m, SYNC_LABEL, sync_socket, session)
+        negative_count = snapshot(m, session)["vault_items"]
+        wrong = "00" * 44
+        mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value.replace(pin + "|SYNC", wrong + "|SYNC"))
+        rejected = session.wait_text("rejected its fixed authority/request context", since=mark)
+        assert "no success recorded" in rejected
+        assert snapshot(m, session)["vault_items"] == negative_count
+        print("PM26_MATRIX full25-offline+wrong-pin=observed", flush=True)
+
         mark = operation(session, "b", "1", "New native backup path", native)
         session.wait_text("Native encrypted backup complete", since=mark)
         assert native.stat().st_mode & 0o777 == 0o600 and native.stat().st_size > 0
-        digest = source_digest(native)
-        mark = operation(session, "b", "1", "New native backup path", native)
-        session.wait_text("Operation failed explicitly; no success was recorded", since=mark)
-        assert source_digest(native) == digest
+        native_digest = source_digest(native)
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
         session.wait_text("PLAINTEXT WARNING", since=mark)
         submit(session, "NOT EXPORT"); session.wait_text("Confirmation mismatch", since=mark)
@@ -397,10 +429,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         submit(session, "EXPORT"); session.wait_text("Plaintext export complete", since=mark)
         assert plaintext.stat().st_mode & 0o777 == 0o600 \
             and plaintext.read_bytes().startswith(b"PM-LOGICAL-JSONL/1\n")
-        mark = operation(session, "b", "2", "New plaintext export path", plaintext)
-        session.wait_text("PLAINTEXT WARNING", since=mark)
-        submit(session, "EXPORT"); session.wait_text("Operation failed explicitly; no success was recorded", since=mark)
-
+        plaintext_digest = source_digest(plaintext)
         m.tui_search(session, "Large stream")
         mark = session.mark(); session.send_key("D")
         page = session.wait_text("large-雪.bin", since=mark)
@@ -451,17 +480,17 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         finally:
             m.close_session_preserving_primary(wrong)
         session = start(m, binary, profile, private, endpoint, password=NEW_PASSWORD)
-        restored_count = snapshot(m, session)["vault_items"]
+        for path, digest in digests.items():
+            assert source_digest(path) == digest
         print("PM26_MATRIX full25-local=observed", flush=True)
 
-        mark = operation(session, "y", "1", "Observed server RPK", f"{pin}|{pairing}|PAIR")
-        session.wait_text("Protected pairing created", since=mark)
-        assert pairing.stat().st_mode & 0o777 == 0o600
-        namespace = pairing_namespace(pairing.read_bytes())
-        launch(m, SYNC_LABEL, [sync_binary, "serve", "--db", sync_db, "--socket", sync_socket,
-            "--server-key", server_key, "--namespace", namespace, "--client-pub", client_pub], scratch, labels)
-        sync_pid = wait_service(m, SYNC_LABEL, sync_socket, session)
-        sync_value = f"{pairing}|{sync_binary}|{sync_socket}|{client_key}|{server_pub}|{pin}|SYNC"
+        mark = operation(session, "b", "1", "New native backup path", native)
+        expect_output_collision(session, "backup", native, native_digest, since=mark)
+        mark = operation(session, "b", "2", "New plaintext export path", plaintext)
+        session.wait_text("PLAINTEXT WARNING", since=mark)
+        submit(session, "EXPORT")
+        expect_output_collision(session, "plaintext", plaintext, plaintext_digest, since=mark)
+
         mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value)
         try:
             complete = session.wait_text("Sync complete through pinned TLS", timeout=20, since=mark)
@@ -475,11 +504,6 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         job = re.search(r"job=([0-9a-f]{32})", complete); assert job
         mark = operation(session, "y", "4", "Exact sync job ID", job.group(1))
         session.wait_text("Sync complete through pinned TLS", since=mark)
-        wrong = "00" * 44
-        mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value.replace(pin + "|SYNC", wrong + "|SYNC"))
-        rejected = session.wait_text("rejected its fixed authority/request context", since=mark)
-        assert "no success recorded" in rejected
-        assert snapshot(m, session)["vault_items"] == restored_count
         hostile_socket = scratch / "closing.sock"
         closing = ClosingEndpoint(hostile_socket)
         failed_value = sync_value.replace(str(sync_socket), str(hostile_socket))

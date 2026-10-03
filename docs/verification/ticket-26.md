@@ -1,9 +1,13 @@
 # Ticket 26 verification method and checkpoint
 
-Date: 2026-09-13. Requirements: R01, R02, R09, R10, R11. This document is
-the written verification method for the macOS custody port. The current state
-is an **implementation checkpoint, not native acceptance evidence**: this
-Linux host cannot execute Darwin kernel, launchd, AppKit or ACL behavior.
+Created: 2026-09-13. Updated: 2026-10-02 (America/Santo_Domingo).
+Requirements: R01, R02, R09, R10, R11. This is the written verification method
+and native CI chronology for the macOS custody port. The current state is an
+**implementation checkpoint with partial native evidence, not complete Ticket
+26 acceptance**. Native claims refer only to the exact GitHub runs/SHAs and
+CPU observed below; local Linux checks cannot execute Darwin kernel, launchd,
+AppKit or macOS ACL behavior. Ticket 26 remains claimed, pending integration
+and the recorded gates; reboot/human/platform support are not certified here.
 
 ## Native contract under test
 
@@ -1995,3 +1999,31 @@ Inherited compatibility path also encountered and retained:
 `reducer::decode_event` tries `decode_legacy_body` when the primary body decode
 fails/canonicality differs; it can accept a supported legacy representation.
 This is not modified or used as a diagnostic substitute.
+
+The next fixture candidate puts output-collision negatives after the other
+independent local cases. Before them, create protected pairing, prove the
+ordinary offline message against the not-yet-started real sync endpoint,
+launch the same owned native sync daemon with the original closed-peer
+readiness probe, and exercise the existing wrong-pin request-context negative.
+None substitutes for happy sync. On collision failure, keep the original
+eight-second wait and emit only `kind`, fixed UI result category, and whether
+the original destination digest changed, then re-raise. Do not overwrite a
+destination deliberately through a setup command or alter product rename
+behavior. Require original source digests before reporting the local group
+observed; all collision and sync assertions still gate overall Full25 PASS.
+
+Run [37091908012](https://github.com/SantanaJcp/passwordmanager/actions/runs/37091908012),
+exact `282531282b045a17eabaa607a3738b78b9438d31`, completed FAILED on both
+CPUs. Both completed Ticket23/partial Ticket24, immediate concurrent discovery,
+and Full25 imports. Both recorded `items=1 pending-revisions=5 missing-items=5`:
+purged item payloads are absent but five signed revision events remain pending.
+This confirms the shared purge/outbox prerequisite defect traced above. The
+exact error returned by the export was not instrumented, so attribution of the
+earlier integrity phase to that export remains a source-traced inference.
+Both then passed causal retirement and the first native backup, but timed out
+waiting for the second backup to reject the existing destination. Source
+inspection shows `rpc_download_atomic` checks only its temporary's novelty
+and then uses `fs::rename` onto the destination; the next fixed UI/digest
+discriminant must distinguish actual overwrite from an observer failure.
+Neither shared path is changed. Intel retained its independent clipboard
+indeterminacy/`-1700`; ARM had no core error. Both strict cleanups completed.
