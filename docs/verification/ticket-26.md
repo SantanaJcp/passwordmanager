@@ -8,9 +8,232 @@ and native CI chronology for the macOS custody port. The current state is an
 CPU observed below; local Linux checks cannot execute Darwin kernel, launchd,
 AppKit or macOS ACL behavior. Ticket 26 remains claimed, pending integration
 and the recorded gates; reboot/human/platform support are not certified here.
-See the [October 2 consolidated checkpoint](#october-2-consolidated-checkpoint)
-for the final candidate, component results and remaining blockers from this
-continuation; the earlier observations below remain historical evidence.
+See the [October 3 clipboard and final-phase checkpoint](#october-3-clipboard-and-final-phase-checkpoint)
+for this bounded continuation and the [October 2 consolidated checkpoint](#october-2-consolidated-checkpoint)
+for the earlier full-matrix baseline. Earlier observations remain historical
+evidence; a bounded fixture PASS does not establish full Ticket26 acceptance.
+
+## October 3 clipboard and final-phase checkpoint
+
+Bounded implementation worktree: `.worktrees/26-clipboard`, branch
+`codex/pm-26-clipboard`, based on `36eecc8c365328ca4c8ca074ae013564767d79b7`.
+This work does not integrate the main branch, merge PR #1 or change ticket status.
+
+The task authorizes categorical diagnosis, native CI and an independent fixture
+mode for the final gates. Concrete method before execution:
+
+1. Run the ordinary matrix with `pasteboard_diagnostic=false`, preserving its
+   cold isolated AppleScript path (no shared-bootstrap supporting session).
+   Keep all existing timeouts, copy/idle limits, G1 UID/system-domain assertions
+   and the post-control. Add always-on **fixture-only** fixed categories:
+   AppleScript error class, timeout vs completed, elapsed before/at the existing
+   copy bound, TUI idle-lock observed, and native human pasteboard type/text/
+   exact-canary categories before and after. Never print clipboard data,
+   hashes, raw errors or identity material. Build the standalone test observer
+   with the runner's native `cc`/AppKit and verify its Mach-O CPU alongside
+   the product. No extra dependency or product diagnostic feature is used.
+2. Discriminate: a post `coercion-1700` with native `empty`/`nil`, absent canary
+   and idle-lock after the probe timeout demonstrates a fixture observation
+   after expiry; string/value with the canary still present instead implicates
+   AppleScript coercion itself. An unavailable/unstable native snapshot is a
+   failed requirement, never denial or PASS. A cold timeout vs a completed
+   warm/shared-bootstrap run is environment/observer evidence, not a CPU cause.
+3. Correct only the demonstrated cause and repeat natively on Intel/ARM.
+   A native AppKit probe may replace AppleScript as the isolated **observer**
+   if the evidence supports it; it must keep the same real agent UID, system
+   bootstrap and exact-canary negative with positive human pre/post controls.
+   No warmup, retry, longer lease or substitute value is permitted.
+4. Add explicit `final_phase_only` fixture mode: run setup, core clipboard/TUI
+   matrix and the same final suspension/restart/native probes without Full25.
+   Emit `full25=NOT_RUN acceptance=NOT_CLAIMED`; preserve all core failures and
+   strict cleanup. The default remains the full matrix, including happy sync.
+   Strengthen final evidence with a changed real custody PID, unchanged native
+   identity/keys/bootstrap/ACLs, suspension denied before/after restart, resume
+   under the same enrolled identity and a second restart with delegation still
+   usable and the same exact enabled metadata. No provider is substituted.
+5. Local fixture verification uses the documented macOS CI guard, Python AST,
+   existing PTY/helper/observer regressions and shell/YAML/diff/link checks.
+   Any local laboratory invocation acquires `flock /tmp/pm-cargo-window.lock`
+   in this worktree. No local Darwin run or product check is claimed; if
+   product changes become necessary, `check.sh` and native RED/GREEN are required.
+   At most approximately five hypothesis-driven exact-SHA native dispatches,
+   with both jobs awaited to completion and URL/SHA/result retained here.
+
+The inherited `MacPtySession.close` ignores `EBADF` from closing its PTY;
+it remains unchanged. The purge/outbox, provider/second-agent, import summary,
+listener/dispatcher and inherited fallbacks remain outside this workstream.
+Apple documents `errAECoercionFail` as a descriptor coercion failure
+([reference](https://developer.apple.com/documentation/coreservices/erraecoercionfail));
+it is not an isolation denial. Native state is observed using
+[`NSPasteboard`](https://developer.apple.com/documentation/appkit/nspasteboard),
+without changing product clipboard operations.
+
+First diagnostic run
+[37106382228](https://github.com/SantanaJcp/passwordmanager/actions/runs/37106382228),
+SHA `5652ef7c8cdca8be0a9b166d96497c484c45bae7`, completed **FAIL globally,
+both CPUs**. Native build/test/Mach-O and all reached core assertions passed;
+Full25 retained `durable=integrity screen=integrity process=same`, with zero
+roots (23 opaque blocks Intel, 15 ARM). No final gates were reached.
+With no shared-bootstrap control, the isolated AppleScript read completed
+nonzero without the canary in about 21.5 s Intel / 24 s ARM, before the existing
+copy bound. Human native snapshots were string/value, exact canary present,
+stable before/after; `tui-idle-lock=no`. No `-1700` was reproduced. This does
+not establish a CPU-specific cause or close the historical failures.
+
+Stage 2 method (written before run 37107134590), still fixture-only: use the standalone AppKit
+observer as the **only** read in the same agent UID/system-domain job, with
+the same 30-second probe bound and human AppleScript pre/post controls.
+Require a completed, stable native read, strict fixed schema, no stderr,
+no exact canary, and the existing domain/UID assertions. Invalid/unavailable/
+unstable/timeout results remain explicit failures; no AppleScript retry or
+alternate read is selected after failure. The positive/negative oracle is
+unchanged, now observing the same native API as the product rather than
+AppleScript's descriptor conversion/runtime. The new independent mode still
+runs every core assertion and then the final gates; sync is explicitly NOT_RUN.
+
+Add a separate causal control before final gates: a real TUI copies with the
+existing 5-second lease; observe the exact human canary, wait for the original
+`Clipboard custody expired` status without replacement or added delay, and
+require native empty/nil/absent/stable plus `coercion-1700` from the exact
+human `the clipboard as text` expression. Lock normally and check no canary
+in PTY output. This tests the empty-pasteboard hypothesis directly on both CPUs;
+it is not a manufactured isolation denial and cannot replace a failed agent
+probe. The old timeout and shared-bootstrap exposure remain historical FAILs.
+
+Second run
+[37107134590](https://github.com/SantanaJcp/passwordmanager/actions/runs/37107134590),
+SHA `87baf92505b0aa67b346c993a30a598866d6cbb5`, completed **FAIL, both CPUs**,
+explicit `final_phase_only=true`, ordinary binaries. Both reached core
+Ticket23/partial24 and kept the human canary string/value/stable before/after.
+The direct AppKit agent process completed nonzero in under the copy bound
+(approximately 0.3 s Intel / 1.1 s ARM), but the first classifier reported
+`probe-native=invalid`; no clipboard denial or scoped PASS was accepted.
+Both independently observed real owned expiry as empty/nil/absent/stable and
+the exact human AppleScript expression returning `coercion-1700`. This proves
+that error's empty-pasteboard cause on both architectures. Both then observed
+`PM26_FINAL suspension=durable restart=real identity=unchanged peer=verified`.
+The later resume fixture failed its original 8-second exit wait: it sent `l`
+while still on the Access screen, where `handle_access_key` ignores it.
+The established path is `Esc` → `Content view` → `l`; fix that fixture path,
+without modifying product keys, event handling or the wait.
+
+The new observer must preserve the old **substring** canary oracle, not only
+whole-string equality. Scan hash-matched windows natively without exporting
+data/digests, and add an embedded synthetic-canary positive control to the
+independent causal session after its expiry assertion (then replace it with
+the existing harmless external marker). This control does not touch the timed
+isolated lease or introduce a warmup before it.
+
+Final native-rejection discriminant: emit `PM26_PB denied=pasteboard-null`
+with the unique exit 69 **only** when `NSPasteboard.generalPasteboard` returns
+nil. Accept this completed explicit API rejection as the negative result only
+with that exact sentinel/exit, absent canary in both captured streams, verified
+agent UID/system manager/different domain and unchanged positive human controls
+using the same native binary. This is an expected failure of the attempted
+secret read, not a fallback or an unavailable result treated as success.
+Timeout, bad arguments/signal/other exit, malformed schema, unavailable types,
+unstable data or any exact canary remain FAIL. A human nil board still fails
+the positive control. Cocoa stderr is captured/scanned and never dumped;
+arbitrary nonzero statuses are never accepted as a denial. The next run must
+confirm this sentinel before attributing the preceding generic nonzero result.
+
+Historical CPU claim checked against GitHub: run
+[37087946638](https://github.com/SantanaJcp/passwordmanager/actions/runs/37087946638),
+SHA `7038e667e67b1521df04d10efdc68569c92c31ae`, contains post-control `-1700`
+on **both Intel and ARM**. The latest 26 candidate failed only on Intel at
+that boundary; the defect is not inherently Intel-only. No root cause for
+the operating system's variable AppleScript startup latency is claimed.
+
+Local classifier extension before verification: execute the actual launcher
+with fixed synthetic command results in the existing CI guard. Require that
+only the complete read or exact nil/exit-69 pair can report `no`; canary in
+native output or stderr reports `yes`; signal, missing sentinel, arbitrary
+stdout/stderr, unavailable types, instability and timeout remain indeterminate
+failures. Fake command data verifies this fixture classifier only. Actual
+pasteboard, sentinel, substring recognition and identities require the native
+runs. Reuse the existing flock, AST/shell/CI guard and relative-link checks.
+
+### Final executed candidate and cause
+
+Executed fixture/code SHA: `e3f02d4f34ea45c50754b150f5eec96e9c1a77b6`.
+The later report/guard-only commit does not alter this executed harness,
+workflow or native observer. No product source, listener/dispatcher, admission,
+provider, footer, import summary, purge/outbox or inherited fallback changed.
+
+| Run / exact SHA | Intel | ARM | Scope and observed result |
+| --- | --- | --- | --- |
+| [37106382228](https://github.com/SantanaJcp/passwordmanager/actions/runs/37106382228) / `5652ef7c8cdca8be0a9b166d96497c484c45bae7` | FAIL global; core observed | FAIL global; core observed | Original cold AppleScript diagnostic: 21.5/24 s, human canary intact; later happy sync integrity, zero roots. |
+| [37107134590](https://github.com/SantanaJcp/passwordmanager/actions/runs/37107134590) / `87baf92505b0aa67b346c993a30a598866d6cbb5` | FAIL bounded fixture | FAIL bounded fixture | Empty expiry → human `-1700` confirmed; generic native nonzero not accepted. Suspension/first restart/identity observed; Access-screen `l` prevented final completion. |
+| [37107761539](https://github.com/SantanaJcp/passwordmanager/actions/runs/37107761539) / `e3f02d4f34ea45c50754b150f5eec96e9c1a77b6` | **PASS bounded mode** ([job](https://github.com/SantanaJcp/passwordmanager/actions/runs/37107761539/job/111159537648)) | **PASS bounded mode** ([job](https://github.com/SantanaJcp/passwordmanager/actions/runs/37107761539/job/111159537406)) | Every core assertion, explicit native nil rejection, real expiry/coercion and embedded-canary control, both final restarts, identity/authority, final native probes and strict cleanup passed. Full25 NOT_RUN; full acceptance NOT_CLAIMED. |
+| [37107763341](https://github.com/SantanaJcp/passwordmanager/actions/runs/37107763341) / `e3f02d4f34ea45c50754b150f5eec96e9c1a77b6` | **FAIL full matrix** ([job](https://github.com/SantanaJcp/passwordmanager/actions/runs/37107763341/job/111159543703)) | **FAIL full matrix** ([job](https://github.com/SantanaJcp/passwordmanager/actions/runs/37107763341/job/111159543802)) | Both core/clipboard passed. Intel reached mandatory happy sync and failed original 20 s wait with integrity, same custody PID, 25 opaque blocks and zero roots. ARM failed the original wait for the complete master-rotation historical-copy warning (`macos_tui_migration_lab.py:510`), before full25-local/collision/sync. No final gate or full acceptance PASS in this mode. |
+
+Both final runs use `pasteboard_diagnostic=false` and ordinary production
+binaries/plist. The independent run uses `final_phase_only=true`; the full
+run uses false. In **all four final jobs**, the isolated native API completes
+in approximately 0.3 s with `probe-native=denied probe-error=pasteboard-null`,
+correct real agent UID, system manager and different domain, no exact canary
+in either stream. The same native binary observes the human canary as
+string/value/present/stable before and after. No TUI idle-lock occurs during
+the isolated read. This is completed explicit rejection, never timeout PASS.
+
+**Demonstrated cause and attribution boundary:** the human post-control
+expression is `the clipboard as text`, not the product AppKit writer and not
+an agent transport operation. After a real owned lease expires, native state
+is empty/nil and that expression emits `errAECoercionFail (-1700)` on both
+CPUs, independently of sync. The old isolated indeterminate branch follows
+only `TimeoutExpired` when both canary streams are absent; its 30 s read bound
+and preceding metadata/launch observation cannot ensure the positive human
+post-control remains inside the separate 30 s copy/idle lifetime. This is the
+fixture's mismatched observation lifetimes. Direct native observation removes
+the AppleScript runtime/coercion dependency from the isolated reader, while
+preserving the negative oracle and positive human controls and all deadlines.
+The explicit native nil in the job, paired with positive same-binary human
+controls, demonstrates the G1 fixture's domain separation for this probe.
+
+The old failing runs did not record native pasteboard types or latency phases;
+their precise historical empty state is therefore inferred from the timeout
+branch, expiry contract and now-native causal control, not a recovered
+measurement. The OS-internal cause of variable cold AppleScript latency is
+unclassified and is not claimed repaired. Historical exposure in the shared
+human bootstrap remains a confirmed unsafe profile, not an accepted agent
+deployment. No arbitrary error, empty substitute value, warmup, retry, longer
+lease/deadline, KDF relaxation or fallback is introduced.
+
+### Current criterion 3 and handoff
+
+This table supersedes the **current** clipboard/final-phase cells of the
+October 2 checkpoint; it does not rewrite its historical failures.
+
+| Criterion 3 component | Current evidence at `e3f02d4` | Remaining boundary |
+| --- | --- | --- |
+| Native clipboard isolation, ownership race, TUI keyboard/resize/lock/expiry | **PASS component Intel + ARM**, bounded and full runs above; same-domain exposure remains explicitly unsupported. | Does not certify all desktop capture APIs, human terminal apps, reboot/FDE or platform support. |
+| Suspension and real launchd restart | **PASS component Intel + ARM**, bounded run: discovery denied before and after real restart; changed custody PID, same installed process/UID and peer verified. | Full25 normal path remains blocked before these final gates. |
+| Persistent native identity and authority | **PASS component Intel + ARM**, bounded run: native account UIDs, private/public keys, bootstrap, profiles, published RPKs, binary/plist content and owner/modes unchanged across both restarts. Resume through real human TUI, lock, same exact enabled metadata discovered; second changed-PID restart preserves usable authorization without another setup/enrollment. | Single admitted bootstrap agent only; no second functioning agent/provider or full credential authentication is claimed. |
+| Final native probes and teardown | **PASS component Intel + ARM**, bounded run: real `script` PTY `/dev/tty`, core limit zero, AppKit changeCount probe; strict absence checks and cleanup before the scoped PASS. Native build/tests/Mach-O checks passed in both final runs. | Reboot/FileVault/real human terminal applications remain Ticket31; signing/notarization Ticket34. `MacPtySession.close`'s inherited EBADF handling stays untouched. |
+| Full Ticket26 / complete Full25 | **FAIL / incomplete**; normal run preserves mandatory gates and no full PASS. | Intel sync/purge-outbox integrity remains open; ARM rotation-warning observation failed, cause not newly classified here. No repeated identical run or owning-workstream change. |
+
+Local verification passed in this worktree: existing screen/PTY-helper
+regressions with flock, macOS CI configuration guard (including 11 synthetic
+classifier cases), harness and embedded-launcher AST, shell syntax, YAML,
+relative file/section links and `git diff --check`. No local Darwin execution,
+product `check.sh`, full Linux laboratory rerun or product RED/GREEN is claimed:
+product code is byte-for-byte unchanged against `36eecc8`. The failed new
+fixture classification/exit path in run 2 and corrected bounded PASS in run 3
+are fixture evidence, not a manufactured product RED/GREEN.
+
+Four hypothesis-driven runs, all completed; no own run remains active. No
+cache/artifact/secret/certificate, dependency installation on this host,
+larger runner, root checkout edit, other-worktree edit, issue-status change,
+force push, rule change, main-branch integration or PR merge occurred.
+The existing credential-helper path failed; only the task-authorized per-push
+`gh auth git-credential` override was used. GitHub reported the already
+authorized permissions bypass on normal branch creation/update.
+
+Handoff: orchestrator reviews/integrates this focused fixture branch, retaining
+the normal full matrix. Owning workstream/user must resolve purge/outbox and
+classify the Full25 rotation-warning failure before full acceptance can be
+retested. The unrelated admission/provider/footer/summary/fallback gates and
+human/reboot/FDE/signing evidence remain open; no ticket is advanced here.
 
 ## Native contract under test
 
@@ -72,9 +295,19 @@ PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh --diagnostic
 
 That mode alone enables the compile-time diagnostic feature, injects the fixed
 diagnostic environment into the synthetic client and launchd fixture, and
-validates the protected diagnostic log. Unknown or additional arguments fail;
+validates the protected diagnostic log. Unknown, duplicate or conflicting arguments fail;
 normal-mode failure never selects diagnostic mode. Native acceptance requires
 the default normal command, while diagnostic runs remain supporting evidence.
+
+The task's separate, explicit bounded mode is
+`PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh --final-phase-only`
+(workflow input `final_phase_only=true`, default false). It runs the ordinary
+core and final gates with ordinary binaries and the original master password,
+without Full25's rotation/sync. Only its scoped result may be green;
+`full25=NOT_RUN acceptance=NOT_CLAIMED` is mandatory, and it never prints the
+normal acceptance PASS group. It can be combined with one diagnostic flag;
+it is never selected after a failed full run. Every core failure remains fatal
+after the independent final observations and strict teardown.
 
 The pasteboard-only observation path is a separate explicit opt-in. It builds
 and installs the ordinary binary and ordinary LaunchDaemon plist; it does not
@@ -132,8 +365,9 @@ Its Python harness then:
 7. boots the job out and removes only the collision-checked paths/accounts it
    created, even on failure.
 
-Success requires every assertion and command to exit zero and all four final `PASS`
-lines to be present. A skip, cross-build, Linux execution, missing pasteboard
+Full acceptance in normal mode requires every assertion and command to exit zero
+and all four final `PASS` lines to be present. The explicitly scoped mode above
+has its own result and never establishes full acceptance. A skip, cross-build, Linux execution, missing pasteboard
 session, missing sudo privilege, pre-existing path/account, or cleanup failure
 is not acceptance. The harness intentionally does not claim reboot, FileVault,
 Intel+Apple-silicon coverage, signing, notarization or a human's daily machine;

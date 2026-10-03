@@ -52,9 +52,12 @@ require_exact_count() {
 
 require_literal '  workflow_dispatch:' "$workflow"
 require_literal '      pasteboard_diagnostic:' "$workflow"
+require_literal '      final_phase_only:' "$workflow"
 require_literal '        type: boolean' "$workflow"
 require_literal '          PM26_PASTEBOARD_DIAGNOSTIC: ${{ inputs.pasteboard_diagnostic }}' "$workflow"
 require_literal '            args+=(--pasteboard-diagnostic)' "$workflow"
+require_literal '          PM26_FINAL_PHASE_ONLY: ${{ inputs.final_phase_only }}' "$workflow"
+require_literal '            args+=(--final-phase-only)' "$workflow"
 require_literal '  contents: read' "$workflow"
 require_literal "  RUSTUP_AUTO_INSTALL: '0'" "$workflow"
 require_literal '    RUSTUP_HOME: ${{ github.workspace }}/.toolchain/rustup' "$workflow"
@@ -342,16 +345,17 @@ configure_ticket26_build_commands normal /synthetic-ticket26
 [[ "${build_command[*]}" != *macos-ticket26-diagnostics* ]]
 [[ "${test_command[*]}" != *macos-ticket26-diagnostics* ]]
 printf '%s\n' "${build_command[@]}" "${test_command[@]}" >/dev/null
-configure_ticket26_harness_command normal /synthetic-ticket26 /synthetic-config.log
+configure_ticket26_harness_command normal /synthetic-ticket26 /synthetic-config.log false
 [[ "${harness_command[*]}" != *--diagnostic* ]]
 [[ "${harness_command[*]}" != *--pasteboard-diagnostic* ]]
+[[ "${harness_command[*]}" != *--final-phase-only* ]]
 printf '%s\n' "${harness_command[@]}" >/dev/null
 
 configure_ticket26_build_commands pasteboard /synthetic-ticket26
 [[ "${build_command[*]}" != *macos-ticket26-diagnostics* ]]
 [[ "${test_command[*]}" != *macos-ticket26-diagnostics* ]]
 printf '%s\n' "${build_command[@]}" "${test_command[@]}" >/dev/null
-configure_ticket26_harness_command pasteboard /synthetic-ticket26 /synthetic-config.log
+configure_ticket26_harness_command pasteboard /synthetic-ticket26 /synthetic-config.log false
 count_argument --pasteboard-diagnostic "${harness_command[@]}"
 [[ "${harness_command[*]}" != *--diagnostic* ]]
 printf '%s\n' "${harness_command[@]}" >/dev/null
@@ -360,9 +364,16 @@ configure_ticket26_build_commands diagnostic /synthetic-ticket26
 count_argument macos-ticket26-diagnostics "${build_command[@]}"
 count_argument macos-ticket26-diagnostics "${test_command[@]}"
 printf '%s\n' "${build_command[@]}" "${test_command[@]}" >/dev/null
-configure_ticket26_harness_command diagnostic /synthetic-ticket26 /synthetic-config.log
+configure_ticket26_harness_command diagnostic /synthetic-ticket26 /synthetic-config.log false
 count_argument --diagnostic "${harness_command[@]}"
 printf '%s\n' "${harness_command[@]}" >/dev/null
+configure_ticket26_harness_command normal /synthetic-ticket26 /synthetic-config.log true
+count_argument --final-phase-only "${harness_command[@]}"
+[[ "${harness_command[*]}" != *--diagnostic* ]]
+[[ "${harness_command[*]}" != *--pasteboard-diagnostic* ]]
+configure_ticket26_harness_command pasteboard /synthetic-ticket26 /synthetic-config.log true
+count_argument --final-phase-only "${harness_command[@]}"
+count_argument --pasteboard-diagnostic "${harness_command[@]}"
 SH
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$harness" <<'PY'
@@ -378,21 +389,28 @@ spec = importlib.util.spec_from_file_location("pm_macos_lab", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-normal, pasteboard, paths = module.parse_lab_arguments(["custody", "cli", "plist", "config"])
-assert normal is False and pasteboard is False and len(paths) == 4
-diagnostic, pasteboard, paths = module.parse_lab_arguments(
+normal, pasteboard, final, paths = module.parse_lab_arguments(["custody", "cli", "plist", "config"])
+assert normal is False and pasteboard is False and final is False and len(paths) == 4
+diagnostic, pasteboard, final, paths = module.parse_lab_arguments(
     ["--diagnostic", "custody", "cli", "plist", "config"]
 )
-assert diagnostic is True and pasteboard is False and len(paths) == 4
-diagnostic, pasteboard, paths = module.parse_lab_arguments(
+assert diagnostic is True and pasteboard is False and final is False and len(paths) == 4
+diagnostic, pasteboard, final, paths = module.parse_lab_arguments(
     ["--pasteboard-diagnostic", "custody", "cli", "plist", "config"]
 )
-assert diagnostic is False and pasteboard is True and len(paths) == 4
+assert diagnostic is False and pasteboard is True and final is False and len(paths) == 4
+for options in (["--final-phase-only"], ["--pasteboard-diagnostic", "--final-phase-only"],
+                ["--final-phase-only", "--diagnostic"]):
+    diagnostic, pasteboard, final, paths = module.parse_lab_arguments(
+        options + ["custody", "cli", "plist", "config"]
+    )
+    assert final is True and len(paths) == 4
 for rejected in (
     ["--unknown", "cli", "plist", "config"],
     ["--diagnostic", "--unknown", "cli", "plist", "config"],
     ["--diagnostic", "--pasteboard-diagnostic", "cli", "plist", "config"],
     ["custody", "cli", "plist"],
+    ["--final-phase-only", "--final-phase-only", "custody", "cli", "plist", "config"],
 ):
     try:
         module.parse_lab_arguments(rejected)
@@ -513,14 +531,63 @@ assert module.parse_agent_pasteboard_result(
         b"PM26_PASTEBOARD probe-canary-stdout=absent",
         b"PM26_PASTEBOARD probe-canary-stderr=absent",
         b"PM26_PASTEBOARD probe-success-read=no",
+        b"PM26_PASTEBOARD probe-error=other",
+        b"PM26_PASTEBOARD probe-native=valid",
     )) + b"\n"
 ) == {
     b"agent-uid": b"expected", b"manager-uid": b"system",
     b"manager-name": b"different", b"manager-domain": b"different",
     b"probe-result": b"nonzero", b"probe-canary-stdout": b"absent",
-    b"probe-canary-stderr": b"absent", b"probe-success-read": b"no",
+    b"probe-canary-stderr": b"absent", b"probe-success-read": b"no", b"probe-error": b"other",
+    b"probe-native": b"valid",
 }
 module.assert_pasteboard_diagnostic_regression()
+
+# Execute the actual launcher classifier with synthetic command results.
+# These are fixture oracles, never native clipboard/isolation evidence.
+import hashlib
+import os
+import subprocess
+canary = b"synthetic-classifier-canary"
+native_empty = b"PM26_PB types=empty text=nil canary=absent stable=yes\n"
+native_present = b"PM26_PB types=string text=value canary=present stable=yes\n"
+cases = (
+    ("empty", 0, native_empty, b"", "valid", "no"),
+    ("exposure", 0, native_present, b"", "valid", "yes"),
+    ("explicit-null", 69, b"PM26_PB denied=pasteboard-null\n", b"", "denied", "no"),
+    ("wrong-status", -6, b"PM26_PB denied=pasteboard-null\n", b"", "invalid", "indeterminate"),
+    ("missing-sentinel", 69, b"", b"", "invalid", "indeterminate"),
+    ("malformed", 0, b"arbitrary output\n", b"", "invalid", "indeterminate"),
+    ("unavailable", 0, native_empty.replace(b"empty", b"unavailable"), b"", "unavailable", "indeterminate"),
+    ("unstable", 0, native_empty.replace(b"stable=yes", b"stable=no"), b"", "unstable", "indeterminate"),
+    ("unexpected-stderr", 0, native_empty, b"arbitrary error", "invalid", "indeterminate"),
+    ("stderr-exposure", 69, b"PM26_PB denied=pasteboard-null\n", canary, "denied", "yes"),
+    ("timeout", None, b"", b"", "timeout", "indeterminate"),
+)
+original_run, original_argv = subprocess.run, sys.argv
+try:
+    with tempfile.TemporaryDirectory(prefix="pm26clip-classifier-") as temporary:
+        result_path = pathlib.Path(temporary) / "result"
+        for name, status, stdout, stderr, expected_native, expected_read in cases:
+            def synthetic_run(command, **kwargs):
+                if command == ["/bin/launchctl", "manageruid"]:
+                    return subprocess.CompletedProcess(command, 0, b"0\n", b"")
+                if command == ["/bin/launchctl", "managername"]:
+                    return subprocess.CompletedProcess(command, 0, b"System\n", b"")
+                assert command[0] == "/synthetic-native-probe", name
+                if status is None:
+                    raise subprocess.TimeoutExpired(command, 30, output=stdout, stderr=stderr)
+                return subprocess.CompletedProcess(command, status, stdout, stderr)
+            subprocess.run = synthetic_run
+            sys.argv = ["launcher", str(result_path), str(os.getuid()), "501", "Aqua",
+                        str(len(canary)), hashlib.sha256(canary).hexdigest(), "/synthetic-native-probe"]
+            exec(module.AGENT_PASTEBOARD_LAUNCHER, {})
+            fields = module.parse_agent_pasteboard_result(result_path.read_bytes())
+            assert fields[b"probe-native"] == expected_native.encode(), name
+            assert fields[b"probe-success-read"] == expected_read.encode(), name
+finally:
+    subprocess.run, sys.argv = original_run, original_argv
+
 assert module.parse_sodium_cflags(b"CFLAGS='-O0 -g'\n") == b"opt0"
 assert module.parse_sodium_cflags(b"CFLAGS='-O2 -g'\n") == b"optimized"
 for rejected in (b"", b"CFLAGS='-Og'\n", b"CFLAGS='-O0 -O2'\n"):

@@ -145,6 +145,10 @@ DIAGNOSTIC_LINE = re.compile(
     rb"(?:present|absent)|"
     rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-success-read="
     rb"(?:yes|no|indeterminate)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-error="
+    rb"(?:none|coercion-1700|pasteboard-null|other|timeout)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-native="
+    rb"(?:valid|denied|invalid|unavailable|unstable|timeout)|"
     rb"PM26_DIAGNOSTIC unlock-phase="
     rb"(?:channel-verified|sqlite-opened|durability-configured|bundle-loaded|"
     rb"kdf-start|kdf-end|root-authenticated) elapsed-ms=[0-9]{1,6}|"
@@ -235,6 +239,7 @@ human_manager_uid = int(sys.argv[3], 10)
 human_manager_name = sys.argv[4].encode("ascii")
 marker_length = fixed_length(sys.argv[5])
 marker_digest = fixed_digest(sys.argv[6])
+native_probe = sys.argv[7]
 if marker_length is None or marker_digest is None:
     raise SystemExit(64)
 
@@ -260,23 +265,48 @@ else:
 
 try:
     probe = subprocess.run(
-        ["/usr/bin/osascript", "-e", "the clipboard as text"],
+        [native_probe, str(marker_length), marker_digest.hex()],
         check=False, capture_output=True, timeout=PROBE_TIMEOUT,
     )
 except subprocess.TimeoutExpired as error:
     probe_status = "timeout"
+    probe_error = "timeout"
     probe_stdout = error.stdout or b""
     probe_stderr = error.stderr or b""
 else:
     probe_status = "zero" if probe.returncode == 0 else "nonzero"
+    probe_error = "none" if probe.returncode == 0 and probe.stderr == b"" else "other"
     probe_stdout = probe.stdout
     probe_stderr = probe.stderr
 
 stdout_canary = marker_present(probe_stdout, marker_length, marker_digest)
 stderr_canary = marker_present(probe_stderr, marker_length, marker_digest)
+native_result = re.fullmatch(
+    rb"PM26_PB types=(?:unavailable|empty|string|other) text=(?:nil|value) "
+    rb"canary=(?:present|absent) stable=(?:yes|no)\n", probe_stdout,
+)
+if native_result is not None:
+    # Detect the exact canary even in an unstable or otherwise failed read.
+    stdout_canary = stdout_canary or b"canary=present" in probe_stdout
+if probe_status == "timeout":
+    native_category = "timeout"
+elif probe.returncode == 69 and probe.stdout == b"PM26_PB denied=pasteboard-null\n":
+    # This sentinel is emitted only when generalPasteboard itself returns nil.
+    # Human pre/post use this same native binary and must fetch the exact
+    # canary. Stderr is scanned for the canary and never printed.
+    native_category = "denied"
+    probe_error = "pasteboard-null"
+elif probe.returncode != 0 or probe.stderr or native_result is None:
+    native_category = "invalid"
+elif b"types=unavailable" in probe_stdout:
+    native_category = "unavailable"
+elif b"stable=yes" not in probe_stdout:
+    native_category = "unstable"
+else:
+    native_category = "valid"
 probe_success = (
     "yes" if stdout_canary or stderr_canary
-    else "indeterminate" if probe_status == "timeout" else "no"
+    else "no" if native_category in ("valid", "denied") else "indeterminate"
 )
 result_path.write_text(
     "\n".join((
@@ -290,6 +320,8 @@ result_path.write_text(
         "PM26_PASTEBOARD probe-canary-stderr="
         + ("present" if stderr_canary else "absent"),
         "PM26_PASTEBOARD probe-success-read=" + probe_success,
+        "PM26_PASTEBOARD probe-error=" + probe_error,
+        "PM26_PASTEBOARD probe-native=" + native_category,
     )) + "\n",
     encoding="ascii",
 )
@@ -304,7 +336,9 @@ AGENT_PASTEBOARD_RESULT_LINE = re.compile(
     rb"probe-result=(?:zero|nonzero|timeout)|"
     rb"probe-canary-stdout=(?:present|absent)|"
     rb"probe-canary-stderr=(?:present|absent)|"
-    rb"probe-success-read=(?:yes|no|indeterminate))$"
+    rb"probe-success-read=(?:yes|no|indeterminate)|"
+    rb"probe-error=(?:none|coercion-1700|pasteboard-null|other|timeout)|"
+    rb"probe-native=(?:valid|denied|invalid|unavailable|unstable|timeout))$"
 )
 
 
@@ -1498,9 +1532,40 @@ def read_appkit_pasteboard(session=None):
         else session.run_while_draining(command, check=False, timeout=10)
     )
     assert result.returncode == 0 and result.stderr == b"", (
-        "AppKit pasteboard observer failed", result.returncode, result.stderr[:1024],
+        "AppKit pasteboard observer failed", classify_applescript_error(result),
     )
     return result.stdout.rstrip(b"\r\n")
+
+
+def classify_applescript_error(result):
+    if result.returncode == 0 and result.stderr == b"":
+        return "none"
+    if re.search(rb"\(-1700\)\s*$", result.stderr):
+        return "coercion-1700"
+    return "other"
+
+
+def pasteboard_snapshot(phase, session):
+    observer = pathlib.Path(__file__).resolve().parents[3] / "target/debug/macos-pasteboard-probe"
+    result = session.run_while_draining(
+        [observer, str(len(TUI_PASSWORD_RECORD)), hashlib.sha256(TUI_PASSWORD_RECORD).hexdigest()],
+        check=False, timeout=10,
+    )
+    assert result.returncode == 0 and result.stderr == b"", "native pasteboard snapshot failed"
+    assert re.fullmatch(
+        rb"PM26_PB types=(?:unavailable|empty|string|other) text=(?:nil|value) "
+        rb"canary=(?:present|absent) stable=(?:yes|no)\n", result.stdout,
+    ), "native pasteboard snapshot emitted unclassified output"
+    assert phase in ("before", "after", "expired", "embedded")
+    print("PM26_CLIPBOARD phase=" + phase + " " + result.stdout.decode("ascii").strip(), flush=True)
+    assert b"types=unavailable" not in result.stdout and b"stable=yes" in result.stdout, (
+        "native pasteboard snapshot was unavailable or unstable"
+    )
+    if phase == "before":
+        assert result.stdout == b"PM26_PB types=string text=value canary=present stable=yes\n", (
+            "native positive control did not recognize the exact human canary"
+        )
+    return result.stdout
 
 
 def write_appkit_pasteboard(value, session=None):
@@ -1699,7 +1764,7 @@ def assert_agent_cannot_read_pasteboard(
 
 def parse_agent_pasteboard_result(value):
     lines = value.splitlines()
-    assert len(lines) == 8 and all(
+    assert len(lines) == 10 and all(
         AGENT_PASTEBOARD_RESULT_LINE.fullmatch(line) for line in lines
     ), "isolated pasteboard launch result was missing or malformed"
     fields = {}
@@ -1710,7 +1775,7 @@ def parse_agent_pasteboard_result(value):
     assert set(fields) == {
         b"agent-uid", b"manager-uid", b"manager-name", b"manager-domain",
         b"probe-result", b"probe-canary-stdout", b"probe-canary-stderr",
-        b"probe-success-read",
+        b"probe-success-read", b"probe-error", b"probe-native",
     }, "isolated pasteboard launch result had an unexpected schema"
     return fields
 
@@ -1778,6 +1843,7 @@ def prepare_launchd_agent(
     label = f"{LABEL}.pasteboard-agent"
     plist_path = scratch / "pasteboard-agent.plist"
     launcher_path = scratch / "pasteboard-agent-launcher.py"
+    native_probe = scratch / "pasteboard-native-probe"
     result_path = agent_directory / "pasteboard-result"
     stdout_path = agent_directory / "pasteboard-stdout"
     stderr_path = agent_directory / "pasteboard-stderr"
@@ -1790,6 +1856,12 @@ def prepare_launchd_agent(
         launcher.write(AGENT_PASTEBOARD_LAUNCHER)
     sudo(["chown", "root:wheel", launcher_path])
     sudo(["chmod", "0555", launcher_path])
+    owned_paths.append(("pasteboard-native-probe", native_probe))
+    probe_source = pathlib.Path(__file__).resolve().parents[3] / "target/debug/macos-pasteboard-probe"
+    sudo(["install", "-o", "root", "-g", "wheel", "-m", "0555", probe_source, native_probe])
+    require_owner_mode(native_probe, (0, 0o555))
+    require_traversal(AGENT, native_probe.parent)
+    assert sudo(["test", "-x", native_probe], user=AGENT).returncode == 0
 
     for name, path in (("pasteboard-result", result_path),
                        ("pasteboard-stdout", stdout_path),
@@ -1805,6 +1877,7 @@ def prepare_launchd_agent(
             sys.executable, str(launcher_path), str(result_path), str(agent_uid),
             str(human_manager_uid), human_manager_name, str(len(secret)),
             hashlib.sha256(secret).hexdigest(),
+            str(native_probe),
         ],
         "UserName": AGENT,
         "GroupName": AGENT,
@@ -1869,9 +1942,14 @@ def assert_launchd_agent_cannot_read_pasteboard(
             b"agent-uid", b"manager-uid", b"manager-name", b"manager-domain",
             b"probe-result", b"probe-canary-stdout", b"probe-canary-stderr",
             b"probe-success-read",
+            b"probe-error",
+            b"probe-native",
         ):
             emit_diagnostic(b"PM26_DIAGNOSTIC pasteboard-isolated-"
                             + name + b"=" + fields[name])
+    print("PM26_CLIPBOARD isolated " + " ".join(
+        name.decode("ascii") + "=" + value.decode("ascii") for name, value in fields.items()
+    ), flush=True)
     assert fields[b"agent-uid"] == b"expected", "isolated pasteboard job UID was not the agent"
     assert fields[b"manager-uid"] == b"system" \
         and fields[b"manager-domain"] == b"different", (
@@ -1883,6 +1961,12 @@ def assert_launchd_agent_cannot_read_pasteboard(
         )
     assert fields[b"probe-success-read"] == b"no", (
         "isolated pasteboard probe result was indeterminate or exposed the canary"
+    )
+    assert (fields[b"probe-native"], fields[b"probe-error"], fields[b"probe-result"]) in {
+        (b"valid", b"none", b"zero"),
+        (b"denied", b"pasteboard-null", b"nonzero"),
+    }, (
+        "isolated native pasteboard observer did not complete a valid read or explicit rejection"
     )
 
 
@@ -3167,10 +3251,12 @@ def run_tui_core_lab(
     try:
         copied_start = select_tui_password_for_copy(isolated)
         isolated.wait_text("Copied explicitly", since=copied_start)
+        copy_observed = time.monotonic()
         assert_human_pasteboard_canary(
             TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation, phase="before",
             session=isolated,
         )
+        pasteboard_snapshot("before", isolated)
         probe_error = None
         try:
             assert_launchd_agent_cannot_read_pasteboard(
@@ -3178,6 +3264,12 @@ def run_tui_core_lab(
             )
         except BaseException as error:
             probe_error = error
+        print("PM26_CLIPBOARD probe-elapsed=" + (
+            "copy-bound-or-later" if time.monotonic() - copy_observed >= 30 else "before-copy-bound"
+        ) + " tui-idle-lock=" + (
+            "yes" if "Locked after 5 minutes without human input" in isolated.text() else "no"
+        ), flush=True)
+        pasteboard_snapshot("after", isolated)
         after_error = None
         try:
             assert_human_pasteboard_canary(
@@ -3245,6 +3337,41 @@ def run_tui_core_lab(
 
 
 
+def assert_empty_pasteboard_coercion(binary, profile, private, endpoint):
+    """Discriminate the human AppleScript error after a real product lease expires."""
+    expiry = start_macos_tui(binary, profile, private, endpoint, idle=30, reveal=1, copy=5)
+    try:
+        copied = select_tui_password_for_copy(expiry)
+        expiry.wait_text("Copied explicitly", since=copied)
+        assert_human_pasteboard_canary(TUI_PASSWORD_RECORD, session=expiry)
+        expiry.wait_text("Clipboard custody expired", since=copied)
+        state = pasteboard_snapshot("expired", expiry)
+        assert state == b"PM26_PB types=empty text=nil canary=absent stable=yes\n", (
+            "owned product expiry did not leave an empty native pasteboard"
+        )
+        observer = expiry.run_while_draining(
+            ["osascript", "-e", "the clipboard as text"], check=False, timeout=10,
+        )
+        category = classify_applescript_error(observer)
+        print("PM26_CLIPBOARD expiry-control source=human-read-as-text error=" + category, flush=True)
+        assert category == "coercion-1700" and observer.stdout == b"", (
+            "empty-pasteboard AppleScript coercion hypothesis was not confirmed"
+        )
+        write_appkit_pasteboard(
+            b"synthetic-prefix-" + TUI_PASSWORD_RECORD + b"-synthetic-suffix", session=expiry,
+        )
+        assert pasteboard_snapshot("embedded", expiry) == (
+            b"PM26_PB types=string text=value canary=present stable=yes\n"
+        ), "native observer did not detect a canary embedded in other bytes"
+        write_appkit_pasteboard(TUI_EXTERNAL_REPLACEMENT, session=expiry)
+        expiry.send_key("l")
+        assert expiry.wait_exit(timeout=8) == 0
+        assert TUI_PASSWORD_RECORD not in bytes(expiry.output) and PASSWORD not in bytes(expiry.output)
+        assert b"\x1b]52;" not in bytes(expiry.output)
+    finally:
+        close_session_preserving_primary(expiry)
+
+
 def probe(binary, user, profile, private, endpoint, *, allowed=True, diagnostic=False):
     command = [binary, "probe", "--profile", profile, "--private", private,
                "--socket", endpoint]
@@ -3300,16 +3427,93 @@ def fake_server_rejected_before_tls(binary, profile, private, impostor_home):
 
 def parse_lab_arguments(values):
     arguments = list(values)
-    diagnostic = bool(arguments and arguments[0] == "--diagnostic")
-    pasteboard_diagnostic = bool(arguments and arguments[0] == "--pasteboard-diagnostic")
-    if diagnostic or pasteboard_diagnostic:
+    options = set()
+    while arguments and arguments[0].startswith("--"):
+        option = arguments[0]
+        assert option in {"--diagnostic", "--pasteboard-diagnostic", "--final-phase-only"} \
+            and option not in options, "unknown or duplicate laboratory mode"
+        options.add(option)
         arguments.pop(0)
+    diagnostic = "--diagnostic" in options
+    pasteboard_diagnostic = "--pasteboard-diagnostic" in options
+    final_phase_only = "--final-phase-only" in options
+    assert not (diagnostic and pasteboard_diagnostic), "conflicting laboratory diagnostic modes"
     assert len(arguments) == 4 and not any(
         value.startswith("--") for value in arguments
-    ), "usage: macos_lab.py [--diagnostic|--pasteboard-diagnostic] CUSTODY CLI PLIST SODIUM_CONFIG"
-    return diagnostic, pasteboard_diagnostic, tuple(
+    ), "usage: macos_lab.py [--diagnostic|--pasteboard-diagnostic] [--final-phase-only] CUSTODY CLI PLIST SODIUM_CONFIG"
+    return diagnostic, pasteboard_diagnostic, final_phase_only, tuple(
         pathlib.Path(value).resolve() for value in arguments
     )
+
+
+def run_final_native_gates(binary, human_profile, human_key, agent_profile, agent_key,
+                           current_password, identity_paths):
+    """The same final gates in full acceptance and the explicitly bounded mode."""
+    def identity_snapshot():
+        # These synthetic private bytes/digests stay in the fixture observer;
+        # no key, digest, path or raw error is emitted as a diagnostic.
+        return (
+            tuple(pwd.getpwnam(name).pw_uid for name in (CUSTODIAN, AGENT, OTHER)),
+            tuple((owner_mode(path), hashlib.sha256(sudo(["cat", path]).stdout).digest())
+                  for path in identity_paths),
+        )
+
+    def restart_and_require_identity():
+        before_pid = running_launchd_pid(sudo(["launchctl", "print", f"system/{LABEL}"]))
+        assert before_pid is not None, "custody PID missing before final restart"
+        sudo(["launchctl", "kickstart", "-k", f"system/{LABEL}"])
+        time.sleep(1)
+        wait_for_service()
+        after_pid = running_launchd_pid(sudo(["launchctl", "print", f"system/{LABEL}"]))
+        assert after_pid is not None and after_pid != before_pid, "final restart did not replace custody PID"
+        assert run(["ps", "-o", "user=", "-p", str(after_pid)]).stdout.strip() == CUSTODIAN.encode()
+        command = run(["ps", "-o", "command=", "-p", str(after_pid)]).stdout.decode().strip()
+        assert command.split()[0] == str(binary), "final restart changed the custody binary"
+        assert identity_snapshot() == original_identity, "native identity, keys, bootstrap or ACL changed"
+        assert launchd_peer_uid(AGENT, RUNTIME / "agent.sock") == pwd.getpwnam(CUSTODIAN).pw_uid
+
+    original_identity = identity_snapshot()
+    enabled = require_agent_discovery(binary, agent_profile, agent_key, RUNTIME / "agent.sock")
+    assert enabled.startswith("PASS delegated-discovery count=1"), "final baseline has no enabled credential"
+    suspend = run([binary, "human-authorization", "--profile", human_profile,
+                   "--private", human_key, "--socket", RUNTIME / "human.sock", "--action", "suspend"],
+                  input=wire_fields([current_password]))
+    assert suspend.stdout == b"PASS human-authorization action=suspend\n" and suspend.stderr == b""
+    agent_discovery(binary, agent_profile, agent_key, RUNTIME / "agent.sock", allowed=False)
+    restart_and_require_identity()
+    agent_discovery(binary, agent_profile, agent_key, RUNTIME / "agent.sock", allowed=False)
+    print("PM26_FINAL suspension=durable restart=real identity=unchanged peer=verified", flush=True)
+
+    resumed = start_macos_tui(binary, human_profile, human_key, RUNTIME / "human.sock",
+                              idle=30, reveal=1, copy=5, password=current_password)
+    try:
+        access = resumed.mark()
+        resumed.send_key("a")
+        resumed.wait_text("Delegated access: SUSPENDED", since=access)
+        start = resumed.mark()
+        resumed.send_key("s")
+        resumed.wait_text("Delegated access: RESUMED", since=start)
+        content = resumed.mark()
+        resumed.send_key("escape")
+        resumed.wait_text("Content view", since=content)
+        resumed.send_key("l")
+        assert resumed.wait_exit(timeout=8) == 0
+        assert current_password not in bytes(resumed.output) and TUI_PASSWORD_RECORD not in bytes(resumed.output)
+        assert b"\x1b]52;" not in bytes(resumed.output)
+    finally:
+        close_session_preserving_primary(resumed)
+    assert require_agent_discovery(binary, agent_profile, agent_key, RUNTIME / "agent.sock") == enabled, (
+        "resumed identity did not discover the same enabled metadata"
+    )
+    restart_and_require_identity()
+    assert require_agent_discovery(binary, agent_profile, agent_key, RUNTIME / "agent.sock") == enabled, (
+        "authorization or enabled metadata changed across resumed restart"
+    )
+    print("PM26_FINAL resumed-restart=real identity=unchanged authorization=usable metadata=same human=locked", flush=True)
+
+    tty_clipboard = run(["script", "-q", "/dev/null", binary, "macos-native-probe"])
+    assert b"PASS macos-native tty=real rlimit-core=0 clipboard=AppKit-changeCount" in tty_clipboard.stdout
+    print("PM26_FINAL native-probes=observed tty=real core=zero clipboard=AppKit-changeCount", flush=True)
 
 
 def main():
@@ -3319,9 +3523,11 @@ def main():
         "ticket 26 diagnostic activation must be injected only into owned fixture processes"
     )
     assert_screen_observer_regression()
-    diagnostic, pasteboard_diagnostic, paths = parse_lab_arguments(sys.argv[1:])
+    diagnostic, pasteboard_diagnostic, final_phase_only, paths = parse_lab_arguments(sys.argv[1:])
     binary, cli, source_plist, sodium_config = paths
     classify_native_sodium(sodium_config, diagnostic)
+    if final_phase_only:
+        print("PM26_SCOPE mode=final-phase-only full25=NOT_RUN acceptance=NOT_CLAIMED", flush=True)
     guarded = [INSTALL, STATE, RUNTIME, PLIST]
     collisions = [str(path) for path in guarded if path.exists()]
     assert not collisions, f"refusing to replace pre-existing host paths: {collisions}"
@@ -3542,30 +3748,35 @@ def main():
             raise BaseExceptionGroup("native custody process changed; stop matrices", matrix_errors + [
                 AssertionError("custody PID changed before Full25"),
             ])
-        from macos_tui_migration_lab import run_tui_ticket25_matrix
+        if final_phase_only:
+            current_password = PASSWORD  # This mode never runs Full25's master rotation.
+            try:
+                assert_empty_pasteboard_coercion(
+                    INSTALL / "pm-custody", human_profile, human_key, RUNTIME / "human.sock",
+                )
+            except Exception as error:
+                matrix_errors.append(error)
+        else:
+            from macos_tui_migration_lab import run_tui_ticket25_matrix
+            try:
+                current_password = run_tui_ticket25_matrix(
+                    sys.modules[__name__], INSTALL / "pm-custody", human_profile, human_key,
+                    RUNTIME / "human.sock", scratch, owned_launchd_labels,
+                )
+                tui25_verified = True
+                print("PM26_MATRIX full25=observed", flush=True)
+            except Exception as error:
+                raise ExceptionGroup("native independent matrices failed", matrix_errors + [error])
         try:
-            current_password = run_tui_ticket25_matrix(
-                sys.modules[__name__], INSTALL / "pm-custody", human_profile, human_key,
-                RUNTIME / "human.sock", scratch, owned_launchd_labels,
+            run_final_native_gates(
+                INSTALL / "pm-custody", human_profile, human_key, agent_profile, agent_key,
+                current_password,
+                (server_key, server_pub, bootstrap, human_key, human_pub, agent_key, agent_pub,
+                 other_key, other_pub, human_profile, agent_profile, published_human_pub,
+                 published_agent_pub, published_other_pub, INSTALL / "pm-custody", PLIST),
             )
-            tui25_verified = True
-            print("PM26_MATRIX full25=observed", flush=True)
         except Exception as error:
-            raise ExceptionGroup("native independent matrices failed", matrix_errors + [error])
-        suspend = run([INSTALL / "pm-custody", "human-authorization", "--profile", human_profile,
-                       "--private", human_key, "--socket", RUNTIME / "human.sock", "--action", "suspend"],
-                      input=wire_fields([current_password]))
-        assert suspend.stdout == b"PASS human-authorization action=suspend\n" and suspend.stderr == b""
-        sudo(["launchctl", "kickstart", "-k", f"system/{LABEL}"])
-        time.sleep(1); wait_for_service()
-        discover = sudo([INSTALL / "pm-custody", "agent-discover", "--profile", agent_profile,
-                         "--private", agent_key, "--socket", RUNTIME / "agent.sock"],
-                        user=AGENT, check=False)
-        assert discover.returncode == 4 and discover.stdout == b""
-        assert discover.stderr == b"CUSTODY_UNAVAILABLE\n"
-
-        tty_clipboard = run(["script", "-q", "/dev/null", INSTALL / "pm-custody", "macos-native-probe"])
-        assert b"PASS macos-native tty=real rlimit-core=0 clipboard=AppKit-changeCount" in tty_clipboard.stdout
+            raise ExceptionGroup("native final gates failed", matrix_errors + [error])
         if not diagnostic:
             diagnostic_log = sudo(["test", "-e", DIAGNOSTIC_LOG], check=False)
             assert diagnostic_log.returncode != 0 and diagnostic_log.stdout == b"", (
@@ -3581,6 +3792,12 @@ def main():
         bootstrapped, owned_paths, owned_empty_directories, owned_records,
         owned_launchd_labels=owned_launchd_labels,
     )
+    if final_phase_only:
+        assert tui_core_verified, "bounded mode cannot pass without all core assertions"
+        print("PASS macos-final-phase-only core=observed suspension=durable identity=unchanged "
+              "restart=suspended+resumed native=observed cleanup=verified full25=NOT_RUN acceptance=NOT_CLAIMED")
+        print("LIMIT reboot=NOT_RUN intel+arm64=handled-by-ticket31 signing+notarization=NOT_RUN")
+        return
     print("PASS macos-launchdaemon account=_passwordmanager peer=getpeereid bilateral=tls-rpk")
     print("PASS macos-acl bootstrap=0400 binary+plist=root-owned wrong-uid=rejected")
     print("PASS macos-persistence suspension=durable launchd-restart=real")
