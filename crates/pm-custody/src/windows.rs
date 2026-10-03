@@ -266,6 +266,7 @@ struct VaultService {
     audit_custody: Arc<AuditDeviceCustody>,
     diagnostics: Option<ServiceDiagnostics>,
     sync_jobs: Arc<crate::sync_job::Manager>,
+    admission: Arc<crate::custody_admission::CustodyAdmission>,
 }
 
 struct PreparedRole {
@@ -549,6 +550,12 @@ fn serve_vault(
         let sync_jobs = crate::sync_job::Manager::open(&vault_path)?;
         sync_jobs.resume()?;
         let service = Arc::new(VaultService {
+            admission: Arc::new(crate::custody_admission::CustodyAdmission::load(
+                &bootstrap_path,
+                &audit_path,
+                bootstrap_custody_fingerprint,
+                audit_custody_fingerprint,
+            )?),
             path: vault_path,
             device,
             audit_custody,
@@ -733,6 +740,7 @@ fn handle_server_connection(
                 path: &service.path,
                 device: service.device,
                 audit_custody: &service.audit_custody,
+                admission: &service.admission,
             },
             peer_rpk,
         ),
@@ -1722,6 +1730,25 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, Failure> {
         return Err(Failure::Unavailable);
     }
     Ok(bytes)
+}
+
+fn bootstrap_custody_fingerprint(path: &Path) -> Result<[u8; 32], Failure> {
+    let bootstrap = read_bootstrap(path)?;
+    crate::custody_admission::fingerprint_parts(&[
+        &bootstrap.server.private,
+        &bootstrap.server.spki,
+        bootstrap.service_sid.as_bytes(),
+        bootstrap.agent_sid.as_bytes(),
+        &bootstrap.agent_spki,
+        bootstrap.human_sid.as_bytes(),
+        &bootstrap.human_spki,
+    ])
+}
+
+fn audit_custody_fingerprint(path: &Path) -> Result<[u8; 32], Failure> {
+    let bytes = read_protected(path)?;
+    AuditDeviceCustody::from_protected_bytes(&bytes).map_err(|_| Failure::Unavailable)?;
+    Ok(pm_crypto::digest(&bytes))
 }
 
 fn load_or_create_audit_custody(

@@ -713,7 +713,10 @@ impl PasskeyProvider {
         request.validate()?;
         let bytes = request.to_bytes();
         let request_digest = digest(&bytes);
-        let connection = Connection::open(self.attempts.path())?;
+        let connection = Connection::open_with_flags(
+            self.attempts.path(),
+            rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
         crate::configure_platform_durability(&connection)?;
         if let Some((stored, response)) = connection
             .query_row(
@@ -780,7 +783,10 @@ impl PasskeyProvider {
         public: &PasskeyPublicCredential,
         verification: HumanVerification,
     ) -> Result<PasskeyStatus, PasskeyError> {
-        let mut connection = Connection::open(self.attempts.path())?;
+        let mut connection = Connection::open_with_flags(
+            self.attempts.path(),
+            rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
         crate::configure_platform_durability(&connection)?;
         let tx = connection.transaction()?;
         let (request_bytes, state, expires): (Vec<u8>, String, i64) = tx
@@ -869,7 +875,10 @@ impl PasskeyProvider {
     /// # Errors
     /// Rejects corrupt or unavailable encrypted provider state.
     pub fn response(&self, request_id: [u8; 16]) -> Result<Option<PasskeyStatus>, PasskeyError> {
-        let connection = Connection::open(self.attempts.path())?;
+        let connection = Connection::open_with_flags(
+            self.attempts.path(),
+            rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
         crate::configure_platform_durability(&connection)?;
         let row: Option<(String, Option<Vec<u8>>)> = connection
             .query_row(
@@ -899,7 +908,10 @@ impl PasskeyProvider {
         &self,
         request_id: [u8; 16],
     ) -> Result<Option<PasskeyRequest>, PasskeyError> {
-        let connection = Connection::open(self.attempts.path())?;
+        let connection = Connection::open_with_flags(
+            self.attempts.path(),
+            rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
         crate::configure_platform_durability(&connection)?;
         let row: Option<(Vec<u8>, String, i64)> = connection
             .query_row(
@@ -930,7 +942,10 @@ impl PasskeyProvider {
         &self,
         request_id: [u8; 16],
     ) -> Result<Option<PasskeyPrompt>, PasskeyError> {
-        let connection = Connection::open(self.attempts.path())?;
+        let connection = Connection::open_with_flags(
+            self.attempts.path(),
+            rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
         crate::configure_platform_durability(&connection)?;
         let row: Option<(Vec<u8>, String, i64)> = connection
             .query_row(
@@ -961,7 +976,10 @@ impl PasskeyProvider {
     /// # Errors
     /// Rejects incomplete, non-registration, or corrupt request state.
     pub fn registered_item(&self, request_id: [u8; 16]) -> Result<[u8; 16], PasskeyError> {
-        let connection = Connection::open(self.attempts.path())?;
+        let connection = Connection::open_with_flags(
+            self.attempts.path(),
+            rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
         crate::configure_platform_durability(&connection)?;
         let row: Option<(String, String, Option<Vec<u8>>)> = connection
             .query_row(
@@ -989,7 +1007,10 @@ impl PasskeyProvider {
         peer: &AgentPeer,
         request_id: [u8; 16],
     ) -> Result<Option<PasskeyStatus>, PasskeyError> {
-        let connection = Connection::open(self.attempts.path())?;
+        let connection = Connection::open_with_flags(
+            self.attempts.path(),
+            rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
         crate::configure_platform_durability(&connection)?;
         let attempt: Option<Option<Vec<u8>>> = connection
             .query_row(

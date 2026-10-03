@@ -429,6 +429,7 @@ struct VaultService {
     audit_custody: Arc<AuditDeviceCustody>,
     provider: Option<ControlledProvider>,
     sync_jobs: Arc<sync_job::Manager>,
+    admission: Arc<crate::custody_admission::CustodyAdmission>,
 }
 
 #[derive(Clone)]
@@ -761,6 +762,12 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
         device,
     )?);
     let service = VaultService {
+        admission: Arc::new(crate::custody_admission::CustodyAdmission::load(
+            &bootstrap_path,
+            &audit_path,
+            bootstrap_custody_fingerprint,
+            audit_custody_fingerprint,
+        )?),
         path: vault_path,
         device,
         audit_custody,
@@ -794,6 +801,12 @@ fn serve_attempt_lab(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
         device,
     )?);
     let service = VaultService {
+        admission: Arc::new(crate::custody_admission::CustodyAdmission::load(
+            &bootstrap_path,
+            &audit_path,
+            bootstrap_custody_fingerprint,
+            audit_custody_fingerprint,
+        )?),
         path: vault_path,
         device,
         audit_custody,
@@ -810,6 +823,47 @@ fn serve_attempt_lab(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
         &human_socket,
         Some(&service),
     )
+}
+
+fn bootstrap_custody_fingerprint(path: &Path) -> Result<[u8; 32], Failure> {
+    let bootstrap = read_bootstrap(path)?;
+    crate::custody_admission::fingerprint_parts(&[
+        &bootstrap.server.private,
+        &bootstrap.server.spki,
+        &bootstrap.agent_uid.to_be_bytes(),
+        &bootstrap.agent_spki,
+        &bootstrap.human_uid.to_be_bytes(),
+        &bootstrap.human_spki,
+    ])
+}
+
+fn audit_custody_fingerprint(path: &Path) -> Result<[u8; 32], Failure> {
+    // Use the startup ownership/type/mode criteria, with a locked destination
+    // before reading private custody. No ordinary plaintext owner is added.
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| Failure::Unavailable)?;
+    let metadata = file.metadata().map_err(|_| Failure::Unavailable)?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != current_uid()
+        || metadata.mode() & 0o7777 != 0o400
+        || metadata.nlink() != 1
+        || !(1..=MAX_PROTECTED_BYTES).contains(&metadata.len())
+    {
+        return Err(Failure::Unavailable);
+    }
+    let length = usize::try_from(metadata.len()).map_err(|_| Failure::Unavailable)?;
+    let mut bytes = ProtectedBytes::zeroed(length).map_err(|_| Failure::Unavailable)?;
+    file.read_exact(&mut bytes)
+        .map_err(|_| Failure::Unavailable)?;
+    let mut extra = [0_u8; 1];
+    if file.read(&mut extra).map_err(|_| Failure::Unavailable)? != 0 {
+        return Err(Failure::Unavailable);
+    }
+    AuditDeviceCustody::from_protected_bytes(&bytes).map_err(|_| Failure::Unavailable)?;
+    Ok(pm_crypto::digest(&bytes))
 }
 
 fn load_or_create_audit_custody(
@@ -4174,6 +4228,7 @@ fn handle_connection(
                 path: &service.path,
                 device: service.device,
                 audit_custody: &service.audit_custody,
+                admission: &service.admission,
             },
             peer_rpk.ok_or(Failure::Unavailable)?,
         );

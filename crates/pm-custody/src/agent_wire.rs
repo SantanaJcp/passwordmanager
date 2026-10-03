@@ -20,6 +20,7 @@ pub(crate) struct AgentService<'a> {
     pub path: &'a Path,
     pub device: [u8; 16],
     pub audit_custody: &'a Arc<AuditDeviceCustody>,
+    pub admission: &'a crate::custody_admission::CustodyAdmission,
 }
 
 pub(crate) fn serve_agent(
@@ -77,6 +78,7 @@ fn handle_attempt_request(
     request: &[u8],
 ) -> Result<Vec<u8>, Failure> {
     let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
+    verify_admission_custody(service, opcode)?;
     let attempts = AttemptVault::open(
         DelegatedVault::open(
             service.path,
@@ -186,6 +188,15 @@ fn handle_attempt_request(
         Ok(snapshot) => encode_attempt_snapshot(&snapshot),
         Err(error) => Ok(vec![attempt_error_status(&error)]),
     }
+}
+
+// A narrow seam shared by all transports. W4 can change dispatch/identity
+// admission independently; every new authentication still crosses this check.
+fn verify_admission_custody(service: &AgentService<'_>, opcode: u8) -> Result<(), Failure> {
+    if matches!(opcode, 30 | 33 | 40 | 41) {
+        service.admission.verify()?;
+    }
+    Ok(())
 }
 
 fn push_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), Failure> {

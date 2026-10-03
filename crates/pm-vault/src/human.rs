@@ -3824,7 +3824,10 @@ fn open_connection_observed(
     path: &Path,
     diagnostics: &mut UnlockDiagnostics,
 ) -> Result<Connection, HumanCommitError> {
-    let connection = Connection::open(path)?;
+    let connection = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+    )?;
     diagnostics.phase(UnlockDiagnosticPhase::SqliteOpened);
     crate::configure_platform_durability(&connection)?;
     connection.execute_batch(
