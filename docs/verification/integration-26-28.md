@@ -1,6 +1,6 @@
 # Integración 26–28 — composición y evidencia
 
-Fecha: 2026-10-03. Rol: merger de candidatas publicadas. El corte vigente está en [Composición de G7 fases 4–5 y clipboard](#composición-de-g7-fases-45-y-clipboard--2026-10-03); las secciones anteriores conservan la integración y remediación históricas. Esta composición no corrige defectos abiertos ni cambia estados de tickets.
+Fecha: 2026-10-03. Rol: merger de candidatas publicadas. El corte vigente está en [Composición W3/W4/W2/W1 fijada](#composicion-w1-w4-20261003); las secciones anteriores conservan la integración y remediación históricas. Esta composición no corrige defectos abiertos ni cambia estados de tickets.
 
 ## Identidad y alcance
 
@@ -421,3 +421,181 @@ Se conservan los inventarios de fallbacks de [28](ticket-28.md), [26](ticket-26.
 Pendientes: presentación completa de resumen/avisos; purge/outbox; vault-loss; composición de staging preparado con cleanup G7; retirada en caliente de bootstrap/audit; clasificación del FAIL intermitente result-sync; memoria restante, segundo agente/proveedor y gates humanos, reboot/FDE, firma y targets no acreditados. No se decide producto ni se cambian tickets. La raíz y `codex/implement-passwordmanager` se preservan; PR borrador #1 no se fusiona ni se modifica.
 
 Entrega: composición publicada y verificación ejecutada; **aceptación global continúa FAIL**. No hay fix mecánico de composición pendiente identificado. El dueño de G7 debe clasificar la primera falla result-sync antes de declarar ese gate estable; las demás decisiones/RED anteriores requieren su autorización específica. No se transforma la documentación en cierre de G7 ni en revisión formal final.
+
+
+<a id="composicion-w1-w4-20261003"></a>
+
+## Composición W3 → W4 → W2 → W1 — 2026-10-03
+
+### Identidad y resolución
+
+Base comprobada local/origin: `ee3c1fd31cad59060e4120f3e2518b1196a90c1a`.
+SHA final de código/fixtures: `dedb8f6c2bbcd71837a1c51da51cf4fdb934c605`.
+Worktree y rama de integración originales. W1 avanzaba en paralelo, pero el
+merge usa exclusivamente `eb78c5e173a1712f54b98f8f807a2e8f33d51865`.
+Cuatro merge commits, sin rebase/squash/force ni cambios de estado de tickets.
+
+| Orden | Candidata fijada | Merge | Conflictos / resolución |
+| --- | --- | --- | --- |
+| 1 | W3 `e0eec49303b3d1212aacb7a0988fe383bd29af6d` | `93b5c0afac1b142af7e79255ec0f6cf3df916ec9` | Sin conflictos. Owners, vault existente, guard y errores tipados íntegros. |
+| 2 | W4 `549c5122f67d70a842ff3fe1558e9d0f19092068` | `9de97bb2ffe96faf60b8c24b0dcf9a0220e82d53` | Un conflicto textual en main.rs: conservar ambos módulos. Conectar el guard W3 con los carriles nativos de W4. |
+| 3 | W2 `7a45b49333279b7a570793a1813a5e52cb586674` | `7b8ff954667c76831a9da47c8d9f4c682e062e3c` | Automático: backup/reducer conservan apertura W3 y digest/root v3/rechazo de kind W2. |
+| 4 | W1 `eb78c5e173a1712f54b98f8f807a2e8f33d51865` | `dedb8f6c2bbcd71837a1c51da51cf4fdb934c605` | Automático: fixtures Mac conservan sync/counters W2 y panel/colisión W1; Windows conserva pool/admisión y transferencia. |
+
+Resolución archivo:símbolo:
+
+- `crates/pm-custody/src/main.rs`: declarar `connection_dispatch` y
+  `custody_admission` con los cfg originales; lib.rs ya los combinó automáticamente.
+- `crates/pm-custody/src/linux.rs:accept_one`: ambos carriles Linux/Darwin
+  verifican `VaultService.admission` antes de handler/dispatch. Fallo cierra esa
+  conexión, manteniendo el servicio y trabajo en vuelo; no hay ruta sustituta.
+- `crates/pm-custody/src/windows.rs:serve_role`: SID nativo y guard W3 antes
+  de reservar worker agente. `handle_server_connection` comprueba el mismo guard
+  en ambos roles antes de TLS/engine. Se conserva el guard W3 de opcodes
+  30/33/40/41 para conexiones persistentes y el pool de cuatro.
+- `crates/pm-vault/src/backup.rs:{write_backup,restore_graph_digest}` y
+  `reducer.rs:{open,connect,apply_received_package}`: hunks distintos, composición
+  automática, sin CREATE para bóveda existente ni `.or_else` de kind; sin otro
+  decoder al fallar v3, borrado de headers o ack sin root.
+- `crates/pm-custody/tests/{macos_lab,macos_tui_migration_lab}.py`: W2 mantiene
+  tiempos/diagnóstico/counters de sync; W1 mantiene panel actual, colisiones con
+  digest original y oráculos completos. `tui_access_lab.py` conserva discovery
+  con TUI abierta y el render W1.
+- `crates/pm-native-channel/src/windows.rs`: derechos individuales/capacidad
+  de pipes W4 y validación/diagnóstico de lease W1, sin relajar DACL ni límites.
+
+No hubo decisiones de producto ni correcciones de defectos abiertos por el
+merger. Manifest `/tmp/pmint4-preservation.json`: los 40 paths exclusivos
+(W3 12, W4 4, W2 11, W1 13) son idénticos a sus candidatas; diez paths
+compartidos inspeccionados. Ascendencia de los cuatro SHAs, AST de fixtures
+compartidos, diff-check y ausencia de cambios en tickets/workflows/Cargo.lock
+comprobados. Un único engine y ningún ajuste de KDF/deadlines/asserts/tests.
+
+### Método, gates locales y comparación
+
+Método del baseline y de los cuatro informes, cwd este worktree, Rust1.98.1
+locked/offline, artefactos Keycloak/CFT absolutos indicados arriba,
+PYTHONDONTWRITEBYTECODE=1. Cada cargo/check/build/lab bajo
+`flock /tmp/pm-cargo-window.lock`, secuencial. Driver propio
+`/tmp/pmint4-run-local.py`, resultados `/tmp/pmint4-local-results.json`,
+resumen `/tmp/pmint4-local-summary.{log,json}`; fuentes y HEAD estables durante
+el barrido. Ninguna instalación local ni limpieza de paths ajenos.
+
+Check posterior a cada merge: `/tmp/pmint4-merge-w3-check.log`,
+`-merge-w4-check.log`, `-merge-w2-isolated-check.log`, `-merge-w1-check.log`.
+Todos rc0. La primera corrida W2 `-merge-w2-check.log` queda **descartada**
+como evidencia aislada: el merger inició el merge pendiente W1 antes de que
+terminara. Tras concluirla se abortó solamente ese merge pendiente propio,
+se reejecutó check sobre W2 limpio y luego se volvió a componer W1. Ningún
+resultado de esa primera corrida reemplaza los gates nuevos.
+
+Barrido completo terminado: **52 casos / 47 rc0 / tres RED conocidos / dos
+regresiones**; runner rc1, 553.902 s agregados con esperas de lock incluidas.
+Los 48 comandos W3 incluyen exactamente los 40 del baseline; se agregaron
+concurrencia, probe purge, E2EE/shared-purge y digest restore. No se reutilizaron
+logs ni se repitió un fallo sin cambio/discriminante.
+
+| Baseline, mismos nombres/comandos | Candidata rc0/casos | Integración rc0/casos | Resultado |
+| --- | --- | --- | --- |
+| `/tmp/pmrs-gate-results.json` | 38/40 | 37/40 | Regresión bootstrap; operations sigue rc1 pero cambia la causa, no se conserva su RED histórico. |
+| W1 `/tmp/pmw1b-final-gate-results.json` | 39/40 | 37/40 | Operations 0→1 y bootstrap 0→1. |
+| W2 `/tmp/pmw2d-gate-results.json` | 38/40 | 37/40 | Mismas dos fronteras; purge/restore pasan. |
+| W3 `/tmp/pmw3c-final-results.json` | 44/48 | 43/48 | Bootstrap 0→1; guard/live/vault/result-sync/errores tipados preservados en sus casos. |
+| W4 `/tmp/pmw4-resume-gate-results.json` | 39/41 | 38/41 | Mismas fronteras; new-concurrency se compara con concurrency (comando idéntico), rc0. |
+
+| Gate / frontera | Resultado y evidencia |
+| --- | --- |
+| Final check / clean locked-offline | PASS rc0, 57.731 / 44.001 s; `/tmp/pmint4-final-{check,clean}.log`. |
+| Labs Linux + publication | 28/29 rc0; operations falla en stop tras el caso de endpoint que cierra. Publication backup/plaintext/attachment PASS. |
+| W3 inflight result-sync/audit/crash + canaries | PASS, 4/4; bootstrap separado abajo. |
+| W3 vault completed / inflight vault / tres inflight-live | PASS, 5/5; sin reemplazo, nueva admisión cerrada, calls=1, cleanup=0. |
+| W3 matrix trace | PASS rc0. |
+| Concurrencia W4 | PASS rc0; TUI abierta, mismo daemon, cuarto admitido/quinto rechazado y recuperación del pool. `/tmp/pmint4-concurrency.log`. |
+| Probe purge W2 | PASS rc0: `Ok(4)`, pending=0, signed-headers=4, opaque-blocks=6, roots=1. `/tmp/pmint4-purge-probe.log`. |
+| W2 E2EE / shared-purge | PASS 32 + 1 tests; paginado 259 eventos/2 páginas/payloads0, sesión TLS, restore y convergencia real. `/tmp/pmint4-purge-sync-tests.log`. |
+| Digest restore | PASS 2 comparaciones con el reductor. `/tmp/pmint4-restore-digest-tests.log`. |
+| g7-matrix | RED conocido rc1: exactamente commit-outbox-audit EIO/ENOSPC por staging retenido; listas RED/ProductRed iguales a W3, cleanup errors=0. |
+| g7-extra-bootstrap / g7-extra-vault | Dos rc1 diagnósticos conservados, autoridad/receipts, replacement=0, closed=1, cleanup errors=0; fuera de gates. |
+| lab-tui-operations | **Regresión de gate**, esperado W1 rc0, observado rc1. Ya pasó el panel/import/sync y llega a `tui_operations_lab.py:222`; `linux_lab.py:stop` observa stderr `SYNC_UNAVAILABLE\n`. También se propaga ese error en teardown; no es la truncación exact-duplicates histórica. `/tmp/pmint4-lab-tui-operations.log`. |
+| g7-inflight-bootstrap | **Regresión de gate**, 0→1: tras restauración, `g7_canary_channels.py:241` rechaza un fd/recurso no clasificado en `inflight-historical-restored`; closed=1/replacement=0/calls=1 y cleanup=0 previos. `/tmp/pmint4-g7-inflight-bootstrap.log`. |
+
+Causas: `pm-sync/src/session.rs:Session::spawn` hereda stderr del child y
+`pm-sync/src/main.rs:main` emite SYNC_UNAVAILABLE al fallar el endpoint.
+Es una vía visible compatible con el primer FAIL, **inferencia causal** aún
+sin aislamiento; no se corrige/silencia ese stderr desde el merger. El scanner
+no imprime qué fd/target incumplió su inventario: no se atribuye el segundo
+FAIL a canario filtrado, vault sustituido ni a una causa interna demostrada.
+Ambos son regresiones frente a las candidatas, aun sin atribución definitiva
+a un hunk concreto. Se entregan al dueño para diagnóstico, sin retries,
+relajar scanner, KDF, plazos o asserts. Multiagente RED W4 no se ejecuta ni
+entra en los gates; su binding de producto sigue pendiente.
+
+### CI nativa y clasificación
+
+Repositorio público y workflows manuales activos comprobados por API; mismos
+workflows y runners estándar, sin caches/artifacts/secrets/larger ni cambios de
+reglas. [Gratuidad](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+verificada en fuente primaria. Runs sobre SHA exacto
+`dedb8f6c2bbcd71837a1c51da51cf4fdb934c605`, binarios normales:
+
+- [macOS 37135611956](https://github.com/SantanaJcp/passwordmanager/actions/runs/37135611956),
+  `pasteboard_diagnostic=false`, `final_phase_only=false`.
+- [Windows 37135614086](https://github.com/SantanaJcp/passwordmanager/actions/runs/37135614086),
+  `diagnostic_only=false`, `service_diagnostics=false`, `tui_conpty_red=true`.
+
+Ambos workflows terminaron; una corrida macOS y una Windows de un máximo
+2+2. No se consumen las segundas corridas repitiendo un SHA sin cambio ni
+hipótesis discriminante. Metadata `native-{macos,windows}.json` y logs
+`native-macos.log`, `native-macos-{intel,arm}.log`, `native-windows.log`, todos
+con prefijo `/tmp/pmint4-`. Referencias descargadas por API con sus headSha y
+logs propios `reference-<run>.{json,log}` bajo el mismo prefijo.
+
+| Plataforma / job | Resultado exacto frente a referencias | Clasificación |
+| --- | --- | --- |
+| [Mac ARM 111239421098](https://github.com/SantanaJcp/passwordmanager/actions/runs/37135611956/job/111239421098) | **PASS del lab completo**. Discovery con humano abierto/mismo PID; ambas colisiones rejected/destination=same; happy sync 17.604 s del span TUI, durable/screen=succeeded, pushed=59/pulled=59, blocks=287/roots=1. Full25 completo, status/same-job/restart/lock/idle/offline/retire y cleanup verificados, además de core/fase final. | Supera el bloqueo previo ARM de colisión de W2; conserva la negativa de W1 [37129005704](https://github.com/SantanaJcp/passwordmanager/actions/runs/37129005704), SHA `c4038653314a8adeef1e75f16d3828106894d5aa`, y el discovery W4 [37123539350](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123539350), SHA `e4a8f49e62f1081875e821ea53b1dbe83d6fc7cc`. No acredita reboot/FDE/firma/humano externo. |
+| [Mac Intel 111239421248](https://github.com/SantanaJcp/passwordmanager/actions/runs/37135611956/job/111239421248) | **FAIL global; happy sync durable/root PASS acotado**. Discovery y Full25-local/colisiones pasan; span TUI20.368 s (incluye interacción/observación, wait20 original intacto); durable/screen=succeeded, pushed=59/pulled=59, blocks=287/roots=1, PIDs iguales. Falla `macos_tui_migration_lab.py:631`, `assert "pushed=" in complete and "pulled=" in complete`. No alcanza consulta same-job y grupos posteriores. | **FAIL visual conocido**, misma aserción de [W2 37133730351](https://github.com/SantanaJcp/passwordmanager/actions/runs/37133730351), SHA `4282843c3cc9acb4fdda893d23f56b68f5e4b893`, con span18.05s/root1. El panel W1 no lo elimina en esta observación. No es retorno de integrity/roots0 ni pérdida de readiness. La causa precisa de la observación/panel sigue sin aislar. |
+| [Windows ARM64 111239429948](https://github.com/SantanaJcp/passwordmanager/actions/runs/37135614086/job/111239429948) | **FAIL global** tras build/static, 14 primitivas (pool incluido), pipe1, observer20 y sync-lib1 PASS; TUI first-prompt/hidden-input/unlock/siete tipos PASS. Resize100×30 pasa por secuencia; en 42×12 falla `fresh native resize repaint` tras15s, hijo vivo/parser ground/salida presente. 80×24, CSV/1PUX y grupos posteriores no alcanzados en esta corrida. | **FAIL nuevo de la candidata resize W1**, posterior al antiguo CSI t de [37132151922](https://github.com/SantanaJcp/passwordmanager/actions/runs/37132151922), SHA `99b40aefac0852b7d4799f9e37a1fe2023da4901`. Sin regresión observada de build/14 primitivas/pool frente a [W4 37123864276](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123864276), SHA `37c1bd82d2cf2c37f02c326397298715d23faed2`. El positivo 1PUX de [W1 37128434031](https://github.com/SantanaJcp/passwordmanager/actions/runs/37128434031), SHA `7e5febb8586c1f3d897abb9896be79e01996a811`, queda **sin revalidar** aquí. No se demuestra una regresión de ese positivo ni aceptación Windows integral. |
+
+El diagnóstico Windows exige simultáneamente cursor/repaint nuevo, reporte de
+resize y literal esperado (`windows_tui_conpty_fixture.rs:2071`); el log no
+individualiza cuál condición falla. No se deduce que el producto no resize ni
+se rebaja ese oráculo. Cleanup de servicio/raíz no reporta fallo adicional;
+no acredita los Drops heredados. El job storage diagnostics quedó skipped por
+input normal, sin usarlo como aceptación.
+
+Entornos observados: macOS15.7.9/kernel24.6.0, Rust1.98.1 nativo, Intel
+`macos15/20260824.0482.1` x86_64-apple-darwin y ARM
+`macos15/20260907.0337.1` aarch64-apple-darwin. Windows11 Enterprise
+10.0.26200/build26200, `win11-vs2026-arm64/20260924.168.1`,
+aarch64-pc-windows-msvc1.98.1, libsodium1.0.22 ARM64/MT,
+UAC_ENABLE_LUA=1. Preflight es sólo entorno.
+
+**Objetivo Mac de llegar al happy sync durable y publicar roots en ambas CPU:
+PASS acotado. Aceptación global de integración: FAIL.** Quedan dos regresiones
+locales, el visual Intel conocido y la nueva frontera resize Windows; no se
+implementan fixes por el merger ni se cierran tickets.
+
+### Pendientes y publicación
+
+Se preservan los fallbacks heredados de los informes W1–W4: handler/accept
+ignorado en loops, discovery fallido convertido en rechazo genérico, selección
+legada de cuerpo en decode_event, colisión staging con recreación y errores
+best-effort de cleanup/Drop; sus lugares, condiciones y sustituciones siguen
+inventariados en esos informes. Las aperturas SQLite y `.or_else` de kind de
+las tablas históricas anteriores ya están corregidas por W3/W2 en este corte.
+No se retiran ni corrigen otros fallbacks desde el merger.
+
+Decisiones pendientes: representación durable/retención/replay frente al RED
+staging G7; binding/provisión/migración nativos por RPK de múltiples agentes;
+configuración/selección/provisión del proveedor ordinario (`provider: None`
+conservado). Reboot/FDE/firma, Windows11 x64, Linux AArch64 y aceptación humana
+no acreditados por estos gates. No se cierran 26/27/28 ni W1–W4.
+
+Push normal únicamente a `codex/pm-integration-26-28`: el helper original
+falló por gh inexistente; se usó el override explícitamente autorizado, sin
+cambiar config ni reglas. GitHub anunció el bypass de permisos previamente
+autorizado. Rama raíz `codex/implement-passwordmanager` en b3577d2 y trabajo
+ajeno `.gitignore`, `.pi/`, `odd/` preservados. PR#1 continúa sin fusionar.
+El commit posterior de este informe es exclusivamente documental: su árbol
+de código/fixtures/workflows coincide con el SHA de los runs, sin atribuirle
+una ejecución nativa diferente.
