@@ -3151,3 +3151,96 @@ Preflight último candidato: check7 rc0 bajo flock,
 `/tmp/pmw1b-check7.log`, fmt/diff-check PASS. Repetir barrido40 y clean mediante
 los mismos comandos del baseline, con logs distintos final-gate para preservar
 la evidencia anterior; no declarar sus resultados mientras estén en curso.
+
+### Corrida 6 fase2 y checkpoint de entrega W1
+
+[Windows 37132151922](https://github.com/SantanaJcp/passwordmanager/actions/runs/37132151922),
+SHA `99b40aefac0852b7d4799f9e37a1fe2023da4901`, terminó FAIL.
+Build ARM64/static y primitives13/pipe1/observer18/sync-lib1 PASS; seed con
+lectura exacta y salida encoding natural PASS. Los siete tipos vuelven a pasar.
+Resize100×30 produce CSI final `t` (0x74), que el observer rechaza; hijo vivo,
+parser ground, error también propagado por cleanup del observer. No hay
+PASS resize. Como este grupo se adelantó, no se ejecutó la clasificación nueva
+del preview ni los grupos siguientes. Log `/tmp/pmw1b-windows5.log`.
+
+Causa demostrada de esta frontera: el observer sólo implementaba movimientos,
+erase/modos y no window manipulation `t`; no es evidencia de fracaso del
+resize del producto. Candidata del fixture: admitir exclusivamente
+`CSI 8;<rows>;<columns>t` que coincide exactamente con las dimensiones ya
+solicitadas por ResizePseudoConsole, contar el evento y **además** exigir
+posicionamiento/repaint nuevo y el literal actual. No inferir texto por reflow,
+ignorar otros window ops o reinterpretar geometría distinta. El significado
+estándar del comando8 consta en [XTerm, XTWINOPS](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html).
+El log nativo capturó el final0x74, no sus tres parámetros: esta candidata
+necesita comprobar esa forma exacta y GREEN real en una ventana CI posterior.
+Dos regresiones cfgWindows cubren reporte coincidente sin inventar repaint y
+rechazo de geometría/op/formato distintos; **no ejecutadas en este Linux**.
+No relajar SCREEN_WAIT15s, copy1s, límites, DACL ni asserts existentes.
+
+Consumo propio fase2: **6/6 corridas**, cinco Windows y una Mac, todas
+terminadas. Ninguna séptima corrida autorizada. Se conserva PR#1 borrador;
+no integración, merge, cambios de reglas o de estados de tickets.
+Entorno último Windows: Windows11 Enterprise10.0.26200/build26200,
+ARM64, `win11-vs2026-arm64`/`20260924.168.1`, Rust1.98.1
+`aarch64-pc-windows-msvc`, UAC_ENABLE_LUA=1. Mac propio3:15.7.9/kernel24.6.0,
+Intel imagen20260824.0482.1 y ARM imagen20260907.0337.1, Rust1.98.1 nativo.
+El fixture discrimina identidad/privilegio humano; no inferir elevación o
+soporte desde el preflight. x64/reboot/FDE/Terminal humano/firma siguen pendientes.
+
+Verificación local final: barrido terminado sobre99b40ae,
+`/tmp/pmw1b-final-gate-results.json`, **40 casos,39 rc0,0 diferencias** con
+`/tmp/pmw1-resume-gate-results.json` por nombre, comando exacto y rc.
+Driver `/tmp/pmw1b-final-gate-run.py`, resumen
+`/tmp/pmw1b-final-gate-summary.log`. Check y clean-offline-build rc0 en
+`/tmp/pmw1b-final-gate-final-{check,clean}.log`; tres labs TUI y restantes
+wrappers sin regresión. Sólo g7-matrix conserva rc1 de staging, conocido W3.
+Cada comando conserva flock y los artefactos Keycloak/Chrome autorizados.
+Después se añadió exclusivamente el reconocimiento/test cfgWindows de CSI t;
+check8 fresco rc0 bajo flock, `/tmp/pmw1b-check8.log`. No atribuir al check Linux
+compilación ni GREEN de esas ramas Windows. Fmt/diff-check y enlaces locales
+(ticket26:6, ticket27:3, ninguno ausente) PASS. No secrets, caches, artifacts,
+certificados, instalaciones adicionales o fallback nuevo.
+
+Esta tabla sustituye el estado vigente de la tabla del checkpoint de reanudación;
+no cambia el ticket `claimed` ni borra los resultados históricos:
+
+| Criterio27 | Estado de fase2 | Evidencia/límite |
+| --- | --- | --- |
+| Servicio virtual/DACL/DPAPI y peer bilateral G1 por proceso real | PASS parcial | ARM64 SCM/RPK/humano real y primitives; falta matriz integral G1 y segundo CPU. |
+| Rechazos sustitución/impersonación/dump/lectura/fallos | PASS parcial | Empty/directory/hardlink locales con cero lease y DACL exacta; negativas peer/PID/source/reparse/transferencia fallida integrales pendientes. |
+| ConPTY/clipboard/persistencia sin admin del agente | PASS parcial | Tipos7 por teclado, reveal/expiry, imports del run2 y copia exacta anterior; resize GREEN, nuevo-owner tras expiry y operaciones posteriores Windows pendientes. x64/reboot en32. |
+| Evidencia TDD RED/GREEN; comandos exactos sin skip/stub | PASS de cambios acotados | Hardlink→positivo run1/run2, nota run4/run5; barrido40 sin regresión. CSI t sólo RED nativo+candidata, falta GREEN. |
+| Revisión contractual e integración por merger antes de resolver | pendiente | Handoff W1; sin integración y sin cierre de27. |
+
+| Matriz Windows W1 | Estado observado máximo |
+| --- | --- |
+| Siete tipos/Unicode/selección sin valor/reveal exacto/expiry | PASS run5 y run6; passkey almacenamiento, no UP/UV. |
+| CSV largo, siete contadores en panel antes de IMPORT | PASS runs2/5; commit transaccional. |
+| 1PUX2MiB+ positivo | PASS run2 con CSV previo; FAIL run5 con tipos8 previos, después de duplicación y antes de preview. Nueva frontera desconocida. |
+| ACL real antes/durante/después | PASS run2; run5 instala y restaura incluso tras error de preview. No sustituye matriz completa de fallo. |
+| Empty/directory/hardlink negativos | PASS run5; error explícito/cero lease/DACL exacta. |
+| Segundo lease/DACL nulo/cambio externo | PASS de primitives previas; negativas completas de transferencia real no demostradas. |
+| Peer/PID impostor, pseudohandle, reparse y todo fracaso1PUX | pendiente; ninguna equivalencia con tests unitarios o el hardlink. |
+| Resize100×30→42×12→80×24 | RED del observer al primer t; candidata estricta publicada, GREEN nativo pendiente. |
+| Organización/history/copia | Alcanzado hasta lectura exacta de clipboard run2; preservación del nuevo owner tras expiry falla/no demostrada. Hipótesis de pump sin confirmar. |
+| Backup/export/trash/restore/recovery/master y avisos completos | Oráculos preparados, no alcanzados Windows; Linux operations PASS. |
+| Pair-sync-retire/E2E/restart/offline y attachment grande | No alcanzados y fixture incompleto. Falta segundo dispositivo con prefijos verificables; sync integral también conserva bloqueo purge/outbox W2. |
+
+Archivos fase2: `pm-custody/src/tui.rs`, `pm-custody/src/windows.rs`,
+`pm-native-channel/src/{lib,windows}.rs`, dos examples Windows (seed nuevo y
+ConPTY), `test-windows-custody-lab.ps1`, `verify-windows-libsodium-build.sh`,
+`macos_tui_migration_lab.py`, docs ticket26/27. No human_wire, vault/staging,
+crypto, listener/dispatcher/admisión ni engine purge/sync/backup modificados.
+Conflictos previsibles: W3 App/tui y windows.rs (errores/protección), W4
+windows.rs/diagnósticos/fixture PS/ConPTY, W2 fixtures de migración/operaciones
+y docs26/27. El checker PE sigue inspeccionando ambos productos y el seed;
+no se añade otro protocolo de producto ni dependencia.
+
+Siguiente acción del coordinador: revisar esta rama sin integrar automáticamente;
+autorizar otra ventana nativa para validar CSI t y obtener el discriminante
+post-duplicación que quedó preparado. Si handler común falla, delegar diagnóstico
+de preview/classify/prepare a su dueño antes de modificar custodia/vault/staging.
+Después continuar clipboard y operaciones restantes; preparar segundo dispositivo
+por el método normal antes de acreditar retiro y componer W2 para sync integral.
+Mac ARM histórico necesita nueva hipótesis/evidencia si vuelve a fallar8s; no
+repetirlo idéntico ni afirmar reparación por una sola no reproducción.

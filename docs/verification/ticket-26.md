@@ -2453,3 +2453,11 @@ Log `/tmp/pmw1b-macos1.log`. No se ejecutó el sample posterior al fallo porque
 el gate pasó. No atribuir causa raíz al timeout histórico ARM ni afirmar que
 la instrumentación lo corrigió: **no reproducido**, causa pendiente. No repetir
 el mismo SHA sin hipótesis nueva. Deadline8s, backup y aserciones intactos.
+
+Handoff W1 fase2: se consumieron las6 corridas autorizadas (5 Windows+1Mac),
+todas terminadas; ningún run Mac adicional. La causa del timeout histórico
+ARM queda pendiente, con hipótesis status/panel descartada y negativas nativas
+Intel/ARM PASS8s sobrec403865. Antes de nueva corrida, el coordinador debe
+proveer hipótesis/cambio pertinente y una nueva ventana CI. Entorno propio:
+macOS15.7.9/kernel24.6.0; Intel20260824.0482.1, ARM20260907.0337.1,
+Rust1.98.1. No se cambió backup, deadline, publicación ni estado de26.

@@ -124,6 +124,7 @@ mod windows_fixture {
         focus_reporting: bool,
         window_title_updates: u64,
         cursor_positions: u64,
+        resize_reports: u64,
         line_feeds: u64,
         delayed_wraps: u64,
         bottom_scrolls: u64,
@@ -169,6 +170,7 @@ mod windows_fixture {
                 focus_reporting: false,
                 window_title_updates: 0,
                 cursor_positions: 0,
+                resize_reports: 0,
                 line_feeds: 0,
                 delayed_wraps: 0,
                 bottom_scrolls: 0,
@@ -586,6 +588,13 @@ mod windows_fixture {
             let distance = || if first == 0 { 1 } else { first };
             match command {
                 b'm' => {}
+                b't' if parameters.as_slice() == [8, self.rows, self.columns] => {
+                    let Some(next) = self.resize_reports.checked_add(1) else {
+                        self.fail("ConPTY resize-report counter overflow");
+                        return;
+                    };
+                    self.resize_reports = next;
+                }
                 b'H' | b'f' if parameters.len() <= 2 => {
                     let row = parameters.first().copied().unwrap_or(1).max(1) - 1;
                     let column = parameters.get(1).copied().unwrap_or(1).max(1) - 1;
@@ -2026,13 +2035,14 @@ mod windows_fixture {
             (42, 12, "Password Manager"),
             (80, 24, "Items (selection is metadata only)"),
         ] {
-            let previous_positions = {
+            let (previous_positions, previous_reports) = {
                 let mut state = fixture
                     .observer
                     .state
                     .lock()
                     .map_err(|_| io::Error::other("resize observer poisoned"))?;
                 let previous_positions = state.cursor_positions;
+                let previous_reports = state.resize_reports;
                 if unsafe {
                     ResizePseudoConsole(
                         fixture.pseudo_console,
@@ -2054,12 +2064,14 @@ mod windows_fixture {
                 state.saved_row = 0;
                 state.saved_column = 0;
                 state.wrap_pending = false;
-                previous_positions
+                (previous_positions, previous_reports)
             };
             fixture
                 .observer
                 .wait_for_matching("fresh native resize repaint", |state| {
-                    state.cursor_positions > previous_positions && state.contains(expected)
+                    state.cursor_positions > previous_positions
+                        && state.resize_reports > previous_reports
+                        && state.contains(expected)
                 })
                 .map_err(|primary| {
                     io::Error::other(format!(
@@ -2399,6 +2411,35 @@ mod windows_fixture {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn observer_validates_resize_reports_without_inventing_repaint() {
+            let observer = TerminalObserver::new();
+            observer.feed(b"\x1b[8;24;80t").unwrap();
+            let state = observer.state.lock().unwrap();
+            assert_eq!(state.resize_reports, 1);
+            assert_eq!(state.cursor_positions, 0);
+            assert!(
+                state
+                    .cells
+                    .iter()
+                    .all(|cell| matches!(cell, ScreenCell::Empty))
+            );
+        }
+
+        #[test]
+        fn observer_rejects_wrong_resize_geometry_or_unrecognized_window_ops() {
+            for sequence in [
+                b"\x1b[8;30;100t".as_slice(),
+                b"\x1b[4;24;80t",
+                b"\x1b[8;24t",
+                b"\x1b[?8;24;80t",
+            ] {
+                let observer = TerminalObserver::new();
+                assert!(observer.feed(sequence).is_err());
+                assert_eq!(observer.state.lock().unwrap().resize_reports, 0);
+            }
+        }
 
         #[test]
         fn observer_distinguishes_note_secret_from_its_public_type() {
