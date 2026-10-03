@@ -21,6 +21,16 @@ function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
+function Assert-TuiFixtureOutput([string]$Path, [string]$Scenario) {
+    $actual = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    Assert-True ($null -ne $actual) "$Scenario fixture emitted empty public output"
+    $exact = $actual -ceq "TUI_CONPTY_READY`n"
+    $lf = $actual.EndsWith("`n")
+    $crlf = $actual.EndsWith("`r`n")
+    Write-Host "TUI_PUBLIC_OUTPUT scenario=$Scenario chars=$($actual.Length) lf=$lf crlf=$crlf exact=$exact"
+    Assert-True $exact "$Scenario fixture emitted unexpected public output"
+}
+
 function Invoke-Checked([string]$File, [string[]]$Arguments) {
     & $File @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$File failed ($LASTEXITCODE)" }
@@ -678,13 +688,13 @@ try {
             $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, '--encoding-exit', $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
             Write-Host (Get-Content $tuiErr -Raw)
             Assert-True ($p.ExitCode -eq 0) ('TUI encoding natural-exit scenario failed: ' + (Get-Content $tuiErr -Raw))
-            Assert-True ((Get-Content $tuiOut -Raw) -eq "TUI_CONPTY_READY$([Environment]::NewLine)") 'encoding-exit fixture emitted unexpected public output'
+            Assert-TuiFixtureOutput $tuiOut 'encoding-exit'
         }
         $matrixMode = if ($ServiceDiagnostics) { '--matrix-probe' } else { '--matrix' }
         $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, $matrixMode, $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
         Write-Host (Get-Content $tuiErr -Raw)
         Assert-True ($p.ExitCode -eq 0) ('normal pm-custody TUI did not complete its ConPTY tracer: ' + (Get-Content $tuiErr -Raw))
-        Assert-True ((Get-Content $tuiOut -Raw) -eq "TUI_CONPTY_READY$([Environment]::NewLine)") 'TUI fixture emitted unexpected public output'
+        Assert-TuiFixtureOutput $tuiOut 'matrix'
         Assert-True (Test-Path -LiteralPath $tuiBackup -PathType Leaf) 'TUI native backup was not published'
         Assert-True ((Get-Item -LiteralPath $tuiBackup -ErrorAction Stop).Length -gt 0) 'TUI native backup is empty'
         Assert-True (Test-Path -LiteralPath $tuiPlaintext -PathType Leaf) 'TUI plaintext export was not published'

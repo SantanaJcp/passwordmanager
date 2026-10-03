@@ -1,8 +1,12 @@
-# Ticket 27 — composición Windows pendiente de ejecución nativa
+# Ticket 27 — evidencia Windows parcial y matriz pendiente
 
-Fecha: 2026-09-13. Estado: **implementación sin acreditar, no candidato
-aceptado**. Este documento no acredita Windows ni resuelve el ticket. No se
-ejecutó Windows, no se instaló servicio y no se modificó el host Linux.
+Corte actual: 2026-10-02. Estado: **checkpoint parcial Win11 ARM64, no candidato
+aceptado**; ticket `claimed`. El primer prompt/input oculto/unlock pasan en
+modo normal; la matriz se detiene por recorte del input CSV en el footer común,
+con decisión de presentación pendiente. Los métodos y runs exactos del corte
+están al final. No acredita soporte completo, x64/reboot ni resuelve el ticket.
+Las entradas desde 2026-09-13 se conservan como cronología de checkpoints,
+no como declaraciones simultáneas sobre el candidato actual.
 
 ## Método del checkpoint `pm-vault` Windows (escrito antes de implementar)
 
@@ -2230,3 +2234,20 @@ Fallback adicional observado al inspeccionar el wrapper fijado de Ratatui
 que el límite de una línea, lo omite. No activa a 78 columnas internas, no
 explica este recorte y no se cambia la dependencia. Permanece además el fallback
 TERM de Crossterm y los cleanups heredados sin autorización del handoff.
+
+[Run44](https://github.com/SantanaJcp/passwordmanager/actions/runs/37091018915),
+SHA `30f473befba48ef9f8098b7913740fdf6fa37d27`, job `111111197605`: build y
+13/1/15/1 PASS. El caso independiente observa prompt/input oculto/unlock,
+salida natural 0 y exactamente `stage=restore output-cp=437 expected=437
+restored=true`. GREEN nativo de restauración CP. El workflow sigue FAIL:
+PowerShell rechaza stdout del fixture antes de comenzar la matriz siguiente.
+
+Defecto del oráculo observado tras esa salida: exige Environment.NewLine
+(CRLF) mientras el único stdout del fixture es `println!("TUI_CONPTY_READY")`.
+[Rust println](https://doc.rust-lang.org/std/macro.println.html) especifica LF
+en todas las plataformas. Método antes de repetir: comparar exactamente
+`TUI_CONPTY_READY`+LF, sin Trim ni aceptar CRLF como alternativa. Informar sólo
+longitud, fin LF/CRLF y booleano de coincidencia del contenido público para
+discriminar cualquier desacuerdo restante de redirección/decodificación; no
+volcar stdout. El siguiente run debe superar este oráculo y conservar el RED
+CSV, sin cambiar producto/layout ni elevar la matriz a PASS.
