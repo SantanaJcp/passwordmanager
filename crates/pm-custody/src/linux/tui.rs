@@ -716,7 +716,7 @@ fn event_loop(
             && Instant::now().duration_since(app.wire_at) >= Duration::from_secs(5)
         {
             write_frame(tls, &[65])?;
-            if &*read_frame(tls)? != [0] {
+            if *read_frame(tls)? != [0] {
                 return Err(Failure::Unavailable);
             }
             app.wire_at = Instant::now();
@@ -895,7 +895,7 @@ fn handle_prompt_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result
         KeyCode::Esc => {
             if app.mode == Mode::RecoveryRotate {
                 write_frame(tls, &[])?;
-                if &*read_frame(tls)? != [2] {
+                if *read_frame(tls)? != [2] {
                     return Err(Failure::Unavailable);
                 }
             }
@@ -1167,7 +1167,7 @@ fn preview_1pux(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Fa
     };
     let source = open_1pux_source(Path::new(&path))?;
     write_frame(tls, &[31, replace])?;
-    if &*read_frame(tls)? != [0] {
+    if *read_frame(tls)? != [0] {
         return Err(Failure::Unavailable);
     }
     send_file_descriptor(&tls.sock, source.as_raw_fd())?;
@@ -1218,7 +1218,7 @@ fn handle_access_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result
         ),
         KeyCode::Char('s') => {
             write_frame(tls, &[57, u8::from(!app.suspended)])?;
-            if &*read_frame(tls)? != [0] {
+            if *read_frame(tls)? != [0] {
                 return Err(Failure::Unavailable);
             }
             show_access(app, tls)?;
@@ -1237,7 +1237,7 @@ fn handle_access_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result
             let mut request = vec![56];
             request.extend_from_slice(subject);
             write_frame(tls, &request)?;
-            if &*read_frame(tls)? != [0] {
+            if *read_frame(tls)? != [0] {
                 return Err(Failure::Unavailable);
             }
             show_access(app, tls)?;
@@ -1251,7 +1251,7 @@ fn handle_access_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result
             request.extend_from_slice(item);
             request.push(u8::from(!enabled));
             write_frame(tls, &request)?;
-            if &*read_frame(tls)? != [0] {
+            if *read_frame(tls)? != [0] {
                 return Err(Failure::Unavailable);
             }
             show_access(app, tls)?;
@@ -1432,7 +1432,7 @@ fn enroll_agent(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Fa
     push_bytes(&mut request, label.as_bytes())?;
     push_bytes(&mut request, environment.as_bytes())?;
     write_frame(tls, &request)?;
-    if &*read_frame(tls)? != [0] {
+    if *read_frame(tls)? != [0] {
         return Err(Failure::Unavailable);
     }
     show_access(app, tls)
@@ -1880,7 +1880,7 @@ fn confirm_passkey(tls: &mut HumanTls, confirmation: &PasskeyConfirmation) -> Re
     let response = read_frame(tls)?;
     let mut cursor = Cursor::new(&response);
     cursor.expect(&[0])?;
-    let status = PasskeyStatus::from_bytes(&cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+    let status = PasskeyStatus::from_bytes(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
     cursor.finish()?;
     if matches!(status, PasskeyStatus::Waiting(_)) {
         return Err(Failure::Unavailable);
@@ -1890,7 +1890,7 @@ fn confirm_passkey(tls: &mut HumanTls, confirmation: &PasskeyConfirmation) -> Re
 
 fn lock_human_channel(tls: &mut HumanTls) -> Result<(), Failure> {
     write_frame(tls, &[14])?;
-    if &*read_frame(tls)? == [0] {
+    if *read_frame(tls)? == [0] {
         Ok(())
     } else {
         Err(Failure::Unavailable)

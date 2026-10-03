@@ -332,9 +332,7 @@ fn keygen(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure>
     push_bytes(&mut encoded, document.as_ref())?;
     encoded.extend_from_slice(&spki);
 
-    if let Err(error) = write_new(&private_path, &encoded, 0o400) {
-        return Err(error);
-    }
+    write_new(&private_path, &encoded, 0o400)?;
     if let Err(error) = write_new(&public_path, &spki, 0o444) {
         return Err(error.after_owned_path_cleanup(fs::remove_file(private_path)));
     }
@@ -373,8 +371,7 @@ fn provision_bootstrap(arguments: &mut impl Iterator<Item = OsString>) -> Result
     encoded.extend_from_slice(&agent_spki);
     encoded.extend_from_slice(&human_uid.to_be_bytes());
     encoded.extend_from_slice(&human_spki);
-    let result = write_new(&path, &encoded, 0o400);
-    result
+    write_new(&path, &encoded, 0o400)
 }
 
 fn provision_profile(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
@@ -699,7 +696,7 @@ fn agent_attempt(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), F
         hex(revision),
         state,
         reason,
-        String::from_utf8_lossy(&result)
+        String::from_utf8_lossy(result)
     );
     Ok(())
 }
@@ -975,7 +972,7 @@ fn human_passkey_confirm(arguments: &mut impl Iterator<Item = OsString>) -> Resu
     let response = read_frame(&mut tls)?;
     let mut cursor = Cursor::new(&response);
     cursor.expect(&[0])?;
-    let status = PasskeyStatus::from_bytes(&cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+    let status = PasskeyStatus::from_bytes(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
     cursor.finish()?;
     if matches!(status, PasskeyStatus::Waiting(_)) {
         return Err(Failure::Unavailable);
@@ -1715,7 +1712,7 @@ fn rpc_download_atomic(
         let mut written = 0_u64;
         loop {
             let frame = read_frame_bounded(tls, STREAM_CHUNK_BYTES + 64)?;
-            if &*frame == [0] {
+            if *frame == [0] {
                 break;
             }
             written = written
@@ -1950,7 +1947,7 @@ fn assert_pattern_download(
     let mut received = 0_u64;
     loop {
         let frame = read_frame_bounded(tls, STREAM_CHUNK_BYTES)?;
-        if &*frame == [0] {
+        if *frame == [0] {
             break;
         }
         received += u64::try_from(frame.len()).map_err(|_| Failure::Unavailable)?;
@@ -2285,7 +2282,7 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
     let mut received = 0_u64;
     loop {
         let frame = read_frame_bounded(&mut tls, STREAM_CHUNK_BYTES)?;
-        if &*frame == [0] {
+        if *frame == [0] {
             break;
         }
         received += u64::try_from(frame.len()).map_err(|_| Failure::Unavailable)?;
@@ -2825,11 +2822,10 @@ fn handle_human_rpc(
     .map_err(|_| Failure::Unavailable)?;
     write_frame(tls, &[0])?;
     loop {
-        let request = match read_frame(tls) {
-            Ok(value) => value,
-            Err(_) => return Ok(()),
+        let Ok(request) = read_frame(tls) else {
+            return Ok(());
         };
-        if &*request == [14] {
+        if *request == [14] {
             drop(vault);
             let mut autonomous = AutonomousAuditVault::open(
                 &service.path,
@@ -2860,7 +2856,7 @@ fn handle_human_rpc(
             handle_stream_download(&vault, tls, &request[1..])?;
             continue;
         }
-        if &*request == [32] {
+        if *request == [32] {
             handle_native_backup_download(&mut vault, tls)?;
             continue;
         }
@@ -3405,7 +3401,7 @@ fn call_ssh_provider(
             }
             3 => return Ok(AttemptOutcome::Indeterminate),
             6 if lease.method() == "publickey" && !signed => {
-                let Ok(signature) = sign_ssh_auth_payload(lease, &value) else {
+                let Ok(signature) = sign_ssh_auth_payload(lease, value) else {
                     return Ok(AttemptOutcome::Failed {
                         reason: "INTEGRITY_FAILURE",
                     });
@@ -3733,7 +3729,7 @@ fn handle_stream_upload(
     let mut cursor = Cursor::new(request);
     let bytes = cursor.bytes()?;
     cursor.finish()?;
-    let record = LogicalRecord::from_descriptor_bytes(&bytes).map_err(|_| Failure::Unavailable)?;
+    let record = LogicalRecord::from_descriptor_bytes(bytes).map_err(|_| Failure::Unavailable)?;
     if record.attachments().len() != 1 {
         return Err(Failure::Unavailable);
     }
@@ -3797,7 +3793,7 @@ fn handle_plaintext_backup_download(
     write_frame(tls, &[0])?;
     let mut writer = FrameWriter { tls };
     vault
-        .write_plaintext_export(&command, &signature, &body, &mut writer)
+        .write_plaintext_export(command, &signature, body, &mut writer)
         .map_err(|_| Failure::Unavailable)?;
     write_frame(writer.tls, &[0])
 }
@@ -3898,7 +3894,7 @@ impl Read for FrameReader<'_> {
                 )
             })?;
             self.position = 0;
-            if &*self.buffer == [0] {
+            if *self.buffer == [0] {
                 self.ended = true;
                 return Ok(0);
             }
@@ -4052,7 +4048,7 @@ fn handle_human_request(
                 .map_err(|_| Failure::Unavailable)?;
             let body = cursor.bytes()?;
             cursor.finish()?;
-            match vault.commit(&command, &signature, &body) {
+            match vault.commit(command, &signature, body) {
                 Ok(receipt) => {
                     let mut response = vec![0];
                     response.extend_from_slice(&receipt.to_bytes());
@@ -4091,7 +4087,7 @@ fn handle_human_request(
             let mut cursor = Cursor::new(rest);
             let bytes = cursor.bytes()?;
             cursor.finish()?;
-            let record = LogicalRecord::from_bytes(&bytes).map_err(|_| Failure::Unavailable)?;
+            let record = LogicalRecord::from_bytes(bytes).map_err(|_| Failure::Unavailable)?;
             let prepared = vault
                 .prepare_create_record(&record)
                 .map_err(|_| Failure::Unavailable)?;
@@ -4578,7 +4574,7 @@ fn handle_human_request(
                 .try_into()
                 .map_err(|_| Failure::Unavailable)?;
             let record =
-                LogicalRecord::from_bytes(&cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+                LogicalRecord::from_bytes(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
             cursor.finish()?;
             let prepared = vault
                 .prepare_edit_record(item, &record)
@@ -5316,11 +5312,11 @@ fn decode_wire_record(cursor: &mut Cursor<'_>) -> Result<PasswordRecord, Failure
     let destination = cursor.bytes()?;
     let notes = cursor.bytes()?;
     let record = PasswordRecord::new(
-        std::str::from_utf8(&title).map_err(|_| Failure::Unavailable)?,
-        std::str::from_utf8(&username).map_err(|_| Failure::Unavailable)?,
-        &password,
-        std::str::from_utf8(&destination).map_err(|_| Failure::Unavailable)?,
-        std::str::from_utf8(&notes).map_err(|_| Failure::Unavailable)?,
+        std::str::from_utf8(title).map_err(|_| Failure::Unavailable)?,
+        std::str::from_utf8(username).map_err(|_| Failure::Unavailable)?,
+        password,
+        std::str::from_utf8(destination).map_err(|_| Failure::Unavailable)?,
+        std::str::from_utf8(notes).map_err(|_| Failure::Unavailable)?,
     )
     .map_err(|_| Failure::Unavailable)?;
     Ok(record)
@@ -6257,22 +6253,28 @@ mod protected_frame_tests {
     use std::process::Command;
 
     const CHILD: &str = "PM28_PROTECTED_RESPONSE_CHILD";
+    static CANARY: [u8; 512 * 1024] = [0x5a; 512 * 1024];
 
     #[test]
     fn sensitive_response_requires_locked_owner_before_serialization() {
         if std::env::var_os(CHILD).is_some() {
-            let public_control = vec![0_u8; 8];
-            assert_eq!(public_control.len(), 8, "public control must be usable");
-            println!("PM28_RESPONSE_CONTROL_READY");
             let limit = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
+                rlim_cur: 128 * 1024,
+                rlim_max: 128 * 1024,
             };
             // SAFETY: the child changes only its own process limit.
-            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit) }, 0);
-            let canary = vec![0x5a_u8; 512 * 1024];
+            assert_eq!(
+                unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const limit) },
+                0
+            );
+            let control = protected_field_response(b"PM28_SYNTHETIC_SMALL")
+                .expect("small response under the same memlock pressure");
+            assert_eq!(&control.as_ref()[5..], b"PM28_SYNTHETIC_SMALL");
+            drop(control);
+            println!("PM28_RESPONSE_CONTROL_READY");
+            // Synthetic static fixture; no ordinary secret heap owner.
             assert!(
-                protected_field_response(&canary).is_err(),
+                matches!(protected_field_response(&CANARY), Err(Failure::Unavailable)),
                 "unlocked response serialization was accepted"
             );
             println!("PM28_RESPONSE_LOCK_DENIED");
@@ -6286,13 +6288,17 @@ mod protected_frame_tests {
             .env(CHILD, "1")
             .output()
             .expect("isolated response child");
-        assert!(output.status.success(), "protected response child failed");
         assert!(
             output
                 .stdout
                 .windows(b"PM28_RESPONSE_CONTROL_READY".len())
                 .any(|value| value == b"PM28_RESPONSE_CONTROL_READY"),
             "response control marker missing"
+        );
+        println!("PM28_RESPONSE_CONTROL_READY");
+        assert!(
+            output.status.success(),
+            "unlocked response serialization was accepted after control"
         );
         assert!(
             output

@@ -687,3 +687,33 @@ Final compile after rustfmt passed: `/tmp/pm-handoff-g7-final-check.log`,
 from WT28. Saved as a local WIP checkpoint, NOT integrated or accepted.
 Next: run the discriminating regression on baseline9ec8b30 before claiming
 a behavioral correction; then candidate focused tests and full G7 inventory.
+
+## Reanudación 2026-10-02 — método discriminante concretado
+
+El WIP `8bf30bf` es una migración estática previa al RED de respuestas; no se
+presenta como TDD. Copia detached propia de `9ec8b30` en
+`/tmp/pm28-20261002-baseline9ec8b30`, añadiendo sólo el fixture de regresión.
+El baseline reproduce las dos instrucciones del serializer real de reveal
+(opcodes 50/52/53: status seguido de `push_bytes`), sin migrar producto.
+El hijo fija memlock soft/hard a 128 KiB, serializa un campo pequeño bajo ese
+mismo límite, verifica sus bytes y libera el resultado. Sólo después emite
+`PM28_RESPONSE_CONTROL_READY` y solicita un campo sintético de 512 KiB desde
+stack. Se exige `Failure::Unavailable` (categoría pública
+`CUSTODY_UNAVAILABLE`); aceptar el Vec de respuesta es RED conductual. El parent
+exige el control antes de status y no imprime las salidas del hijo. Esto cubre
+el serializer de respuesta, no un recorrido TLS completo. Todas las corridas
+usan `flock /tmp/pm-cargo-window.lock` desde su cwd exacto. Los logs nuevos usan
+`/tmp/pm28-20261002-*`; los históricos ausentes no son evidencia accesible.
+
+Resultado del vertical: RED rc101 con control confirmado en
+`/tmp/pm28-20261002-red-response.log`, baseline `9ec8b30`; GREEN rc0 en
+`/tmp/pm28-20261002-green-response.log`. El primer intento de preparación usó
+un cwd incorrecto y ejecutó cero pruebas: `/tmp/pm28-20261002-baseline-no-fixture.log`
+queda invalidado, no es RED. El fixture definitivo usa un canario estático
+sintético; no añade un owner heap ordinario. El gate inicial falló por formato
+(`wip-check.log`), el segundo completó tests pero falló por 35 lints
+(`wip-check2.log`), y el siguiente intento enfocado quedó con un lint del fixture
+(`wip-clippy2.log`). Corregidos borrows y forma de expresiones sin alterar los
+fallbacks heredados, `scripts/check.sh` completo terminó rc0 en
+`/tmp/pm28-20261002-wip-check3.log`: config, build inputs, fmt, check, tests y
+clippy locked/offline. Esto valida el checkpoint, no cierra el inventario G7.
