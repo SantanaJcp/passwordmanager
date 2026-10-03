@@ -1409,9 +1409,10 @@ Conflicto previsto de composición con 26/27: mover loader/callers de linux.rs
 al único engine extraído; Cargo.lock puede requerir composición mecánica. No
 se integra en principal, no se fusiona PR #1 ni se resuelve ticket 28.
 
-### Estado vigente de criterios 28/G7 — fase 3 (checkpoint parcial)
+### Estado histórico de criterios 28/G7 — fase 3 (checkpoint parcial)
 
-Esta tabla sustituye el estado vigente de fase 2, sin borrar su cronología.
+Esta tabla sustituyó el estado de fase 2. El estado vigente está al final de
+fase 4; se conserva esta cronología.
 
 | Criterio | Estado y alcance vigente | Evidencia |
 |---|---|---|
@@ -1490,3 +1491,303 @@ flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh vault 
 # Por cada uno de los 26 scripts enumerados, con log propio y rc propagado:
 PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3 PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64 PYTHONDONTWRITEBYTECODE=1 flock /tmp/pm-cargo-window.lock ./scripts/test-linux-storage-fault-lab.sh
 ```
+
+## Fase 4 — 2026-10-03: providers sobre la integración
+
+Base verificada `36eecc8c365328ca4c8ca074ae013564767d79b7`; worktree propio
+`.worktrees/28-g7-phase4`, rama `codex/pm-28-phase4`. No cambia el estado del
+issue ni se integra en principal. La composición mueve TUI/handlers a
+`tui.rs`, `human_wire.rs`, `agent_wire.rs` y `sync_job.rs`.
+
+Concreción de §1 antes de GREEN: subprocess por seam, control válido completo
+y luego denegación real de memlock. HTTP fijo/chunked, form, JSON y JavaScript
+usan control pequeño con 32 KiB y fuente estática sintética de 64 KiB, dentro
+del límite existente; no se imprime el contenido. GitHub valida el request
+completo antes de bajar memlock a cero y exige rechazo al serializar el mismo
+PAT sintético. CDP controla una respuesta válida, baja memlock a cero y exige
+rechazo con cero bytes consumidos del reader. `read_cdp_message` se extrae
+sin cambiar el loop de lectura para probar el reader utilizado por Browser.
+Las APIs infalibles form/js se envuelven sólo en `Ok` en el fixture RED; ese
+wrapper se retira cuando la API pase a fallible, sin cambiar el oráculo.
+Un error de compilación no acredita RED. Los procesos hijos conservan stdout/
+stderr completos en memoria del fixture; se muestran sólo marcadores seguros.
+
+Comando RED (cwd del worktree, log `/tmp/pm28p4-red-provider-sources.log`):
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-web-auth --lib memory_tests --locked --offline -- --nocapture
+```
+
+Fallback nuevo inspeccionado, conservado: `browser.rs::wait_for_view`, diagnóstico
+tras timeout, usa `unwrap_or(false)`, `unwrap_or("?")` y `unwrap_or("")` si
+faltan campos de la vista. Sustituye valores desconocidos en el diagnóstico;
+el intento sigue fallando. Opciones: categorías explícitas de campos ausentes
+o mantener los sustitutos. Se recomienda distinguir ausencia explícitamente
+en un correctivo autorizado; no se cambia esta rama en fase 4.
+
+Siguiente RED de §1: se extrae el encoder realmente usado por requests
+controladas, metadata SSH, password SSH tardío y respuesta de firma, preservando
+prefix/fields/suffix byte a byte. Control independiente completo antes de bajar
+memlock a cero; serializar los mismos campos debe fallar antes de producir
+request. El fixture no abre una conexión ni repite un login. GREEN usará el
+ProtectedFrameWriter ya integrado, con tamaños checked exactos y sin adapters
+Vec. Los labs de providers comprobarán compatibilidad de esos callers.
+
+Concreción adicional de §1 para TUI: subprocess con control UTF-8/escapes de
+`split_exact` (seam real de master_rotate e importación), luego memlock=0 y
+misma entrada válida, debajo de 32 KiB. Otro caso controla el encoder real de
+requests master-rotate/native-restore y exige rechazo memlock=0. Se extrae ese
+encoder sin cambiar bytes/semántica para el RED. GREEN limitará el cambio a
+owners únicos de campos y requests: sin cambiar footer, resumen, etiquetas,
+confirmaciones ni capacidades. Ratatui/reveal sigue pendiente; proteger esos
+dos seams no acredita sus Cell/String internos.
+
+Verificación de compatibilidad del helper propio: comparar recursivamente JSON
+válido con el parser previo (texto/números exactos, Unicode/control, claves y
+orden) y exigir el mismo rechazo de duplicados, surrogates, profundidad y
+trailing. Probar lectores completos con EOF, exceso de límite, CDP máximo con
+NUL y truncamiento; no aceptar un owner parcial. Es extensión concreta de §1,
+sin ampliar gramática, límites ni excepciones G7.
+
+### Inventario de fase 4 y fronteras conservadas
+
+Owners migrados: fuentes/valores de los tres perfiles web; request GitHub,
+forms OIDC/exchange, HTTP entero/cuerpo fijo/chunked; JSON propio (también
+claves/números desconocidos); segmentos JWT, tokens/resultados/serializers;
+state/nonce/verifier, scripts/escapes, mensajes CDP/evaluación y callback HTTP.
+El encoder de CDP toma vistas prestadas; las estructuras Vec contienen nodos,
+punteros o metadata numérica, nunca un payload secreto ordinario. Los owners
+sensibles no ganan Debug/Clone/Display ni conversiones a Vec. La excepción TLS
+PKCS8 ya existente (`callback_key`→rustls) sigue pendiente de evaluación de la
+biblioteca: su fuente propia ahora está locked, pero `key.to_vec()` conserva
+la copia requerida por la API rustls prevista en G7; no se acredita como locked.
+RNG/TOTP producen su salida propia directamente en destino protegido. Heap
+Chromium, TLS/crypto y russh no quedan acreditados por estos cambios.
+
+Custody: encoder exacto compartido por las requests controladas, metadata SSH,
+password SSH tardío y firma. El presupuesto y límites wire no se cambian.
+TUI: `split_exact` mide escapes/UTF-8 sin almacenar texto y después escribe en
+owners ProtectedText; native-restore/master-rotate reservan su request exacta
+antes de copiar la maestra. Se conservan las confirmaciones y los valores del
+resumen. `render_footer`, `decode_import_preview` y el bloque que construye
+`Mapping=... duplicate-action=...; {summary}` se comprobaron byte a byte
+idénticos a la base. No se ha resuelto el resumen recortado.
+
+Los nuevos errores de memoria web posteriores al parseo de la request se
+conservan tipados y se propagan sin fabricar respuesta; los diagnósticos de
+etapa usan inspect_err. Las closures `parsed` de handle_github/browser/exchange
+siguen agrupando el error de las copias ProtectedBytes preexistentes con parseo
+y status4: **ese fallback no se corrige**. `provider::serve` y `Browser::stop`
+se comprobaron idénticos a la base. No se modifican listener/dispatcher,
+admisión, `provider: None`, carriles macOS, Windows ni engine.
+
+Inventario integral sigue **FAIL**: pm-ssh-client (perfil/resultado propios y
+request de firma; la contraseña String de russh pertenece a la excepción
+explícita de la biblioteca); `human_wire::handle_recovery_rotation` conserva
+RecoveryCode Display→hex/String→Vec, y `encode_catalog` conserva metadata Vec;
+`agent_wire::encode_attempt_snapshot` conserva resultado Vec y los owners de
+admisión/contexto previos. TUI reveal conserva display_secret/sanitize_text,
+format de Exposure, Paragraph/Cell de Ratatui; import/sync/streams y metadata
+ordinaria restante no se migraron. ZIP/DEFLATE y el resto del inventario de
+fase 3 continúan abiertos. No hay una excepción nueva que los declare seguros.
+
+Fallbacks/silenciamientos adicionales encontrados por lectura, **sin corrección
+ni RED runtime propio en esta fase**:
+
+| Lugar | Activación | Sustitución u ocultación conservada |
+|---|---|---|
+| `Profile::value` / `ExchangeProfile::value` web | Getter de una clave ausente | Devuelve `""`; la validación previa cubre claves requeridas, el method opcional también usa esta representación. |
+| `pm-ssh-client::read_frame/authenticate`→`serve` | Alloc/mlock propio falla | Lo convierte en Error::Io; el dispatcher emite frame3 indeterminado, agrupado con I/O/SSH. |
+| `pm-ssh-client::serve`, carril consumer | read_frame o parseo inválido | Continúa el loop sin devolver la causa. |
+| `agent_wire::serve_agent` | read_frame falla, también por alloc/mlock | Retorna Ok y cierra el carril sin conservar la categoría del fallo. |
+| `tui::display_secret` | Secreto no UTF-8 | Muestra `<binary secret: N bytes>`; no los bytes. Es comportamiento heredado y su test binario sigue intacto. |
+
+Opciones para las fallas operativas: conservar estas sustituciones, o separar
+categorías tipadas y propagarlas por el workstream autorizado de dispatcher/
+proveedor. Se recomienda la segunda. Este checkpoint se detiene antes de
+ampliar esos owners cuando exigiría introducir otra clasificación sustituta o
+cambiar esa frontera prohibida. Para getter/presentación, distinguir ausencia
+y representación binaria explícitamente en una decisión propia, preservando
+las capacidades humanas; no inferir autorización desde G7.
+
+Los fallbacks enumerados por el usuario (SQLite perdido/implícito, sync .or_else,
+notesPlain/favIndex, TOTP→source fields, respuesta vacía→DENIED, frames provider,
+Browser::stop, ProcessTlsTransport::put, sync_stage, from_utf8_lossy, Drops
+Windows/LocalFree/DestroyWindow) siguen sin corrección en esta entrega.
+
+### Ajustes del harness tras la primera barrida
+
+La primera barrida queda íntegra en `/tmp/pm28p4-local-summary.log` y
+`/tmp/pm28p4-local-results.json`: dos diferencias adicionales a la base,
+adapter-protected-frame y passkey-login. No se contabiliza como gate verde.
+Concreción de §1 antes de volver a ejecutar: el perfil web ahora necesita
+memlock antes de bind. El lab exige primero rechazo rc4/sin socket cuando se
+deniega desde exec; después arranca un control válido con su perfil protegido,
+usa `prlimit` en ese PID propio para bajar soft/hard a cero y conserva exactamente
+el oráculo de frame: sólo header de longitud, cero payload enviado, cierre sin
+timeout ni respuesta. El carril SSH conserva el control anterior memlock=0.
+No se relaja la aserción ni se concede memoria ordinaria para arrancar web.
+
+En passkey-login el primer fallo observado es CUSTODY_UNAVAILABLE tras un
+reinicio, no una aserción de tokens/WebAuthn. El harness usaba existencia de
+path como readiness y dejaba los sockets del PID anterior: podía devolver
+readiness antes de que el custodio nuevo reemplazara esos paths. Concreción
+de la regresión existente: después de terminar y observar el PID exacto,
+validar tipo socket y retirar sólo `agent.sock`/`human.sock` propios antes de
+cada reinicio. Se exige aparición nueva en el mismo plazo y se repite el lab
+entero en fixture nuevo; no se reenvía ninguna operación/login dentro del caso.
+Esta corrección no cambia listener/dispatcher de producto.
+
+Fallbacks adicionales del harness passkey-login conservados: `stop` sustituye
+SIGTERM por SIGKILL si agota 8 s y el finally usa
+`shutil.rmtree(root, ignore_errors=True)`, ocultando errores al retirar su raíz.
+Se reportan sin corregir: no se acredita cleanup integral §4 con ese lab.
+
+### RED/GREEN y compatibilidad nuevos
+
+Todos los comandos siguientes se ejecutaron con cwd del worktree propio y
+`flock /tmp/pm-cargo-window.lock`, locked/offline. Cada RED llegó al control
+válido completo y compiló: la falla discriminante fue aceptar el owner
+ordinario después de denegar memlock, no compilación ni dependencia.
+
+| Seam real | RED | GREEN y regresión |
+|---|---|---|
+| HTTP fijo/chunked, form, JSON, request GitHub, JavaScript y CDP | `pm28p4-red-provider-sources.log` rc101: 7/7 fallan después de control | `pm28p4-green-provider-sources.log` rc0: 15/15; check3 incluye además 3 controles de compatibilidad, 18/18 lib y 6/6 profiles |
+| Requests custody hacia providers, incluido password SSH tardío | `pm28p4-red-custody-provider-request.log` rc101: 1 fallo después de control de layout | `pm28p4-green-custody-provider-request.log` rc0: 1/1 |
+| TUI split con UTF-8/escapes y request restore/rotate | `pm28p4-red-tui-owners.log` rc101: 2/2 fallan después de control | `pm28p4-green-tui-owners.log` rc0: 17/17, incluidos los 2 nuevos |
+
+Comandos de los tres RED, en ese orden:
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-web-auth --lib memory_tests --locked --offline -- --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody --lib linux::provider_memory_tests --locked --offline -- --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody --lib tui::memory_tests --locked --offline -- --nocapture
+```
+
+Para GREEN se usó `--lib` sin filtro en web, el mismo filtro de request custody,
+y `tui::` en TUI. Las APIs form/js ahora fallibles sustituyen sólo el wrapper
+Ok del fixture RED; controles, límites y canarios permanecen iguales.
+Los errores de compilación intermedios (`green-provider-sources-build1/2`,
+`green-tui-owners-build1`, `check1`) y ajustes Clippy (`check2`) quedan en
+`/tmp/pm28p4-*.log`, **no son RED de producto**.
+
+El parser propio preserva gramática previa, números exactos y Unicode; rechaza
+duplicados, surrogates, profundidad y trailing igual que el parser anterior.
+Los readers rechazan truncamiento/exceso y sólo devuelven fuentes completas.
+Los controles nuevos usan datos sintéticos estáticos identificables; no se
+copian credenciales reales ni se imprimen payloads secretos en asserts.
+
+### Estado vigente de criterios 28/G7 — fase 4 (checkpoint parcial)
+
+Esta tabla sustituye el estado vigente de fase 3. Ningún PASS acotado cierra G7
+ni el ticket. La integración y la revisión independiente siguen a cargo del
+orquestador.
+
+| Criterio | Estado y alcance vigente | Evidencia |
+|---|---|---|
+| Records/password/notas/Attachment, decoder AuthRecord y serializers | PASS acotado heredado | Fase 2; check3 |
+| Parsers CSV/JSON e inline PMF1 | PASS acotado heredado | Fase 2; check3 |
+| Passkey de 32 bytes | PASS del constructor/decoder heredado | Fase 2; check3 |
+| Response sensible custody y frames ya migrados | PASS acotado heredado; no todos los caminos | Fase 1; check3 |
+| Response final web-auth compartido | PASS acotado heredado | Fase 3; check3 |
+| Sources/requests propios HTTP/JSON/CDP y resultados web | PASS acotado nuevo; no heaps TLS/Chromium/russh ni todo pm-ssh-client | 7 RED/GREEN, parser/readers y labs web/GitHub/exchange/passkey |
+| Requests custody hacia providers | PASS acotado nuevo | RED/GREEN request y labs proveedores; bytes/semántica conservados |
+| Owners TUI split y requests restore/rotate | PASS acotado nuevo | 2 RED/GREEN; 17/17 TUI; footer/resumen intactos |
+| Memoria propia integral, wires y presentación restante | **FAIL de inventario** | Inventario fase 4: SSH, recovery, snapshot, import/sync, Ratatui, ZIP/DEFLATE |
+| Presupuesto agregado | PASS contador test-only 64 KiB; 32 MiB físicos/overhead no demostrados | Fase 2; host memlock 8 MiB; no se amplía |
+| Guardas Linux/core/dumpable/stdin | PASS acotado heredado | Labs fault-safety/custody-protected-input |
+| 17.º RATE_LIMITED y CLOCK_UNTRUSTED | PASS acotado heredado | delegated_authorization y labs autorización |
+| Límites restantes, incluido techo custodial 128 | No demostrado integralmente | Sin nuevas pruebas de estos techos |
+| ENOSPC WAL + atomicidad/restart | PASS acotado heredado | Lab storage-fault |
+| Primer fsync WAL de admisión humana/audit | PASS acotado heredado: EIO real único | Caso SQLite-sync |
+| Matriz fsync/WAL/staging/commit/outbox/audit y ENOSPC por frontera | **No demostrado integralmente** | No se añadieron fronteras §2 en esta fase |
+| Crash/intención sin resultado → INDETERMINATE, no doble login | PASS acotado heredado | Lab attempts; no todos los proveedores/fronteras |
+| Bootstrap perdido con intento completado | PASS acotado heredado | Caso bootstrap-completed |
+| Vault perdido con intento completado | **FAIL sin autorización para corregir** | red-vault rc1: main-vault=1; rechazo rc4 no basta |
+| Custodia de auditoría perdida/ilegible, inicialización y restitución | PASS acotado heredado autorizado | Caso custody-audit |
+| Pérdidas en vivo/en vuelo/ambiguas | No demostrado integralmente | Sin extensión §3 en esta fase |
+| Canarios activos/históricos, todos los canales y UID agente/core/crash | **No demostrado integralmente** | No se añade escaneo integral §4; labs acotados no lo sustituyen |
+| Purge/outbox de revisión purgada | **RED heredado separado de gates** | red-purge: QueryReturnedNoRows; no se corrige |
+| Windows VirtualLock/WER y macOS nativo | Diferido | Sin evidencia nativa nueva; seams no acreditan soporte |
+| Check completo y build limpio | PASS | check3 rc0; clean-offline rc0 en 35.16 s |
+| Barrida final de 36 casos frente a integración | Sin regresión frente a base: 33 rc0, TUI mismatch conocido y 2 RED separados | pm28p4-local-final-summary.log/JSON: BASELINE_CHANGES=0, mismatches=1 |
+| Integración/revisión independiente | Pendiente, fuera de esta entrega | Rama propia; ticket/PR #1 sin cambio de estado |
+
+### Archivos y siguiente frontera
+
+Producto: `pm-web-auth/src/{lib,provider,oidc,exchange,github,browser,plaintext}.rs`
+y `pm-custody/src/{linux,tui}.rs`. Fixtures: cuatro módulos web de soporte/memoria,
+dos custody de memoria, `pm-web-auth/tests/{profile,passkey_login_lab}` y
+`pm-custody/tests/adapter_protected_frame_lab`. Documento: este método/evidencia.
+No cambia Cargo.lock, dependencias, workflows ni configuración del host.
+
+Conflictos previsibles: `linux.rs` en packing/callers del worker de providers;
+`provider.rs` en propagación posterior al parseo y reader de perfil; `tui.rs` en
+split/restore/rotate y adaptación de callers. Los correctivos de proveedor pueden
+tocar las mismas regiones. Listener/dispatcher/admisión no tienen ediciones
+directas de esta entrega, ni los archivos `human_wire`, `agent_wire`, `sync_job`
+y Windows. Las fronteras prohibidas y el footer/resumen se conservan.
+
+Siguiente acción: el orquestador decide la propagación explícita de fallos de
+memoria SSH/agente en el correctivo autorizado, preservando capacidades; después
+migrar sus owners y los de presentación con RED propio. Continuar §2 con vault
+nuevo por frontera y §4 con inventario/canales completos. No atribuir cierre
+integral a estos GREEN ni corregir SQLite/purge u otros fallbacks sin autorización.
+
+### Gate final del checkpoint de fase 4
+
+Los últimos cambios de producto preceden a `check3` y al build limpio; después
+sólo cambian los dos harness descritos y esta evidencia. No se repiten gates
+Cargo sin una modificación que los invalide. La barrida final reutiliza sus
+logs completos en sus dos primeras filas y ejecuta los restantes 34 casos,
+secuenciales, un flock por invocación:
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/check.sh
+flock /tmp/pm-cargo-window.lock ./scripts/clean-offline-build.sh
+# Runner local: enumera exactamente los 36 casos de integración, rc propagado,
+# cada comando con flock y artifacts aprobados; no modifica fixtures ajenos.
+PYTHONDONTWRITEBYTECODE=1 python3 /tmp/pm28p4-run-local-final.py > /tmp/pm28p4-local-final-summary.log 2>&1
+```
+
+Resultados verificados:
+
+- `/tmp/pm28p4-check3.log` rc0: fmt, config/build-inputs, workspace check/test
+  all-targets y Clippy. `/tmp/pm28p4-clean-offline.log` rc0: build limpio locked/
+  offline, **35.16 s**. Las dos filas reutilizadas lo declaran explícitamente.
+- `/tmp/pm28p4-local-final-results.json`: **36 casos, 33 rc0, cero diferencias
+  de rc respecto a** `/tmp/pmint2-20261003-fixed-local-results.json`; tiempo de
+  los 34 casos ejecutados **225.45 s**, cero raíces residuales nuevas observadas.
+  El summary termina rc0, `BASELINE_CHANGES 0`, `mismatches=1`.
+- De los 26 labs, 25 rc0 y **tui-operations rc1**: el mismo
+  `wait_text("exact-duplicates=1")` frente a la línea de importación recortada.
+  Se observó la pantalla real en tmux; footer/resumen permanecen iguales.
+  Los otros labs TUI, OIDC, TOTP, exchange, GitHub y passkey-login pasan.
+  Publication backup/plaintext/attachment: 3/3 rc0.
+- Custody-audit rc0: rechazo rc4, reemplazo=0, restitución original y cleanup
+  errors=0. SQLite-sync rc0: control con 24 fsync; EIO real único en primer
+  fsync, una llamada/una inyección, rc4, siete archivos propios completos,
+  rollback/integridad/restart y cleanup errors=0. No se acredita otra frontera.
+- Bootstrap-completed rc0: provider-calls=1, sustituto=0, cinco conteos exactos,
+  restitución y cleanup errors=0.
+- **RED vault y purge/outbox siguen fuera de gates y no se corrigen**:
+  `/tmp/pm28p4-final-red-vault.log` rc1 registra main-vault=1 aunque el cliente
+  rechaza rc4, provider-calls=1, restitución exacta y cleanup errors=0;
+  `/tmp/pm28p4-final-red-purge.log` rc1 registra QueryReturnedNoRows, pending=4,
+  signed-headers=4. No se cambia su esperado para ocultarlos.
+
+La primera barrida y los dos fallos del harness se conservan, no se renombran
+como PASS. Los focused posteriores están en
+`/tmp/pm28p4-adapter-frame-harness-green.log` y
+`/tmp/pm28p4-passkey-readiness-green.log`, ambos rc0; la final repite esos labs
+en fixtures nuevos. La única raíz residual de la primera falla del adapter
+(`/tmp/pm-adapter-protected-frame-linux-lab-1n7ku1ly`) se inventarió, comprobó
+sin ejecutables vivos y retiró por path exacto con rmtree estricto; no se barrió
+ningún `/tmp/pm-*` ajeno. No se generan pycache en las barridas.
+
+`/tmp/pm28p4-preservation.log` confirma regiones protegidas sin cambios, wires/
+sync/Windows, pm-vault y Cargo.lock idénticos a la base. También se comprobaron
+AST de ambos fixtures Python, enlaces del documento, diff y estado del ticket
+sin cambios. La raíz conserva `.gitignore`, `.pi/` y `odd/` ajenos intactos.
+Se publica únicamente la rama propia; PR #1 continúa borrador y no se fusiona.
+Esto es **checkpoint parcial verificado, no cierre de fase 4 ni G7**.

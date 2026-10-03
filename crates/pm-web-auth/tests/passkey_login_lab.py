@@ -32,6 +32,15 @@ def stop(p):
   try:p.wait(8)
   except subprocess.TimeoutExpired:p.kill();p.wait(5)
 
+def stop_custodian(p,run):
+ stop(p)
+ assert p.poll() is not None
+ for name in ("agent.sock","human.sock"):
+  path=run/name
+  assert stat.S_ISSOCK(path.lstat().st_mode)
+  path.unlink()
+ assert not (run/"agent.sock").exists() and not (run/"human.sock").exists()
+
 def wait_path(p,path,timeout=15):
  end=time.monotonic()+timeout
  while time.monotonic()<end:
@@ -307,7 +316,7 @@ def main():
   tty_confirm(HUMAN,[custody,"human-passkey-enable","--profile",hprof,"--private",hk,"--socket",run/"human.sock","--request",rid],"ENABLE "+rid)
   discovered=run_uid(BRIDGE,[custody,"agent-discover","--profile",aprof,"--private",ak,"--socket",run/"agent.sock"]);row=next(x for x in discovered.stdout.decode().split("set=",1)[1].split(",") if ":passkey:" in x);item=row.split(":",1)[0]
   stop(bp);procs.remove(bp);configure_flow(auth_port,ca)
-  stop(daemon);procs.remove(daemon)
+  stop_custodian(daemon,run);procs.remove(daemon)
   for src,dst in ((cader,bh/"ca.der"),(callbackder,bh/"callback.der"),(callbackkey,bh/"callback.key.der")):shutil.copy2(src,dst);os.chown(dst,BRIDGE,BRIDGE);dst.chmod(0o400)
   profile=bh/"keycloak-passkey.profile";profile.write_text("\n".join(["version=1","profile_id=keycloak-passkey-lab",f"issuer={origin}/realms/pm",f"authorization_endpoint={origin}/realms/pm/protocol/openid-connect/auth",f"token_endpoint={origin}/realms/pm/protocol/openid-connect/token",f"jwks_uri={origin}/realms/pm/protocol/openid-connect/certs","client_id=pm-passkey",f"redirect_uri=https://callback.test:{callback_port}/callback",f"expected_subject={ALICE_ID}","expected_username=alice","audience=pm-passkey","scopes=openid","browser_version=153.0.8010.36",f"browser_sha256={hashlib.sha256((cft/'chrome').read_bytes()).hexdigest()}",f"browser_path={cft/'chrome'}",f"browser_home={home}",f"ca_der={bh/'ca.der'}",f"callback_cert={bh/'callback.der'}",f"callback_key={bh/'callback.key.der'}","method=webauthn",f"extension_path={extension}",f"extension_sha256={ext_hash(extension)}",""]));os.chown(profile,BRIDGE,BRIDGE);profile.chmod(0o400)
   sockdir=bh/"provider";sockdir.mkdir();os.chown(sockdir,BRIDGE,BRIDGE);sockdir.chmod(0o711);psock=sockdir/"web.sock";plog=bh/"provider.log";plog.touch();os.chown(plog,BRIDGE,BRIDGE)
@@ -366,7 +375,7 @@ def main():
   assert cancelled["state"]=="CANCELLED" and cancelled["result"] is None,cancelled
 
   # The installed account is checked before any browser launch or assertion.
-  stop(daemon);procs.remove(daemon);stop(provider);procs.remove(provider);psock.unlink()
+  stop_custodian(daemon,run);procs.remove(daemon);stop(provider);procs.remove(provider);psock.unlink()
   wrong_profile=bh/"wrong-account.profile";wrong_profile.write_text(profile.read_text().replace("expected_username=alice","expected_username=bob"));os.chown(wrong_profile,BRIDGE,BRIDGE);wrong_profile.chmod(0o400)
   provider=start_uid(BRIDGE,[web,"serve","--profile",wrong_profile,"--socket",psock,"--custodian-uid",str(CUSTODIAN)],stdout=open(plog,"ab"),stderr=subprocess.STDOUT);procs.append(provider);wait_path(provider,psock)
   daemon=start_uid(CUSTODIAN,[custody,"serve-attempt-lab","--bootstrap",boot,"--agent-socket",run/"agent.sock","--human-socket",run/"human.sock","--vault",vault,"--device",DEVICE,"--provider-socket",psock,"--provider-uid",str(BRIDGE)]);procs.append(daemon);wait_path(daemon,run/"agent.sock");wait_path(daemon,run/"human.sock")
@@ -379,7 +388,7 @@ def main():
 
   # Revocation between WebAuthn challenge creation and the TTY ceremony leaves
   # no signed response and makes the outer attempt inaccessible to that peer.
-  stop(daemon);procs.remove(daemon);stop(provider);procs.remove(provider);psock.unlink()
+  stop_custodian(daemon,run);procs.remove(daemon);stop(provider);procs.remove(provider);psock.unlink()
   provider=start_uid(BRIDGE,[web,"serve","--profile",profile,"--socket",psock,"--custodian-uid",str(CUSTODIAN)],stdout=open(plog,"ab"),stderr=subprocess.STDOUT);procs.append(provider);wait_path(provider,psock)
   daemon=start_uid(CUSTODIAN,[custody,"serve-attempt-lab","--bootstrap",boot,"--agent-socket",run/"agent.sock","--human-socket",run/"human.sock","--vault",vault,"--device",DEVICE,"--provider-socket",psock,"--provider-uid",str(BRIDGE)]);procs.append(daemon);wait_path(daemon,run/"agent.sock");wait_path(daemon,run/"human.sock")
   revoked_args=args.copy();revoked_args[revoked_args.index("--nonce")+1]="19"*16;revoked_args[revoked_args.index("--issued-at")+1]=str(int(time.time()*1_000_000))

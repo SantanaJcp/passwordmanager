@@ -9,6 +9,7 @@ mod browser;
 mod exchange;
 mod github;
 mod oidc;
+mod plaintext;
 mod provider;
 
 pub use oidc::{OidcError, OidcResult};
@@ -65,26 +66,27 @@ const GITHUB_PROFILE_KEYS: [&str; 6] = [
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProfileError {
     Invalid,
+    ResourceUnavailable,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Profile {
-    values: BTreeMap<String, String>,
+    values: BTreeMap<String, pm_crypto::ProtectedText>,
 }
 
 /// Installed, human-owned configuration for one Keycloak Standard Token
 /// Exchange v2 relationship. Requests can select only `profile_id`; endpoints,
 /// requester, subject, audience and scopes are fixed here.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct ExchangeProfile {
-    values: BTreeMap<String, String>,
+    values: BTreeMap<String, pm_crypto::ProtectedText>,
 }
 
 /// Installed profile for the single typed GitHub issues request. The network
 /// origin, method, path and headers are not caller-controlled.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct GithubProfile {
-    values: BTreeMap<String, String>,
+    values: BTreeMap<String, pm_crypto::ProtectedText>,
     connect_port: u16,
 }
 
@@ -104,7 +106,13 @@ impl GithubProfile {
             let (key, value) = line.split_once('=').ok_or(ProfileError::Invalid)?;
             if !GITHUB_PROFILE_KEYS.contains(&key)
                 || value.is_empty()
-                || values.insert(key.to_owned(), value.to_owned()).is_some()
+                || values
+                    .insert(
+                        key.to_owned(),
+                        pm_crypto::ProtectedText::copy_from_str(value)
+                            .map_err(|_| ProfileError::ResourceUnavailable)?,
+                    )
+                    .is_some()
             {
                 return Err(ProfileError::Invalid);
             }
@@ -174,7 +182,13 @@ impl ExchangeProfile {
             let (key, value) = line.split_once('=').ok_or(ProfileError::Invalid)?;
             if !EXCHANGE_PROFILE_KEYS.contains(&key)
                 || value.is_empty()
-                || values.insert(key.to_owned(), value.to_owned()).is_some()
+                || values
+                    .insert(
+                        key.to_owned(),
+                        pm_crypto::ProtectedText::copy_from_str(value)
+                            .map_err(|_| ProfileError::ResourceUnavailable)?,
+                    )
+                    .is_some()
             {
                 return Err(ProfileError::Invalid);
             }
@@ -226,7 +240,7 @@ impl ExchangeProfile {
 
     #[must_use]
     pub fn value(&self, key: &str) -> &str {
-        self.values.get(key).map_or("", String::as_str)
+        self.values.get(key).map_or("", |value| &**value)
     }
 
     pub(crate) fn url(&self, key: &str) -> Result<HttpsUrl<'_>, ProfileError> {
@@ -250,7 +264,13 @@ impl Profile {
             let (key, value) = line.split_once('=').ok_or(ProfileError::Invalid)?;
             if !PROFILE_KEYS.contains(&key)
                 || value.is_empty()
-                || values.insert(key.to_owned(), value.to_owned()).is_some()
+                || values
+                    .insert(
+                        key.to_owned(),
+                        pm_crypto::ProtectedText::copy_from_str(value)
+                            .map_err(|_| ProfileError::ResourceUnavailable)?,
+                    )
+                    .is_some()
             {
                 return Err(ProfileError::Invalid);
             }
@@ -330,7 +350,7 @@ impl Profile {
 
     #[must_use]
     pub fn value(&self, key: &str) -> &str {
-        self.values.get(key).map_or("", String::as_str)
+        self.values.get(key).map_or("", |value| &**value)
     }
 
     pub(crate) fn url(&self, key: &str) -> Result<HttpsUrl<'_>, ProfileError> {
@@ -338,10 +358,13 @@ impl Profile {
     }
 }
 
-fn get<'a>(values: &'a BTreeMap<String, String>, key: &str) -> Result<&'a str, ProfileError> {
+fn get<'a>(
+    values: &'a BTreeMap<String, pm_crypto::ProtectedText>,
+    key: &str,
+) -> Result<&'a str, ProfileError> {
     values
         .get(key)
-        .map(String::as_str)
+        .map(|value| &**value)
         .ok_or(ProfileError::Invalid)
 }
 
@@ -463,3 +486,6 @@ fn valid_host(host: &str) -> bool {
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
 }
+
+#[cfg(test)]
+mod memory_test_support;

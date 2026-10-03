@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use zeroize::Zeroizing;
+use crate::plaintext;
 
 use crate::{ExchangeProfile, GithubProfile, Profile, browser, exchange, github};
 
@@ -175,7 +175,8 @@ fn handle_github(
         Ok(github::GithubOutcome::WaitingForSso) => response(1, b"GITHUB_SSO_REQUIRED"),
         Ok(github::GithubOutcome::Rejected) => response(2, b""),
         Ok(github::GithubOutcome::Indeterminate) => response(3, b""),
-        Ok(github::GithubOutcome::IntegrityFailure) | Err(()) => response(5, b""),
+        Err(plaintext::Error::ResourceUnavailable) => Err(()),
+        Ok(github::GithubOutcome::IntegrityFailure) | Err(_) => response(5, b""),
         Ok(github::GithubOutcome::RateLimited) => response(6, b""),
     }
 }
@@ -195,7 +196,7 @@ fn handle_browser(
         let password =
             pm_crypto::ProtectedBytes::copy_from_slice(cursor.bytes()?).map_err(|_| ())?;
         let secret = pm_crypto::ProtectedBytes::copy_from_slice(cursor.bytes()?).map_err(|_| ())?;
-        let algorithm = cursor.text()?.to_owned();
+        let algorithm = cursor.text()?;
         let digits = cursor.byte()?;
         let period = u16::from_be_bytes(cursor.fixed::<2>()?);
         let t0 = u64::from_be_bytes(cursor.fixed::<8>()?);
@@ -211,7 +212,7 @@ fn handle_browser(
         }
         let totp = if method == "password_totp" {
             if secret.is_empty()
-                || !matches!(algorithm.as_str(), "SHA1" | "SHA256" | "SHA512")
+                || !matches!(algorithm, "SHA1" | "SHA256" | "SHA512")
                 || !matches!(digits, 6 | 8)
                 || !(15..=120).contains(&period)
                 || t0 != 0
@@ -249,7 +250,8 @@ fn handle_browser(
         }
         Ok(browser::BrowserOutcome::Rejected) => response(2, b""),
         Ok(browser::BrowserOutcome::IntegrityFailure) => response(5, b""),
-        Err(()) => response(4, b""),
+        Err(plaintext::Error::ResourceUnavailable) => Err(()),
+        Err(_) => response(4, b""),
     }
 }
 
@@ -294,7 +296,8 @@ fn handle_exchange(
         requester_client_secret: &requester_client_secret,
     };
     match exchange::perform(profile, &credential, now) {
-        Ok(result) => response(0, &result.encode()),
+        Ok(result) => response(0, &result.encode().map_err(|_| ())?),
+        Err(exchange::ExchangeError::ResourceUnavailable) => Err(()),
         Err(exchange::ExchangeError::Network) => response(3, b""),
         Err(exchange::ExchangeError::InvalidResponse) => response(2, b""),
         Err(exchange::ExchangeError::InvalidToken | exchange::ExchangeError::SecretReflection) => {
@@ -324,7 +327,8 @@ fn reconcile(
     match outcome {
         Ok(browser::BrowserOutcome::Succeeded(result)) => response(0, &result),
         Ok(browser::BrowserOutcome::Rejected) => response(2, b""),
-        Ok(browser::BrowserOutcome::IntegrityFailure) | Err(()) => response(5, b""),
+        Err(plaintext::Error::ResourceUnavailable) => Err(()),
+        Ok(browser::BrowserOutcome::IntegrityFailure) | Err(_) => response(5, b""),
         Ok(browser::BrowserOutcome::Waiting) => unreachable!(),
     }
 }
@@ -340,7 +344,7 @@ fn handle_passkey(
         let method = cursor.text()?;
         let destination = cursor.text()?;
         let context = cursor.text()?;
-        let username = cursor.text()?.to_owned();
+        let username = cursor.text()?;
         let password = cursor.bytes()?;
         let item = cursor.fixed::<16>()?;
         cursor.finish()?;
@@ -362,7 +366,7 @@ fn handle_passkey(
         eprintln!("WEB_AUTH_FAIL stage=passkey-request");
         return response(4, b"");
     };
-    match browser::authenticate_passkey(profile, &username, item) {
+    match browser::authenticate_passkey(profile, username, item) {
         Ok((browser::BrowserOutcome::Waiting, Some(session))) => {
             sessions.insert(attempt, session);
             response(1, b"PASSKEY_HUMAN_CONFIRMATION")
@@ -370,6 +374,7 @@ fn handle_passkey(
         Ok((browser::BrowserOutcome::Succeeded(result), None)) => response(0, &result),
         Ok((browser::BrowserOutcome::Rejected, None)) => response(2, b""),
         Ok((browser::BrowserOutcome::IntegrityFailure, None)) => response(5, b""),
+        Err(plaintext::Error::ResourceUnavailable) => Err(()),
         _ => {
             eprintln!("WEB_AUTH_FAIL stage=passkey-browser-start");
             response(4, b"")
@@ -377,7 +382,7 @@ fn handle_passkey(
     }
 }
 
-fn read_private(path: &Path) -> Result<Zeroizing<Vec<u8>>, ()> {
+fn read_private(path: &Path) -> Result<pm_crypto::ProtectedBytes, ()> {
     let metadata = fs::symlink_metadata(path).map_err(|_| ())?;
     if !metadata.file_type().is_file()
         || metadata.uid() != current_uid()
@@ -385,11 +390,11 @@ fn read_private(path: &Path) -> Result<Zeroizing<Vec<u8>>, ()> {
     {
         return Err(());
     }
-    let bytes = fs::read(path).map_err(|_| ())?;
-    if bytes.len() > 16 * 1024 {
+    if metadata.len() > 16 * 1024 {
         return Err(());
     }
-    Ok(Zeroizing::new(bytes))
+    let mut file = fs::File::open(path).map_err(|_| ())?;
+    plaintext::read_all(&mut file, 16 * 1024).map_err(|_| ())
 }
 
 fn current_uid() -> u32 {

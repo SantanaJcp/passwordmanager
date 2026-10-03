@@ -3593,6 +3593,84 @@ fn run_provider_once(service: &VaultService) -> Result<(), Failure> {
     Ok(())
 }
 
+fn encode_provider_message(
+    prefix: &[u8],
+    fields: &[&[u8]],
+    suffix: &[u8],
+) -> Result<ProtectedBytes, ()> {
+    let mut size = prefix.len().checked_add(suffix.len()).ok_or(())?;
+    for field in fields {
+        size = size
+            .checked_add(encoded_bytes_len(field).map_err(|_| ())?)
+            .ok_or(())?;
+    }
+    let mut message = ProtectedFrameWriter::new(size).map_err(|_| ())?;
+    message.fixed(prefix).map_err(|_| ())?;
+    for field in fields {
+        message.bytes(field).map_err(|_| ())?;
+    }
+    message.fixed(suffix).map_err(|_| ())?;
+    message.finish_exact().map_err(|_| ())
+}
+
+#[cfg(test)]
+#[path = "provider_memory_tests.rs"]
+mod provider_memory_tests;
+
+fn encode_controlled_provider_request(
+    opcode: u8,
+    lease: &pm_vault::AttemptLease,
+) -> Result<ProtectedBytes, ()> {
+    let mut prefix = [0_u8; 33];
+    prefix[0] = opcode;
+    prefix[1..17].copy_from_slice(lease.attempt_id());
+    prefix[17..].copy_from_slice(lease.revision_id());
+    let mut fields: Vec<&[u8]> = Vec::new();
+    let mut tail = [0_u8; 11];
+    let suffix: &[u8];
+    if lease.reconciliation_only() {
+        suffix = &[];
+    } else {
+        if matches!(opcode, 3..=5) {
+            fields.push(lease.integration_id().as_bytes());
+            fields.push(lease.method().as_bytes());
+        }
+        fields.push(lease.destination().as_bytes());
+        fields.push(lease.context());
+        if opcode == 5 {
+            fields.push(lease.subject_token().ok_or(())?);
+        } else {
+            fields.push(lease.username().as_bytes());
+            fields.push(lease.password());
+        }
+        if opcode == 3 {
+            if let Some(totp) = lease.totp() {
+                fields.push(totp.secret());
+                fields.push(match totp.algorithm() {
+                    TotpAlgorithm::Sha1 => b"SHA1",
+                    TotpAlgorithm::Sha256 => b"SHA256",
+                    TotpAlgorithm::Sha512 => b"SHA512",
+                });
+                tail[0] = totp.digits();
+                tail[1..3].copy_from_slice(&totp.period().to_be_bytes());
+                tail[3..].copy_from_slice(&totp.t0().to_be_bytes());
+            } else {
+                fields.push(&[]);
+                fields.push(&[]);
+            }
+            suffix = &tail;
+        } else if lease.integration_id() == "keycloak-webauthn" {
+            suffix = lease.credential_id();
+        } else {
+            if lease.integration_id() == "keycloak-token-exchange" {
+                fields.push(lease.subject_token().ok_or(())?);
+            }
+            suffix = &[];
+        }
+    }
+    encode_provider_message(&prefix, &fields, suffix)
+}
+
 fn call_controlled_provider(
     provider: &ControlledProvider,
     lease: &pm_vault::AttemptLease,
@@ -3622,48 +3700,7 @@ fn call_controlled_provider(
     } else {
         1
     };
-    let mut request = Zeroizing::new(vec![opcode]);
-    request.extend_from_slice(lease.attempt_id());
-    request.extend_from_slice(lease.revision_id());
-    if !lease.reconciliation_only() {
-        if matches!(opcode, 3..=5) {
-            push_bytes(&mut request, lease.integration_id().as_bytes()).map_err(|_| ())?;
-            push_bytes(&mut request, lease.method().as_bytes()).map_err(|_| ())?;
-        }
-        push_bytes(&mut request, lease.destination().as_bytes()).map_err(|_| ())?;
-        push_bytes(&mut request, lease.context()).map_err(|_| ())?;
-        if opcode == 5 {
-            push_bytes(&mut request, lease.subject_token().ok_or(())?).map_err(|_| ())?;
-        } else {
-            push_bytes(&mut request, lease.username().as_bytes()).map_err(|_| ())?;
-            push_bytes(&mut request, lease.password()).map_err(|_| ())?;
-            if lease.integration_id() == "keycloak-webauthn" {
-                request.extend_from_slice(lease.credential_id());
-            }
-        }
-        if opcode == 3 {
-            if let Some(totp) = lease.totp() {
-                push_bytes(&mut request, totp.secret()).map_err(|_| ())?;
-                let algorithm = match totp.algorithm() {
-                    TotpAlgorithm::Sha1 => "SHA1",
-                    TotpAlgorithm::Sha256 => "SHA256",
-                    TotpAlgorithm::Sha512 => "SHA512",
-                };
-                push_bytes(&mut request, algorithm.as_bytes()).map_err(|_| ())?;
-                request.push(totp.digits());
-                request.extend_from_slice(&totp.period().to_be_bytes());
-                request.extend_from_slice(&totp.t0().to_be_bytes());
-            } else {
-                push_bytes(&mut request, &[]).map_err(|_| ())?;
-                push_bytes(&mut request, &[]).map_err(|_| ())?;
-                request.push(0);
-                request.extend_from_slice(&0_u16.to_be_bytes());
-                request.extend_from_slice(&0_u64.to_be_bytes());
-            }
-        } else if lease.integration_id() == "keycloak-token-exchange" {
-            push_bytes(&mut request, lease.subject_token().ok_or(())?).map_err(|_| ())?;
-        }
-    }
+    let request = encode_controlled_provider_request(opcode, lease)?;
     write_frame(&mut stream, &request).map_err(|_| ())?;
     let response = read_frame(&mut stream).map_err(|_| ())?;
     let mut c = Cursor::new(&response);
@@ -3711,17 +3748,26 @@ fn call_ssh_provider(
         return Err(());
     }
     let public = lease.ssh().map_or(&[][..], pm_vault::SshLease::public_key);
-    let mut request = vec![4];
-    request.extend_from_slice(lease.attempt_id());
-    request.extend_from_slice(lease.revision_id());
-    push_bytes(&mut request, lease.integration_id().as_bytes()).map_err(|_| ())?;
-    push_bytes(&mut request, lease.method().as_bytes()).map_err(|_| ())?;
-    push_bytes(&mut request, lease.destination().as_bytes()).map_err(|_| ())?;
-    push_bytes(&mut request, lease.context()).map_err(|_| ())?;
-    push_bytes(&mut request, lease.username().as_bytes()).map_err(|_| ())?;
-    push_bytes(&mut request, public).map_err(|_| ())?;
-    request.extend_from_slice(lease.owner_subject());
-    request.extend_from_slice(&lease.owner_generation().to_be_bytes());
+    let mut prefix = [0_u8; 33];
+    prefix[0] = 4;
+    prefix[1..17].copy_from_slice(lease.attempt_id());
+    prefix[17..].copy_from_slice(lease.revision_id());
+    let mut suffix = [0_u8; 24];
+    suffix[..16].copy_from_slice(lease.owner_subject());
+    suffix[16..].copy_from_slice(&lease.owner_generation().to_be_bytes());
+    let request = encode_provider_message(
+        &prefix,
+        &[
+            lease.integration_id().as_bytes(),
+            lease.method().as_bytes(),
+            lease.destination().as_bytes(),
+            lease.context(),
+            lease.username().as_bytes(),
+            public,
+        ],
+        &suffix,
+    )?;
+
     write_frame(&mut stream, &request).map_err(|_| ())?;
 
     let ready = read_frame(&mut stream).map_err(|_| ())?;
@@ -3740,10 +3786,8 @@ fn call_ssh_provider(
         _ => return Err(()),
     }
     if lease.method() == "password" {
-        let mut secret = vec![5];
-        push_bytes(&mut secret, lease.password()).map_err(|_| ())?;
+        let secret = encode_provider_message(&[5], &[lease.password()], &[])?;
         write_frame(&mut stream, &secret).map_err(|_| ())?;
-        secret.zeroize();
     }
     let mut signed = false;
     loop {
@@ -3776,8 +3820,7 @@ fn call_ssh_provider(
                     });
                 };
                 signed = true;
-                let mut answer = vec![7];
-                push_bytes(&mut answer, &signature).map_err(|_| ())?;
+                let answer = encode_provider_message(&[7], &[&signature], &[])?;
                 write_frame(&mut stream, &answer).map_err(|_| ())?;
             }
             _ => return Err(()),

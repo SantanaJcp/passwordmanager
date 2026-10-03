@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use pm_interface::{Json, encode_json, parse_json};
-use zeroize::Zeroizing;
+use crate::plaintext::{self, Json, Value};
+use pm_crypto::{ProtectedBytes, ProtectedText};
 
 use crate::ExchangeProfile;
-use crate::oidc::{form_component, https_request, verified_jwt_claims};
+use crate::oidc::{https_request, verified_jwt_claims};
 
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 const EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
@@ -15,6 +15,7 @@ pub(crate) enum ExchangeError {
     InvalidResponse,
     InvalidToken,
     SecretReflection,
+    ResourceUnavailable,
 }
 
 pub(crate) struct ExchangeCredential<'a> {
@@ -24,35 +25,41 @@ pub(crate) struct ExchangeCredential<'a> {
 }
 
 pub(crate) struct ExchangeResult {
-    issuer: String,
-    audience: String,
-    access_token: String,
+    issuer: ProtectedText,
+    audience: ProtectedText,
+    access_token: ProtectedText,
     expires_at: i64,
-    scope: String,
+    scope: ProtectedText,
 }
 
 impl ExchangeResult {
-    pub(crate) fn encode(&self) -> Vec<u8> {
-        encode_json(&Json::Object(vec![
-            ("kind".into(), Json::String("exchanged_access_token".into())),
-            ("issuer".into(), Json::String(self.issuer.clone())),
-            ("audience".into(), Json::String(self.audience.clone())),
-            ("token_type".into(), Json::String("Bearer".into())),
-            (
-                "access_token".into(),
-                Json::String(self.access_token.clone()),
-            ),
-            (
-                "issued_token_type".into(),
-                Json::String(ACCESS_TOKEN_TYPE.into()),
-            ),
-            (
-                "expires_at".into(),
-                Json::String(self.expires_at.to_string()),
-            ),
-            ("scope".into(), Json::String(self.scope.clone())),
-        ]))
+    pub(crate) fn encode(&self) -> Result<ProtectedBytes, ExchangeError> {
+        let expires_at = self.expires_at.to_string();
+        Value::Object(vec![
+            ("kind", Value::String("exchanged_access_token")),
+            ("issuer", Value::String(&self.issuer)),
+            ("audience", Value::String(&self.audience)),
+            ("token_type", Value::String("Bearer")),
+            ("access_token", Value::String(&self.access_token)),
+            ("issued_token_type", Value::String(ACCESS_TOKEN_TYPE)),
+            ("expires_at", Value::String(&expires_at)),
+            ("scope", Value::String(&self.scope)),
+        ])
+        .encode()
+        .map_err(ExchangeError::from)
     }
+}
+impl From<plaintext::Error> for ExchangeError {
+    fn from(error: plaintext::Error) -> Self {
+        match error {
+            plaintext::Error::ResourceUnavailable => Self::ResourceUnavailable,
+            plaintext::Error::Io => Self::Network,
+            _ => Self::InvalidResponse,
+        }
+    }
+}
+fn parse_json(bytes: &[u8]) -> Result<Json, ExchangeError> {
+    plaintext::parse_json(bytes).map_err(ExchangeError::from)
 }
 
 pub(crate) fn perform(
@@ -70,35 +77,32 @@ pub(crate) fn perform(
         std::str::from_utf8(credential.subject_token).map_err(|_| ExchangeError::InvalidToken)?;
     let client_secret = std::str::from_utf8(credential.requester_client_secret)
         .map_err(|_| ExchangeError::InvalidToken)?;
-    let form = Zeroizing::new(format!(
-        "grant_type={}&subject_token={}&subject_token_type={}&requested_token_type={}&audience={}&scope={}&client_id={}&client_secret={}",
-        form_component(EXCHANGE_GRANT),
-        form_component(subject),
-        form_component(ACCESS_TOKEN_TYPE),
-        form_component(ACCESS_TOKEN_TYPE),
-        form_component(profile.audience()),
-        form_component(profile.scopes()),
-        form_component(credential.requester_client_id),
-        form_component(client_secret),
-    ));
-    let response = Zeroizing::new(
-        https_request(
-            profile
-                .url("token_endpoint")
-                .map_err(|_| ExchangeError::Network)?,
-            profile.value("ca_der"),
-            "POST",
-            "application/x-www-form-urlencoded",
-            form.as_bytes(),
-        )
-        .map_err(map_oidc)?,
-    );
+    let form = plaintext::form(&[
+        ("grant_type", EXCHANGE_GRANT),
+        ("subject_token", subject),
+        ("subject_token_type", ACCESS_TOKEN_TYPE),
+        ("requested_token_type", ACCESS_TOKEN_TYPE),
+        ("audience", profile.audience()),
+        ("scope", profile.scopes()),
+        ("client_id", credential.requester_client_id),
+        ("client_secret", client_secret),
+    ])?;
+    let response = https_request(
+        profile
+            .url("token_endpoint")
+            .map_err(|_| ExchangeError::Network)?,
+        profile.value("ca_der"),
+        "POST",
+        "application/x-www-form-urlencoded",
+        &form,
+    )
+    .map_err(map_oidc)?;
     if contains(&response, credential.subject_token)
         || contains(&response, credential.requester_client_secret)
     {
         return Err(ExchangeError::SecretReflection);
     }
-    let json = parse_json(&response).map_err(|_| ExchangeError::InvalidResponse)?;
+    let json = parse_json(&response)?;
     if json.field("refresh_token").is_some()
         || json.field("id_token").is_some()
         || response_string(&json, "token_type")? != "Bearer"
@@ -106,15 +110,18 @@ pub(crate) fn perform(
     {
         return Err(ExchangeError::InvalidResponse);
     }
-    let access_token = response_string(&json, "access_token")?.to_owned();
-    if access_token == subject || access_token == client_secret || access_token.len() > 64 * 1024 {
+    let access_token = plaintext::text(response_string(&json, "access_token")?)?;
+    if &*access_token == subject
+        || &*access_token == client_secret
+        || access_token.len() > 64 * 1024
+    {
         return Err(ExchangeError::SecretReflection);
     }
     let expires_in = response_integer(&json, "expires_in")?;
     if !(1..=86_400).contains(&expires_in) {
         return Err(ExchangeError::InvalidResponse);
     }
-    let scope = response_string(&json, "scope")?.to_owned();
+    let scope = plaintext::text(response_string(&json, "scope")?)?;
     if !same_scope_set(&scope, profile.scopes()) {
         return Err(ExchangeError::InvalidResponse);
     }
@@ -128,7 +135,7 @@ pub(crate) fn perform(
         &[],
     )
     .map_err(map_oidc)?;
-    let jwks = parse_json(&jwks).map_err(|_| ExchangeError::InvalidResponse)?;
+    let jwks = parse_json(&jwks)?;
     let claims = verified_jwt_claims(&access_token, &jwks).map_err(map_oidc)?;
     validate_exchange_claims(
         profile,
@@ -145,8 +152,8 @@ pub(crate) fn perform(
         return Err(ExchangeError::InvalidToken);
     }
     Ok(ExchangeResult {
-        issuer: profile.value("issuer").to_owned(),
-        audience: profile.audience().to_owned(),
+        issuer: plaintext::text(profile.value("issuer"))?,
+        audience: plaintext::text(profile.audience())?,
         access_token,
         expires_at: token_expiry,
         scope,
@@ -158,6 +165,7 @@ fn map_oidc(error: crate::OidcError) -> ExchangeError {
         crate::OidcError::Network => ExchangeError::Network,
         crate::OidcError::InvalidResponse => ExchangeError::InvalidResponse,
         crate::OidcError::InvalidToken => ExchangeError::InvalidToken,
+        crate::OidcError::ResourceUnavailable => ExchangeError::ResourceUnavailable,
     }
 }
 
@@ -250,7 +258,17 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 mod tests {
     use pm_interface::Json;
 
-    use super::{ExchangeError, validate_exchange_claims};
+    use super::ExchangeError;
+    fn validate_exchange_claims(
+        profile: &ExchangeProfile,
+        claims: &Json,
+        subject: &[u8],
+        secret: &[u8],
+        now: i64,
+    ) -> Result<(), ExchangeError> {
+        let claims = super::parse_json(&pm_interface::encode_json(claims)).unwrap();
+        super::validate_exchange_claims(profile, &claims, subject, secret, now)
+    }
     use crate::ExchangeProfile;
 
     fn profile() -> ExchangeProfile {

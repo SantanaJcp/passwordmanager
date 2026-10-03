@@ -17,7 +17,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use pm_crypto::ProtectedBytes;
+use pm_crypto::{ProtectedBytes, ProtectedText, ProtectedWriter};
 #[cfg(target_os = "macos")]
 use pm_native_channel::OwnedClipboard;
 use pm_vault::PasskeyStatus;
@@ -38,7 +38,9 @@ use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
 use std::process::{Child, Command, Stdio};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::human_wire::{Cursor, protected_copy, read_frame, write_frame};
+use crate::human_wire::{
+    Cursor, ProtectedFrameWriter, encoded_bytes_len, protected_copy, read_frame, write_frame,
+};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::linux::{
     HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared, connect,
@@ -1286,31 +1288,63 @@ fn show_access(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
     Ok(())
 }
 
-fn split_exact<const N: usize>(value: &str) -> Result<[String; N], Failure> {
-    let mut fields = vec![String::new()];
+fn split_fields<const N: usize>(
+    value: &str,
+    mut emit: impl FnMut(usize, char) -> Result<(), Failure>,
+) -> Result<(), Failure> {
+    let mut index = 0;
     let mut escaped = false;
     for character in value.chars() {
         if escaped {
-            fields
-                .last_mut()
-                .ok_or(Failure::Unavailable)?
-                .push(character);
+            emit(index, character)?;
             escaped = false;
         } else if character == '\\' {
             escaped = true;
         } else if character == '|' {
-            fields.push(String::new());
+            index = index.checked_add(1).ok_or(Failure::Unavailable)?;
         } else {
-            fields
-                .last_mut()
-                .ok_or(Failure::Unavailable)?
-                .push(character);
+            emit(index, character)?;
+        }
+        if index >= N {
+            return Err(Failure::Unavailable);
         }
     }
-    if escaped {
+    if escaped || index.checked_add(1) != Some(N) {
         return Err(Failure::Unavailable);
     }
-    fields.try_into().map_err(|_| Failure::Unavailable)
+    Ok(())
+}
+
+fn split_exact<const N: usize>(value: &str) -> Result<[ProtectedText; N], Failure> {
+    let mut sizes = [0_usize; N];
+    split_fields::<N>(value, |index, character| {
+        let size = sizes.get_mut(index).ok_or(Failure::Unavailable)?;
+        *size = size
+            .checked_add(character.len_utf8())
+            .ok_or(Failure::Unavailable)?;
+        Ok(())
+    })?;
+    let mut fields = sizes
+        .into_iter()
+        .map(|size| ProtectedWriter::new(size).map_err(|_| Failure::Unavailable))
+        .collect::<Result<Vec<_>, _>>()?;
+    split_fields::<N>(value, |index, character| {
+        let mut bytes = [0; 4];
+        fields
+            .get_mut(index)
+            .ok_or(Failure::Unavailable)?
+            .put(character.encode_utf8(&mut bytes).as_bytes())
+            .map_err(|_| Failure::Unavailable)
+    })?;
+    fields
+        .into_iter()
+        .map(|field| {
+            ProtectedText::from_bytes(field.finish_exact().map_err(|_| Failure::Unavailable)?)
+                .map_err(|_| Failure::Unavailable)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .try_into()
+        .map_err(|_| Failure::Unavailable)
 }
 
 fn decode_import_preview(response: &[u8]) -> Result<(String, WirePrepared), Failure> {
@@ -1357,18 +1391,18 @@ fn decode_import_preview(response: &[u8]) -> Result<(String, WirePrepared), Fail
 
 fn preview_csv(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
     let [path, format, duplicates] = split_exact::<3>(value)?;
-    let format = match format.as_str() {
+    let format = match &*format {
         "chrome" => 0,
         "apple" => 1,
         "mappable" => 2,
         _ => return Err(Failure::Unavailable),
     };
-    let replace = match duplicates.as_str() {
-        "keep" => 0,
-        "replace" => 1,
+    let (replace, duplicates) = match &*duplicates {
+        "keep" => (0, "keep"),
+        "replace" => (1, "replace"),
         _ => return Err(Failure::Unavailable),
     };
-    let source = read_import_source(Path::new(&path))?;
+    let source = read_import_source(Path::new(&*path))?;
     let mut request = vec![23, format, replace];
     push_bytes(&mut request, &source)?;
     write_frame(tls, &request)?;
@@ -1385,12 +1419,12 @@ fn preview_csv(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Fai
 
 fn preview_1pux(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
     let [path, duplicates] = split_exact::<2>(value)?;
-    let replace = match duplicates.as_str() {
+    let replace = match &*duplicates {
         "keep" => 0,
         "replace" => 1,
         _ => return Err(Failure::Unavailable),
     };
-    let source = open_1pux_source(Path::new(&path))?;
+    let source = open_1pux_source(Path::new(&*path))?;
     write_frame(tls, &[31, replace])?;
     if *read_frame(tls)? != [0] {
         return Err(Failure::Unavailable);
@@ -1560,14 +1594,13 @@ fn stream_file_to_server(tls: &mut HumanTls, path: &Path) -> Result<(), Failure>
 
 fn native_restore(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
     let [path, confirmation] = split_exact::<2>(value)?;
-    if confirmation != "RESTORE" {
+    if &*confirmation != "RESTORE" {
         app.status = "Confirmation mismatch; vault unchanged".into();
         return Ok(());
     }
-    let mut request = vec![34];
-    push_bytes(&mut request, &app.password)?;
+    let request = encode_secret_request(34, &app.password)?;
     write_frame(tls, &request)?;
-    stream_file_to_server(tls, Path::new(&path))?;
+    stream_file_to_server(tls, Path::new(&*path))?;
     let prepared = decode_prepared_response(&read_frame(tls)?)?;
     rpc_commit(tls, &prepared)?;
     refresh(app, tls)?;
@@ -1575,21 +1608,35 @@ fn native_restore(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), 
     Ok(())
 }
 
+fn encode_secret_request(opcode: u8, value: &[u8]) -> Result<ProtectedBytes, Failure> {
+    let size = 1_usize
+        .checked_add(encoded_bytes_len(value)?)
+        .ok_or(Failure::Unavailable)?;
+    let mut request = ProtectedFrameWriter::new(size)?;
+    request.fixed(&[opcode])?;
+    request.bytes(value)?;
+    request.finish_exact()
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(test)]
+#[path = "tui_memory_tests.rs"]
+mod memory_tests;
+
 fn master_rotate(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
-    let [mut replacement, confirmation] = split_exact::<2>(value)?;
-    if confirmation != "ROTATE" || replacement.is_empty() {
-        replacement.zeroize();
+    let [replacement, confirmation] = split_exact::<2>(value)?;
+    if &*confirmation != "ROTATE" || replacement.is_empty() {
+        drop(replacement);
         app.status = "Confirmation mismatch; master password unchanged".into();
         return Ok(());
     }
-    let mut request = vec![43];
-    push_bytes(&mut request, replacement.as_bytes())?;
+    let request = encode_secret_request(43, replacement.as_bytes())?;
     write_frame(tls, &request)?;
-    request.zeroize();
+    drop(request);
     let prepared = decode_prepared_response(&read_frame(tls)?)?;
     rpc_commit(tls, &prepared)?;
     app.password = protected_copy(replacement.as_bytes())?;
-    replacement.zeroize();
+    drop(replacement);
     app.status =
         "Master password rotated; old backups and exposed copies retain historical paths".into();
     Ok(())
@@ -1853,7 +1900,7 @@ fn create_private_output(path: &Path) -> Result<File, Failure> {
 
 fn pair_device(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
     let [pin, path, confirmation] = split_exact::<3>(value)?;
-    if confirmation != "PAIR" {
+    if &*confirmation != "PAIR" {
         app.status = "Confirmation mismatch; no pairing created".into();
         return Ok(());
     }
@@ -1866,13 +1913,13 @@ fn pair_device(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Fai
     c.expect(&[0])?;
     let protected = c.bytes()?;
     c.finish()?;
-    let mut output = create_private_output(Path::new(&path))?;
+    let mut output = create_private_output(Path::new(&*path))?;
     if output
         .write_all(protected)
         .and_then(|()| output.sync_all())
         .is_err()
     {
-        fs::remove_file(path).map_err(|_| Failure::Unavailable)?;
+        fs::remove_file(&*path).map_err(|_| Failure::Unavailable)?;
         return Err(Failure::Unavailable);
     }
     app.status =
@@ -1891,15 +1938,15 @@ fn sync_now(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failur
         pin,
         confirmation,
     ] = split_exact::<7>(value)?;
-    if confirmation != "SYNC" {
+    if &*confirmation != "SYNC" {
         app.status = "Confirmation mismatch; sync not started".into();
         return Ok(());
     }
-    if !sync_endpoint_available(Path::new(&socket))? {
+    if !sync_endpoint_available(Path::new(&*socket))? {
         app.status = "Sync endpoint offline; no sync was performed".into();
         return Ok(());
     }
-    let protected = Zeroizing::new(fs::read(pairing).map_err(|_| Failure::Unavailable)?);
+    let protected = Zeroizing::new(fs::read(&*pairing).map_err(|_| Failure::Unavailable)?);
     let pin = decode_hex_44(&pin)?;
     let mut request = Zeroizing::new(vec![63]);
     push_bytes(&mut request, &protected)?;
@@ -2021,7 +2068,7 @@ fn decode_hex_16_text(value: &str) -> Result<[u8; 16], Failure> {
 
 fn retire_device(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
     let [device, confirmation] = split_exact::<2>(value)?;
-    if confirmation != "RETIRE" {
+    if &*confirmation != "RETIRE" {
         app.status = "Confirmation mismatch; no device retired".into();
         return Ok(());
     }
@@ -2031,7 +2078,8 @@ fn retire_device(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), F
     let prepared = decode_prepared_response(&read_frame(tls)?)?;
     rpc_commit(tls, &prepared)?;
     app.status = format!(
-        "Device {device} retired at every locally observed prefix; later offline events are outside accepted history"
+        "Device {} retired at every locally observed prefix; later offline events are outside accepted history",
+        &*device
     );
     Ok(())
 }
@@ -3097,7 +3145,12 @@ mod tests {
         let Ok(fields) = split_exact::<3>(r"/tmp/a\|b|chrome|keep") else {
             panic!("valid escaped fields rejected")
         };
-        assert_eq!(fields, ["/tmp/a|b", "chrome", "keep"]);
+        assert!(
+            fields
+                .iter()
+                .zip(["/tmp/a|b", "chrome", "keep"])
+                .all(|(actual, expected)| (**actual).eq(expected))
+        );
         assert!(split_exact::<2>(r"dangling\").is_err());
     }
 

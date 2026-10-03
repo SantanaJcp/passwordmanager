@@ -57,36 +57,42 @@ fn accepts_closed_https_keycloak_profile() {
 #[test]
 fn rejects_redirect_issuer_or_unknown_profile_fields() {
     let http = VALID.replace("issuer=https://", "issuer=http://");
-    assert_eq!(Profile::parse(http.as_bytes()), Err(ProfileError::Invalid));
+    assert!(matches!(
+        Profile::parse(http.as_bytes()),
+        Err(ProfileError::Invalid)
+    ));
     let wrong_callback = VALID.replace("callback.test", "auth.test");
-    assert_eq!(
+    assert!(matches!(
         Profile::parse(wrong_callback.as_bytes()),
         Err(ProfileError::Invalid)
-    );
+    ));
     let extra = format!("{VALID}helper=/tmp/agent-controlled\n");
-    assert_eq!(Profile::parse(extra.as_bytes()), Err(ProfileError::Invalid));
+    assert!(matches!(
+        Profile::parse(extra.as_bytes()),
+        Err(ProfileError::Invalid)
+    ));
     let hostile_endpoint = VALID.replace(
         "authorization_endpoint=https://auth.test:18443",
         "authorization_endpoint=https://evil.test:18443",
     );
-    assert_eq!(
+    assert!(matches!(
         Profile::parse(hostile_endpoint.as_bytes()),
         Err(ProfileError::Invalid)
-    );
+    ));
 }
 
 #[test]
 fn rejects_unpinned_or_wrong_browser_artifact() {
     let latest = VALID.replace("browser_version=153.0.8010.36", "browser_version=latest");
-    assert_eq!(
+    assert!(matches!(
         Profile::parse(latest.as_bytes()),
         Err(ProfileError::Invalid)
-    );
+    ));
     let relative = VALID.replace("browser_path=/opt/pm-lab/chrome", "browser_path=chrome");
-    assert_eq!(
+    assert!(matches!(
         Profile::parse(relative.as_bytes()),
         Err(ProfileError::Invalid)
-    );
+    ));
 }
 
 #[test]
@@ -97,7 +103,7 @@ fn accepts_only_a_closed_standard_v2_exchange_profile() {
     assert_eq!(profile.audience(), "pm-target");
     assert_eq!(profile.scopes(), "target.read");
 
-    assert_eq!(
+    assert!(matches!(
         ExchangeProfile::parse(
             EXCHANGE
                 .replace(
@@ -107,8 +113,8 @@ fn accepts_only_a_closed_standard_v2_exchange_profile() {
                 .as_bytes()
         ),
         Err(ProfileError::Invalid)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         ExchangeProfile::parse(
             EXCHANGE
                 .replace(
@@ -118,11 +124,11 @@ fn accepts_only_a_closed_standard_v2_exchange_profile() {
                 .as_bytes()
         ),
         Err(ProfileError::Invalid)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         ExchangeProfile::parse(format!("{EXCHANGE}resource=https://agent.invalid\n").as_bytes()),
         Err(ProfileError::Invalid)
-    );
+    ));
 }
 
 #[test]
@@ -134,15 +140,15 @@ fn accepts_only_a_pinned_passkey_extension_profile() {
     let profile = Profile::parse(passkey.as_bytes()).unwrap();
     assert!(profile.is_passkey());
     let floating = passkey.replace(&"ab".repeat(32), "latest");
-    assert_eq!(
+    assert!(matches!(
         Profile::parse(floating.as_bytes()),
         Err(ProfileError::Invalid)
-    );
+    ));
     let missing_adapter = passkey.replace("method=webauthn\n", "");
-    assert_eq!(
+    assert!(matches!(
         Profile::parse(missing_adapter.as_bytes()),
         Err(ProfileError::Invalid)
-    );
+    ));
 }
 
 #[test]
@@ -160,9 +166,9 @@ fn github_profile_fixes_origin_path_headers_and_request_profile() {
         format!("{GITHUB}path=/user\n"),
         format!("{GITHUB}authorization=agent-value\n"),
     ] {
-        assert_eq!(
+        assert!(matches!(
             GithubProfile::parse(invalid.as_bytes()),
             Err(ProfileError::Invalid)
-        );
+        ));
     }
 }

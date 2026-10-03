@@ -57,12 +57,24 @@ def main():
         )
         github.chmod(0o400)
         web_socket = root / "web.sock"
-        web_process = subprocess.Popen(
+        denied_start = subprocess.Popen(
             [web, "serve", "--profile", github, "--socket", web_socket,
              "--custodian-uid", str(os.geteuid())],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={}, preexec_fn=deny_memlock,
         )
+        processes.append(denied_start)
+        stdout, stderr = denied_start.communicate(timeout=5)
+        processes.remove(denied_start)
+        assert denied_start.returncode == 4, (denied_start.returncode, stdout, stderr)
+        assert not web_socket.exists() and not stdout and not stderr
+        web_process = subprocess.Popen(
+            [web, "serve", "--profile", github, "--socket", web_socket,
+             "--custodian-uid", str(os.geteuid())],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={},
+        )
         processes.append(web_process); wait_socket(web_process, web_socket)
+        # Keep the loaded protected profile, then deny the next frame allocation.
+        resource.prlimit(web_process.pid, resource.RLIMIT_MEMLOCK, (0, 0))
         with socket.socket(socket.AF_UNIX) as client:
             client.settimeout(3); client.connect(str(web_socket)); client.sendall((64).to_bytes(4, "big"))
             try:
@@ -102,7 +114,7 @@ def main():
         for process in reversed(processes):
             stop(process)
         shutil.rmtree(root)
-    print("PASS fault-safety adapter-frames=locked-before-payload web+ssh=closed cleanup=verified")
+    print("PASS fault-safety adapter-frames=locked-before-payload web+ssh=closed web-profile=locked-before-socket cleanup=verified")
 
 
 if __name__ == "__main__":

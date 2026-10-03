@@ -2,15 +2,16 @@
 
 use std::{
     fs,
-    io::{Read, Write},
+    io::Write,
     net::{Ipv4Addr, SocketAddrV4, TcpStream},
     sync::Arc,
     time::Duration,
 };
 
+use crate::plaintext::{self, Json, Value};
 use aws_lc_rs::signature::{RSA_PKCS1_2048_8192_SHA256, UnparsedPublicKey};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use pm_interface::{Json, encode_json, parse_json};
+use pm_crypto::{ProtectedBytes, ProtectedText};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned, version};
 
@@ -23,41 +24,60 @@ pub enum OidcError {
     Network,
     InvalidResponse,
     InvalidToken,
+    ResourceUnavailable,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct OidcResult {
-    pub issuer: String,
-    pub subject: String,
-    pub client_id: String,
-    pub audience: String,
-    pub access_token: String,
-    pub id_token: String,
+    pub issuer: ProtectedText,
+    pub subject: ProtectedText,
+    pub client_id: ProtectedText,
+    pub audience: ProtectedText,
+    pub access_token: ProtectedText,
+    pub id_token: ProtectedText,
     pub expires_at: i64,
-    pub scope: String,
+    pub scope: ProtectedText,
 }
 
 impl OidcResult {
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        encode_json(&Json::Object(vec![
-            ("kind".into(), Json::String("oidc_tokens".into())),
-            ("issuer".into(), Json::String(self.issuer.clone())),
-            ("subject".into(), Json::String(self.subject.clone())),
-            ("client_id".into(), Json::String(self.client_id.clone())),
-            ("audience".into(), Json::String(self.audience.clone())),
-            ("token_type".into(), Json::String("Bearer".into())),
-            (
-                "access_token".into(),
-                Json::String(self.access_token.clone()),
-            ),
-            ("id_token".into(), Json::String(self.id_token.clone())),
-            (
-                "expires_at".into(),
-                Json::String(self.expires_at.to_string()),
-            ),
-            ("scope".into(), Json::String(self.scope.clone())),
-        ]))
+    /// Encodes into an exact locked owner, borrowing every source field.
+    ///
+    /// # Errors
+    /// Fails explicitly if locked memory or the encoding is unavailable.
+    pub fn encode(&self) -> Result<ProtectedBytes, OidcError> {
+        let expires_at = self.expires_at.to_string();
+        Value::Object(vec![
+            ("kind", Value::String("oidc_tokens")),
+            ("issuer", Value::String(&self.issuer)),
+            ("subject", Value::String(&self.subject)),
+            ("client_id", Value::String(&self.client_id)),
+            ("audience", Value::String(&self.audience)),
+            ("token_type", Value::String("Bearer")),
+            ("access_token", Value::String(&self.access_token)),
+            ("id_token", Value::String(&self.id_token)),
+            ("expires_at", Value::String(&expires_at)),
+            ("scope", Value::String(&self.scope)),
+        ])
+        .encode()
+        .map_err(OidcError::from)
+    }
+}
+impl From<plaintext::Error> for OidcError {
+    fn from(error: plaintext::Error) -> Self {
+        match error {
+            plaintext::Error::ResourceUnavailable => Self::ResourceUnavailable,
+            plaintext::Error::Io => Self::Network,
+            _ => Self::InvalidResponse,
+        }
+    }
+}
+fn parse_json(bytes: &[u8]) -> Result<Json, OidcError> {
+    plaintext::parse_json(bytes).map_err(OidcError::from)
+}
+fn invalid_token(error: OidcError) -> OidcError {
+    match error {
+        OidcError::ResourceUnavailable => error,
+        _ => OidcError::InvalidToken,
     }
 }
 
@@ -68,13 +88,13 @@ pub(crate) fn exchange_code(
     nonce: &str,
     now: i64,
 ) -> Result<OidcResult, OidcError> {
-    let form = format!(
-        "grant_type=authorization_code&client_id={}&redirect_uri={}&code={}&code_verifier={}",
-        form_component(profile.value("client_id")),
-        form_component(profile.value("redirect_uri")),
-        form_component(code),
-        form_component(verifier),
-    );
+    let form = plaintext::form(&[
+        ("grant_type", "authorization_code"),
+        ("client_id", profile.value("client_id")),
+        ("redirect_uri", profile.value("redirect_uri")),
+        ("code", code),
+        ("code_verifier", verifier),
+    ])?;
     let response = https_request(
         profile
             .url("token_endpoint")
@@ -82,11 +102,11 @@ pub(crate) fn exchange_code(
         profile.value("ca_der"),
         "POST",
         "application/x-www-form-urlencoded",
-        form.as_bytes(),
+        &form,
     )?;
-    let json = parse_json(&response).map_err(|_| OidcError::InvalidResponse)?;
-    let access_token = string_field(&json, "access_token")?.to_owned();
-    let id_token = string_field(&json, "id_token")?.to_owned();
+    let json = parse_json(&response)?;
+    let access_token = plaintext::text(string_field(&json, "access_token")?)?;
+    let id_token = plaintext::text(string_field(&json, "id_token")?)?;
     if string_field(&json, "token_type")? != "Bearer" || access_token == id_token {
         return Err(OidcError::InvalidResponse);
     }
@@ -94,7 +114,7 @@ pub(crate) fn exchange_code(
     if !(1..=86_400).contains(&expires_in) {
         return Err(OidcError::InvalidResponse);
     }
-    let scope = string_field(&json, "scope")?.to_owned();
+    let scope = plaintext::text(string_field(&json, "scope")?)?;
     if !scope.split(' ').any(|value| value == "openid") {
         return Err(OidcError::InvalidResponse);
     }
@@ -105,15 +125,15 @@ pub(crate) fn exchange_code(
         "",
         &[],
     )?;
-    let jwks = parse_json(&jwks).map_err(|_| OidcError::InvalidResponse)?;
+    let jwks = parse_json(&jwks)?;
     let id_subject = validate_jwt(&id_token, &jwks, profile, Some(nonce), now)?;
     let access_subject = validate_jwt(&access_token, &jwks, profile, None, now)?;
     validate_subject_binding(profile, &id_subject, &access_subject)?;
     Ok(OidcResult {
-        issuer: profile.value("issuer").to_owned(),
+        issuer: plaintext::text(profile.value("issuer"))?,
         subject: id_subject,
-        client_id: profile.value("client_id").to_owned(),
-        audience: profile.value("audience").to_owned(),
+        client_id: plaintext::text(profile.value("client_id"))?,
+        audience: plaintext::text(profile.value("audience"))?,
         access_token,
         id_token,
         expires_at: now
@@ -140,7 +160,7 @@ fn validate_jwt(
     profile: &Profile,
     nonce: Option<&str>,
     now: i64,
-) -> Result<String, OidcError> {
+) -> Result<ProtectedText, OidcError> {
     let claims = verified_jwt_claims(token, jwks)?;
     if string_field(&claims, "iss")? != profile.value("issuer")
         || !audience_contains(&claims, profile.value("audience"))
@@ -160,7 +180,7 @@ fn validate_jwt(
     {
         return Err(OidcError::InvalidToken);
     }
-    Ok(string_field(&claims, "sub")?.to_owned())
+    Ok(plaintext::text(string_field(&claims, "sub")?)?)
 }
 
 pub(crate) fn verified_jwt_claims(token: &str, jwks: &Json) -> Result<Json, OidcError> {
@@ -184,7 +204,7 @@ pub(crate) fn verified_jwt_claims(token: &str, jwks: &Json) -> Result<Json, Oidc
     let signature = URL_SAFE_NO_PAD
         .decode(signature64)
         .map_err(|_| OidcError::InvalidToken)?;
-    let signed = format!("{header64}.{claims64}");
+    let signed = &token[..token.len() - signature64.len() - 1];
     UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, key)
         .verify(signed.as_bytes(), &signature)
         .map_err(|_| OidcError::InvalidToken)?;
@@ -192,10 +212,10 @@ pub(crate) fn verified_jwt_claims(token: &str, jwks: &Json) -> Result<Json, Oidc
 }
 
 fn parse_segment(value: &str) -> Result<Json, OidcError> {
-    let decoded = URL_SAFE_NO_PAD
-        .decode(value)
-        .map_err(|_| OidcError::InvalidToken)?;
-    parse_json(&decoded).map_err(|_| OidcError::InvalidToken)
+    let decoded = plaintext::decode_base64(value)
+        .map_err(OidcError::from)
+        .map_err(invalid_token)?;
+    parse_json(&decoded).map_err(invalid_token)
 }
 
 fn jwk(jwks: &Json, kid: &str) -> Result<Vec<u8>, OidcError> {
@@ -262,7 +282,7 @@ fn der(tag: u8, body: &[u8]) -> Vec<u8> {
 
 fn audience_contains(claims: &Json, expected: &str) -> bool {
     match claims.field("aud") {
-        Some(Json::String(value)) => value == expected,
+        Some(Json::String(value)) => &**value == expected,
         Some(Json::Array(values)) => values.iter().any(|value| value.string() == Some(expected)),
         _ => false,
     }
@@ -292,17 +312,8 @@ fn uint_field(value: &Json, key: &str) -> Result<i64, OidcError> {
     number.parse().map_err(|_| OidcError::InvalidResponse)
 }
 
-pub(crate) fn form_component(value: &str) -> String {
-    let mut output = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            output.push(char::from(byte));
-        } else {
-            use std::fmt::Write as _;
-            write!(output, "%{byte:02X}").unwrap();
-        }
-    }
-    output
+pub(crate) fn form_component(value: &str) -> Result<ProtectedText, OidcError> {
+    plaintext::form_component(value).map_err(OidcError::from)
 }
 
 pub(crate) fn https_request(
@@ -311,7 +322,7 @@ pub(crate) fn https_request(
     method: &str,
     content_type: &str,
     body: &[u8],
-) -> Result<Vec<u8>, OidcError> {
+) -> Result<ProtectedBytes, OidcError> {
     let ca = fs::read(ca_der).map_err(|_| OidcError::Network)?;
     let mut roots = RootCertStore::empty();
     roots
@@ -352,14 +363,11 @@ pub(crate) fn https_request(
         .and_then(|()| tls.write_all(body))
         .and_then(|()| tls.flush())
         .map_err(|_| OidcError::Network)?;
-    let mut response = Vec::new();
-    tls.take(u64::try_from(MAX_HTTP_BODY + 64 * 1024).unwrap())
-        .read_to_end(&mut response)
-        .map_err(|_| OidcError::Network)?;
+    let response = plaintext::read_all(&mut tls, MAX_HTTP_BODY + 64 * 1024)?;
     parse_http_response(&response)
 }
 
-fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, OidcError> {
+fn parse_http_response(response: &[u8]) -> Result<ProtectedBytes, OidcError> {
     let split = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -397,7 +405,10 @@ fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, OidcError> {
     let decoded = if chunked {
         decode_chunked(body)?
     } else {
-        body.to_vec()
+        if body.len() > MAX_HTTP_BODY || content_length.is_some_and(|length| length != body.len()) {
+            return Err(OidcError::InvalidResponse);
+        }
+        ProtectedBytes::copy_from_slice(body).map_err(plaintext::Error::from)?
     };
     if content_length.is_some_and(|length| length != decoded.len()) || decoded.len() > MAX_HTTP_BODY
     {
@@ -406,37 +417,43 @@ fn parse_http_response(response: &[u8]) -> Result<Vec<u8>, OidcError> {
     Ok(decoded)
 }
 
-fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, OidcError> {
-    let mut output = Vec::new();
-    loop {
-        let line = body
-            .windows(2)
-            .position(|window| window == b"\r\n")
-            .ok_or(OidcError::InvalidResponse)?;
-        let size = usize::from_str_radix(
-            std::str::from_utf8(&body[..line])
-                .map_err(|_| OidcError::InvalidResponse)?
-                .split(';')
-                .next()
-                .ok_or(OidcError::InvalidResponse)?,
-            16,
-        )
-        .map_err(|_| OidcError::InvalidResponse)?;
-        body = &body[line + 2..];
-        if size == 0 {
-            return (body == b"\r\n")
-                .then_some(output)
-                .ok_or(OidcError::InvalidResponse);
+fn decode_chunked(body: &[u8]) -> Result<ProtectedBytes, OidcError> {
+    plaintext::encode(|output| {
+        let mut body = body;
+        let mut total = 0_usize;
+        loop {
+            let line = body
+                .windows(2)
+                .position(|window| window == b"\r\n")
+                .ok_or(plaintext::Error::InvalidJson)?;
+            let size = usize::from_str_radix(
+                std::str::from_utf8(&body[..line])
+                    .map_err(|_| plaintext::Error::InvalidJson)?
+                    .split(';')
+                    .next()
+                    .ok_or(plaintext::Error::InvalidJson)?,
+                16,
+            )
+            .map_err(|_| plaintext::Error::InvalidJson)?;
+            body = &body[line + 2..];
+            if size == 0 {
+                return (body == b"\r\n")
+                    .then_some(())
+                    .ok_or(plaintext::Error::InvalidJson);
+            }
+            let end = size.checked_add(2).ok_or(plaintext::Error::InvalidJson)?;
+            total = total
+                .checked_add(size)
+                .filter(|n| *n <= MAX_HTTP_BODY)
+                .ok_or(plaintext::Error::InvalidJson)?;
+            if body.len() < end || &body[size..end] != b"\r\n" {
+                return Err(plaintext::Error::InvalidJson);
+            }
+            output.put(&body[..size])?;
+            body = &body[end..];
         }
-        if size > MAX_HTTP_BODY || body.len() < size + 2 || &body[size..size + 2] != b"\r\n" {
-            return Err(OidcError::InvalidResponse);
-        }
-        output.extend_from_slice(&body[..size]);
-        if output.len() > MAX_HTTP_BODY {
-            return Err(OidcError::InvalidResponse);
-        }
-        body = &body[size + 2..];
-    }
+    })
+    .map_err(OidcError::from)
 }
 
 #[cfg(test)]
@@ -449,7 +466,18 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use pm_interface::{Json, encode_json};
 
-    use super::{OidcError, validate_jwt, validate_subject_binding};
+    use super::{OidcError, validate_subject_binding};
+    fn validate_jwt(
+        token: &str,
+        jwks: &Json,
+        profile: &Profile,
+        nonce: Option<&str>,
+        now: i64,
+    ) -> Result<bool, OidcError> {
+        let jwks = super::parse_json(&encode_json(jwks)).unwrap();
+        super::validate_jwt(token, &jwks, profile, nonce, now)
+            .map(|value| (*value).eq("synthetic-subject"))
+    }
     use crate::Profile;
 
     fn profile() -> Profile {
@@ -569,7 +597,7 @@ mod tests {
         );
         assert_eq!(
             validate_jwt(&valid, &jwks, &profile, Some("expected-nonce"), 100),
-            Ok("synthetic-subject".into())
+            Ok(true)
         );
         assert_eq!(
             validate_jwt(&valid, &jwks, &profile, Some("wrong-nonce"), 100),
@@ -658,3 +686,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "oidc_memory_tests.rs"]
+mod memory_tests;

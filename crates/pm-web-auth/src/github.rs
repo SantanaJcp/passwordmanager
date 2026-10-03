@@ -2,13 +2,14 @@
 
 use std::{
     fs,
-    io::{Read, Write},
+    io::Write,
     net::{Ipv4Addr, SocketAddrV4, TcpStream},
     sync::Arc,
     time::Duration,
 };
 
-use pm_interface::{Json, encode_json, parse_json};
+use crate::plaintext::{self, Error, Json, Value};
+use pm_crypto::ProtectedBytes;
 use rustls::{
     ClientConfig, ClientConnection, RootCertStore, StreamOwned,
     pki_types::{CertificateDer, ServerName},
@@ -20,9 +21,9 @@ use crate::GithubProfile;
 const MAX_HTTP_RESPONSE: usize = 1024 * 1024;
 const MAX_PUBLIC_RESULT: usize = 64 * 1024;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub(crate) enum GithubOutcome {
-    Succeeded(Vec<u8>),
+    Succeeded(ProtectedBytes),
     WaitingForSso,
     Rejected,
     RateLimited,
@@ -32,10 +33,10 @@ pub(crate) enum GithubOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GithubQuery {
-    filter: String,
-    state: String,
-    sort: String,
-    direction: String,
+    filter: &'static str,
+    state: &'static str,
+    sort: &'static str,
+    direction: &'static str,
     page: u64,
     per_page: u64,
 }
@@ -44,7 +45,7 @@ pub(crate) fn perform(
     profile: &GithubProfile,
     token: &[u8],
     context: &[u8],
-) -> Result<GithubOutcome, ()> {
+) -> Result<GithubOutcome, Error> {
     let query = parse_context(context)?;
     let request = build_request(profile, token, &query)?;
     let ca = fs::read(profile.value("ca_der")).map_err(|_| ())?;
@@ -73,13 +74,11 @@ pub(crate) fn perform(
     tls.write_all(&request)
         .and_then(|()| tls.flush())
         .map_err(|_| ())?;
-    let mut response = Vec::new();
-    tls.take(u64::try_from(MAX_HTTP_RESPONSE + 1).map_err(|_| ())?)
-        .read_to_end(&mut response)
-        .map_err(|_| ())?;
-    if response.len() > MAX_HTTP_RESPONSE {
-        return Ok(GithubOutcome::IntegrityFailure);
-    }
+    let response = match plaintext::read_all(&mut tls, MAX_HTTP_RESPONSE) {
+        Ok(response) => response,
+        Err(Error::InvalidJson) => return Ok(GithubOutcome::IntegrityFailure),
+        Err(error) => return Err(error),
+    };
     parse_response(&response, token, &query)
 }
 
@@ -100,36 +99,56 @@ pub(crate) fn parse_context(value: &[u8]) -> Result<GithubQuery, ()> {
     let per_page = field(&mut lines, "per_page")?
         .parse::<u64>()
         .map_err(|_| ())?;
-    if lines.next().is_some()
-        || !matches!(
-            filter.as_str(),
-            "assigned" | "created" | "mentioned" | "subscribed" | "repos" | "all"
-        )
-        || !matches!(state.as_str(), "open" | "closed" | "all")
-        || !matches!(sort.as_str(), "created" | "updated" | "comments")
-        || !matches!(direction.as_str(), "asc" | "desc")
-        || page == 0
-        || !(1..=100).contains(&per_page)
-    {
+    if lines.next().is_some() {
+        return Err(());
+    }
+    query_from_fields(filter, state, sort, direction, page, per_page)
+}
+
+fn query_from_fields(
+    filter: &str,
+    state: &str,
+    sort: &str,
+    direction: &str,
+    page: u64,
+    per_page: u64,
+) -> Result<GithubQuery, ()> {
+    fn selected(value: &str, choices: &[&'static str]) -> Result<&'static str, ()> {
+        choices
+            .iter()
+            .copied()
+            .find(|choice| *choice == value)
+            .ok_or(())
+    }
+    if page == 0 || !(1..=100).contains(&per_page) {
         return Err(());
     }
     Ok(GithubQuery {
-        filter,
-        state,
-        sort,
-        direction,
+        filter: selected(
+            filter,
+            &[
+                "assigned",
+                "created",
+                "mentioned",
+                "subscribed",
+                "repos",
+                "all",
+            ],
+        )?,
+        state: selected(state, &["open", "closed", "all"])?,
+        sort: selected(sort, &["created", "updated", "comments"])?,
+        direction: selected(direction, &["asc", "desc"])?,
         page,
         per_page,
     })
 }
 
-fn field<'a>(lines: &mut impl Iterator<Item = &'a str>, key: &str) -> Result<String, ()> {
+fn field<'a>(lines: &mut impl Iterator<Item = &'a str>, key: &str) -> Result<&'a str, ()> {
     lines
         .next()
         .and_then(|line| line.strip_prefix(key))
         .and_then(|value| value.strip_prefix('='))
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
         .ok_or(())
 }
 
@@ -137,12 +156,12 @@ pub(crate) fn build_request(
     profile: &GithubProfile,
     token: &[u8],
     query: &GithubQuery,
-) -> Result<Vec<u8>, ()> {
+) -> Result<ProtectedBytes, Error> {
     if !(16..=1024).contains(&token.len()) || !token.iter().all(u8::is_ascii_graphic) {
-        return Err(());
+        return Err(Error::InvalidJson);
     }
     let token = std::str::from_utf8(token).map_err(|_| ())?;
-    Ok(format!(
+    let request = plaintext::format(format_args!(
         "GET {}?filter={}&state={}&sort={}&direction={}&page={}&per_page={} HTTP/1.1\r\nHost: api.github.com\r\nAccept: application/vnd.github+json\r\nAuthorization: Bearer {}\r\nX-GitHub-Api-Version: {}\r\nUser-Agent: passwordmanager/1\r\nConnection: close\r\n\r\n",
         profile.path(),
         query.filter,
@@ -153,15 +172,15 @@ pub(crate) fn build_request(
         query.per_page,
         token,
         profile.api_version(),
-    )
-    .into_bytes())
+    ))?;
+    plaintext::encode(|output| output.put(request.as_bytes()))
 }
 
 pub(crate) fn parse_response(
     response: &[u8],
     token: &[u8],
     query: &GithubQuery,
-) -> Result<GithubOutcome, ()> {
+) -> Result<GithubOutcome, Error> {
     if token.is_empty() || contains(response, token) {
         return Ok(GithubOutcome::IntegrityFailure);
     }
@@ -182,45 +201,48 @@ pub(crate) fn parse_response(
         let (name, raw) = line.split_once(':').ok_or(())?;
         let value = raw.trim();
         if value.bytes().any(|byte| byte.is_ascii_control()) {
-            return Err(());
+            return Err(Error::InvalidJson);
         }
         if name.eq_ignore_ascii_case("content-length") {
             let length = value.parse::<usize>().map_err(|_| ())?;
             if content_length.replace(length).is_some() {
-                return Err(());
+                return Err(Error::InvalidJson);
             }
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
             if chunked || !value.eq_ignore_ascii_case("chunked") {
-                return Err(());
+                return Err(Error::InvalidJson);
             }
             chunked = true;
         } else if name.eq_ignore_ascii_case("x-github-sso") {
             if sso.replace(value).is_some() {
-                return Err(());
+                return Err(Error::InvalidJson);
             }
         } else if name.eq_ignore_ascii_case("retry-after") {
             if retry_after.replace(value).is_some() {
-                return Err(());
+                return Err(Error::InvalidJson);
             }
         } else if name.eq_ignore_ascii_case("link") {
             if link.replace(value).is_some() {
-                return Err(());
+                return Err(Error::InvalidJson);
             }
         } else if name.eq_ignore_ascii_case("location") && location.replace(value).is_some() {
-            return Err(());
+            return Err(Error::InvalidJson);
         }
     }
     if chunked && content_length.is_some() {
-        return Err(());
+        return Err(Error::InvalidJson);
     }
     let body = &response[split + 4..];
     let body = if chunked {
         decode_chunked(body)?
     } else {
         if content_length.is_some_and(|length| length != body.len()) {
-            return Err(());
+            return Err(Error::InvalidJson);
         }
-        body.to_vec()
+        if body.len() > MAX_HTTP_RESPONSE {
+            return Ok(GithubOutcome::IntegrityFailure);
+        }
+        ProtectedBytes::copy_from_slice(body).map_err(Error::from)?
     };
     if body.len() > MAX_HTTP_RESPONSE {
         return Ok(GithubOutcome::IntegrityFailure);
@@ -253,17 +275,23 @@ pub(crate) fn parse_response(
     }
 }
 
-fn success(body: &[u8], query: &GithubQuery, link: Option<&str>) -> Result<GithubOutcome, ()> {
-    let Json::Array(items) = parse_json(body).map_err(|_| ())? else {
+fn success(body: &[u8], query: &GithubQuery, link: Option<&str>) -> Result<GithubOutcome, Error> {
+    let Json::Array(items) = plaintext::parse_json(body)? else {
         return Ok(GithubOutcome::IntegrityFailure);
     };
     if items.len() > usize::try_from(query.per_page).map_err(|_| ())? {
         return Ok(GithubOutcome::IntegrityFailure);
     }
+    let mut numbers = Vec::with_capacity(items.len());
+    for issue in &items {
+        numbers.push((
+            json_u64(issue, "id")?.to_string(),
+            json_u64(issue, "number")?.to_string(),
+        ));
+    }
     let mut public = Vec::with_capacity(items.len());
-    for issue in items {
-        let id = json_u64(&issue, "id")?;
-        let number = json_u64(&issue, "number")?;
+    for (issue, (id, number_text)) in items.iter().zip(&numbers) {
+        let number = json_u64(issue, "number")?;
         let title = issue.field("title").and_then(Json::string).ok_or(())?;
         let state = issue.field("state").and_then(Json::string).ok_or(())?;
         let html_url = issue.field("html_url").and_then(Json::string).ok_or(())?;
@@ -276,33 +304,38 @@ fn success(body: &[u8], query: &GithubQuery, link: Option<&str>) -> Result<Githu
         {
             return Ok(GithubOutcome::IntegrityFailure);
         }
-        public.push(Json::Object(vec![
-            ("id".into(), Json::String(id.to_string())),
-            ("number".into(), Json::Number(number.to_string())),
-            ("title".into(), Json::String(title.to_owned())),
-            ("state".into(), Json::String(state.to_owned())),
-            ("html_url".into(), Json::String(html_url.to_owned())),
+        public.push(Value::Object(vec![
+            ("id", Value::String(id)),
+            ("number", Value::Number(number_text)),
+            ("title", Value::String(title)),
+            ("state", Value::String(state)),
+            ("html_url", Value::String(html_url)),
         ]));
     }
     let next_page = match link {
-        None => Json::Null,
-        Some(value) => Json::Number(parse_next_link(value, query)?.to_string()),
+        None => None,
+        Some(value) => Some(parse_next_link(value, query)?.to_string()),
     };
-    let encoded = encode_json(&Json::Object(vec![
+    let page = query.page.to_string();
+    let encoded = Value::Object(vec![
+        ("kind", Value::String("authenticated_http_response")),
+        ("provider", Value::String("github")),
         (
-            "kind".into(),
-            Json::String("authenticated_http_response".into()),
+            "request_profile_id",
+            Value::String("github-assigned-issues/1"),
         ),
-        ("provider".into(), Json::String("github".into())),
+        ("status", Value::Number("200")),
+        ("items", Value::Array(public)),
+        ("page", Value::Number(&page)),
         (
-            "request_profile_id".into(),
-            Json::String("github-assigned-issues/1".into()),
+            "next_page",
+            match &next_page {
+                Some(value) => Value::Number(value),
+                None => Value::Null,
+            },
         ),
-        ("status".into(), Json::Number("200".into())),
-        ("items".into(), Json::Array(public)),
-        ("page".into(), Json::Number(query.page.to_string())),
-        ("next_page".into(), next_page),
-    ]));
+    ])
+    .encode()?;
     if encoded.len() > MAX_PUBLIC_RESULT {
         return Ok(GithubOutcome::IntegrityFailure);
     }
@@ -370,17 +403,13 @@ fn parse_link_query(value: &str) -> Result<GithubQuery, ()> {
             return Err(());
         }
     }
-    parse_context(
-        format!(
-            "github-assigned-issues/1\nfilter={}\nstate={}\nsort={}\ndirection={}\npage={}\nper_page={}\n",
-            filter.ok_or(())?,
-            state.ok_or(())?,
-            sort.ok_or(())?,
-            direction.ok_or(())?,
-            page.ok_or(())?,
-            per_page.ok_or(())?,
-        )
-        .as_bytes(),
+    query_from_fields(
+        filter.ok_or(())?,
+        state.ok_or(())?,
+        sort.ok_or(())?,
+        direction.ok_or(())?,
+        page.ok_or(())?.parse().map_err(|_| ())?,
+        per_page.ok_or(())?.parse().map_err(|_| ())?,
     )
 }
 
@@ -394,35 +423,40 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, ()> {
-    let mut output = Vec::new();
-    loop {
-        let line = body
-            .windows(2)
-            .position(|window| window == b"\r\n")
-            .ok_or(())?;
-        let size = usize::from_str_radix(
-            std::str::from_utf8(&body[..line])
-                .map_err(|_| ())?
-                .split(';')
-                .next()
-                .ok_or(())?,
-            16,
-        )
-        .map_err(|_| ())?;
-        body = &body[line + 2..];
-        if size == 0 {
-            return (body == b"\r\n").then_some(output).ok_or(());
+fn decode_chunked(body: &[u8]) -> Result<ProtectedBytes, Error> {
+    plaintext::encode(|output| {
+        let mut body = body;
+        let mut total = 0_usize;
+        loop {
+            let line = body
+                .windows(2)
+                .position(|window| window == b"\r\n")
+                .ok_or(())?;
+            let size = usize::from_str_radix(
+                std::str::from_utf8(&body[..line])
+                    .map_err(|_| ())?
+                    .split(';')
+                    .next()
+                    .ok_or(())?,
+                16,
+            )
+            .map_err(|_| ())?;
+            body = &body[line + 2..];
+            if size == 0 {
+                return (body == b"\r\n").then_some(()).ok_or(Error::InvalidJson);
+            }
+            let end = size.checked_add(2).ok_or(())?;
+            total = total
+                .checked_add(size)
+                .filter(|n| *n <= MAX_HTTP_RESPONSE)
+                .ok_or(())?;
+            if body.len() < end || &body[size..end] != b"\r\n" {
+                return Err(Error::InvalidJson);
+            }
+            output.put(&body[..size])?;
+            body = &body[end..];
         }
-        if size > MAX_HTTP_RESPONSE || body.len() < size + 2 || &body[size..size + 2] != b"\r\n" {
-            return Err(());
-        }
-        output.extend_from_slice(&body[..size]);
-        if output.len() > MAX_HTTP_RESPONSE {
-            return Err(());
-        }
-        body = &body[size + 2..];
-    }
+    })
 }
 
 #[cfg(test)]
@@ -502,19 +536,19 @@ mod tests {
             value.extend_from_slice(body);
             value
         };
-        assert_eq!(
+        assert!(matches!(
             parse_response(
                 &response("302 Found", "Location: https://evil.invalid/\r\n", b""),
                 TOKEN,
                 &query
             ),
             Ok(GithubOutcome::IntegrityFailure)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             parse_response(&response("200 OK", "", TOKEN), TOKEN, &query),
             Ok(GithubOutcome::IntegrityFailure)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             parse_response(
                 &response(
                     "403 Forbidden",
@@ -525,30 +559,34 @@ mod tests {
                 &query
             ),
             Ok(GithubOutcome::WaitingForSso)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             parse_response(
                 &response("403 Forbidden", "Retry-After: 60\r\n", b"quota"),
                 TOKEN,
                 &query
             ),
             Ok(GithubOutcome::RateLimited)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             parse_response(
                 &response("401 Unauthorized", "", b"bad token"),
                 TOKEN,
                 &query
             ),
             Ok(GithubOutcome::Rejected)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             parse_response(
                 &response("500 Internal Server Error", "", b"secret error"),
                 TOKEN,
                 &query
             ),
             Ok(GithubOutcome::Indeterminate)
-        );
+        ));
     }
 }
+
+#[cfg(test)]
+#[path = "github_memory_tests.rs"]
+mod memory_tests;
