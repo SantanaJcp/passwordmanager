@@ -640,6 +640,7 @@ fn run_terminal(
         #[cfg(windows)]
         if let Some(probe) = diagnostic.as_mut() {
             probe.record("after-alt")?;
+            probe.writer_experiments()?;
         }
         guard.state.cursor_hidden = true;
         execute!(guard.writer, crossterm::cursor::Hide).map_err(|_| Failure::Unavailable)?;

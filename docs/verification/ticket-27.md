@@ -2090,3 +2090,25 @@ observación. Así se mide explícitamente stdout no-console/ausente, que es una
 de las hipótesis, y se conserva el flujo original con CONOUT$. Un fallo al
 escribir métricas, tamaño fuera del límite o lectura parcial continúa siendo
 error. Estas categorías de diagnóstico no acreditan soporte del handle.
+
+[Run39](https://github.com/SantanaJcp/passwordmanager/actions/runs/37088451327),
+SHA `7306335d5b936473931863524bf78c660598394c`, job `111103454702`: FAIL tras
+12/1/14/1 PASS. Evidencia discriminante: frame 80×24, prompt=true en (3,19);
+writer y CONOUT$ antes/después de alternate y tras draw: VT=true, modo 7,
+viewport 0,0,79,23. Stdout: GetConsoleMode falla con ERROR_INVALID_HANDLE (6).
+Tras draw ambos buffers tienen títulos/prompt=false y cursor 79,23, igual que
+observer; no es únicamente reconstrucción, geometría ni ausencia en layout.
+La hipótesis anterior de modo VT perdido queda refutada en este candidato.
+No se modifica el modo ni se reabre el writer por hipótesis.
+
+Siguiente experimento, antes del código: tras alternate y antes del clear/draw,
+escribir en el writer exacto una secuencia CSI completa y luego su variante
+fragmentada como hace fmt/Crossterm. Ambas dibujan sólo `PM27Probe` en (0,0),
+texto distinto de los oráculos TUI, y deben terminar en cursor (9,0). Una
+tercera escribe cuatro U+250C en UTF-8 y debe terminar en (4,0) con cuatro
+glyphs U+250C Win32. Se mide GetConsoleOutputCP y cantidad de box glyphs/CSI
+literales; nunca se imprimen celdas. El clear normal borra las sondas antes de
+la aceptación. Completa vs fragmentada distingue parser de escritura; ancho y
+glyphs/código de página distinguen decodificación. No cambia CP, VT, TERM,
+backend, pantalla ni plazo. Cualquier resultado inesperado es evidencia roja,
+no se cambia el criterio para aceptarlo.

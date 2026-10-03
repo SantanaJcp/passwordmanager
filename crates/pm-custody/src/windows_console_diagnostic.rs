@@ -8,7 +8,8 @@ use windows_sys::Win32::{
     Foundation::{GetLastError, HANDLE},
     System::Console::{
         CONSOLE_SCREEN_BUFFER_INFO, COORD, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode,
-        GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleOutputCharacterW, STD_OUTPUT_HANDLE,
+        GetConsoleOutputCP, GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleOutputCharacterW,
+        STD_OUTPUT_HANDLE,
     },
 };
 use zeroize::Zeroizing;
@@ -41,6 +42,26 @@ impl Diagnostic {
             self.snapshot(stage, name, handle)?;
         }
         self.output.flush().map_err(|_| Failure::Unavailable)
+    }
+
+    pub(super) fn writer_experiments(&mut self) -> Result<(), Failure> {
+        self.writer
+            .write_all(b"\x1b[2J\x1b[1;1HPM27Probe")
+            .map_err(|_| Failure::Unavailable)?;
+        self.record("assembled")?;
+        self.writer
+            .write_all(b"\x1b[2J")
+            .map_err(|_| Failure::Unavailable)?;
+        for part in [b"\x1b[".as_slice(), b"1", b";", b"1", b"H", b"PM27Probe"] {
+            self.writer
+                .write_all(part)
+                .map_err(|_| Failure::Unavailable)?;
+        }
+        self.record("fragmented")?;
+        self.writer
+            .write_all("\x1b[2J\x1b[1;1H┌┌┌┌".as_bytes())
+            .map_err(|_| Failure::Unavailable)?;
+        self.record("utf8")
     }
 
     fn snapshot(&mut self, stage: &str, name: &str, handle: HANDLE) -> Result<(), Failure> {
@@ -80,8 +101,20 @@ impl Diagnostic {
             text.chunks(width)
                 .any(|row| row.windows(needle.len()).any(|v| v == needle))
         });
+        let probe: Vec<u16> = "PM27Probe".encode_utf16().collect();
+        let probe_at_origin = text.starts_with(&probe);
+        let boxes = text
+            .iter()
+            .filter(|unit| (0x2500..=0x257f).contains(*unit))
+            .count();
+        let corners = text.iter().filter(|unit| **unit == 0x250c).count();
+        let literal_csi = text.windows(2).filter(|pair| *pair == [0x1b, 0x5b]).count();
+        let output_cp = unsafe { GetConsoleOutputCP() };
+        if output_cp == 0 {
+            return self.query_failure(stage, name, "output-cp");
+        }
         writeln!(self.output,
-            "TUI_PROBE stage={stage} handle={name} vt={} mode={mode} buffer={}x{} viewport={},{},{},{} cursor={},{} manager={} rpk={} prompt={}",
+            "TUI_PROBE stage={stage} handle={name} vt={} mode={mode} buffer={}x{} viewport={},{},{},{} cursor={},{} manager={} rpk={} prompt={} cp={output_cp} probe-origin={probe_at_origin} boxes={boxes} corners={corners} literal-csi={literal_csi}",
             mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0, info.dwSize.X, info.dwSize.Y,
             info.srWindow.Left, info.srWindow.Top, info.srWindow.Right, info.srWindow.Bottom,
             info.dwCursorPosition.X, info.dwCursorPosition.Y, markers[0], markers[1], markers[2]
