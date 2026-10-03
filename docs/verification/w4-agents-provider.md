@@ -322,3 +322,57 @@ Linux y Windows siguen descartando errores individuales de handler conforme
 al inventario heredado; no atribuir a W4 una política nueva de recuperación.
 El merger debe conservar los cambios de los tres workstreams y ejecutar su
 verificación de composición. W4 solo publica su rama, sin integrar ni merge.
+
+## Barrida Linux de reanudación
+
+Comando coordinador: `python3 /tmp/pmw4-run-gates.py resume-gate`, desde W4;
+el script ejecuta secuencialmente los 40 comandos exactos del baseline,
+cada uno bajo `flock /tmp/pm-cargo-window.lock`, con los artefactos sintéticos
+Keycloak/CFT declarados y PYTHONDONTWRITEBYTECODE=1. Resultados y comandos:
+`/tmp/pmw4-resume-gate-results.json`; resumen
+`/tmp/pmw4-resume-gate-summary.log`; logs individuales
+`/tmp/pmw4-resume-gate-<caso>.log`. Los tiempos incluyen espera del lock
+compartido y no son una medición de rendimiento del dispatcher.
+
+Los **40 casos base finalizan con 38 rc0 y cero diferencias de rc/oráculos**
+frente a `/tmp/pmrs-gate-results.json`. Check rc0 y clean locked/offline rc0;
+logs `...-final-check.log` y `...-final-clean.log`. TUI operations conserva
+rc1 con `exact-duplicates=1`/preview recortado. G7 matrix conserva rc1 y los
+dos RED EIO/ENOSPC de commit-outbox-audit por staging retenido. No se reclasifica
+ninguno como PASS. Result-sync/bootstrap/audit/crash en vuelo y canarios rc0.
+P1, P2, P4 y SSH reales pasan sus entrypoints existentes; no es evidencia de
+proveedor ordinario. El lab 24 pasa el discovery adicional con TUI abierta.
+
+La barrida comenzó en `e4a8f49`; el único cambio posterior de producto es la
+anotación de tipo bajo cfg(windows) en `37c1bd8`. Todo código Linux/macOS y
+fixtures probado permanece idéntico a `e4a8f49`; los commits documentales no
+introducen otra versión de producto. No se repiten gates por esos cambios
+ajenos al comportamiento Linux ni se mezclan fuentes de W1–W3.
+
+Lab nuevo final: `flock /tmp/pm-cargo-window.lock
+./scripts/test-linux-concurrency-lab.sh`, rc0,
+`/tmp/pmw4-resume-gate-new-concurrency.log`, con PASS posterior a cleanup:
+ordinary daemon, TUI abierta, mismo PID, concurrencia dentro del agente y
+límite de cuatro. Total del coordinador **41 casos / 39 rc0 / cero
+regresiones de rc u oráculos**, exit0 de comparación; esto no convierte en
+éxito los dos RED de producto heredados. El barrido completo ha terminado.
+
+## Entrega y siguiente acción
+
+Primer checkpoint publicado: `e4a8f49e62f1081875e821ea53b1dbe83d6fc7cc`.
+Código final: `37c1bd82d2cf2c37f02c326397298715d23faed2`; los hijos posteriores
+son evidencia documental. Publicación normal solo a
+`codex/pm-w4-agents-provider`, usando el override de helper autorizado porque
+el helper instalado apunta a un gh inexistente; sin cambio persistente de
+configuración, force, integración, merge del PR #1 ni estados de tickets.
+GitHub informa bypass de los permisos existentes del ref, sin modificar reglas.
+
+Correctivo 1 entregado con la evidencia y límites anteriores. Correctivo 2
+con RED ordinario confirmado y detenido por decisión de binding/provisión/
+migración; correctivo 3 pendiente en el orden aprobado, con composición y
+configuración real aún por decidir. Siguiente acción del coordinador: acordar
+el registro local confiable por RPK y su migración explícita (recomendado),
+luego la configuración instalada de adaptadores reales; retomar 2 → 3 y
+actualizar 07/24/P4 contra un daemon ordinario estable. La revisión/integración
+de esta candidata corresponde al merger, preservando el hook W3 y trabajo
+de W1–W2. Los fallbacks inventariados siguen sin modificación.
