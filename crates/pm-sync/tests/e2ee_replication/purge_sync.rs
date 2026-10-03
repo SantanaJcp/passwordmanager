@@ -1485,14 +1485,14 @@ fn session_endpoint_failure_returns_explicit_ipc_error_and_failed_exit() {
     let request = b"{}";
     let mut input = child.stdin.take().unwrap();
     input
-        .write_all(&(request.len() as u32).to_be_bytes())
+        .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
         .unwrap();
     input.write_all(request).unwrap();
     drop(input);
     let output = child.wait_with_output().unwrap();
     peer.join().unwrap();
     let error = br#"{"ok":false,"code":"unavailable"}"#;
-    let mut frame = (error.len() as u32).to_be_bytes().to_vec();
+    let mut frame = u32::try_from(error.len()).unwrap().to_be_bytes().to_vec();
     frame.extend_from_slice(error);
     assert_eq!(output.status.code(), Some(4));
     assert_eq!(

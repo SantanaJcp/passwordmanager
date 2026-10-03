@@ -922,6 +922,7 @@ class MacPtySession:
                 prefix_complete = bool(re.search(pattern, value))
             if expected in value and (pattern is None or re.search(pattern, value)):
                 if pattern is not None:
+                    assert timeout == 0 or time.monotonic() <= deadline, "mandatory TUI panel completion exceeded observation deadline"
                     print(f"PMINT5_SYNC_PANEL prefix_ms={round((prefix_at - started) * 1000)} complete_ms={round((time.monotonic() - started) * 1000)} complete-at-prefix={int(prefix_complete)}", flush=True)
                 return value
             remaining = deadline - time.monotonic()
@@ -1453,6 +1454,15 @@ def assert_information_panel_regression():
     complete = boundary.wait_information("Sync complete through pinned TLS", timeout=1,
                                          pattern=SYNC_COMPLETE_PATTERN)
     assert len(reads) == 1 and "pushed=59 pulled=59" in complete
+    from unittest.mock import patch
+    with patch("macos_lab.time.monotonic", side_effect=[0, 2, 2]):
+        try:
+            boundary.wait_information("Sync complete through pinned TLS", timeout=1,
+                                      pattern=SYNC_COMPLETE_PATTERN)
+        except AssertionError as error:
+            assert str(error) == "mandatory TUI panel completion exceeded observation deadline"
+        else:
+            raise AssertionError("late sync completion passed the original deadline")
     import textwrap
     warning = "Recovery code shown temporarily; store externally, then re-enter it exactly to commit: old backups and exposed copies retain historical recovery paths."
     rows = textwrap.wrap(warning, width=78) + ["Recovery code:", code[:78], code[78:]]
