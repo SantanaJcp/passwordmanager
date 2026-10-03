@@ -1952,3 +1952,46 @@ No cause is attributed before the durable/UI/server discriminant. ARM had no
 independent core error; Intel also retained isolated clipboard indeterminacy
 and its post-control AppleScript `-1700`. Strict cleanup ran and no cleanup
 error was reported. Neither job emitted overall acceptance PASS.
+
+Run [37090972867](https://github.com/SantanaJcp/passwordmanager/actions/runs/37090972867),
+exact `1d74a8b63e4d5d2059237553801da5842abafbb7`, completed FAILED on both
+CPUs. Intel completed Ticket23/partial Ticket24 and the concurrent gate, then
+the happy-sync discriminant found `durable=integrity screen=integrity
+process=same`, `blocks=23 roots=0`. Thus real pinned transport accepted opaque
+blocks and the server stayed alive; this is not incomplete progress or an
+observer-only timeout. Intel also retained clipboard indeterminacy/`-1700`.
+ARM failed earlier at the first causal-control TUI unlock: the child remained
+alive in a password-prompt screen at the existing eight-second bound. The
+sync diagnostic was not reached; no input/KDF/dispatcher cause is attributed.
+Both strict cleanups completed without additional errors.
+
+Source-supported next discriminant: the preceding Ticket23 permanently purges
+an item/revisions, `apply_item_purge` deletes their payloads while signed
+revision events remain in outbox, and `SyncReplica::push` calls
+`export_ciphertext_graph` for every pending bound revision. That export joins
+the now-required item/revision payload and maps a reducer error to the observed
+integrity phase. Count pending `item-revision` events whose subject is in
+`purged_items` and has no `vault_items` row, using read-only SQL, before Full25.
+No IDs, event bodies or payloads are logged, and no outbox row is acknowledged,
+deleted or skipped. If confirmed this is a shared engine/sync blocker, outside
+the macOS port; do not change `pm-vault` or shared sync replication here.
+
+Predetermined fixture ordering refinement: run import, causal retirement,
+backup/export/collisions, streamed download, audit, restore and rotations before
+pairing/sync. These independent cases keep their original assertions and
+bounds; they never substitute for rejected sync. Sync, its negatives and
+strict cleanup remain mandatory for Full25 PASS. Reopen post-rotation sessions
+with the explicit rotated synthetic password. Report completed groups as
+`observed`, not overall acceptance.
+
+Restore observer correction supported by `backup::restore_event_count` and
+`human::commit_backup_restore`: a restore creates new content events. Require
+new item/event counts and an unchanged digest of the pre-existing authority
+events (exclude only content lifecycle and audit-purge kinds), rather than
+requiring the entire `authority_events` count to remain identical. This checks
+preserved authority and does not suppress legitimate restored revisions.
+
+Inherited compatibility path also encountered and retained:
+`reducer::decode_event` tries `decode_legacy_body` when the primary body decode
+fails/canonicality differs; it can accept a supported legacy representation.
+This is not modified or used as a diagnostic substitute.

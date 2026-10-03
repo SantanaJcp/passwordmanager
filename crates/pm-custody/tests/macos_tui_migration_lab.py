@@ -25,10 +25,13 @@ def source_digest(path):
 
 
 def snapshot(m, session=None):
-    code = """import json,sqlite3,sys
+    code = """import hashlib,json,sqlite3,sys
 with sqlite3.connect('file:'+sys.argv[1]+'?mode=ro', uri=True) as db:
- print(json.dumps({t:db.execute('select count(*) from '+t).fetchone()[0]
-  for t in ('vault_items','revision_parts','authority_events','audit_purge_ranges')}))
+ state={t:db.execute('select count(*) from '+t).fetchone()[0]
+  for t in ('vault_items','revision_parts','authority_events','audit_purge_ranges')}
+ rows=db.execute("select event_digest from authority_events where kind not in ('item-revision','trash','restore','purge-item','purge-revisions','audit-purge') order by event_digest")
+ state['authority_state']=hashlib.sha256(b''.join(row[0] for row in rows)).hexdigest()
+ print(json.dumps(state))
 """
     command = [sys.executable, "-c", code, m.STATE / "vault.sqlite3"]
     result = m.sudo(command) if session is None else session.run_sudo_while_draining(command)
@@ -266,8 +269,25 @@ def rejected_source(m, binary, profile, private, endpoint, path, *, onepux_sourc
         m.close_session_preserving_primary(session)
 
 
+def observe_pending_purged_graphs(m):
+    code = """import json,sqlite3,sys
+with sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True) as db:
+ purged=db.execute('select count(*) from purged_items').fetchone()[0]
+ pending=db.execute("select count(*) from outbox o join authority_events a on a.event_digest=o.event_digest join purged_items p on p.item_id=a.subject where a.kind='item-revision'").fetchone()[0]
+ missing=db.execute("select count(*) from outbox o join authority_events a on a.event_digest=o.event_digest join purged_items p on p.item_id=a.subject left join vault_items i on i.item_id=a.subject where a.kind='item-revision' and i.item_id is null").fetchone()[0]
+ print(json.dumps([purged,pending,missing]))
+"""
+    result = m.sudo([sys.executable, "-c", code, m.STATE / "vault.sqlite3"])
+    assert result.returncode == 0 and result.stderr == b"", "outbox diagnostic failed"
+    values = json.loads(result.stdout)
+    assert len(values) == 3 and all(type(v) is int and v >= 0 for v in values)
+    purged, pending, missing = values
+    print(f"PM26_OUTBOX_PURGED items={purged} pending-revisions={pending} missing-items={missing}", flush=True)
+
+
 def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labels):
     human = scratch / "human"
+    observe_pending_purged_graphs(m)
     seed_remote_history(m, binary, profile, private, endpoint, scratch, labels)
     streamed = m.run([binary, "human-streaming-file", "--profile", profile,
                      "--private", private, "--socket", endpoint],
@@ -353,69 +373,13 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         for path, digest in digests.items():
             assert source_digest(path) == digest, "import changed its source"
 
-        mark = operation(session, "y", "1", "Observed server RPK", f"{pin}|{pairing}|PAIR")
-        session.wait_text("Protected pairing created", since=mark)
-        assert pairing.stat().st_mode & 0o777 == 0o600
-        namespace = pairing_namespace(pairing.read_bytes())
-        launch(m, SYNC_LABEL, [sync_binary, "serve", "--db", sync_db, "--socket", sync_socket,
-            "--server-key", server_key, "--namespace", namespace, "--client-pub", client_pub], scratch, labels)
-        sync_pid = wait_service(m, SYNC_LABEL, sync_socket, session)
-        sync_value = f"{pairing}|{sync_binary}|{sync_socket}|{client_key}|{server_pub}|{pin}|SYNC"
-        mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value)
-        try:
-            complete = session.wait_text("Sync complete through pinned TLS", timeout=20, since=mark)
-        except BaseException as error:
-            try:
-                diagnose_sync_wait(m, session, mark, sync_db, sync_pid)
-            except BaseException as diagnostic_error:
-                raise error from diagnostic_error
-            raise
-        assert "pushed=" in complete and "pulled=" in complete
-        job = re.search(r"job=([0-9a-f]{32})", complete); assert job
-        mark = operation(session, "y", "4", "Exact sync job ID", job.group(1))
-        session.wait_text("Sync complete through pinned TLS", since=mark)
-        wrong = "00" * 44
-        mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value.replace(pin + "|SYNC", wrong + "|SYNC"))
-        rejected = session.wait_text("rejected its fixed authority/request context", since=mark)
-        assert "no success recorded" in rejected
-        assert snapshot(m, session)["vault_items"] == before + 2
+        print("PM26_MATRIX full25-import=observed", flush=True)
         mark = operation(session, "y", "3", "Exact device ID", REMOTE_DEVICE + "|RETIRE")
         session.wait_text("retired at every locally observed", since=mark)
         result = session.run_sudo_while_draining([sys.executable, "-c",
             "import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);print(d.execute(\"select count(*) from authority_events where kind='device-retire' and subject=?\",[bytes.fromhex(sys.argv[2])]).fetchone()[0])",
             m.STATE / "vault.sqlite3", REMOTE_DEVICE])
         assert result.stdout == b"1\n" and result.stderr == b""
-
-        hostile_socket = scratch / "closing.sock"
-        closing = ClosingEndpoint(hostile_socket)
-        failed_value = sync_value.replace(str(sync_socket), str(hostile_socket))
-        mark = operation(session, "y", "2", "pairing|pm-sync program", failed_value)
-        queued = session.wait_text("authorized and queued", since=mark)
-        failed_job = re.search(r"Sync job ([0-9a-f]{32})", queued); assert failed_job
-        lock(m, session); session = None
-        assert m.sudo(["test", "-f", m.STATE / "vault.sqlite3.sync-job"], check=False).returncode == 0
-        m.sudo(["launchctl", "kickstart", "-k", "system/" + m.LABEL]); m.wait_for_service()
-        session = start(m, binary, profile, private, endpoint, idle=1)
-        mark = operation(session, "y", "4", "Exact sync job ID", failed_job.group(1))
-        progress = session.wait_text("Sync job", since=mark)
-        assert "complete through" not in progress
-        assert session.wait_exit(timeout=8) == 0
-        m.close_session_preserving_primary(session); session = None
-        session = start(m, binary, profile, private, endpoint)
-        mark = operation(session, "y", "4", "Exact sync job ID", failed_job.group(1))
-        deadline = m.time.monotonic() + 75
-        queried = m.time.monotonic()
-        while True:
-            page = session._current_text_after(mark)
-            if page is not None and "unavailable after bounded transport" in page:
-                break
-            assert m.time.monotonic() < deadline, "same sync job did not reach bounded unavailability"
-            if m.time.monotonic() - queried >= 20:
-                mark = operation(session, "y", "4", "Exact sync job ID", failed_job.group(1))
-                queried = m.time.monotonic()
-            session._read_once(0.1)
-        assert m.sudo(["test", "-e", m.STATE / "vault.sqlite3.sync-job"], check=False).returncode == 1
-        closing.close(); closing = None
 
         mark = operation(session, "b", "1", "New native backup path", native)
         session.wait_text("Native encrypted backup complete", since=mark)
@@ -456,6 +420,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         assert after["revision_parts"] == before["revision_parts"]
         assert after["audit_purge_ranges"] > before["audit_purge_ranges"]
         authority = after["authority_events"]
+        authority_state = after["authority_state"]
         before_count = after["vault_items"]
         mark = operation(session, "b", "3", "Archive path|RESTORE", f"{native}|NOT RESTORE")
         session.wait_text("Confirmation mismatch", since=mark)
@@ -463,7 +428,8 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         mark = operation(session, "b", "3", "Archive path|RESTORE", f"{native}|RESTORE")
         session.wait_text("Restore committed with new IDs/keys", since=mark)
         restored = snapshot(m, session)
-        assert restored["vault_items"] > before_count and restored["authority_events"] == authority
+        assert restored["vault_items"] > before_count and restored["authority_events"] > authority
+        assert restored["authority_state"] == authority_state, "restore changed current authority"
         mark = operation(session, "b", "5", "Recovery code shown temporarily")
         page = session.wait_text("Exposure:", since=mark)
         code = re.search(r"Exposure: ([^\s│]+)", page); assert code and code.group(1) != "<hidden>"
@@ -484,6 +450,68 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
             assert wrong.wait_exit(timeout=8) == 4
         finally:
             m.close_session_preserving_primary(wrong)
+        session = start(m, binary, profile, private, endpoint, password=NEW_PASSWORD)
+        restored_count = snapshot(m, session)["vault_items"]
+        print("PM26_MATRIX full25-local=observed", flush=True)
+
+        mark = operation(session, "y", "1", "Observed server RPK", f"{pin}|{pairing}|PAIR")
+        session.wait_text("Protected pairing created", since=mark)
+        assert pairing.stat().st_mode & 0o777 == 0o600
+        namespace = pairing_namespace(pairing.read_bytes())
+        launch(m, SYNC_LABEL, [sync_binary, "serve", "--db", sync_db, "--socket", sync_socket,
+            "--server-key", server_key, "--namespace", namespace, "--client-pub", client_pub], scratch, labels)
+        sync_pid = wait_service(m, SYNC_LABEL, sync_socket, session)
+        sync_value = f"{pairing}|{sync_binary}|{sync_socket}|{client_key}|{server_pub}|{pin}|SYNC"
+        mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value)
+        try:
+            complete = session.wait_text("Sync complete through pinned TLS", timeout=20, since=mark)
+        except BaseException as error:
+            try:
+                diagnose_sync_wait(m, session, mark, sync_db, sync_pid)
+            except BaseException as diagnostic_error:
+                raise error from diagnostic_error
+            raise
+        assert "pushed=" in complete and "pulled=" in complete
+        job = re.search(r"job=([0-9a-f]{32})", complete); assert job
+        mark = operation(session, "y", "4", "Exact sync job ID", job.group(1))
+        session.wait_text("Sync complete through pinned TLS", since=mark)
+        wrong = "00" * 44
+        mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value.replace(pin + "|SYNC", wrong + "|SYNC"))
+        rejected = session.wait_text("rejected its fixed authority/request context", since=mark)
+        assert "no success recorded" in rejected
+        assert snapshot(m, session)["vault_items"] == restored_count
+        hostile_socket = scratch / "closing.sock"
+        closing = ClosingEndpoint(hostile_socket)
+        failed_value = sync_value.replace(str(sync_socket), str(hostile_socket))
+        mark = operation(session, "y", "2", "pairing|pm-sync program", failed_value)
+        queued = session.wait_text("authorized and queued", since=mark)
+        failed_job = re.search(r"Sync job ([0-9a-f]{32})", queued); assert failed_job
+        lock(m, session); session = None
+        assert m.sudo(["test", "-f", m.STATE / "vault.sqlite3.sync-job"], check=False).returncode == 0
+        m.sudo(["launchctl", "kickstart", "-k", "system/" + m.LABEL]); m.wait_for_service()
+        session = start(m, binary, profile, private, endpoint, idle=1, password=NEW_PASSWORD)
+        mark = operation(session, "y", "4", "Exact sync job ID", failed_job.group(1))
+        progress = session.wait_text("Sync job", since=mark)
+        assert "complete through" not in progress
+        assert session.wait_exit(timeout=8) == 0
+        m.close_session_preserving_primary(session); session = None
+        session = start(m, binary, profile, private, endpoint, password=NEW_PASSWORD)
+        mark = operation(session, "y", "4", "Exact sync job ID", failed_job.group(1))
+        deadline = m.time.monotonic() + 75
+        queried = m.time.monotonic()
+        while True:
+            page = session._current_text_after(mark)
+            if page is not None and "unavailable after bounded transport" in page:
+                break
+            assert m.time.monotonic() < deadline, "same sync job did not reach bounded unavailability"
+            if m.time.monotonic() - queried >= 20:
+                mark = operation(session, "y", "4", "Exact sync job ID", failed_job.group(1))
+                queried = m.time.monotonic()
+            session._read_once(0.1)
+        assert m.sudo(["test", "-e", m.STATE / "vault.sqlite3.sync-job"], check=False).returncode == 1
+        closing.close(); closing = None
+
+        lock(m, session); session = None
         stop_launch(m, SYNC_LABEL, labels)
         session = start(m, binary, profile, private, endpoint, password=NEW_PASSWORD)
         mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value)
