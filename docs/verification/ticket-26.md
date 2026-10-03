@@ -1,6 +1,6 @@
 # Ticket 26 verification method and checkpoint
 
-Created: 2026-09-13. Updated: 2026-10-02 (America/Santo_Domingo).
+Created: 2026-09-13. Updated: 2026-10-03 (America/Santo_Domingo).
 Requirements: R01, R02, R09, R10, R11. This is the written verification method
 and native CI chronology for the macOS custody port. The current state is an
 **implementation checkpoint with partial native evidence, not complete Ticket
@@ -8,6 +8,9 @@ and native CI chronology for the macOS custody port. The current state is an
 CPU observed below; local Linux checks cannot execute Darwin kernel, launchd,
 AppKit or macOS ACL behavior. Ticket 26 remains claimed, pending integration
 and the recorded gates; reboot/human/platform support are not certified here.
+See the [October 2 consolidated checkpoint](#october-2-consolidated-checkpoint)
+for the final candidate, component results and remaining blockers from this
+continuation; the earlier observations below remain historical evidence.
 
 ## Native contract under test
 
@@ -105,7 +108,8 @@ cache or artifact upload and a preflight PASS cannot bypass a product failure.
 
 The shell gate performs the locked/offline native build, native unit tests and
 `plutil` validation. It requires each `pm`/`pm-custody` artifact to be a
-single-architecture Mach-O exactly matching `uname -m`. Its Python harness then:
+single-architecture Mach-O exactly matching `uname -m`, including `pm-sync`.
+Its Python harness then:
 
 1. creates the collision-guarded, runner-owned `0711` fixture root, then
    `_passwordmanager`, `_pmagent26` and
@@ -2089,3 +2093,94 @@ direct evidence for the composite-status observer correction above. Intel
 had no independent core failure. Both strict cleanups completed without
 additional errors. No timeout was converted into success and neither job
 reached output-collision classification or overall acceptance.
+
+Run [37094118542](https://github.com/SantanaJcp/passwordmanager/actions/runs/37094118542),
+exact `53f8aa54881d190ced7ac17e0de7658d65eb4288`, completed FAILED on both
+CPUs, with `pasteboard_diagnostic=false` and ordinary production binaries.
+The workflow finished at 2026-10-03 03:50:39 UTC (October 2 local date).
+Both passed native build/test/Mach-O gates, the causal control with the human
+connection still open, unchanged immediate concurrent discovery, Ticket23 and
+the existing partial Ticket24 slice. Both recorded the same five pending
+purged revision graphs and completed Full25 import/offline/wrong-pin/local
+assertion groups. Both emitted `PM26_OUTPUT_COLLISION kind=backup
+result=unexpected-complete destination=changed`: a second keyboard backup
+reported completion and changed the pre-existing destination digest instead
+of rejecting it. The original eight-second rejection wait failed and remained
+a failure. This proves a shared Unix product overwrite defect, not a repaint
+expectation: `rpc_download_atomic` uses `create_new` for its `.partial` file
+only, then `fs::rename` replaces the destination. Its body is not changed here.
+ARM had no independent core error; Intel additionally retained isolated
+pasteboard indeterminacy and the post-control AppleScript `-1700`. Both ran
+strict cleanup without an additional reported cleanup failure. Neither emitted
+overall acceptance PASS. No identical rerun is justified while these shared
+blockers remain unchanged.
+
+### October 2 consolidated checkpoint
+
+Latest executed source candidate:
+`53f8aa54881d190ced7ac17e0de7658d65eb4288`,
+[Intel job](https://github.com/SantanaJcp/passwordmanager/actions/runs/37094118542/job/111120416664)
+and [Apple-silicon job](https://github.com/SantanaJcp/passwordmanager/actions/runs/37094118542/job/111120416554).
+Both jobs are completed FAILED. A following documentation-only commit records
+this result; it is not a newly executed native candidate. All launched native
+runs have finished. The branch remains `codex/pm-26`; Ticket26 stays claimed,
+with no main-branch integration or PR merge.
+
+Here **PASS (component)** means that the identified assertions completed on
+the exact candidate above, not that the failed job or entire criterion passed.
+The issue's checkboxes are intentionally unchanged.
+
+| Ticket26 acceptance / requested coverage | Current evidence and boundary |
+| --- | --- |
+| Native account / LaunchDaemon / bilateral peer / keys and ACL (criterion 1) | **PASS (component), Intel + arm64.** Real `_passwordmanager` process, installed binary/plist ownership, native peer UID, TLS/RPK roles, wrong-UID/role/fake-server rejection, inaccessible protected state and bad-bootstrap rejection completed before the matrices. No overall gate PASS was emitted. |
+| CLI-first authority and fail-closed TUI (criterion 2) | **PASS (component), Intel + arm64** for full Ticket23, existing partial Ticket24, original concurrent agent discovery, invalid import negatives, wrong old password and fixed wrong-pin request context. **Incomplete** for the entire criterion: second working agent / provider states below and post-Full25 gates are not demonstrated. The wrong-pin case rejects the fixed request context; it does not certify every bad-certificate network case. |
+| Native clipboard / terminal / suspension and identity persistence (criterion 3) | **PARTIAL / FAIL.** ARM's reached core assertions passed on the latest candidate; Intel's isolated pasteboard probe remained indeterminate and its human post-control failed `-1700`. Terminal keyboard/resize assertions were reached on both. The separate final suspension/restart and native-probe gates occur after Full25 and were not reached. Older passes are retained in the chronology and are not current acceptance. Reboot/FileVault/human-terminal evidence stays in Ticket31; signing/notarization in Ticket34. |
+| TDD red/green and exact checks (criterion 4) | **PASS (bounded evidence)** for concurrent-discovery red/green on both native CPUs and the local full `flock /tmp/pm-cargo-window.lock ./scripts/check.sh` after product changes. Native build/test/architecture checks passed on both at the latest SHA. Full native acceptance remains FAILED; Linux-gated tests reporting zero cases on Darwin do not establish native integration coverage. |
+| Contract/standards review and merger integration (criterion 5) | **NOT DEMONSTRATED / pending merger.** This branch preserves the recorded limits/KDF, ordinary daemon, peer/role validation and design agreements; it does not certify an independent review or integration with 27/28. No issue status or confirmed design decision is changed. |
+| Full24 second real agent / provider WAITING / passkey UP and UV | **BLOCKED, Intel + arm64.** Real second identity is enrolled, but the ordinary endpoint pins one bootstrap UID/SPKI; its transport is rejected. `serve_vault` sets `provider: None`. No normal provider worker, working second transport, WAITING or passkey ceremony is demonstrated; no lab provider/second listener substitutes for them. |
+| Full25 independent local positive and negative groups | **PASS (component), Intel + arm64.** Keyboard CSV/1PUX import/preview/cancel/duplicate/malformed cases, source hashes, signed causal retirement, protected pairing, real endpoint readiness, offline and wrong-pin context; native backup, warned/confirmed plaintext export, exact 16 MiB + 4096 streaming download (bytes/length/mode), audit query/purge, wrong restore confirmation, native restore with new content and unchanged current-authority fingerprint, exact recovery re-entry/warning, master rotation/warning, old-password rejection and fresh new-password unlock completed. `full25-local=observed` precedes mandatory collision/sync gates; it is not full Full25 acceptance. |
+| Full25 existing-destination negative | **FAIL, Intel + arm64.** Latest native keyboard backup overwrote the pre-existing file, with completion status and changed digest. Plaintext collision is later in the fixture and **not demonstrated**. The shared `rpc_download_atomic` body is untouched; authorize its owning workstream before changing it. |
+| Native `pm-sync` build / tests / architecture / listener readiness | **PASS (component), Intel + arm64.** Locked/offline build/tests and single native Mach-O architecture passed, followed by real custody-owned system job and unchanged closed-peer readiness probe. This is not an end-to-end sync PASS. |
+| Full25 happy pinned sync / status / persistent job / idle / bounded backoff | **FAIL / BLOCKED / not demonstrated.** Runs `37090294105` (both CPUs) and `37090972867` (Intel) retain the happy-sync timeout / durable integrity failure. Real server received 23 opaque blocks but zero roots in the Intel discriminant. Both latest jobs confirm one purged item with five pending signed revisions lacking required item payload. Attribution of the earlier integrity phase to graph export remains a source-traced inference; the missing prerequisite is verified. Latest fixture stops at backup overwrite, so happy sync, same-job status, closing-endpoint/restart/idle/backoff and final post-stop offline assertions were not reached. |
+
+Concurrent-discovery root cause is confirmed by the native before/after
+discriminant: at `7038e667e67b1521df04d10efdc68569c92c31ae` both CPUs complete
+the same pending discovery only after the human lock; after the macOS-only
+two-lane correction both complete it while that human connection stays open,
+and the original concurrent acceptance assertion is immediate. The correction
+adds one fixed human thread, not a new vault engine or per-client custody
+thread pool. The fixture repaint changes separately require complete current
+frames/status literals without changing any existing bound or assertion.
+
+The second product correction confines a checked native socket-guard failure
+to the existing `pm-sync::serve_one` connection handler before TLS processing.
+The original listener probe had terminated `serve` with ordinary exit 4 and
+`SYNC_UNAVAILABLE`; after moving the guard the same probe leaves the real
+daemon alive on both CPUs. No error is converted into a successful connection,
+and no native guard is removed.
+
+Product files changed since `8951e6b` are only
+[`pm-custody/src/linux.rs`](../../crates/pm-custody/src/linux.rs)
+and [`pm-sync/src/main.rs`](../../crates/pm-sync/src/main.rs), both potential
+merge-conflict sites for Ticket28. No `tui.rs`, `lib.rs` or `pm-vault` product
+change is included. Test changes add the native Full25 driver, share the
+unchanged Linux 1PUX/pairing builders, and update Mac observers/diagnostics.
+The full Linux TUI laboratory was not rerun; integration regression coverage
+belongs to the merger. The unrelated dirty `.gitignore` is preserved and
+excluded from all commits.
+
+Additional inherited cleanup concealment encountered and preserved:
+`rpc_download_atomic` ignores failure of `remove_file(.partial)` after a
+stream error, so cleanup failure is not separately surfaced. The existing
+`accept_one` ignored handler errors, sync dispatch error substitution,
+conditional provider recovery and legacy event decoder described above are
+also unchanged. None is introduced as a way to pass this fixture.
+
+Next authorized boundary: hand the branch/evidence to the orchestrator, who
+can assign the shared purge/outbox and atomic destination-publication defects
+to their owning implementation workstreams, provide the ordinary multi-agent
+and provider paths, and reconcile the two product conflict sites with 28.
+After those changes and merger regression checks, dispatch a new exact native
+candidate on both CPUs and execute the still-mandatory gates. Do not resolve
+26, delete pending revision events, bypass purge, substitute a provider,
+reinterpret clipboard indeterminacy as denial or extend deadlines here.
