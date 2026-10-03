@@ -2030,6 +2030,64 @@ mod tests {
     }
 
     #[test]
+    fn process_transfer_lease_rejects_a_null_dacl_and_releases_its_reservation() {
+        let _exclusive_process_dacl = PROCESS_DACL_TEST.lock().unwrap();
+        let process = unsafe { GetCurrentProcess() };
+        let (descriptor, original_dacl) = query_process_dacl(process).unwrap();
+        let before = acl_bytes(original_dacl).unwrap();
+        let set_null = unsafe {
+            SetSecurityInfo(
+                process,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+        let mut unexpected_lease_cleanup = Ok(());
+        let rejected = if set_null == ERROR_SUCCESS {
+            match ProcessHandleTransferLease::begin() {
+                Err(error) => error.cleanup_result().is_ok(),
+                Ok(lease) => {
+                    unexpected_lease_cleanup = lease.finish();
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        let restored = unsafe {
+            SetSecurityInfo(
+                process,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                original_dacl,
+                ptr::null(),
+            )
+        };
+        let after = current_process_dacl_bytes();
+        let released = free_local(descriptor);
+        assert_eq!(set_null, ERROR_SUCCESS);
+        assert_eq!(restored, ERROR_SUCCESS);
+        assert_eq!(after.unwrap(), before);
+        released.unwrap();
+        unexpected_lease_cleanup.unwrap();
+        assert!(
+            rejected,
+            "null process DACL did not cause an explicit begin failure"
+        );
+        ProcessHandleTransferLease::begin()
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert_eq!(current_process_dacl_bytes().unwrap(), before);
+    }
+
+    #[test]
     fn process_transfer_lease_detects_a_visible_dacl_change_without_overwriting_it() {
         let _exclusive_process_dacl = PROCESS_DACL_TEST.lock().unwrap();
         let process = unsafe { GetCurrentProcess() };
