@@ -2,7 +2,7 @@
 
 Corte actual: 2026-10-02. Estado: **checkpoint parcial Win11 ARM64, no candidato
 aceptado**; ticket `claimed`. El primer prompt/input oculto/unlock pasan en
-modo normal; fase 2 corrige el scroll del footer común en Linux. La matriz se
+modo normal; fase 2 verifica el scroll del footer común en Linux y Win11 ARM64. La matriz se
 detiene ahora porque el status recortado oculta datos del resumen de importación;
 su ubicación completa requiere decisión del usuario. Los métodos y runs exactos del corte
 están al final. No acredita soporte completo, x64/reboot ni resuelve el ticket.
@@ -2412,3 +2412,113 @@ Otros fallbacks observados, sin modificar: `tui_content_lab.py::screen` reemplaz
 UTF-8 inválido al capturar PTY; `pm-sync/src/main.rs::serve` Unix continúa al
 fallar un accept y omite el resultado de `serve_one_unix` en el worker. No son
 nuevos ni una autorización para ocultar fallos en esta fase.
+
+
+### Fase 2: resultado nativo y checkpoint publicado — 2026-10-02
+
+[Run46](https://github.com/SantanaJcp/passwordmanager/actions/runs/37094133145),
+SHA de producto exacto `e536f9590f7bd75106ebec6922a2855213d392d9`,
+[job111120461983](https://github.com/SantanaJcp/passwordmanager/actions/runs/37094133145/job/111120461983):
+**FAIL global**, conclusión esperada y leída; no queda corrida iniciada pendiente.
+Windows 11 Enterprise 10.0.26200/build26200, imagen
+`win11-vs2026-arm64 20260924.168.1`, Rust/Cargo1.98.1 host ARM64 MSVC.
+Preflight y fuente libsodium autenticada pasan, PE ARM64/CRT estático pasan.
+13 nativos + 1 pipe + 16 observer + 1 sync-lib PASS, incluido el nuevo oráculo
+conjunto de suffix/cursor. Son grupos separados, no pruebas sync E2E.
+
+Producto normal (`service_diagnostics=false`): prompt/input oculto/unlock PASS;
+`TUI_STAGE stage=footer-horizontal result=pass` acredita el sufijo completo,
+`Input: ‹` y cursor (78,20) a 80×24 antes de Enter. La entrada CSV llega a
+preview. El fallo corporal exacto es `ConPTY screen did not show expected text
+within 15 seconds: exact-duplicates=0`. **No se tecleó IMPORT**, y no se
+alcanzaron 1PUX ni las operaciones posteriores. La presentación obligatoria
+del resumen queda bloqueada por la decisión adicional comunicada, no por CP,
+observer o pérdida del teclado. No se cambia la aserción ni se repite el run.
+
+El harness terminó teardown y eliminación propia sin errores agregados; ejecutó
+su consulta terminante de ausencia de servicio, cuentas y raíz antes de
+propagar el error del cuerpo. No se atribuye esto a los Drops heredados que aún
+ignoran errores. Log íntegro: `/tmp/pm27-phase2-native46-full.log`; watch terminó
+1 por la conclusión failure, `/tmp/pm27-phase2-native46-watch.log`.
+
+Comandos exactos desde este worktree (sin lock local retenido durante CI):
+
+```sh
+# RED de render (101, 0/7); GREEN se ejecutó en los all-targets (20+20+1).
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody --lib footer_ --locked --offline
+flock /tmp/pm-cargo-window.lock sh -c './scripts/cargo-local.sh fmt --all && ./scripts/cargo-local.sh test -p pm-custody --all-targets --locked --offline && ./scripts/cargo-local.sh check -p pm-custody --all-targets --locked --offline'
+flock /tmp/pm-cargo-window.lock ./scripts/check.sh
+flock /tmp/pm-cargo-window.lock ./scripts/clean-offline-build.sh
+# Los tres labs en una ventana, logs separados y suma explícita de fallos.
+flock /tmp/pm-cargo-window.lock env PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3 PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64 bash -c 'set -u; failures=0; for name in content access operations; do if ./scripts/test-linux-tui-${name}-lab.sh > /tmp/pm27-phase2-linux-tui-${name}-green1.log 2>&1; then printf "PASS tui-%s\n" "$name"; else rc=$?; printf "FAIL tui-%s rc=%s\n" "$name" "$rc"; failures=$((failures + 1)); fi; done; test "$failures" -eq 0'
+flock /tmp/pm-cargo-window.lock sh -c './scripts/cargo-local.sh fmt --all && ./scripts/cargo-local.sh fmt --all -- --check && ./scripts/cargo-local.sh test -p pm-native-channel --all-targets --locked --offline'
+gh workflow run ticket-27-windows.yml --ref codex/pm-27-composed -f diagnostic_only=false -f service_diagnostics=false -f tui_conpty_red=true
+gh run watch 37094133145 --exit-status --interval 20
+gh run view 37094133145 --log
+bash scripts/verify-native-ci-config.sh
+bash scripts/verify-windows-libsodium-build.sh
+git diff --check
+```
+
+RED reproducible comprometido: `d04bb43` (footer extraído sin cambio semántico +
+tests + lab largo); GREEN de producto: `e536f9590f7bd75106ebec6922a2855213d392d9`,
+publicado por push normal a `codex/pm-27-composed`. La actualización posterior de
+esta evidencia es documental y no cambia el SHA de producto observado en46.
+No se integra a la rama principal ni se fusiona PR#1; 27 sigue `claimed`.
+
+| Criterio o componente de 27 | Estado al corte | Evidencia y límite |
+| --- | --- | --- |
+| Servicio virtual, DPAPI/DACL y pipe bilateral/RPK Win11 ARM64 | PASS nativo parcial | Primitives y prefijo de46; no equivale a toda la defensa G1. |
+| Sustitución/impersonación/dump/lectura/fallos de custodia integrales | no demostrado | Negativas integrales pendientes; no cerrar por tests de primitives. |
+| ConPTY prompt/input oculto/unlock y encoding | PASS nativo | Normal46 conserva los GREEN anteriores. Restauración exacta natural demostrada en45, no reejecutada en46. |
+| Footer input horizontal, indicador y cursor en80×24 | PASS nativo + render Linux | RED d04 → GREEN e536; 7 casos×2 de render; joint oracle46. Wide/combining/bordes/máscara/resize comprobados en TestBackend, no todos en terminal Windows humano. |
+| CSV por teclado: entrada larga y preview | PASS nativo parcial | Sufijo y cursor visibles, Enter llega a preview; no confirma import. Linux sí confirma primer CSV largo antes del siguiente bloqueo. |
+| Resumen completo CSV antes de confirmar | FAIL | Recortado en Linux operations y46; decisión nueva pendiente. |
+| 1PUX grande por teclado y transferencia real | bloqueado | No alcanzado por46; código/fixtures previos no son prueba. |
+| Tipos completos y resize/redraw Windows | bloqueado | No alcanzados; siete tipos y resize pasan sólo en lab Linux content de este corte. |
+| Backup/export/restore, maestra y recovery, pair-sync-retire TUI | bloqueado | No alcanzados; no sustituir por comandos directos ni pruebas Linux. |
+| Lease DACL antes/durante/después, segundo lease, cambio y DACL nulo en tests | PASS nativo parcial | Tests serializados46; no demuestra sampling de la lease real TUI. |
+| Lease TUI real y matriz de ACL/fracaso, peer/PID/source/reparse/multilink | no demostrado | Matriz pendiente; no cambiar permisos ni ampliar TCB para simularla. |
+| Sync nativo completo, journal/restart/offline/retire | no demostrado | Sólo sync-lib1/1; binario/E2E y firma/DACL completa pendientes. |
+| Win11 x64/reboot/FDE, Windows Terminal humano y firma real | no demostrado | Fuera de lo acreditable por este runner; gates32/34. |
+| TDD del footer común | PASS Linux + nativo | RED de render y PTY; GREEN de render y scroll46; el nuevo resumen permanece rojo. |
+| Revisión contractual e integración por merger distinto | bloqueado | Checkpoint con déficit declarado, no candidato aceptado ni ticket resuelto. |
+
+Producto tocado en fase2: sólo `crates/pm-custody/src/tui.rs`, en el footer y
+su llamada desde draw, helpers de ancho/grafemas/cursor y tests. **App,
+TerminalGuard, loop/keymap y los handlers/transportes no cambian.** No se añade
+otro engine ni dependencia. Zonas de composición con26/28: la llamada al footer
+al final de draw y los helpers/tests nuevos del mismo módulo; preservar los
+cambios de memoria protegida/guardas de28 al componer. Otros archivos:
+`tui_operations_lab.py` (source largo propio y oráculo previo a Enter),
+`windows_tui_conpty_fixture.rs` (oráculo conjunto y review antes de IMPORT),
+`docs/design/isolation.md` (una frase en Terminal), y esta evidencia.
+
+Heredados observados y conservados, sin autorización para cambiarlos:
+
+- `WindowsServerPipe`/`WindowsClientPipe` Drop: ignoran CloseHandle al soltar
+  handles; create puede abandonar SD y omitir errores de LocalFree. Un fallo
+  nativo de cleanup no se hace visible por esas rutas.
+- `WindowsClipboardWindow::drop`: ignora DestroyWindow al soltar su HWND.
+- Crossterm0.29 `ansi_support.rs`: si enable_vt_processing falla, TERM distinto
+  de dumb puede declarar soporte; no se usó como camino de reparación.
+- Ratatui-widgets0.3.2 `reflow.rs`: wrap omite glyph más ancho que la línea;
+  input/status nuevos no dependen de ese wrapper, dependencia intacta.
+- `tui_content_lab.py::screen`: UTF-8 inválido se reemplaza durante capture;
+  no se cambia ni se presenta como validación estricta de bytes inválidos.
+- `pm-sync` Unix serve: fallo de accept se continúa; el resultado del worker
+  puede quedar omitido. `sync_job::validate_program` Windows sólo acredita
+  regular/no-vacío, no firma fijada; sigue pendiente y no se declara seguro.
+- El resto del inventario del handoff16/09 (temporales/unlink de
+  ProcessTlsTransport::put, sustitución sync_stage en colisión, from_utf8_lossy
+  de agent_attempt, backup_lab/process-runner/TemporaryDirectory create,
+  MacPtySession/old web_auth/TestDir) se conserva; no se tocó ni se revalidó en
+  esta fase. Los cuatro cleanups previamente autorizados no se reabren.
+
+**Siguiente acción:** decidir dónde mostrar el resumen obligatorio completo.
+Se recomienda el panel de contenido durante preview; una vista explícita por
+tecla añade un paso. La consulta está pendiente; el tiempo transcurrido no es
+aprobación. Tras esa decisión, ejecutar GREEN del lab operations conservando
+el contador, verificar el nuevo render y continuar matriz nativa46 desde el
+nuevo commit, incluidas lease/negativas/sync. No repetir e536 sin cambio o
+experimento ni resolver27. No queda Cargo/lab/CI propio activo al entregar.
