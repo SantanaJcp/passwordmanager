@@ -3244,3 +3244,42 @@ Después continuar clipboard y operaciones restantes; preparar segundo dispositi
 por el método normal antes de acreditar retiro y componer W2 para sync integral.
 Mac ARM histórico necesita nueva hipótesis/evidencia si vuelve a fallar8s; no
 repetirlo idéntico ni afirmar reparación por una sola no reproducción.
+
+## W1 fase 3 — reanudación y método (2026-10-03)
+
+Checkpoint inicial limpio `eb78c5e173a1712f54b98f8f807a2e8f33d51865`,
+igual a origin; base `ee3c1fd`. Autorización: hasta ocho corridas adicionales
+de Windows custody y, si cambia código compartido con Mac, hasta dos Mac.
+Sólo W1, sin integración, merge, cambios de reglas ni estados de tickets.
+Los fallbacks heredados inventariados siguen intactos; no hay evidencia de
+que expliquen el fallo post-duplicación o el clipboard. Si una causa queda
+en vault/staging/custodia W3, listener/admisión W4, purge/sync/backup W2 o
+un fallback no autorizado, detener ese arreglo y entregar el discriminante.
+
+Corrida 1 propuesta sobre la candidata estricta ya publicada: comprobar
+resize100×30→42×12→80×24, reporte de geometría exacta y posicionamiento/
+repaint fresco; nunca aceptar una secuencia desconocida. La fuente primaria
+Microsoft confirma opcode8 como ResizeWindowInCharacters y orden rows/columns:
+[DispatchTypes.hpp](https://github.com/microsoft/terminal/blob/2b5336c1fca1e53ceeaac09710a13c478938cc8d/src/terminal/adapter/DispatchTypes.hpp#L584),
+[AdaptDispatch::WindowManipulation](https://github.com/microsoft/terminal/blob/2b5336c1fca1e53ceeaac09710a13c478938cc8d/src/terminal/adapter/adaptDispatch.cpp#L3506)
+y [ResizePseudoConsole](https://learn.microsoft.com/en-us/windows/console/resizepseudoconsole).
+Estos enlaces complementan la referencia XTerm de fase2; no son GREEN nativo.
+
+Conservar seed8, tipos7, CSV, negativas empty/directory/hardlink y positivo
+1PUX del mismo proceso/conexión. El diagnóstico preparado en99b40ae distingue
+handler-preview-sent/failed y lectura timeout/eof/other-io/malformed, además
+de restauración DACL exacta. `transfer-duplicated` sólo se emite después de
+validar regular/no-reparse, single-link, fileID no nulo y tamaño; no prueba
+parser, clasificación, preparación ni envío. Si falla el handler, localizar
+esas fronteras antes de corregir; sólo categorías/booleanos, sin contenido,
+rutas, handles ni identidades numéricas. Mantener clipboard lease1s, espera15s
+y nuevo owner exacto. No implementar la hipótesis de pump sin discriminante.
+
+Verificación Linux al cambiar producto/fixtures aplicables: los40 comandos
+exactos de `/tmp/pmw1b-final-gate-results.json`, check y clean incluidos,
+bajo `flock /tmp/pm-cargo-window.lock`, cwd del worktree y artefactos
+Keycloak26.7.3/Chrome ya autorizados. Éxito: mismos rc por caso,39 rc0 y
+g7-matrix rc1 conocido sin regresión. Logs nuevos `/tmp/pmw1c-*.log`;
+soltar el lock al esperar CI. Windows se ejecuta con inputs
+diagnostic_only=false/service_diagnostics=true/tui_conpty_red=true, estándar
+Win11 ARM64 sintético y sin caches/artifacts/secrets/certificados.
