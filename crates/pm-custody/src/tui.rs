@@ -217,6 +217,8 @@ struct App {
     initial_diagnostic: Option<console_diagnostic::Diagnostic>,
     #[cfg(windows)]
     csv_diagnostic: Option<console_diagnostic::Diagnostic>,
+    #[cfg(windows)]
+    transfer_diagnostic: Option<File>,
 }
 
 enum PendingOperation {
@@ -340,6 +342,8 @@ impl App {
             initial_diagnostic: None,
             #[cfg(windows)]
             csv_diagnostic: None,
+            #[cfg(windows)]
+            transfer_diagnostic: None,
         })
     }
 
@@ -805,6 +809,10 @@ fn run_terminal(
         )?;
         #[cfg(windows)]
         {
+            app.transfer_diagnostic = diagnostic
+                .as_ref()
+                .map(console_diagnostic::Diagnostic::report_file)
+                .transpose()?;
             app.initial_diagnostic = diagnostic;
         }
         run_authenticated_session(profile, key, socket, &mut terminal, &mut app)
@@ -1441,11 +1449,20 @@ fn preview_1pux(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Fa
         _ => return Err(Failure::Unavailable),
     };
     let source = open_1pux_source(Path::new(&*path))?;
+    #[cfg(windows)]
+    transfer_phase(app, "source-open")?;
     write_frame(tls, &[31, replace])?;
+    #[cfg(windows)]
+    transfer_phase(app, "request31-sent")?;
     if *read_frame(tls)? != [0] {
         return Err(Failure::Unavailable);
     }
+    #[cfg(windows)]
+    transfer_phase(app, "ack31-received")?;
+    #[cfg(not(windows))]
     let response = transfer_import_file(tls, &source)?;
+    #[cfg(windows)]
+    let response = transfer_import_file(app, tls, &source)?;
     let (summary, prepared) = decode_import_preview(&response)?;
     app.operation = Some(PendingOperation::Import(prepared));
     begin_prompt(app, Mode::ConfirmImport, &summary);
@@ -1458,16 +1475,58 @@ fn transfer_import_file(tls: &mut HumanTls, source: &File) -> Result<ProtectedBy
 }
 
 #[cfg(target_os = "windows")]
-fn transfer_import_file(tls: &mut HumanTls, source: &File) -> Result<ProtectedBytes, Failure> {
-    let lease = pm_native_channel::ProcessHandleTransferLease::begin()
-        .map_err(|error| Failure::Unavailable.after_native_cleanup(error.cleanup_result()))?;
-    let operation = send_file_handle(tls, source).and_then(|()| read_frame(tls));
-    match operation {
-        Ok(response) => match lease.finish() {
+fn transfer_phase(app: &mut App, phase: &'static str) -> Result<(), Failure> {
+    if let Some(report) = app.transfer_diagnostic.as_mut() {
+        writeln!(report, "TUI_PROBE transfer={phase}").map_err(|_| Failure::Unavailable)?;
+        report.flush().map_err(|_| Failure::Unavailable)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn transfer_import_file(
+    app: &mut App,
+    tls: &mut HumanTls,
+    source: &File,
+) -> Result<ProtectedBytes, Failure> {
+    let lease = match pm_native_channel::ProcessHandleTransferLease::begin() {
+        Ok(lease) => lease,
+        Err(error) => {
+            let failure = Failure::Unavailable.after_native_cleanup(error.cleanup_result());
+            return Err(match transfer_phase(app, error.phase()) {
+                Ok(()) => failure,
+                Err(diagnostic) => failure.merge(diagnostic),
+            });
+        }
+    };
+    let operation: Result<ProtectedBytes, Failure> = (|| {
+        transfer_phase(app, "child-lease-installed")?;
+        send_file_handle(tls, source)?;
+        transfer_phase(app, "handle-sent")?;
+        let response = read_frame(tls)?;
+        transfer_phase(app, "preview-received")?;
+        Ok(response)
+    })();
+    let restored = lease.finish();
+    let diagnostic = transfer_phase(
+        app,
+        if restored.is_ok() {
+            "lease-restored"
+        } else {
+            "lease-restore-failed"
+        },
+    );
+    let result = match operation {
+        Ok(response) => match restored {
             Ok(()) => Ok(response),
             Err(cleanup) => Err(Failure::Unavailable.after_native_cleanup(Err(cleanup))),
         },
-        Err(error) => Err(error.after_native_cleanup(lease.finish())),
+        Err(error) => Err(error.after_native_cleanup(restored)),
+    };
+    match (result, diagnostic) {
+        (Ok(response), Ok(())) => Ok(response),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(diagnostic)) => Err(error.merge(diagnostic)),
     }
 }
 

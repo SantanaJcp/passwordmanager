@@ -2917,3 +2917,44 @@ fixtures y añade evidencia: helpers y operations reforzados PASS separados.
 No queda Cargo/lab/CI propio activo; worktree entregado con checkpoint normal,
 sin integración ni cambio de estado de tickets. La documentación posterior
 de resultados no altera el SHA de código ejecutado por las corridas.
+
+## W1 fase 2 — discriminante de transferencia (2026-10-03)
+
+Autorización explícita: worktree `w1-tui-panel`, hasta seis corridas nativas
+Windows/macOS totales, sin integración ni cambio de estado. Baseline Windows
+[37124375821](https://github.com/SantanaJcp/passwordmanager/actions/runs/37124375821),
+`abf9e58a42f2b3a1b37d18290aa608107c5bcb57`, conservado en
+`/tmp/pmw1b-windows-baseline.log`: CSV y lease API con token humano PASS,
+1PUX positivo hijo rc4 y lease TUI no observada.
+
+Método previo a corrida 1: usar el opt-in existente `service_diagnostics` y
+`--matrix-probe`; conservar binario normal, oráculos, sampler 1ms y deadlines.
+El reporte privado de métricas de consola añade sólo categorías fijas de
+source-open/request31/ack31, error de begin por etapa, lease instalada en el
+proceso que ejecuta la TUI, handle enviado, preview recibido y restauración.
+El servicio registra ack31, token recibido y resultado de duplicación. No
+registrar paths, SID/PID numéricos, handles, contenido ni secretos. La lectura
+del reporte se conserva incluso tras fallo; los errores de diagnóstico siguen
+siendo errores. No cambiar listener/dispatcher/admisión, vault/staging,
+purge/sync/backup ni derechos de la lease. El diagnóstico no es aceptación.
+
+Mac baseline [37126535485](https://github.com/SantanaJcp/passwordmanager/actions/runs/37126535485),
+`7d8ba007729bd637add676a6a34429b176ef7d11`, guardado en
+`/tmp/pmw1b-macos-baseline.log`. Hipótesis panel/status descartada por código:
+`expect_output_collision` busca el literal breve de fallo; `run_app` borra el
+panel y publica ese mismo literal en status para DestinationExists. El destino
+intacto no prueba rechazo. Si Windows queda discriminado, observar a 8s el
+estado actual, status/panel por booleanos, temporal propio y proceso humano;
+no anticipar rechazo ni cambiar publicación de W2.
+
+Fallback heredado adicional inspeccionado sin modificar:
+`pm-native-channel/src/windows.rs::impersonated_client_sid` ignora el resultado
+de `CloseHandle(token)` antes de `RevertToSelf`; una liberación fallida no
+cambia el resultado SID. El servidor también omite el resultado del handler en
+`serve_role` y acepta otra conexión; zona W4, sin cambio. No hay evidencia de
+que sean la causa del fallo de transferencia.
+
+Check local previo: `flock /tmp/pm-cargo-window.lock ./scripts/check.sh`
+rc0, `/tmp/pmw1b-check1.log`; fmt bajo el mismo flock y diff-check PASS.
+Los bloques cfg Windows se verificarán nativamente, sin afirmar build Windows
+por el check Linux.

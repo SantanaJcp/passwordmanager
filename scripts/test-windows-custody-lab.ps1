@@ -155,6 +155,10 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
         'phase=human-audit-open'
         'phase=human-audit-append'
         'phase=human-lock-ack'
+        'phase=transfer-ack31'
+        'phase=transfer-token'
+        'phase=transfer-duplicated'
+        'phase=transfer-duplicate-failed'
         'phase=service-failed'
     )
     foreach ($line in $lines) {
@@ -693,6 +697,7 @@ try {
         $matrixMode = if ($ServiceDiagnostics) { '--matrix-probe' } else { '--matrix' }
         $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, $matrixMode, $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
         Write-Host (Get-Content $tuiErr -Raw)
+        Write-ServiceSubphaseDiagnostics $diagnosticPath
         Assert-True ($p.ExitCode -eq 0) ('normal pm-custody TUI did not complete its ConPTY tracer: ' + (Get-Content $tuiErr -Raw))
         Assert-TuiFixtureOutput $tuiOut 'matrix'
         Assert-True (Test-Path -LiteralPath $tuiBackup -PathType Leaf) 'TUI native backup was not published'

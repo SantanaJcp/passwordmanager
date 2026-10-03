@@ -176,6 +176,10 @@ enum ServiceDiagnosticPhase {
     HumanAuditOpen,
     HumanAuditAppend,
     HumanLockAck,
+    TransferAck,
+    TransferToken,
+    TransferDuplicated,
+    TransferDuplicateFailed,
     ServiceFailed,
 }
 
@@ -203,6 +207,10 @@ impl ServiceDiagnosticPhase {
             Self::HumanAuditOpen => b"phase=human-audit-open\n",
             Self::HumanAuditAppend => b"phase=human-audit-append\n",
             Self::HumanLockAck => b"phase=human-lock-ack\n",
+            Self::TransferAck => b"phase=transfer-ack31\n",
+            Self::TransferToken => b"phase=transfer-token\n",
+            Self::TransferDuplicated => b"phase=transfer-duplicated\n",
+            Self::TransferDuplicateFailed => b"phase=transfer-duplicate-failed\n",
             Self::ServiceFailed => b"phase=service-failed\n",
         }
     }
@@ -797,6 +805,9 @@ fn serve_human(
         match opcode {
             31 => {
                 write_frame(tls, &[0])?;
+                if let Some(diagnostics) = service.diagnostics.as_ref() {
+                    diagnostics.record(ServiceDiagnosticPhase::TransferAck)?;
+                }
                 let token = read_frame(tls)?;
                 let source_value = u64::from_be_bytes(
                     token
@@ -804,9 +815,19 @@ fn serve_human(
                         .try_into()
                         .map_err(|_| Failure::Unavailable)?,
                 );
-                let source = transfer_pipe
-                    .duplicate_client_file(source_value, 1024_u64.pow(4) + 256 * 1024 * 1024)
-                    .map_err(|_| Failure::Unavailable)?;
+                if let Some(diagnostics) = service.diagnostics.as_ref() {
+                    diagnostics.record(ServiceDiagnosticPhase::TransferToken)?;
+                }
+                let duplicated = transfer_pipe
+                    .duplicate_client_file(source_value, 1024_u64.pow(4) + 256 * 1024 * 1024);
+                if let Some(diagnostics) = service.diagnostics.as_ref() {
+                    diagnostics.record(if duplicated.is_ok() {
+                        ServiceDiagnosticPhase::TransferDuplicated
+                    } else {
+                        ServiceDiagnosticPhase::TransferDuplicateFailed
+                    })?;
+                }
+                let source = duplicated.map_err(|_| Failure::Unavailable)?;
                 crate::human_wire::handle_1pux_file(&mut vault, tls, rest, source)?;
                 continue;
             }

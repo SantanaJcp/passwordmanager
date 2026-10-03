@@ -946,6 +946,7 @@ impl ProcessHandleTransferReservation {
             .map(|_| Self { active: true })
             .map_err(|_| ProcessHandleTransferBeginError {
                 cleanup_failed: false,
+                phase: "lease-reservation-failed",
             })
     }
 
@@ -967,9 +968,15 @@ impl Drop for ProcessHandleTransferReservation {
 #[derive(Debug)]
 pub struct ProcessHandleTransferBeginError {
     cleanup_failed: bool,
+    phase: &'static str,
 }
 
 impl ProcessHandleTransferBeginError {
+    /// Fixed failure category, without OS identity or resource values.
+    pub const fn phase(&self) -> &'static str {
+        self.phase
+    }
+
     /// Returns the result of cleanup attempted while starting the lease.
     pub const fn cleanup_result(&self) -> Result<(), ChannelAuthenticationError> {
         if self.cleanup_failed {
@@ -995,11 +1002,13 @@ impl ProcessHandleTransferLease {
     ) -> Result<Self, ProcessHandleTransferBeginError> {
         let sid = installed_service_sid().map_err(|_| ProcessHandleTransferBeginError {
             cleanup_failed: false,
+            phase: "lease-sid-failed",
         })?;
         let process = unsafe { GetCurrentProcess() };
         let (original_descriptor, original_dacl) =
             query_process_dacl(process).map_err(|_| ProcessHandleTransferBeginError {
                 cleanup_failed: false,
+                phase: "lease-query-failed",
             })?;
         let mut entry = EXPLICIT_ACCESS_W {
             grfAccessPermissions: PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
@@ -1019,6 +1028,7 @@ impl ProcessHandleTransferLease {
             let original = free_local(original_descriptor);
             return Err(ProcessHandleTransferBeginError {
                 cleanup_failed: installed.is_err() || original.is_err(),
+                phase: "lease-acl-create-failed",
             });
         }
         let installed_bytes = match acl_bytes(installed_dacl) {
@@ -1028,6 +1038,7 @@ impl ProcessHandleTransferLease {
                 let original = free_local(original_descriptor);
                 return Err(ProcessHandleTransferBeginError {
                     cleanup_failed: installed.is_err() || original.is_err(),
+                    phase: "lease-acl-bytes-failed",
                 });
             }
         };
@@ -1047,6 +1058,7 @@ impl ProcessHandleTransferLease {
             let second = free_local(original_descriptor);
             return Err(ProcessHandleTransferBeginError {
                 cleanup_failed: first.is_err() || second.is_err(),
+                phase: "lease-install-failed",
             });
         }
         reservation.transfer();
@@ -1059,7 +1071,10 @@ impl ProcessHandleTransferLease {
         };
         if lease.current_matches(&lease.installed_bytes).is_err() {
             let cleanup_failed = lease.finish().is_err();
-            return Err(ProcessHandleTransferBeginError { cleanup_failed });
+            return Err(ProcessHandleTransferBeginError {
+                cleanup_failed,
+                phase: "lease-postinstall-failed",
+            });
         }
         Ok(lease)
     }
