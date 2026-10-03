@@ -67,6 +67,38 @@ it is not an isolation denial. Native state is observed using
 [`NSPasteboard`](https://developer.apple.com/documentation/appkit/nspasteboard),
 without changing product clipboard operations.
 
+First diagnostic run
+[37106382228](https://github.com/SantanaJcp/passwordmanager/actions/runs/37106382228),
+SHA `5652ef7c8cdca8be0a9b166d96497c484c45bae7`, completed **FAIL globally,
+both CPUs**. Native build/test/Mach-O and all reached core assertions passed;
+Full25 retained `durable=integrity screen=integrity process=same`, with zero
+roots (23 opaque blocks Intel, 15 ARM). No final gates were reached.
+With no shared-bootstrap control, the isolated AppleScript read completed
+nonzero without the canary in about 21.5 s Intel / 24 s ARM, before the existing
+copy bound. Human native snapshots were string/value, exact canary present,
+stable before/after; `tui-idle-lock=no`. No `-1700` was reproduced. This does
+not establish a CPU-specific cause or close the historical failures.
+
+Next discriminant/correction, still fixture-only: use the standalone AppKit
+observer as the **only** read in the same agent UID/system-domain job, with
+the same 30-second probe bound and human AppleScript pre/post controls.
+Require a completed, stable native read, strict fixed schema, no stderr,
+no exact canary, and the existing domain/UID assertions. Invalid/unavailable/
+unstable/timeout results remain explicit failures; no AppleScript retry or
+alternate read is selected after failure. The positive/negative oracle is
+unchanged, now observing the same native API as the product rather than
+AppleScript's descriptor conversion/runtime. The new independent mode still
+runs every core assertion and then the final gates; sync is explicitly NOT_RUN.
+
+Add a separate causal control before final gates: a real TUI copies with the
+existing 5-second lease; observe the exact human canary, wait for the original
+`Clipboard custody expired` status without replacement or added delay, and
+require native empty/nil/absent/stable plus `coercion-1700` from the exact
+human `the clipboard as text` expression. Lock normally and check no canary
+in PTY output. This tests the empty-pasteboard hypothesis directly on both CPUs;
+it is not a manufactured isolation denial and cannot replace a failed agent
+probe. The old timeout and shared-bootstrap exposure remain historical FAILs.
+
 ## Native contract under test
 
 The port keeps the existing vault engine, binary request framing, TLS 1.3 RPK
@@ -127,9 +159,19 @@ PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh --diagnostic
 
 That mode alone enables the compile-time diagnostic feature, injects the fixed
 diagnostic environment into the synthetic client and launchd fixture, and
-validates the protected diagnostic log. Unknown or additional arguments fail;
+validates the protected diagnostic log. Unknown, duplicate or conflicting arguments fail;
 normal-mode failure never selects diagnostic mode. Native acceptance requires
 the default normal command, while diagnostic runs remain supporting evidence.
+
+The task's separate, explicit bounded mode is
+`PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh --final-phase-only`
+(workflow input `final_phase_only=true`, default false). It runs the ordinary
+core and final gates with ordinary binaries and the original master password,
+without Full25's rotation/sync. Only its scoped result may be green;
+`full25=NOT_RUN acceptance=NOT_CLAIMED` is mandatory, and it never prints the
+normal acceptance PASS group. It can be combined with one diagnostic flag;
+it is never selected after a failed full run. Every core failure remains fatal
+after the independent final observations and strict teardown.
 
 The pasteboard-only observation path is a separate explicit opt-in. It builds
 and installs the ordinary binary and ordinary LaunchDaemon plist; it does not

@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      final_phase_only:
+        description: "Run core and final persistence/native gates independently; Full25 NOT_RUN"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -62,9 +67,13 @@ jobs:
         shell: bash
         env:
           PM26_PASTEBOARD_DIAGNOSTIC: ${{ inputs.pasteboard_diagnostic }}
+          PM26_FINAL_PHASE_ONLY: ${{ inputs.final_phase_only }}
         run: |
           args=()
           if [[ "$PM26_PASTEBOARD_DIAGNOSTIC" == true ]]; then
             args+=(--pasteboard-diagnostic)
+          fi
+          if [[ "$PM26_FINAL_PHASE_ONLY" == true ]]; then
+            args+=(--final-phase-only)
           fi
           PM_MACOS_EPHEMERAL_CI=1 ./scripts/test-macos-custody-lab.sh "${args[@]}"

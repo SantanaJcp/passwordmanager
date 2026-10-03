@@ -23,11 +23,15 @@ configure_ticket26_harness_command() {
   local mode="$1"
   local root="$2"
   local sodium_config="$3"
+  local final_phase_only="$4"
   harness_command=(python3 "$root/crates/pm-custody/tests/macos_lab.py")
   if [[ "$mode" == diagnostic ]]; then
     harness_command+=(--diagnostic)
   elif [[ "$mode" == pasteboard ]]; then
     harness_command+=(--pasteboard-diagnostic)
+  fi
+  if [[ "$final_phase_only" == true ]]; then
+    harness_command+=(--final-phase-only)
   fi
   harness_command+=(
     "$root/target/debug/pm-custody"
@@ -39,23 +43,20 @@ configure_ticket26_harness_command() {
 
 main() {
   local mode=normal
-  case "$#" in
-    0) ;;
-    1)
-      if [[ "$1" == --diagnostic ]]; then
-        mode=diagnostic
-      elif [[ "$1" == --pasteboard-diagnostic ]]; then
-        mode=pasteboard
-      else
-        echo "ticket 26 laboratory accepts only --diagnostic or --pasteboard-diagnostic" >&2
-        exit 1
-      fi
-      ;;
-    *)
-      echo "ticket 26 laboratory accepts at most one diagnostic-mode argument" >&2
-      exit 1
-      ;;
-  esac
+  local final_phase_only=false argument
+  for argument in "$@"; do
+    case "$argument" in
+      --diagnostic|--pasteboard-diagnostic)
+        [[ "$mode" == normal ]] || { echo "duplicate/conflicting diagnostic mode" >&2; exit 1; }
+        if [[ "$argument" == --diagnostic ]]; then mode=diagnostic; else mode=pasteboard; fi
+        ;;
+      --final-phase-only)
+        [[ "$final_phase_only" == false ]] || { echo "duplicate final-phase mode" >&2; exit 1; }
+        final_phase_only=true
+        ;;
+      *) echo "unknown ticket 26 laboratory argument" >&2; exit 1 ;;
+    esac
+  done
 
   if [[ "$(uname -s)" != Darwin ]]; then
     echo "ticket 26 laboratory requires a native macOS runner" >&2
@@ -112,7 +113,8 @@ main() {
   done
 
   configure_ticket26_harness_command \
-    "$mode" "$root" "$libsodium_out_dir/source/libsodium-stable/config.log"
+    "$mode" "$root" "$libsodium_out_dir/source/libsodium-stable/config.log" \
+    "$final_phase_only"
   "${harness_command[@]}"
 }
 
