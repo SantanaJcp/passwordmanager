@@ -1112,7 +1112,7 @@ fn handle_operation_key(
             Mode::AuditPurge,
             "generation:through-sequence:PURGE AUDIT (exact range becomes a gap):",
         ),
-        _ => app.status = operation_help(menu).into(),
+        _ => show_information(app, operation_help(menu)),
     }
     Ok(())
 }

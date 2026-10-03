@@ -867,6 +867,8 @@ class MacPtySession:
         rendered = self.screen.application_text()
         render = "other"
         for category, marker in (
+            ("operation-failure", "Operation failed explicitly; no success was recorded"),
+            ("information-panel", "┌Information"),
             ("password-prompt", "Password required"),
             ("unlocked-catalog", "Unlocked: selection never reveals secrets"),
             ("search-prompt", "Search (engine-decrypted):"),
@@ -915,7 +917,9 @@ class MacPtySession:
                 return value
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise AssertionError("mandatory TUI panel observation timed out " + self._screen_diagnostic(since))
+                panel = information_text(self.screen.application_text())
+                shape = "valid" if panel else "absent-or-invalid"
+                raise AssertionError("mandatory TUI panel observation timed out panel=" + shape + " " + self._screen_diagnostic(since))
             self._read_once(min(0.1, remaining))
 
     def wait_selected(self, label, *, timeout=8, since=0):

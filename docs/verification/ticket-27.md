@@ -2717,3 +2717,52 @@ Fallback heredado adicional observado durante la relectura, sin cambio:
 presentación por `<binary secret: N bytes>`. El panel de recovery recibe un
 código textual, pero la función también sirve a otras exposiciones existentes.
 No se usa este descriptor como evidencia de un valor binario revelado completo.
+
+### Discriminante W1 abf9e58 y omisión del menú Audit
+
+SHA `abf9e58a42f2b3a1b37d18290aa608107c5bcb57`, publicado normalmente y
+comprobado por API. Runs terminados:
+[Windows 37124375821](https://github.com/SantanaJcp/passwordmanager/actions/runs/37124375821)
+y [macOS 37124377389](https://github.com/SantanaJcp/passwordmanager/actions/runs/37124377389).
+Check previo rc0, `/tmp/pmw1-resume-check3.log`; helpers de rechazo partido en
+panel PASS, `/tmp/pmw1-resume-macos-helpers3.log`.
+
+Windows mantiene los PASS anteriores y añade `human-token-lease-discriminant`:
+la API real instala un ACE exacto y restaura bytes originales también con el
+humano no elevado del fixture. Por tanto los privilegios genéricos de ese token
+no explican por sí solos la falla. La TUI positiva1PUX sigue sin preview/lease
+observada y sale rc4: `child=exited:4`, parser ground, pantalla limpia tras
+teardown, sin marker de cleanup. Log `/tmp/pmw1-native-windows3.log`. Aún no
+se ha localizado la falla entre ack31, begin lease de la TUI y transferencia;
+no inferir un problema de render ni conceder derechos extra. El siguiente
+discriminante requiere observar esas fronteras de transporte/custodia, fuera
+de la zona W1 render/panel. No repetir este caso idéntico ni saltarlo para
+declarar verdes las operaciones dependientes.
+
+Mac Intel y ARM pasan importadores y offline+wrong-pin desde panel. ARM falla
+esperando el resultado completo del backup inicial; falta todavía discriminar
+error de operación, publicación o representación. Intel completa backup,
+plaintext y attachment grande, pero no reabre Audit tras su query. Causa estática
+concreta: query deja `Mode::Operations(Audit)`; la tecla `z` cae en la rama
+histórica de ayuda para tecla no reconocida, que actualiza sólo `app.status`,
+mientras el panel conserva el resultado de query. Método: misma ayuda y mismas
+teclas, actualizarla también mediante `show_information`, sin cambiar mode,
+input, operaciones ni confirmaciones. El FAIL nativo Intel en la reapertura es
+RED conductual de esa omisión; siguiente GREEN debe superar el mismo punto.
+Logs `/tmp/pmw1-native-macos3.log` y `...macos3-arm.log`.
+
+Antes del siguiente dispatch Mac: check y los tres PTY Linux; helpers y
+diagnóstico categórico del panel (válido/ausente, operación fallida) y del
+destino backup (ausente/vacío/no vacío y modo privado), nunca contenido/rutas
+secretas. Se conserva el wait8s. No se cambia el backup ni sus oráculos. El
+fixture Windows ya discrimina su frontera y no se relanza por una modificación
+del menú que no interviene en su falla1PUX.
+
+GREEN Linux previo al dispatch Mac siguiente: check rc0
+`/tmp/pmw1-resume-check4.log`; helpers rc0
+`/tmp/pmw1-resume-macos-helpers4.log`; los tres labs TUI rc0 en la barrida
+fresca `/tmp/pmw1-resume-gate-results.json`, logs
+`/tmp/pmw1-resume-gate-lab-tui-{content,access,operations}.log`. Mantienen
+types7/resize/Unicode/máscara y el recorrido completo de operations,
+rotaciones/pair/sync/retire incluidos. El resto de los40 casos todavía está
+en curso al publicar este checkpoint; no declarar la barrida concluida aquí.

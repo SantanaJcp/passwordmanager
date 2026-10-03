@@ -447,7 +447,14 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         print("PM26_MATRIX full25-offline+wrong-pin=observed", flush=True)
 
         mark = operation(session, "b", "1", "New native backup path", native)
-        session.wait_information("Native encrypted backup complete", since=mark)
+        try:
+            session.wait_information("Native encrypted backup complete", since=mark)
+        except BaseException:
+            exists = native.is_file()
+            size = "nonempty" if exists and native.stat().st_size > 0 else "absent-or-empty"
+            mode = "private" if exists and native.stat().st_mode & 0o777 == 0o600 else "not-demonstrated"
+            print(f"PM26_BACKUP_WAIT destination={size} mode={mode}", flush=True)
+            raise
         assert native.stat().st_mode & 0o777 == 0o600 and native.stat().st_size > 0
         native_digest = source_digest(native)
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
