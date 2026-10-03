@@ -267,7 +267,15 @@ impl Manager {
         if pairing.server_pin() != &config.pin {
             return Err(WorkerError::Sync(SyncError::Unauthorized));
         }
+        #[cfg(windows)]
         let transport = ProcessTlsTransport::new(
+            &config.program,
+            &config.socket,
+            &config.client_key,
+            &config.server_public,
+        );
+        #[cfg(unix)]
+        let transport = ProcessTlsTransport::authenticated_session(
             &config.program,
             &config.socket,
             &config.client_key,
@@ -278,19 +286,35 @@ impl Manager {
         drop(preparing);
         self.advance(config.id, Phase::Pushing, 0, 0)
             .map_err(|()| WorkerError::Journal)?;
-        let pushed = replica.push(&transport).map_err(WorkerError::Sync)?;
-        self.advance(
-            config.id,
-            Phase::Pulling,
-            u64::try_from(pushed).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
-            0,
-        )
-        .map_err(|()| WorkerError::Journal)?;
-        let pulled = replica.pull(&transport).map_err(WorkerError::Sync)?;
-        Ok((
-            u64::try_from(pushed).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
-            u64::try_from(pulled).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
-        ))
+        let result = (|| {
+            let pushed = replica.push(&transport).map_err(WorkerError::Sync)?;
+            self.advance(
+                config.id,
+                Phase::Pulling,
+                u64::try_from(pushed).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
+                0,
+            )
+            .map_err(|()| WorkerError::Journal)?;
+            let pulled = replica.pull(&transport).map_err(WorkerError::Sync)?;
+            Ok((
+                u64::try_from(pushed).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
+                u64::try_from(pulled).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
+            ))
+        })();
+        #[cfg(unix)]
+        {
+            let closed = transport.finish().map_err(WorkerError::Sync);
+            match (result, closed) {
+                (Ok(value), Ok(())) => Ok(value),
+                (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+                (Err(error), Err(_)) => {
+                    eprintln!("SYNC_SESSION_CLEANUP_FAILED");
+                    Err(error)
+                }
+            }
+        }
+        #[cfg(windows)]
+        result
     }
 
     fn advance(&self, id: [u8; 16], phase: Phase, pushed: u64, pulled: u64) -> Result<(), ()> {

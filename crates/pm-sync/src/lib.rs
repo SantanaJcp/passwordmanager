@@ -21,6 +21,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
+mod session;
 pub mod timing;
 
 pub const MAX_BLOCK_BYTES: usize = 512 * 1024;
@@ -80,6 +82,8 @@ pub struct ProcessTlsTransport {
     socket: PathBuf,
     client_key: PathBuf,
     server_public: PathBuf,
+    #[cfg(unix)]
+    session: Option<std::sync::Mutex<Option<session::Session>>>,
 }
 impl ProcessTlsTransport {
     #[must_use]
@@ -89,8 +93,83 @@ impl ProcessTlsTransport {
             socket: socket.to_owned(),
             client_key: client_key.to_owned(),
             server_public: server_public.to_owned(),
+            #[cfg(unix)]
+            session: None,
         }
     }
+    /// Reuse one mutually authenticated TLS connection for sequential sync RPCs.
+    /// Request/frame/block limits and replica-level retry policy remain unchanged.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn authenticated_session(
+        program: &Path,
+        socket: &Path,
+        client_key: &Path,
+        server_public: &Path,
+    ) -> Self {
+        let mut transport = Self::new(program, socket, client_key, server_public);
+        transport.session = Some(std::sync::Mutex::new(None));
+        transport
+    }
+
+    /// Close and reap the owned session before reporting job success.
+    ///
+    /// # Errors
+    /// Reports a failed client exit, deadline or cleanup explicitly.
+    #[cfg(unix)]
+    pub fn finish(&self) -> Result<(), SyncError> {
+        if let Some(state) = &self.session
+            && let Some(session) = state.lock().map_err(|_| SyncError::Unavailable)?.take()
+        {
+            return session.finish();
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn session_call(&self, request: &str) -> Result<String, SyncError> {
+        let mut state = self
+            .session
+            .as_ref()
+            .ok_or(SyncError::InvalidRequest)?
+            .lock()
+            .map_err(|_| SyncError::Unavailable)?;
+        if state.is_none() {
+            let mut command = Command::new(&self.program);
+            command
+                .arg("session")
+                .arg("--socket")
+                .arg(&self.socket)
+                .arg("--client-key")
+                .arg(&self.client_key)
+                .arg("--server-pub")
+                .arg(&self.server_public);
+            *state = Some(session::Session::spawn(&mut command)?);
+        }
+        let response = state
+            .as_mut()
+            .ok_or(SyncError::Unavailable)?
+            .exchange(request.as_bytes());
+        if response.is_err() {
+            // Reconnection is only on a subsequent explicit caller attempt (the
+            // existing replica retry/backoff); never replay inside this call.
+            let mut session = state.take().ok_or(SyncError::Unavailable)?;
+            if session.abort().is_err() {
+                eprintln!("SYNC_SESSION_CLEANUP_FAILED");
+            }
+        }
+        let response = response?;
+        if !response.starts_with("{\"ok\":true") {
+            return Err(match json_string(&response, "code") {
+                Some("missing") => SyncError::Missing,
+                Some("backpressure") => SyncError::Backpressure,
+                Some("integrity") => SyncError::Integrity,
+                _ => SyncError::Unavailable,
+            });
+        }
+        Ok(response)
+    }
+
     fn call(
         &self,
         method: &str,
@@ -150,6 +229,14 @@ impl ProcessTlsTransport {
 }
 impl SyncTransport for ProcessTlsTransport {
     fn put(&self, n: [u8; 32], h: [u8; 32], b: &[u8]) -> Result<(), SyncError> {
+        #[cfg(unix)]
+        if self.session.is_some() {
+            let _rpc = timing::Span::new("rpc_put");
+            if b.is_empty() || b.len() > MAX_BLOCK_BYTES || digest(b) != h {
+                return Err(SyncError::Integrity);
+            }
+            return self.session_call(&format!("{{\"method\":\"sync.put\",\"namespace\":\"{}\",\"hash\":\"{}\",\"bytes\":\"{}\"}}", hex(&n), hex(&h), STANDARD.encode(b))).map(drop);
+        }
         let parent = self.client_key.parent().ok_or(SyncError::Unavailable)?;
         let temporary = parent.join(format!(".pm-sync-put-{}-{}", std::process::id(), hex(&h)));
         let mut file = pm_native_channel::create_private_file(&temporary, false, true)
@@ -172,6 +259,18 @@ impl SyncTransport for ProcessTlsTransport {
         result.map(drop)
     }
     fn get(&self, n: [u8; 32], h: [u8; 32]) -> Result<Vec<u8>, SyncError> {
+        #[cfg(unix)]
+        let response = if self.session.is_some() {
+            let _rpc = timing::Span::new("rpc_get");
+            self.session_call(&format!(
+                "{{\"method\":\"sync.get\",\"namespace\":\"{}\",\"hash\":\"{}\"}}",
+                hex(&n),
+                hex(&h)
+            ))?
+        } else {
+            self.call("get", n, &[("--hash", hex(&h))])?
+        };
+        #[cfg(not(unix))]
         let response = self.call("get", n, &[("--hash", hex(&h))])?;
         let encoded = json_string(&response, "bytes").ok_or(SyncError::Integrity)?;
         let bytes = STANDARD.decode(encoded).map_err(|_| SyncError::Integrity)?;
@@ -180,6 +279,17 @@ impl SyncTransport for ProcessTlsTransport {
             .ok_or(SyncError::Integrity)
     }
     fn publish(&self, n: [u8; 32], h: [u8; 32]) -> Result<(), SyncError> {
+        #[cfg(unix)]
+        if self.session.is_some() {
+            let _rpc = timing::Span::new("rpc_publish");
+            return self
+                .session_call(&format!(
+                    "{{\"method\":\"sync.publish\",\"namespace\":\"{}\",\"root_hash\":\"{}\"}}",
+                    hex(&n),
+                    hex(&h)
+                ))
+                .map(drop);
+        }
         self.call("publish", n, &[("--hash", hex(&h))]).map(drop)
     }
     fn list(
@@ -188,6 +298,18 @@ impl SyncTransport for ProcessTlsTransport {
         c: Option<u64>,
         l: usize,
     ) -> Result<Vec<(u64, [u8; 32])>, SyncError> {
+        #[cfg(unix)]
+        if self.session.is_some() {
+            let _rpc = timing::Span::new("rpc_list");
+            let cursor = c
+                .map(|v| format!(",\"cursor\":\"{v}\""))
+                .unwrap_or_default();
+            let response = self.session_call(&format!(
+                "{{\"method\":\"sync.list\",\"namespace\":\"{}\"{cursor},\"limit\":{l}}}",
+                hex(&n)
+            ))?;
+            return parse_roots(&response);
+        }
         let mut extra = vec![("--limit", l.to_string())];
         if let Some(cursor) = c {
             extra.push(("--cursor", cursor.to_string()));

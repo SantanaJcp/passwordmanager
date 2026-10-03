@@ -4,7 +4,9 @@
 `codex/pm-w2-purge-sync`, base `ee3c1fd31cad59060e4120f3e2518b1196a90c1a`.
 Sin integración, cambios de tickets, merge de PR ni cambios ajenos.
 
-**Estado de fase 3: Linux sin regresión; macOS incompleto; W2 NO terminado.** Se retoma
+**Estado actual de fase 4: fix de sesión y RED/GREEN Linux publicados en el próximo checkpoint; gates finales y macOS pendientes. W2 NO terminado.**
+
+**Registro de fase 3: Linux sin regresión; macOS incompleto.** Se retoma
 `1aff66ee0834d473438d8c269fae63b7c65fee6e`, limpio y publicado, con replay
 legado corregido y RED de backup/restore. El encargo del 2026-10-03 amplía la
 zona exclusivamente a `backup.rs::restore_graph_digest` y autoriza hasta
@@ -520,3 +522,72 @@ Ejecutar bajo flock los tests E2EE, check, clean offline y los mismos 40 gates
 de `/tmp/pmw2c-gate-results.json`, sin repetir fallos para esconderlos.
 Confirmar el happy TUI exacto dentro de 20 s en ambas CPU; un workflow puede
 seguir fallido por otra matriz y se registra separado.
+
+### Diagnóstico 1 observado y causa acotada
+
+[37129675339](https://github.com/SantanaJcp/passwordmanager/actions/runs/37129675339),
+SHA `d6acdb63d3333a167d5965b4e17f5924b3069d9b`, completed/failure.
+Intel alcanza el happy job: 59 eventos seleccionados, 114 bloques/0 roots,
+mismo PID al vencer. Muestra de 115 puts completados: temporal+fsync 8.376 s;
+spawn 0.144 s; espera de procesos 8.782 s (incluye init/TLS/exchange/exit);
+handshakes 115 / 0.166 s; intercambio 2.845 s; preparación cliente 0.285 s;
+exportación 34 / 2.380 s; SQLite dispatch servidor 115 / 2.422 s y apertura
+115 / 0.212 s. Sin backoff registrado. Job spawn 0.000243 s y status fsync
+0.033 s incluyen también el rechazo de pin anterior: **no sumar como fases
+exclusivas del happy job**. La siguiente medición usa offsets antes del happy
+job para excluir ese antecedente. Es una muestra parcial al cutoff, no duración
+completa ni prueba de que 115 sean todos los bloques necesarios.
+
+ARM falla antes de sync, al desbloquear la TUI de `rejected_source` (fixture
+1PUX), render=password-prompt. No permite atribuir una latencia W2 a ARM;
+no se cambia esa frontera de W1 ni se consume otra corrida idéntica.
+Logs `/tmp/pmw2d-macos-diagnostic1-{arm,intel}.log`, metadata `.json`.
+Repo público/labels estándar, flags false/false y workflow intactos; coste
+según [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+Los dos dispatch por SHA recibieron HTTP422 y **no crearon runs**; el dispatch
+por rama resolvió el SHA anterior y se verificó por API.
+
+**Causa con evidencia Intel:** trabajo por bloque en el adaptador de proceso,
+no el handshake en sí: fsync del temporal y arranque/espera repetidos. La
+reconexión también ocurre una vez por RPC, pero el handshake medido es menor
+que esos costes. Sin evidencia de backoff ni relanzamiento launchd. El fsync
+del temporal no es el fallback heredado de cleanup; ese fallback se conserva.
+
+### Corrección y método GREEN
+
+`ProcessTlsTransport::authenticated_session` conserva el cliente separado y
+reutiliza un único TLS1.3/RPK autenticado. Se envían los mismos JSON/framing y
+métodos, una solicitud a la vez, sin batching ni otro wire/root. IPC al cliente
+transporta únicamente ciphertext bajo frame ≤1 MiB; deadline absoluto 30 s
+para escribir petición/leer respuesta, antes de aceptar respuesta. Ningún
+replay interno: un fallo se devuelve y solo el retry/backoff ya existente de
+la réplica puede iniciar otro intento. El proceso se cierra/recolecta antes
+de marcar el job exitoso; una limpieza fallida se informa. TLS, pin, ALPN,
+ACL por RPC y hashes/límites siguen exigidos. El servidor Unix acepta frames
+sucesivos bajo esa conexión; listener/admisión/proveedor no cambian. Windows
+conserva el camino existente, sin afirmar esta optimización validada allí.
+
+Los puts de sesión envían el ciphertext ya disponible, sin fabricar un
+archivo durable auxiliar por bloque. No se elimina fsync de estado durable,
+SQLite, staging ni outbox. La modalidad de proceso por RPC y su cleanup
+heredado permanecen intactos; no se elige como alternativa tras fallar sesión.
+
+RED Linux `/tmp/pmw2d-session-red.log`, rc101: workload completo publica y
+converge (271 puts/272 gets), pero un wrapper que ejecuta el binario real
+cuenta 546 ejecuciones frente a 1 requerida. GREEN inicial mismo workload:
+1 ejecución, publish 3.269 s frente a 10.143 s y convergencia 4.163 s frente a
+18.051 s. Oráculos previos intactos. Ese primer bloque tuvo Clippy rojo por
+estilo (`collapsible_if`), no es gate completo. Se añaden negativas reales de
+ACL retirada entre RPCs, hash/tamaño inválidos y conexión perdida sin replay
+interno; también se conservan tests TLS del cliente por RPC legado.
+
+Check posterior `/tmp/pmw2d-session-check2.log` rc0: 31 E2EE, dos negativas IPC
+(frame sobredimensionado/truncado y deadline ya vencido), suite completa y
+Clippy. Se extrajo el setup del contador del workload sin suprimir lints.
+`git diff --check` y AST de ambos fixtures pasan. El fixture conserva modos
+diagnóstico/final-phase anteriores: opt-in W2 solo en normal Full25. Se
+comparan separadamente los PIDs del custodio y servidor antes/después del
+happy job; no se imprimen. Se medirá también wall time observado por la TUI.
+No se afirma que el PID server de la primera muestra pruebe continuidad del
+PID del custodio; sus métricas indican dos launches contando el wrong-pin
+anterior, pero no se tomó ese segundo PID explícito en diagnóstico 1.

@@ -83,6 +83,7 @@ TUI23_FIELD_CATALOG = {
 }
 DIAGNOSTIC_ENV = "PM_MACOS_TICKET26_DIAGNOSTIC"
 DIAGNOSTIC_LOG = STATE / "ticket26-diagnostic.log"
+SYNC_TIMING_ENABLED = False
 AGENT_MANAGER_COMMAND_TIMEOUT = 10
 AGENT_PASTEBOARD_PROBE_TIMEOUT = 30
 AGENT_LAUNCH_WAIT_TIMEOUT = (
@@ -3641,13 +3642,15 @@ def main():
                 plistlib.dump(launchd_config, destination)
             plist_to_install = diagnostic_plist
         # W2: inject only categorical sync timing into this owned service.
-        sync_timing_plist = scratch / "w2-sync-timing.plist"
-        launchd_config.setdefault("EnvironmentVariables", {})["PMW2_TIMING"] = "1"
-        if not diagnostic:
+        global SYNC_TIMING_ENABLED
+        SYNC_TIMING_ENABLED = not diagnostic and not final_phase_only
+        if SYNC_TIMING_ENABLED:
+            sync_timing_plist = scratch / "w2-sync-timing.plist"
+            launchd_config["EnvironmentVariables"] = {"PMW2_TIMING": "1"}
             launchd_config["StandardErrorPath"] = str(STATE / "w2-sync-timing.log")
-        with open(sync_timing_plist, "wb") as destination:
-            plistlib.dump(launchd_config, destination)
-        plist_to_install = sync_timing_plist
+            with open(sync_timing_plist, "wb") as destination:
+                plistlib.dump(launchd_config, destination)
+            plist_to_install = sync_timing_plist
         sudo(["install", "-o", "root", "-g", "wheel", "-m", "0644", plist_to_install, PLIST])
         owned_paths.append(("plist", PLIST))
         sudo(["plutil", "-lint", PLIST])

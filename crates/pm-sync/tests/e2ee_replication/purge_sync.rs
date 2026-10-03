@@ -815,7 +815,7 @@ impl TlsServer {
         }
         Self {
             child,
-            transport: ProcessTlsTransport::new(
+            transport: ProcessTlsTransport::authenticated_session(
                 Path::new(env!("CARGO_BIN_EXE_pm-sync")),
                 &socket,
                 &client_key,
@@ -826,7 +826,17 @@ impl TlsServer {
 }
 impl Drop for TlsServer {
     fn drop(&mut self) {
-        self.child.kill().expect("stop owned W2 server");
+        self.transport
+            .finish()
+            .expect("close owned W2 client session");
+        if self
+            .child
+            .try_wait()
+            .expect("query owned W2 server")
+            .is_none()
+        {
+            self.child.kill().expect("stop owned W2 server");
+        }
         self.child.wait().expect("reap owned W2 server");
     }
 }
@@ -1282,10 +1292,35 @@ impl SyncTransport for WorkloadTransport<'_> {
     }
 }
 
+fn count_client_executions(f: &PurgeFixture, server: &mut TlsServer) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let calls = f.dir.path("workload-client-executions");
+    let wrapper = f.dir.path("workload-client-wrapper");
+    let quote = |path: &Path| format!("'{}'", path.to_str().unwrap().replace('\'', "'\"'\"'"));
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf x >> {}\nexec {} \"$@\"\n",
+            quote(&calls),
+            quote(Path::new(env!("CARGO_BIN_EXE_pm-sync")))
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    server.transport = ProcessTlsTransport::authenticated_session(
+        &wrapper,
+        &f.dir.path("w2-sync.sock"),
+        &f.dir.path("w2-client.key"),
+        &f.dir.path("w2-server.pub"),
+    );
+    calls
+}
+
 #[test]
 fn restored_large_workload_measures_real_tls_root_publication() {
     let mut f = PurgeFixture::new();
-    let server = TlsServer::start(&mut f);
+    let mut server = TlsServer::start(&mut f);
+    let calls = count_client_executions(&f, &mut server);
     for _ in 0..16 {
         let create = f
             .owner
@@ -1361,4 +1396,88 @@ fn restored_large_workload_measures_real_tls_root_publication() {
         measured.gets.get(),
         measured.started.elapsed().as_millis()
     ));
+    server.transport.finish().unwrap();
+    assert_eq!(
+        fs::read(&calls).unwrap().len(),
+        1,
+        "one authenticated session must serve the complete restored workload"
+    );
+}
+
+#[test]
+fn authenticated_session_checks_acl_on_every_rpc_and_keeps_integrity_limits() {
+    let mut f = PurgeFixture::new();
+    let server = TlsServer::start(&mut f);
+    assert!(
+        server
+            .transport
+            .list(f.namespace, None, 128)
+            .unwrap()
+            .is_empty()
+    );
+    let bytes = b"PMW2_SYNTHETIC_OPAQUE_BLOCK";
+    let hash = pm_crypto::digest(bytes);
+    assert!(matches!(
+        server.transport.put(f.namespace, [0; 32], bytes),
+        Err(SyncError::Integrity)
+    ));
+    assert!(matches!(
+        server
+            .transport
+            .put(f.namespace, hash, &vec![0; MAX_BLOCK_BYTES + 1]),
+        Err(SyncError::Integrity)
+    ));
+    let db = rusqlite::Connection::open(f.dir.path("tls-store.sqlite3")).unwrap();
+    db.execute(
+        "DELETE FROM namespaces WHERE namespace=?1",
+        [f.namespace.as_slice()],
+    )
+    .unwrap();
+    assert!(
+        server.transport.put(f.namespace, hash, bytes).is_err(),
+        "TLS identity must not cache namespace permission"
+    );
+    assert_eq!(count_rows(&f.dir.path("tls-store.sqlite3"), "blocks"), 0);
+    OpaqueSyncStore::create(&f.dir.path("tls-store.sqlite3"))
+        .unwrap()
+        .authorize(f.namespace, &f.client_rpk)
+        .unwrap();
+    server.transport.put(f.namespace, hash, bytes).unwrap();
+    assert_eq!(server.transport.get(f.namespace, hash).unwrap(), bytes);
+    assert!(matches!(
+        server.transport.get(f.namespace, [0; 32]),
+        Err(SyncError::Missing)
+    ));
+    server.transport.publish(f.namespace, hash).unwrap();
+    assert_eq!(
+        server.transport.list(f.namespace, None, 128).unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn authenticated_session_connection_loss_is_explicit_without_internal_replay() {
+    let mut f = PurgeFixture::new();
+    let mut server = TlsServer::start(&mut f);
+    let bytes = b"PMW2_SYNTHETIC_CONNECTION_LOSS";
+    let hash = pm_crypto::digest(bytes);
+    server.transport.put(f.namespace, hash, bytes).unwrap();
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    let started = Instant::now();
+    assert!(matches!(
+        server.transport.get(f.namespace, hash),
+        Err(SyncError::Unavailable)
+    ));
+    assert!(started.elapsed() < Duration::from_secs(30));
+    assert_eq!(count_rows(&f.dir.path("tls-store.sqlite3"), "roots"), 0);
+    assert!(
+        !f.replica(&f.sender)
+            .reducer()
+            .unwrap()
+            .pending_outbox()
+            .unwrap()
+            .is_empty()
+    );
+    server.transport.finish().unwrap();
 }
