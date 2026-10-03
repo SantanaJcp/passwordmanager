@@ -4,6 +4,7 @@
 pub(crate) enum PrimaryFailure {
     Usage,
     Unavailable,
+    DestinationExists,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -21,6 +22,7 @@ pub(crate) struct CleanupFailure {
 pub(crate) enum Failure {
     Usage,
     Unavailable,
+    DestinationExists,
     WithCleanup {
         primary: PrimaryFailure,
         cleanups: Vec<CleanupFailure>,
@@ -45,6 +47,10 @@ impl Failure {
                 primary: PrimaryFailure::Unavailable,
                 cleanups: vec![failure],
             },
+            Self::DestinationExists => Self::WithCleanup {
+                primary: PrimaryFailure::DestinationExists,
+                cleanups: vec![failure],
+            },
             Self::WithCleanup {
                 primary,
                 mut cleanups,
@@ -59,9 +65,11 @@ impl Failure {
         match self {
             Self::Usage => PrimaryFailure::Usage,
             Self::Unavailable => PrimaryFailure::Unavailable,
+            Self::DestinationExists => PrimaryFailure::DestinationExists,
             Self::WithCleanup { primary, .. } => match primary {
                 PrimaryFailure::Usage => PrimaryFailure::Usage,
                 PrimaryFailure::Unavailable => PrimaryFailure::Unavailable,
+                PrimaryFailure::DestinationExists => PrimaryFailure::DestinationExists,
             },
         }
     }
@@ -69,7 +77,7 @@ impl Failure {
     pub(crate) fn cleanups(&self) -> &[CleanupFailure] {
         match self {
             Self::WithCleanup { cleanups, .. } => cleanups,
-            Self::Usage | Self::Unavailable => &[],
+            Self::Usage | Self::Unavailable | Self::DestinationExists => &[],
         }
     }
 }

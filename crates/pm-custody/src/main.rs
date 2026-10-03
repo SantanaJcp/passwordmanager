@@ -32,6 +32,10 @@ fn main() -> ExitCode {
                     eprintln!("{CUSTODY_UNAVAILABLE}");
                     4
                 }
+                PrimaryFailure::DestinationExists => {
+                    eprintln!("DESTINATION_EXISTS");
+                    4
+                }
             };
             if !failure.cleanups().is_empty() {
                 for cleanup in failure.cleanups() {

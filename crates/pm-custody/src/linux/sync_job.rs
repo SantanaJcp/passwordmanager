@@ -527,6 +527,7 @@ mod tests {
             Ok(value) => value,
             Err(Failure::Usage) => panic!("unexpected custody usage failure"),
             Err(Failure::Unavailable) => panic!("unexpected custody unavailable failure"),
+            Err(Failure::DestinationExists) => panic!("unexpected destination collision"),
             Err(Failure::WithCleanup { .. }) => {
                 panic!("unexpected custody cleanup failure")
             }

@@ -732,11 +732,14 @@ fn event_loop(
                 match handle_key(app, tls, key) {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
-                    Err(_) => {
+                    Err(error) => {
                         app.operation = None;
                         app.input.clear();
                         app.mode = Mode::Browse;
                         app.status = "Operation failed explicitly; no success was recorded".into();
+                        if error.primary() == crate::failure::PrimaryFailure::DestinationExists {
+                            app.status.push_str(" (DESTINATION_EXISTS)");
+                        }
                     }
                 }
                 if app.reauthentication.is_some() {
