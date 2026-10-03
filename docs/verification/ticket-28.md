@@ -717,3 +717,192 @@ sintético; no añade un owner heap ordinario. El gate inicial falló por format
 fallbacks heredados, `scripts/check.sh` completo terminó rc0 en
 `/tmp/pm28-20261002-wip-check3.log`: config, build inputs, fmt, check, tests y
 clippy locked/offline. Esto valida el checkpoint, no cierra el inventario G7.
+
+### Pérdida real de custodia audit — regresión adicional
+
+Se concreta el seam ya seleccionado en §3: fixture Linux propio con vault
+real, tres UIDs y TLS/RPK. Primero `human-password-crud` debe completar y
+`audit_keys` contener la generación inicializada; sólo entonces se emite el
+control fijo. Se para únicamente el daemon propio, se retiene por rename
+el archivo `.audit-custody` original y se reinicia el mismo vault. Se observa
+si aparece un reemplazo y se exige rechazo rc4 sin stdout ni canarios.
+Después se retira únicamente el reemplazo creado por el fixture, se restaura
+el original exacto y se comprueba el restart. La prueba falla si generó claves
+para sustituir una custodia perdida; no es RED si falla setup/control/cleanup.
+No se modifica `load_or_create_audit_custody`: su corrección necesita la
+autorización específica exigida para fallbacks heredados. El fixture no usa
+proveedor externo y no acredita ausencia de doble login.
+
+El primer fixture llegó al control inicializado y falló en la categoría de
+admisión, con cleanup rc0, pero no imprimía métricas fijas que permitan
+identificar el resultado: `/tmp/pm28-20261002-red-audit-custody-loss.log`.
+Se conserva como fallo posterior al control sin atribuirle aún la causa.
+La variante instrumentada registra sólo rc/booleanos, termina restauración y
+cleanup antes de exigir ausencia de claves sustitutas; no imprime salidas ni
+material privado. Se ejecuta en otro vault propio, sin retry de proveedor.
+
+### Rate y clock — concreción del seam público de §3
+
+`seventeenth_attempt_and_clock_rollback_leave_admission_atomic` usa el motor
+real sobre SQLite cifrado, dos RPK de transporte registradas y credencial
+habilitada. Crea 16 intentos vivos del agente A; el 17.º debe ser
+`RATE_LIMITED` sin delta en intentos/audit/authority/outbox/receipts. Repetir
+la idempotencia del primero conserva su ID y esos conteos; el agente B aún
+puede admitir uno. Después el fixture adelanta la ancla durable del reloj
+1000 s y exige `CLOCK_UNTRUSTED` en una admisión nueva de B, sin delta en
+esas tablas. La modificación SQL sólo controla el reloj del fixture: no
+simula proveedor, persistencia ni autoridad. Es cobertura de comportamiento
+existente; si pasa, no se inventa un RED ni se atribuye cambio de producto.
+No cubre el techo custodial de 128 ni todos los límites de G7.
+
+### Evidencia nueva consolidada — 2026-10-02
+
+- Respuesta: RED discriminante rc101 en baseline `9ec8b30`,
+  `/tmp/pm28-20261002-red-response.log`; GREEN rc0 del candidato,
+  `/tmp/pm28-20261002-green-response.log`. Se confirma el control bajo el mismo
+  límite de 128 KiB antes de intentar 512 KiB. No se llama TDD retrospectivo
+  a `8bf30bf`. El checkpoint de correcciones de lint/regresión es `dec9b44`.
+- `scripts/check.sh` completo final rc0:
+  `/tmp/pm28-20261002-final-check.log`, incluye la prueba nueva de rate/clock.
+- Clean locked/offline del checkpoint rc0 en 33.68 s:
+  `/tmp/pm28-20261002-wip-clean.log`. El build final con los tests añadidos se
+  registra separadamente en `/tmp/pm28-20261002-final-clean.log`.
+- Barrida de los 26 `scripts/test-linux-*-lab.sh` existentes: todos rc0,
+  657.41 s, `/tmp/pm28-20261002-labs-summary.log`. Logs individuales
+  `/tmp/pm28-20261002-test-linux-<nombre>-lab.log`. Cada script adquirió su
+  propio `flock`, sin paralelismo de Cargo ni retry del lab. El código de
+  producto fue el mismo que en `dec9b44`; sólo se añadieron pruebas/documentación
+  después. El nuevo negativo audit-loss se ejecuta aparte y **no** está incluido
+  en ese 26/26; no se presenta como gate integral verde de G7.
+- Rate/clock rc0: `/tmp/pm28-20261002-rate-clock.log`; cobertura GREEN de
+  comportamiento existente, sin cambio de producto ni RED fabricado.
+- Audit-loss final rc1: `/tmp/pm28-20261002-red-audit-custody-loss3.log`:
+  control inicializado, admisión `rc=0 closed=0`, `replacement-created=1`,
+  original restituido, restart y `cleanup errors=0`. El segundo log tenía una
+  etiqueta fija errónea “admission=closed” después de medir `closed=0`; no se
+  usa esa etiqueta como evidencia. El tercero corrige sólo el diagnóstico y
+  conserva la aserción negativa. No hay GREEN de este fallo heredado.
+
+Comandos reproducibles desde el cwd indicado:
+
+```sh
+# RED: cwd=/tmp/pm28-20261002-baseline9ec8b30, baseline más fixture test-only
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody --lib linux::protected_frame_tests::sensitive_response_requires_locked_owner_before_serialization --locked --offline -- --exact --nocapture
+# GREEN y gates: cwd=.worktrees/28-fault-safety
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody --lib linux::protected_frame_tests::sensitive_response_requires_locked_owner_before_serialization --locked --offline -- --exact --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/check.sh
+flock /tmp/pm-cargo-window.lock ./scripts/clean-offline-build.sh
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-vault --test delegated_authorization seventeenth_attempt_and_clock_rollback_leave_admission_atomic --locked --offline -- --exact --nocapture
+```
+
+Para cada lab, con artefactos existentes (no se reinstalaron):
+
+```sh
+export PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3
+export PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64
+# Enumerar scripts/test-linux-*-lab.sh y ejecutar uno por vez, con log propio:
+flock /tmp/pm-cargo-window.lock ./scripts/test-linux-storage-fault-lab.sh
+```
+
+El negativo de custodia utiliza el mismo namespace multi-UID de
+`test-linux-custody-protected-input-lab.sh`: sustituir únicamente su invocación
+Python por `audit_custody_loss_lab.py target/debug/pm-custody target/debug/pm`,
+desde el worktree, manteniendo el `flock`, los mapas UID/GID y el mount-proc.
+Este fixture necesita el build actual, no instala dependencias ni toca host.
+
+### Estado exacto de aceptación G7 al entregar
+
+| Criterio | Estado y alcance | Evidencia nueva |
+|---|---|---|
+| Respuesta sensible: control pequeño + 512 KiB bajo memlock | PASS del serializer; no E2E de todos los response tipos | red/green-response.log; final-check.log |
+| Guardas Linux, core=0, dumpable=0, denegación memlock y stdin nativo | PASS del tracer público | test-linux-fault-safety-lab.log; test-linux-custody-protected-input-lab.log |
+| Memoria propia protegida integral / todos serializers, records, imports y requests | FAIL de inventario: siguen owners/serializers ordinarios; no se declara cierre | Punteros concretos debajo |
+| Presupuesto agregado 32 MiB observado y perfil suficiente | No demostrado íntegramente; contador central existe, host soft/hard memlock observado 8192 KiB | root.rs; límite del entorno, no se aumentó |
+| 17.º RATE_LIMITED, idempotencia a capacidad y CLOCK_UNTRUSTED sin parcialidad | PASS por API real; reloj controlado mediante ancla durable del fixture | rate-clock.log; final-check.log |
+| Todos los demás límites, incluido techo custodial 128 | No demostrado como matriz integral | Suites existentes pasan; no extrapolar |
+| ENOSPC real durante WAL, rollback de item/revision/streams/authority/outbox/receipt/audit y restart | PASS acotado | test-linux-storage-fault-lab.log |
+| Fsync de archivo y fallos de cleanup reales | PASS acotado; no acredita fsync SQLite en todas las fronteras | test-linux-cleanup-fault-lab.log; test-linux-rpc-cleanup-fault-lab.log |
+| Matriz real fsync/WAL/commit/outbox/audit por frontera | No demostrado integralmente | ENOSPC y SQL triggers no sustituyen los syscalls faltantes |
+| Crash con intención, reconciliación y ausencia de login duplicado | PASS del proveedor externo controlado; no se extrapola a todos los proveedores | test-linux-attempts-lab.log: provider-calls=1, no-blind-retry |
+| Canarios activos/históricos en todos los canales, temp, dumps y recursos de agente | No demostrado integralmente; hay barridos acotados y controles de aislamiento | 26 logs; faltan matriz completa, crash dump real y process_vm_readv integral |
+| Pérdida audit-custody sin sustitución automática | FAIL: sustitución y CRUD rc0 observados; corrección pendiente de autorización | red-audit-custody-loss3.log |
+| Otras pérdidas de custodia sin doble login | No demostrado como matriz combinada | No atribuir el proveedor del lab attempts al fixture audit-loss, que no tiene proveedor |
+| VirtualLock, WER/LocalDumps Windows | Diferido a implementación/evidencia Windows; Linux no lo acredita | Gates 27/32; sin cambios ni cierre inferido |
+| Controles/crash nativos macOS | Diferido a evidencia nativa macOS | Gates 26/31; sin cierre inferido |
+| Integración por merger y revisión final independiente | Pendiente; ticket sigue claimed, PR #1 no fusionado | Esta rama no se integra desde el implementador |
+
+Las rutas de logs abreviadas en esta tabla llevan el prefijo
+`/tmp/pm28-20261002-` salvo donde se especifica otro.
+
+### Inventario pendiente concreto y frontera de autorización
+
+El octavo vertical del WIP cubre readers TLS/FrameReader, préstamo de Cursor,
+`WirePrepared`, `HumanResponse::Public/Protected`, destinos exactos de responses,
+input/password/reveal persistente de TUI y lectura de privadas RPK custody/sync.
+La prueba nueva discrimina sólo un serializer; los 26 labs validan sus flujos
+observables, no la ausencia de owners ordinarios en todo el producto.
+
+Pendientes visibles, sin introducir `Clone`/`Debug` en ProtectedBytes ni
+adapters secretos para ocultar errores:
+
+- `pm-vault/src/content.rs`: AuthRecord/password/token/SSH, notes/custom/source
+  fields/attachments y to_bytes/encode_human/encode_auth todavía String/Vec.
+- `pm-vault/src/human.rs`: PasswordRecord, PreparedHumanCommand y serializers
+  de documentos/chunks/grants todavía incluyen Vec/Zeroizing<Vec>.
+- `pm-vault/src/migration.rs` y `onepux.rs`: CSV/JSON y buffers de importación
+  aún ordinarios; proteger únicamente el frame TLS no los migra.
+- `pm-custody/src/linux.rs`: keygen/provision-bootstrap, read_import_source,
+  read_regular, read_tty_password, call_provider y encode_attempt_snapshot
+  conservan tramos propios ordinarios.
+- `pm-custody/src/linux/tui.rs`: algunos requests de import/restore/rotación/
+  export/sync y split_exact hacen copias ordinarias; draw/display_secret vuelven
+  a construir String para reveal. Además Ratatui copia símbolos a sus Cell/
+  buffers internos (fuente instalada ratatui-core 0.1.2); esa memoria no se
+  declara protegida ni se agrega como excepción implícita. Debe resolverse el
+  camino de presentación preservando los comportamientos TUI acordados.
+- `pm-web-auth`: responses de provider y bodies/scripts/JSON/HTTP propios aún
+  usan Vec/String; frames protegidos de entrada no cierran este inventario.
+
+Excepciones preservadas: internals TLS/rustls, russh, Chromium y Argon, stack/
+registros/expansiones criptográficas según G7. No se amplían por inferencia.
+
+Fallback nuevo identificado, **heredado**: `linux.rs::load_or_create_audit_custody`
+genera y escribe nuevas claves si falta `.audit-custody`; al entrar una operación
+humana con KH, `audit.rs::ensure_package` acepta AuditKeyUnavailable y provisiona
+una generación nueva. El negativo demuestra pérdida de un dispositivo ya
+inicializado y aceptación rc0 de un CRUD ordinario. Se solicitó autorización
+específica para distinguir primera provisión de pérdida/cambio de claves en
+un dispositivo inicializado, denegar sin claves/generaciones nuevas y verificar
+restauración. La regla del usuario de conservar fallbacks heredados impide
+aplicar esa corrección sin respuesta explícita. No se reabre el contrato G7
+ni se interpreta silencio como aprobación.
+
+Otros heredados observados estáticamente y conservados: ProcessTlsTransport::put
+retiene temporal ciphertext al fallar write/fsync y descarta unlink; sync_stage
+borrar/recrear ante AlreadyExists; agent_attempt sustituye bytes UTF-8 inválidos
+mediante from_utf8_lossy; el runner descarta errores de kill y usa tiempo default
+si pre-epoch. Los demás del handoff (cleanup de fixtures, clipboard/pipe Windows
+y Mac) permanecen comunicados, sin autorización ampliada ni validación nativa
+atribuida a este turno.
+
+Zonas de composición con 26/27: el WIP modifica linux.rs/linux/tui.rs y lib.rs;
+los puertos extraen esas responsabilidades a tui.rs/human_wire.rs/agent_wire.rs/
+sync_job.rs y cfg nativo. Integrar trasladando los owners y lectores a su engine
+único, sin duplicarlo. pm-sync/main.rs también requiere composición cfg. No se
+realizó merge, cherry-pick ni cambio de sus worktrees.
+
+Gate del checkpoint final: `scripts/check.sh` rc0 y clean locked/offline
+rc0 en 36.83 s, con todos los targets/tests actuales compilados
+(`/tmp/pm28-20261002-final-check.log`,
+`/tmp/pm28-20261002-final-clean.log`). El AST del nuevo fixture Python,
+`git diff --check`, las referencias locales y la consistencia `claimed`/G7
+incompleto fueron comprobados. Soft y hard RLIMIT_MEMLOCK del host son
+8192 KiB, observados de nuevo sin modificarlos. Se retiraron sólo los dos
+`__pycache__` creados por nuestras corridas en este worktree; se conserva
+la copia baseline y los logs para revisión. La barrida 26/26 no se repitió
+porque desde `dec9b44` no cambió producto ni ningún lab existente.
+
+Entrega parcial publicable: conserva el WIP `8bf30bf`, añade validación y
+regresiones, **no** completa G7 ni autoriza integración a ciegas. La migración
+del inventario anterior y el negativo audit-loss siguen abiertos; la
+corrección de los fallbacks espera la respuesta explícita solicitada.
