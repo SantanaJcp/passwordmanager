@@ -1517,6 +1517,7 @@ mod windows_fixture {
             let child = child_diagnostic(fixture.process)?;
             return Err(io::Error::other(format!("{primary}; {child}; {observer}")));
         }
+        eprintln!("TUI_STAGE stage=first-prompt result=pass");
         let (first, rest) = password
             .split_first()
             .ok_or_else(|| io::Error::other("synthetic TUI password is empty"))?;
@@ -1525,6 +1526,7 @@ mod windows_fixture {
             .observer
             .wait_for("Password required (input hidden)")
             .map_err(io::Error::other)?;
+        eprintln!("TUI_STAGE stage=hidden-input result=pass");
         let mut input = zeroize::Zeroizing::new(rest.to_vec());
         input.push(b'\r');
         write_keyboard_input(fixture, &input)?;
@@ -1541,6 +1543,7 @@ mod windows_fixture {
             .rejects(password)
             .map_err(io::Error::other)?;
 
+        eprintln!("TUI_STAGE stage=unlock result=pass");
         // Ticket 25 migration is driven through the real keyboard and common
         // human handler. The service result is awaited before the next input;
         // no operation is retried by the fixture.
@@ -1558,6 +1561,7 @@ mod windows_fixture {
             .wait_for("Import committed transactionally")
             .map_err(io::Error::other)?;
 
+        eprintln!("TUI_STAGE stage=csv-import result=pass");
         open_menu(fixture, "m", "Migration:")?;
         open_menu(fixture, "2", "1PUX source")?;
         let onepux_request = format!("{}|keep", encode_operation_field(paths.onepux));
@@ -1571,6 +1575,7 @@ mod windows_fixture {
             .observer
             .wait_for("Import committed transactionally")
             .map_err(io::Error::other)?;
+        eprintln!("TUI_STAGE stage=onepux-import result=pass");
         search(fixture, "Keyboard 1PUX")?;
         fixture
             .observer
@@ -1663,6 +1668,7 @@ mod windows_fixture {
             ));
         }
 
+        eprintln!("TUI_STAGE stage=organization-history-copy result=pass");
         open_menu(fixture, "g", "Generator length")?;
         type_visible_and_submit(fixture, "24", "24")?;
         fixture
@@ -1708,6 +1714,7 @@ mod windows_fixture {
             .wait_for("Audit metadata:")
             .map_err(io::Error::other)?;
 
+        eprintln!("TUI_STAGE stage=generator-access-pending-audit result=pass");
         // New-file backup/export paths are distinct. Existing destinations are
         // intentionally not removed or truncated by this fixture.
         open_menu(fixture, "b", "Backup/recovery:")?;
@@ -1750,6 +1757,7 @@ mod windows_fixture {
             .observer
             .wait_for("Purged ")
             .map_err(io::Error::other)?;
+        eprintln!("TUI_STAGE stage=backup-export-trash result=pass");
         write_keyboard_input(fixture, b"q")?;
         require_tui_exit(fixture.process)
     }
@@ -1798,7 +1806,10 @@ mod windows_fixture {
 
     fn exercise(args: &[String]) -> io::Result<()> {
         if args.len() < 11
-            || args.get(3).map(String::as_str) != Some("--matrix")
+            || !matches!(
+                args.get(3).map(String::as_str),
+                Some("--matrix" | "--matrix-probe")
+            )
             || args.get(8).map(String::as_str) != Some("--")
         {
             return Err(io::Error::new(
@@ -1811,13 +1822,16 @@ mod windows_fixture {
         let diagnostic_path =
             std::path::Path::new(&args[4]).with_file_name("console-diagnostic.txt");
         let mut child_arguments = args[9..].to_vec();
-        child_arguments.push("--console-diagnostics".into());
-        child_arguments.push(
-            diagnostic_path
-                .to_str()
-                .ok_or_else(|| io::Error::other("console diagnostic path is not UTF-8"))?
-                .into(),
-        );
+        let diagnostics_enabled = args[3] == "--matrix-probe";
+        if diagnostics_enabled {
+            child_arguments.push("--console-diagnostics".into());
+            child_arguments.push(
+                diagnostic_path
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("console diagnostic path is not UTF-8"))?
+                    .into(),
+            );
+        }
         let operation = (|| {
             let desktop = create_private_desktop(&mut fixture, &args[1])?;
             setup_conpty(&mut fixture)?;
@@ -1837,6 +1851,9 @@ mod windows_fixture {
         })();
         let cleanup = fixture.cleanup();
         let diagnostic = (|| {
+            if !diagnostics_enabled {
+                return Ok(());
+            }
             let file = std::fs::File::open(&diagnostic_path)?;
             let mut metrics = String::new();
             file.take(8193).read_to_string(&mut metrics)?;

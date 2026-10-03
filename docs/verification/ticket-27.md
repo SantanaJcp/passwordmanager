@@ -2112,3 +2112,35 @@ la aceptación. Completa vs fragmentada distingue parser de escritura; ancho y
 glyphs/código de página distinguen decodificación. No cambia CP, VT, TERM,
 backend, pantalla ni plazo. Cualquier resultado inesperado es evidencia roja,
 no se cambia el criterio para aceptarlo.
+
+Para el GREEN posterior, el fixture emitirá checkpoints categóricos sólo
+después de observar cada resultado (prompt, input oculto, unlock, CSV, 1PUX,
+organización/copy, acceso/audit y backup/export/trash). Así un fallo posterior
+no borra evidencia del prefijo alcanzado. El modo diagnóstico se seleccionará
+con `--matrix-probe` sólo si service_diagnostics=true; `--matrix` conserva el
+producto normal sin sondas ni flag de consola. La corrida normal con false
+sigue requerida. El offset del prompt informado en run39 era bytes UTF-8
+(3 tras el borde U+2502), no celdas: se corrige a columna 1 usando width de
+Ratatui, sin alterar frame/render ni la conclusión sobre geometría.
+
+[Run40](https://github.com/SantanaJcp/passwordmanager/actions/runs/37089021199),
+SHA `19e22958ed84f44cf22379da6d9a168eebd8f1f5`, job `111105181061`: FAIL del prompt tras build y 12/1/14/1.
+CSI completo y fragmentado: probe-origin=true, cursor (9,0), literal-csi=0 en
+writer/activo. UTF-8: CP=437, cursor (12,0), corners=0 y boxes=0 para cuatro
+U+250C que debían ocupar cuatro celdas. Se ha aislado decodificación en consola,
+no parser CSI, alt buffer ni observer. El backend escribe UTF-8 sobre una consola
+que interpreta esos bytes con CP437; sus glyphs y posiciones ya están corruptos
+en Win32 antes de ConPTY. El primer prompt deberá verificarse tras corregirlo.
+
+Método de corrección antes del código: guardar GetConsoleOutputCP (cero falla),
+configurar exactamente CP_UTF8=65001 con SetConsoleOutputCP y verificarlo antes
+de emitir alternate/render. Restaurar y comprobar el CP original al terminar,
+aunque falle otra restauración; un error conserva CUSTODY_UNAVAILABLE. No
+modificar CP de entrada (eventos Windows usan Unicode), modo VT, TERM, handles,
+geometría, deadlines ni motor. El diagnostic opt-in registra también restauración
+categórica, sin leer celdas después de introducir contraseña. El próximo run
+exige cuatro corners/cursor (4,0), prompt Win32+observer real, input oculto y
+avance por teclado de la matriz existente. Después se ejecutará el modo normal
+sin probes. No se fabrica RED: run40 es el RED nativo de encoding.
+Fuentes: [Console Code Pages](https://learn.microsoft.com/en-us/windows/console/console-code-pages)
+y [SetConsoleOutputCP](https://learn.microsoft.com/en-us/windows/console/setconsoleoutputcp).
