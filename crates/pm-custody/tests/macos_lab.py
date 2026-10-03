@@ -145,6 +145,8 @@ DIAGNOSTIC_LINE = re.compile(
     rb"(?:present|absent)|"
     rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-success-read="
     rb"(?:yes|no|indeterminate)|"
+    rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-error="
+    rb"(?:none|coercion-1700|other|timeout)|"
     rb"PM26_DIAGNOSTIC unlock-phase="
     rb"(?:channel-verified|sqlite-opened|durability-configured|bundle-loaded|"
     rb"kdf-start|kdf-end|root-authenticated) elapsed-ms=[0-9]{1,6}|"
@@ -265,10 +267,15 @@ try:
     )
 except subprocess.TimeoutExpired as error:
     probe_status = "timeout"
+    probe_error = "timeout"
     probe_stdout = error.stdout or b""
     probe_stderr = error.stderr or b""
 else:
     probe_status = "zero" if probe.returncode == 0 else "nonzero"
+    probe_error = (
+        "none" if probe.returncode == 0 and probe.stderr == b""
+        else "coercion-1700" if re.search(rb"\(-1700\)\s*$", probe.stderr) else "other"
+    )
     probe_stdout = probe.stdout
     probe_stderr = probe.stderr
 
@@ -290,6 +297,7 @@ result_path.write_text(
         "PM26_PASTEBOARD probe-canary-stderr="
         + ("present" if stderr_canary else "absent"),
         "PM26_PASTEBOARD probe-success-read=" + probe_success,
+        "PM26_PASTEBOARD probe-error=" + probe_error,
     )) + "\n",
     encoding="ascii",
 )
@@ -304,7 +312,8 @@ AGENT_PASTEBOARD_RESULT_LINE = re.compile(
     rb"probe-result=(?:zero|nonzero|timeout)|"
     rb"probe-canary-stdout=(?:present|absent)|"
     rb"probe-canary-stderr=(?:present|absent)|"
-    rb"probe-success-read=(?:yes|no|indeterminate))$"
+    rb"probe-success-read=(?:yes|no|indeterminate)|"
+    rb"probe-error=(?:none|coercion-1700|other|timeout))$"
 )
 
 
@@ -1498,9 +1507,35 @@ def read_appkit_pasteboard(session=None):
         else session.run_while_draining(command, check=False, timeout=10)
     )
     assert result.returncode == 0 and result.stderr == b"", (
-        "AppKit pasteboard observer failed", result.returncode, result.stderr[:1024],
+        "AppKit pasteboard observer failed", classify_applescript_error(result),
     )
     return result.stdout.rstrip(b"\r\n")
+
+
+def classify_applescript_error(result):
+    if result.returncode == 0 and result.stderr == b"":
+        return "none"
+    if re.search(rb"\(-1700\)\s*$", result.stderr):
+        return "coercion-1700"
+    return "other"
+
+
+def pasteboard_snapshot(phase, session):
+    observer = pathlib.Path(__file__).resolve().parents[3] / "target/debug/macos-pasteboard-probe"
+    result = session.run_while_draining(
+        [observer, str(len(TUI_PASSWORD_RECORD)), hashlib.sha256(TUI_PASSWORD_RECORD).hexdigest()],
+        check=False, timeout=10,
+    )
+    assert result.returncode == 0 and result.stderr == b"", "native pasteboard snapshot failed"
+    assert re.fullmatch(
+        rb"PM26_PB types=(?:unavailable|empty|string|other) text=(?:nil|value) "
+        rb"canary=(?:present|absent) stable=(?:yes|no)\n", result.stdout,
+    ), "native pasteboard snapshot emitted unclassified output"
+    assert phase in ("before", "after")
+    print("PM26_CLIPBOARD phase=" + phase + " " + result.stdout.decode("ascii").strip(), flush=True)
+    assert b"types=unavailable" not in result.stdout and b"stable=yes" in result.stdout, (
+        "native pasteboard snapshot was unavailable or unstable"
+    )
 
 
 def write_appkit_pasteboard(value, session=None):
@@ -1699,7 +1734,7 @@ def assert_agent_cannot_read_pasteboard(
 
 def parse_agent_pasteboard_result(value):
     lines = value.splitlines()
-    assert len(lines) == 8 and all(
+    assert len(lines) == 9 and all(
         AGENT_PASTEBOARD_RESULT_LINE.fullmatch(line) for line in lines
     ), "isolated pasteboard launch result was missing or malformed"
     fields = {}
@@ -1710,7 +1745,7 @@ def parse_agent_pasteboard_result(value):
     assert set(fields) == {
         b"agent-uid", b"manager-uid", b"manager-name", b"manager-domain",
         b"probe-result", b"probe-canary-stdout", b"probe-canary-stderr",
-        b"probe-success-read",
+        b"probe-success-read", b"probe-error",
     }, "isolated pasteboard launch result had an unexpected schema"
     return fields
 
@@ -1869,9 +1904,13 @@ def assert_launchd_agent_cannot_read_pasteboard(
             b"agent-uid", b"manager-uid", b"manager-name", b"manager-domain",
             b"probe-result", b"probe-canary-stdout", b"probe-canary-stderr",
             b"probe-success-read",
+            b"probe-error",
         ):
             emit_diagnostic(b"PM26_DIAGNOSTIC pasteboard-isolated-"
                             + name + b"=" + fields[name])
+    print("PM26_CLIPBOARD isolated " + " ".join(
+        name.decode("ascii") + "=" + value.decode("ascii") for name, value in fields.items()
+    ), flush=True)
     assert fields[b"agent-uid"] == b"expected", "isolated pasteboard job UID was not the agent"
     assert fields[b"manager-uid"] == b"system" \
         and fields[b"manager-domain"] == b"different", (
@@ -3167,10 +3206,12 @@ def run_tui_core_lab(
     try:
         copied_start = select_tui_password_for_copy(isolated)
         isolated.wait_text("Copied explicitly", since=copied_start)
+        copy_observed = time.monotonic()
         assert_human_pasteboard_canary(
             TUI_PASSWORD_RECORD, diagnostic=pasteboard_observation, phase="before",
             session=isolated,
         )
+        pasteboard_snapshot("before", isolated)
         probe_error = None
         try:
             assert_launchd_agent_cannot_read_pasteboard(
@@ -3178,6 +3219,12 @@ def run_tui_core_lab(
             )
         except BaseException as error:
             probe_error = error
+        print("PM26_CLIPBOARD probe-elapsed=" + (
+            "copy-bound-or-later" if time.monotonic() - copy_observed >= 30 else "before-copy-bound"
+        ) + " tui-idle-lock=" + (
+            "yes" if "Locked after 5 minutes without human input" in isolated.text() else "no"
+        ), flush=True)
+        pasteboard_snapshot("after", isolated)
         after_error = None
         try:
             assert_human_pasteboard_canary(

@@ -84,6 +84,8 @@ main() {
   libsodium_out_dir=$("${build_command[@]}" |
     python3 scripts/extract-libsodium-build-metadata.py)
   "${test_command[@]}"
+  cc -Wno-deprecated-declarations -framework AppKit \
+    crates/pm-custody/tests/macos_pasteboard_probe.m -o target/debug/macos-pasteboard-probe
   plutil -lint packaging/macos/com.santanajcp.passwordmanager.plist >/dev/null
 
   local machine
@@ -96,7 +98,7 @@ main() {
       ;;
   esac
   local binary architectures
-  for binary in target/debug/pm-custody target/debug/pm target/debug/pm-sync; do
+  for binary in target/debug/pm-custody target/debug/pm target/debug/pm-sync target/debug/macos-pasteboard-probe; do
     test -x "$binary" || {
       echo "ticket 26 native artifact is absent: $binary" >&2
       exit 1

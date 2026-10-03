@@ -12,6 +12,61 @@ See the [October 2 consolidated checkpoint](#october-2-consolidated-checkpoint)
 for the final candidate, component results and remaining blockers from this
 continuation; the earlier observations below remain historical evidence.
 
+## Clipboard and final-phase investigation — October 3
+
+Bounded implementation worktree: `.worktrees/26-clipboard`, branch
+`codex/pm-26-clipboard`, based on `36eecc8c365328ca4c8ca074ae013564767d79b7`.
+This work does not integrate the main branch, merge PR #1 or change ticket status.
+
+The task authorizes categorical diagnosis, native CI and an independent fixture
+mode for the final gates. Concrete method before execution:
+
+1. Run the ordinary matrix with `pasteboard_diagnostic=false`, preserving its
+   cold isolated AppleScript path (no shared-bootstrap supporting session).
+   Keep all existing timeouts, copy/idle limits, G1 UID/system-domain assertions
+   and the post-control. Add always-on **fixture-only** fixed categories:
+   AppleScript error class, timeout vs completed, elapsed before/at the existing
+   copy bound, TUI idle-lock observed, and native human pasteboard type/text/
+   exact-canary categories before and after. Never print clipboard data,
+   hashes, raw errors or identity material. Build the standalone test observer
+   with the runner's native `cc`/AppKit and verify its Mach-O CPU alongside
+   the product. No extra dependency or product diagnostic feature is used.
+2. Discriminate: a post `coercion-1700` with native `empty`/`nil`, absent canary
+   and idle-lock after the probe timeout demonstrates a fixture observation
+   after expiry; string/value with the canary still present instead implicates
+   AppleScript coercion itself. An unavailable/unstable native snapshot is a
+   failed requirement, never denial or PASS. A cold timeout vs a completed
+   warm/shared-bootstrap run is environment/observer evidence, not a CPU cause.
+3. Correct only the demonstrated cause and repeat natively on Intel/ARM.
+   A native AppKit probe may replace AppleScript as the isolated **observer**
+   if the evidence supports it; it must keep the same real agent UID, system
+   bootstrap and exact-canary negative with positive human pre/post controls.
+   No warmup, retry, longer lease or substitute value is permitted.
+4. Add explicit `final_phase_only` fixture mode: run setup, core clipboard/TUI
+   matrix and the same final suspension/restart/native probes without Full25.
+   Emit `full25=NOT_RUN acceptance=NOT_CLAIMED`; preserve all core failures and
+   strict cleanup. The default remains the full matrix, including happy sync.
+   Strengthen final evidence with a changed real custody PID, unchanged native
+   identity/keys/bootstrap/ACLs, suspension denied before/after restart, resume
+   under the same enrolled identity and a second restart with delegation still
+   usable and the same exact enabled metadata. No provider is substituted.
+5. Local fixture verification uses the documented macOS CI guard, Python AST,
+   existing PTY/helper/observer regressions and shell/YAML/diff/link checks.
+   Any local laboratory invocation acquires `flock /tmp/pm-cargo-window.lock`
+   in this worktree. No local Darwin run or product check is claimed; if
+   product changes become necessary, `check.sh` and native RED/GREEN are required.
+   At most approximately five hypothesis-driven exact-SHA native dispatches,
+   with both jobs awaited to completion and URL/SHA/result retained here.
+
+The inherited `MacPtySession.close` ignores `EBADF` from closing its PTY;
+it remains unchanged. The purge/outbox, provider/second-agent, import summary,
+listener/dispatcher and inherited fallbacks remain outside this workstream.
+Apple documents `errAECoercionFail` as a descriptor coercion failure
+([reference](https://developer.apple.com/documentation/coreservices/erraecoercionfail));
+it is not an isolation denial. Native state is observed using
+[`NSPasteboard`](https://developer.apple.com/documentation/appkit/nspasteboard),
+without changing product clipboard operations.
+
 ## Native contract under test
 
 The port keeps the existing vault engine, binary request framing, TLS 1.3 RPK

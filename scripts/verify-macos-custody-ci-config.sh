@@ -513,12 +513,13 @@ assert module.parse_agent_pasteboard_result(
         b"PM26_PASTEBOARD probe-canary-stdout=absent",
         b"PM26_PASTEBOARD probe-canary-stderr=absent",
         b"PM26_PASTEBOARD probe-success-read=no",
+        b"PM26_PASTEBOARD probe-error=other",
     )) + b"\n"
 ) == {
     b"agent-uid": b"expected", b"manager-uid": b"system",
     b"manager-name": b"different", b"manager-domain": b"different",
     b"probe-result": b"nonzero", b"probe-canary-stdout": b"absent",
-    b"probe-canary-stderr": b"absent", b"probe-success-read": b"no",
+    b"probe-canary-stderr": b"absent", b"probe-success-read": b"no", b"probe-error": b"other",
 }
 module.assert_pasteboard_diagnostic_regression()
 assert module.parse_sodium_cflags(b"CFLAGS='-O0 -g'\n") == b"opt0"
