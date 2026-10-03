@@ -2646,7 +2646,7 @@ No se altera el oráculo de staging, el estado de tickets ni ningún otro fallba
 
 | Punto | Seam exacto heredado | Resultado del candidato |
 | --- | --- | --- |
-| (a) | `crates/pm-ssh-client/src/lib.rs::read_frame`, `authenticate` (copia de password), `serve` (brazo del proveedor) | `Error::Memory(CryptoError)` conserva la causa; `Display/Debug=RESOURCE_UNAVAILABLE`. El fallo sale tipado de `serve`, sin emitir frame3 que lo confundía con I/O/SSH. No lee body cuando falla el owner. |
+| (a) | `crates/pm-ssh-client/src/lib.rs::read_frame`, `authenticate` (copia de password), `serve` (brazo del proveedor) | `Error::Memory(CryptoError)` conserva la causa; `Display/Debug=RESOURCE_UNAVAILABLE`. El fallo llega tipado al brazo de `serve`, registra RESOURCE_UNAVAILABLE/cause=protected-memory y conserva el frame3 indeterminado del wire existente. No lee body cuando falla el owner. |
 | (a), cadena del firmante | mismo archivo, `CustodySigner::auth_sign` → `authenticate_publickey_with` en `authenticate` | El `SignError` vacío y su conversión final a Protocol también perdían el fallo de `read_frame`. El firmante usa el mismo `Error` y conserva memoria/I/O/SendError hasta la frontera SSH. |
 | (b) | mismo archivo, `serve`, brazo consumer: `let Ok(read_frame) else continue` y parser `.ok()` | Lectura y `parse_consumer_reference` retornan error tipado desde `serve`; diagnóstico interno de causa y ninguna respuesta de éxito. Referencia inexistente conserva `[1]`. |
 | (c) | `crates/pm-custody/src/agent_wire.rs::serve_agent`, loop de lectura posterior al discovery | Loop extraído `serve_agent_requests`; `read_agent_frame` conserva I/O original y fase header/body, memoria y frame inválido. En la frontera existente registra sólo clasificación segura y retorna `Failure::Unavailable`, nunca `Ok` tras error. |
@@ -2658,8 +2658,10 @@ fijada, nunca `Display/Debug` del I/O/SSH upstream. No se serializa una fuente
 upstream. `main.rs` sólo adapta la construcción del runtime al nuevo error I/O.
 La lectura agente conserva exactamente el límite heredado 18 MiB; SSH conserva
 128 KiB, IO_TIMEOUT, host-key pinning, métodos, checks y sus frames existentes.
-La propagación terminal en `serve` hace que el proceso SSH informe rc4/código
-fijo ante estos fallos; no añade reintentos ni reparación de conexiones.
+La propagación de lectura/parseo del consumidor sale de `serve` como error
+terminal, con rc4/código fijo. En el proveedor, el frame3 indeterminado conserva
+el contrato existente mientras la causa de memoria queda tipada y registrada.
+No añade reintentos ni reparación de conexiones.
 
 El discovery inicial de `serve_agent` sigue convirtiendo **cualquier** error de
 `DelegatedVault::discover` (storage/integridad/memoria incluidos) en `[1]`.
@@ -2678,9 +2680,9 @@ flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody --li
 
 | Punto | RED conductual previo al cambio de producto | GREEN enfocado |
 | --- | --- | --- |
-| (a) | `/tmp/pmw3c-red-ssh.log`, rc101: controles válidos; frame y copia password con memlock=0 observan SSH_UNAVAILABLE | `/tmp/pmw3c-green-ssh-final.log`, rc0: ambos RESOURCE_UNAVAILABLE; control adicional del servidor retorna el mismo tipo antes de body |
-| (b) | mismo RED SSH, rc101: control `[1]` del servidor vivo, después header mayor al máximo descartado (`returned=false`) | mismo GREEN SSH, rc0: header, parseo y EOF parcial retornan error (`returned=true`), referencia desconocida mantiene `[1]` |
-| (c) | `/tmp/pmw3c-red-agent.log`, rc101: timeout del reader produce `success=true` en el loop real posterior al discovery | `/tmp/pmw3c-green-agent-final.log`, rc0: timeout/I/O/EOF/header/body truncados/frame inválido `success=false`; memoria tipada y lectura válida cubiertas adicionalmente |
+| (a) | `/tmp/pmw3c-red-ssh.log`, rc101: controles válidos; frame y copia password con memlock=0 observan SSH_UNAVAILABLE | `/tmp/pmw3c-green3-ssh.log`, rc0: ambos RESOURCE_UNAVAILABLE; servidor conserva frame3, causa interna ResourceUnavailable y sigue vivo antes de body |
+| (b) | mismo RED SSH, rc101: control `[1]` del servidor vivo, después header mayor al máximo descartado (`returned=false`) | mismo GREEN SSH final, rc0: header, parseo y EOF parcial retornan error (`returned=true`), referencia desconocida mantiene `[1]` |
+| (c) | `/tmp/pmw3c-red-agent.log`, rc101: timeout del reader produce `success=true` en el loop real posterior al discovery | `/tmp/pmw3c-green3-agent.log`, rc0: timeout/I/O/UnexpectedEof/header/body truncados/frame inválido `success=false`; memoria tipada, frame válido y cierre ordenado explícito cubiertos |
 
 La extracción de `copy_password` y del loop conservó literalmente la semántica
 heredada para ejecutar los RED: no era una corrección previa ni fallo de setup.
@@ -2719,3 +2721,67 @@ build workspace/all-targets locked/offline. Producto y pruebas enfocados quedan
 verificados; el runner `/tmp/pmw3c-run-gates2.py` está ejecutando los otros 46
 comandos y conserva resultados por invocación, sin reutilizar logs.
 Este checkpoint no declara el barrido aceptado ni el cierre de W3/G7.
+
+### Corrección de compatibilidad observada en el primer barrido
+
+El checkpoint inicial `eba30006ca6019e745e9f8dc7a408a543e2f118b` tenía check y
+clean verdes, pero el barrido detectó dos regresiones reales. Sus gates parciales
+`/tmp/pmw3c-gate2-results.json` y logs se conservan; **no** son aceptación.
+
+- `lab-adapter-protected-frame` rc1: el candidato cerraba el adaptador SSH por
+  memoria en vez de devolver su frame3 existente. Se corrigió exclusivamente
+  el brazo `Error::Memory`: conserva ese wire y el servicio vivo, con causa
+  tipada ResourceUnavailable y diagnóstico seguro diferente de I/O/SSH.
+- `lab-attempts`/`lab-authorization` (y otros consumidores del mismo helper)
+  rc1: el nuevo diagnóstico imprimía UnexpectedEof ante el cierre ordenado
+  entre requests, vulnerando su stderr vacío. El reader ahora reconoce un
+  `read` exitoso de cero bytes antes del header como `Ok(None)`; el loop lo
+  termina normalmente sin log. Un Err real, timeout, header/body parcial o
+  alloc/mlock sigue propagando fallo, con su causa y fase. Interrupted conserva
+  la semántica de `read_exact`, sin modificar deadlines ni inventar otro canal.
+
+No se cambió ningún lab/oráculo heredado. Los tests nuevos mantienen la
+aserción de denegar cada **error** de lectura y agregan el control de EOF limpio.
+El control nuevo de servidor SSH ahora exige el frame existente, causa de
+memoria exacta y servicio vivo. No se atribuye el primer GREEN del checkpoint
+inicial a la aceptación del wire ni a preservación de stderr normal.
+
+El runner inicial se detuvo sólo después de terminar su caso activo
+`lab-passkey-login` (log preservado); no se interrumpió su lab, no se señaló
+ningún proceso ajeno ni se reutilizan resultados parciales para el gate final.
+La corrida final usa `/tmp/pmw3c-run-final.py`, se detiene entre casos ante
+cualquier regresión, reejecuta los 48 comandos y conserva un log nuevo por caso.
+
+El contrato real TLS precisa otro control: `rustls` devuelve UnexpectedEof si
+un cliente cierra sin close_notify; los clientes existentes no envían siempre
+ese cierre TLS. No se convierte ese **Err** en éxito. Antes de producir el
+Failure público se conserva el error original en `LAST_READ_FAILURE`, estado
+interno acotado al último fallo del hilo de conexión. Sólo UnexpectedEof **antes
+de recibir el primer byte** del siguiente header queda sin stderr; el mismo
+error después de empezar header/body se diagnostica. Este estado guarda la
+fuente tipada original sin clones ni serialización de mensajes upstream; no es
+un historial durable. Timeout, I/O, memoria y frame inválido siguen retornando
+Failure::Unavailable. Ok(None) existe exclusivamente por un read exitoso de
+cero bytes. Se comprueba que el error EOF observado conserva source y estado,
+y se repiten adapter-protected-frame, authorization y attempts antes del gate.
+No se cambia el cliente, su protocolo ni el dispatcher W4 para este control.
+
+Los checks intermedios `/tmp/pmw3c-gate3-final-check.log` y
+`/tmp/pmw3c-gate4-final-check.log` acabaron rc101 exclusivamente por Clippy
+(needless_continue y match_same_arms). No ejecutaron labs ni son RED de
+comportamiento. `/tmp/pmw3c-corrective2-clippy.log` pasa rc0 sobre el correctivo.
+Los GREEN definitivos enfocados son `green3-ssh.log` y `green3-agent.log`,
+3/3 padres por crate, hijos memlock incluidos. Los labs correctivos
+`corrective-adapter.log`, `corrective-authorization.log`, `corrective-attempts.log`
+pasan rc0 con sus aserciones originales y stderr normal vacío.
+
+### Checkpoint correctivo verificado
+
+El correctivo pasa `check.sh` (19.153 s, rc0) y clean/offline
+(41.526 s, rc0), con logs `/tmp/pmw3c-final-final-check.log`
+y `/tmp/pmw3c-final-final-clean.log`. Los GREEN enfocados y tres labs correctivos anteriores
+también pasan. El manifiesto `/tmp/pmw3c-final-source-manifest.json` y patch
+`/tmp/pmw3c-final-code.patch` identifican los cuatro Rust bajo este gate;
+no se modifica producto durante el barrido. Los 48 casos siguen en ejecución
+con logs frescos; este checkpoint sustituye el candidato incompatible eba3000,
+pero no adelanta aceptación integral.

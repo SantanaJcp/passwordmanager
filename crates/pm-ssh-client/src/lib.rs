@@ -354,8 +354,7 @@ pub async fn serve(
                     Err(Error::Challenge)=>{let mut r=vec![1];put_bytes(&mut r,b"additional_factor_required")?;write_frame(&mut stream,&r).await?;}
                     Err(Error::Rejected)=>write_frame(&mut stream,&[2,0,0,0,0]).await?,
                     Err(Error::Unauthorized|Error::Protocol|Error::Profile)=>write_frame(&mut stream,&[4,0,0,0,0]).await?,
-                    Err(error @ (Error::Io(_)|Error::Ssh(_)|Error::Random(_)|Error::SignerSend(_)))=>{error.log_internal("authentication");write_frame(&mut stream,&[3,0,0,0,0]).await?;}
-                    Err(error @ Error::Memory(_))=>{error.log_internal("authentication");return Err(error);},
+                    Err(error @ (Error::Io(_)|Error::Ssh(_)|Error::Random(_)|Error::SignerSend(_)|Error::Memory(_)))=>{error.log_internal("authentication");write_frame(&mut stream,&[3,0,0,0,0]).await?;},
                 }
             }
             accepted=consumer.accept()=>{

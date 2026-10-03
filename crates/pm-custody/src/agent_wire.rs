@@ -72,7 +72,9 @@ fn serve_agent_requests(
     peer: &AgentPeer,
 ) -> Result<(), Failure> {
     loop {
-        let request = read_agent_frame(tls).map_err(AgentReadFailure::public_failure)?;
+        let Some(request) = read_agent_frame(tls).map_err(AgentReadFailure::public_failure)? else {
+            return Ok(());
+        };
         write_frame(tls, &handle_attempt_request(service, peer, &request)?)?;
     }
 }
@@ -89,10 +91,18 @@ enum ReadPhase {
 enum AgentReadFailure {
     Io {
         phase: ReadPhase,
+        at_boundary: bool,
         source: std::io::Error,
     },
     Memory(pm_crypto::CryptoError),
     MalformedFrame,
+}
+
+// Preserve the original typed cause after conversion at the existing public
+// boundary, without widening Failure or the native dispatcher (W4).
+// Bounded to the last failure on this connection worker thread.
+std::thread_local! {
+    static LAST_READ_FAILURE: std::cell::RefCell<Option<AgentReadFailure>> = const { std::cell::RefCell::new(None) };
 }
 
 impl AgentReadFailure {
@@ -100,7 +110,14 @@ impl AgentReadFailure {
         // Only fixed categories, phase, OS code and ErrorKind reach diagnostics.
         // The original I/O/crypto cause remains owned by this typed boundary.
         match &self {
-            Self::Io { phase, source } => eprintln!(
+            // Existing clients may close TLS without close_notify between
+            // requests. Retain this as a failure in state, with no stderr noise.
+            Self::Io {
+                at_boundary: true,
+                source,
+                ..
+            } if source.kind() == std::io::ErrorKind::UnexpectedEof => {}
+            Self::Io { phase, source, .. } => eprintln!(
                 "PM_AGENT_READ_FAILURE category=CUSTODY_UNAVAILABLE cause=io phase={phase:?} kind={:?} os_code={:?}",
                 source.kind(),
                 source.raw_os_error()
@@ -112,16 +129,38 @@ impl AgentReadFailure {
                 eprintln!("PM_AGENT_READ_FAILURE category=INVALID_ARGUMENT cause=malformed-frame");
             }
         }
+        LAST_READ_FAILURE.with(|last| {
+            *last.borrow_mut() = Some(self);
+        });
         Failure::Unavailable
     }
 }
 
-fn read_agent_frame(input: &mut impl Read) -> Result<pm_crypto::ProtectedBytes, AgentReadFailure> {
+fn read_agent_frame(
+    input: &mut impl Read,
+) -> Result<Option<pm_crypto::ProtectedBytes>, AgentReadFailure> {
     let mut header = [0_u8; 4];
+    // A zero-byte read between frames is an orderly close, not a failed read.
+    // Interrupted reads retain read_exact's existing retry semantics.
+    loop {
+        match input.read(&mut header[..1]) {
+            Ok(0) => return Ok(None),
+            Ok(_) => break,
+            Err(source) if source.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(source) => {
+                return Err(AgentReadFailure::Io {
+                    phase: ReadPhase::Header,
+                    at_boundary: true,
+                    source,
+                });
+            }
+        }
+    }
     input
-        .read_exact(&mut header)
+        .read_exact(&mut header[1..])
         .map_err(|source| AgentReadFailure::Io {
             phase: ReadPhase::Header,
+            at_boundary: false,
             source,
         })?;
     let length = usize::try_from(u32::from_be_bytes(header))
@@ -134,9 +173,10 @@ fn read_agent_frame(input: &mut impl Read) -> Result<pm_crypto::ProtectedBytes, 
         .read_exact(&mut frame)
         .map_err(|source| AgentReadFailure::Io {
             phase: ReadPhase::Body,
+            at_boundary: false,
             source,
         })?;
-    Ok(frame)
+    Ok(Some(frame))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -388,7 +428,7 @@ mod error_propagation_tests {
         for (name, bytes, kind) in [
             ("timeout", vec![], Some(std::io::ErrorKind::TimedOut)),
             ("io", vec![], Some(std::io::ErrorKind::BrokenPipe)),
-            ("eof", vec![], None),
+            ("eof-error", vec![], Some(std::io::ErrorKind::UnexpectedEof)),
             ("partial-header", vec![0, 0], None),
             ("partial-body", vec![0, 0, 0, 2, 1], None),
             ("malformed", vec![0, 0, 0, 0], None),
@@ -406,7 +446,20 @@ mod error_propagation_tests {
                 matches!(result, Err(Failure::Unavailable)),
                 "read failure became successful connection: {name}"
             );
+            if name == "eof-error" {
+                LAST_READ_FAILURE.with(|last| {
+                    assert!(matches!(last.borrow().as_ref(), Some(AgentReadFailure::Io { at_boundary: true, source, .. })
+                        if source.kind() == std::io::ErrorKind::UnexpectedEof && source.to_string() == "PMW3C_SYNTHETIC_PRIVATE_PATH_PAYLOAD"));
+                });
+            }
         }
+
+        let mut normal_close = BrokenWire {
+            input: std::io::Cursor::new(vec![]),
+            kind: None,
+        };
+        assert!(serve_agent_requests(&mut normal_close, &service, &peer).is_ok());
+        println!("PMW3C_AGENT_ORDERLY_CLOSE success=true diagnostics=none");
     }
     #[test]
     fn classified_agent_reader_preserves_io_phase_and_original_cause() {
@@ -419,15 +472,15 @@ mod error_propagation_tests {
             panic!("read accepted")
         };
         assert!(
-            matches!(&failure, AgentReadFailure::Io { phase: ReadPhase::Header, source } if source.kind() == std::io::ErrorKind::TimedOut && source.to_string() == marker)
+            matches!(&failure, AgentReadFailure::Io { phase: ReadPhase::Header, source, .. } if source.kind() == std::io::ErrorKind::TimedOut && source.to_string() == marker)
         );
         assert!(matches!(failure.public_failure(), Failure::Unavailable));
         let mut body = [0, 0, 0, 2, 1].as_slice();
         assert!(
-            matches!(read_agent_frame(&mut body), Err(AgentReadFailure::Io { phase: ReadPhase::Body, source }) if source.kind() == std::io::ErrorKind::UnexpectedEof)
+            matches!(read_agent_frame(&mut body), Err(AgentReadFailure::Io { phase: ReadPhase::Body, source, .. }) if source.kind() == std::io::ErrorKind::UnexpectedEof)
         );
         let mut valid = [0, 0, 0, 1, 0x28].as_slice();
-        let Ok(frame) = read_agent_frame(&mut valid) else {
+        let Ok(Some(frame)) = read_agent_frame(&mut valid) else {
             panic!("valid frame rejected")
         };
         assert_eq!(&*frame, &[0x28]);
@@ -468,7 +521,7 @@ mod error_propagation_tests {
     #[ignore = "isolated RLIMIT_MEMLOCK child, invoked by the parent"]
     fn agent_memory_child() {
         let mut control = [0, 0, 0, 1, 0x28].as_slice();
-        assert!(read_agent_frame(&mut control).is_ok());
+        assert!(matches!(read_agent_frame(&mut control), Ok(Some(_))));
         println!("PMW3C_AGENT_MEMORY_CONTROL_READY");
         let limit = libc::rlimit {
             rlim_cur: 0,

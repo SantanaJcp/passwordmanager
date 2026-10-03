@@ -25,7 +25,14 @@ fn protected_memory_failure_keeps_its_category() {
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stdout.contains("PMW3C_SSH_MEMORY_CONTROL_READY"));
         assert!(stdout.contains("PMW3C_SSH_MEMORY_OBSERVED"));
-        println!("{stdout}");
+        if mode == "server" {
+            assert!(stderr.contains(
+                "category=RESOURCE_UNAVAILABLE cause=protected-memory source=ResourceUnavailable"
+            ));
+            assert!(!stderr.contains("PMW3C_SYNTHETIC_PASSWORD"));
+            assert!(!stderr.contains("PMW3C_SYNTHETIC_PRIVATE_PATH_PAYLOAD"));
+        }
+        println!("{stdout}{stderr}");
         passed &= output.status.success();
         if !output.status.success() {
             println!("PMW3C_SSH_MEMORY_CHILD_FAILED mode={mode}: {stderr}");
@@ -88,7 +95,7 @@ fn protected_memory_child() {
             let provider = sockets.0.join("provider.sock");
             let server_provider = provider.clone();
             let consumer = sockets.0.join("consumer.sock");
-            let mut server =
+            let server =
                 tokio::spawn(async move { serve(profile, &server_provider, uid, &consumer).await });
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !provider.exists() {
@@ -99,16 +106,21 @@ fn protected_memory_child() {
             .unwrap();
             let mut stream = UnixStream::connect(&provider).await.unwrap();
             stream.write_u32(1).await.unwrap();
-            let result = tokio::time::timeout(Duration::from_secs(1), &mut server)
+            let length = tokio::time::timeout(Duration::from_secs(1), stream.read_u32())
                 .await
                 .unwrap()
                 .unwrap();
+            assert_eq!(length, 5);
+            let mut response = [0; 5];
+            stream.read_exact(&mut response).await.unwrap();
+            assert_eq!(response, [3, 0, 0, 0, 0]);
+            assert!(!server.is_finished());
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
             drop(stream);
             drop(sockets);
-            match result {
-                Err(error) => Err(error),
-                Ok(()) => panic!("server accepted memory failure"),
-            }
+            println!("PMW3C_SSH_MEMORY_OBSERVED mode=server wire=INDETERMINATE server-live=1");
+            return;
         };
         let Err(error) = result else {
             panic!("unlocked owner accepted")
