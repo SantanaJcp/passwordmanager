@@ -56,6 +56,10 @@ use crate::windows::{
 };
 use crate::{Failure, take_path};
 
+#[cfg(windows)]
+#[path = "windows_console_diagnostic.rs"]
+mod console_diagnostic;
+
 const DEFAULT_IDLE: u64 = 300;
 const DEFAULT_REVEAL: u64 = 15;
 const DEFAULT_COPY: u64 = 30;
@@ -203,6 +207,8 @@ struct App {
     attachments: Vec<AttachmentDescriptor>,
     sync_job: Option<[u8; 16]>,
     sync_poll_at: Instant,
+    #[cfg(windows)]
+    initial_diagnostic: Option<console_diagnostic::Diagnostic>,
 }
 
 enum PendingOperation {
@@ -259,6 +265,8 @@ impl App {
             attachments: Vec::new(),
             sync_job: None,
             sync_poll_at: Instant::now(),
+            #[cfg(windows)]
+            initial_diagnostic: None,
         }
     }
 
@@ -506,6 +514,8 @@ pub(super) fn run(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), 
         parsed.idle,
         parsed.reveal,
         parsed.copy,
+        #[cfg(windows)]
+        parsed.diagnostic_path.as_deref(),
     )
 }
 
@@ -516,6 +526,8 @@ struct TuiArguments {
     idle: u64,
     reveal: u64,
     copy: u64,
+    #[cfg(windows)]
+    diagnostic_path: Option<PathBuf>,
 }
 
 fn parse_arguments(
@@ -530,6 +542,14 @@ fn parse_arguments(
     let idle = take_seconds(arguments, "--idle-seconds", DEFAULT_IDLE)?;
     let reveal = take_seconds(arguments, "--reveal-seconds", DEFAULT_REVEAL)?;
     let copy = take_seconds(arguments, "--copy-seconds", DEFAULT_COPY)?;
+    #[cfg(windows)]
+    let diagnostic_path = match arguments.next() {
+        None => None,
+        Some(flag) if flag == "--console-diagnostics" => {
+            Some(PathBuf::from(arguments.next().ok_or(Failure::Usage)?))
+        }
+        Some(_) => return Err(Failure::Usage),
+    };
     finish_arguments(arguments)?;
     if idle > DEFAULT_IDLE || reveal > DEFAULT_REVEAL || copy > DEFAULT_COPY {
         return Err(Failure::Usage);
@@ -541,6 +561,8 @@ fn parse_arguments(
         idle,
         reveal,
         copy,
+        #[cfg(windows)]
+        diagnostic_path,
     })
 }
 
@@ -582,8 +604,17 @@ fn run_terminal(
     idle: u64,
     reveal: u64,
     copy: u64,
+    #[cfg(windows)] diagnostic_path: Option<&Path>,
 ) -> Result<(), Failure> {
     let writer = open_terminal()?;
+    #[cfg(windows)]
+    let mut diagnostic = diagnostic_path
+        .map(|path| console_diagnostic::Diagnostic::create(path, &writer))
+        .transpose()?;
+    #[cfg(windows)]
+    if let Some(probe) = diagnostic.as_mut() {
+        probe.record("before-alt")?;
+    }
     if enable_raw_mode().is_err() {
         if disable_raw_mode().is_err() {
             report_cleanup_failure("terminal-initialization");
@@ -606,6 +637,10 @@ fn run_terminal(
     let operation = (|| {
         guard.state.alternate = true;
         execute!(guard.writer, EnterAlternateScreen).map_err(|_| Failure::Unavailable)?;
+        #[cfg(windows)]
+        if let Some(probe) = diagnostic.as_mut() {
+            probe.record("after-alt")?;
+        }
         guard.state.cursor_hidden = true;
         execute!(guard.writer, crossterm::cursor::Hide).map_err(|_| Failure::Unavailable)?;
         let backend = CrosstermBackend::new(writer);
@@ -616,6 +651,10 @@ fn run_terminal(
             Duration::from_secs(reveal),
             Duration::from_secs(copy),
         );
+        #[cfg(windows)]
+        {
+            app.initial_diagnostic = diagnostic;
+        }
         run_authenticated_session(profile, key, socket, &mut terminal, &mut app)
     })();
     let restoration = guard.restore();
@@ -2436,7 +2475,7 @@ fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Fail
 }
 
 fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Result<(), Failure> {
-    terminal.draw(|frame| {
+    let completed = terminal.draw(|frame| {
         let chunks = Layout::default().direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(6)]).split(frame.area());
         let title = Paragraph::new("Password Manager — human TLS-RPK content")
@@ -2511,7 +2550,15 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
             Line::from(controls),
         ]).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL));
         frame.render_widget(footer, chunks[2]);
-    }).map(|_| ()).map_err(|_| Failure::Unavailable)
+    }).map_err(|_| Failure::Unavailable)?;
+    #[cfg(windows)]
+    if let Some(mut probe) = app.initial_diagnostic.take() {
+        probe.frame(completed.buffer)?;
+        probe.record("after-draw")?;
+    }
+    #[cfg(not(windows))]
+    let _ = completed;
+    Ok(())
 }
 
 fn display_secret(value: &[u8]) -> String {

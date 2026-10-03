@@ -2018,3 +2018,40 @@ is required to confirm this cause and reach the pending first-prompt diagnostic.
 Local close verification: rustfmt/config and pm-native-channel all-targets
 PASS on Linux (`/tmp/pm-handoff-windows-local.log`); Windows-gated tests
 are not executed by that command. Native confirmation remains separate.
+
+### Primer prompt: experimento discriminante — 2026-10-02
+
+Base recuperada con `gh run view 35168387995 --log`: [run36](https://github.com/SantanaJcp/passwordmanager/actions/runs/35168387995), SHA
+`b26c066a9f8e7cc1fb6af8a98195fc2f29706e49`, job `105034530968`.
+12 nativos + 1 pipe + 14 observer + 1 sync PASS; primer prompt FAIL a 15 s.
+Los títulos en bytes raw no prueban emisión del prompt. Se conserva 80×24,
+15 s y el observer estricto; no se fija TERM ni se modifica el motor.
+
+Método escrito antes de ejecutar: un flag Windows opt-in
+`--console-diagnostics <archivo nuevo>` registra sólo métricas y booleanos
+antes de alternate-screen, después y tras el primer draw, antes de introducir
+cualquier contraseña. Compara writer original, stdout y CONOUT$ recién abierto:
+modo VT, tamaño/buffer/viewport/cursor y presencia de tres textos públicos
+fijos leídos del mismo buffer. Compara además área y booleanos en el
+CompletedFrame de Ratatui con el stream y la pantalla del observer. El archivo
+está en la raíz humana privada del fixture, se crea sin reemplazo y se imprime
+sólo tras comprobar límite/formato. Las consultas no cambian modo ni buffer.
+
+| Hipótesis | Experimento y resultado que la distingue |
+| --- | --- |
+| (a) El render no incluye el prompt | Booleano del prompt en CompletedFrame. Ausente con área suficiente implica render/layout anterior al backend; no culpar al observer. |
+| (b) Otro handle/buffer o VT deshabilitado | Modo y geometría antes/después, booleanos Win32 writer/stdout/CONOUT$. Frame presente pero sólo otro buffer lo contiene distingue routing; VT distinto distingue configuración por buffer. |
+| (c) Layout fuera de geometría | Área de CompletedFrame frente a viewport Win32 y 80×24 observado, coordenadas del prompt en el frame. No agrandar pantalla. |
+| (d) Reconstrucción ConPTY | Frame y buffer activo contienen el prompt y el stream lo transmite, pero observer no: reproducción sintética de las secuencias concretas. No aceptar sólo raw como UI visible. |
+
+Fuentes primarias: [VT Microsoft](https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences),
+[handles](https://learn.microsoft.com/en-us/windows/console/console-handles),
+[GetConsoleScreenBufferInfo](https://learn.microsoft.com/en-us/windows/console/getconsolescreenbufferinfo),
+[wiki Terminal, Troubleshooting Tips](https://github.com/microsoft/terminal/wiki/Troubleshooting-Tips).
+VT requiere ENABLE_VIRTUAL_TERMINAL_PROCESSING en el handle del screen buffer;
+CONOUT$ abre el buffer activo. La wiki distingue stream de render y advierte
+que dumps/ETL capturan contenido: aquí sólo booleanos/métricas, sin dumps.
+Fallback heredado observado en Crossterm 0.29 `ansi_support.rs`: si falla
+enable_vt_processing, TERM distinto de dumb puede declarar soporte. Reportado,
+sin usar ni modificar. Los cleanups heredados del handoff siguen pendientes
+de autorización y no se tocan.
