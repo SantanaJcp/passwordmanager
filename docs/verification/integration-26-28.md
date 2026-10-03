@@ -1,6 +1,6 @@
 # Integración 26–28 — composición y evidencia
 
-Fecha: 2026-10-03. Rol original: merger de candidatas publicadas. La remediación posterior autorizada cierra únicamente dos regresiones de composición; no corrige los demás defectos abiertos ni cambia estados de tickets.
+Fecha: 2026-10-03. Rol: merger de candidatas publicadas. El corte vigente está en [Composición de G7 fases 4–5 y clipboard](#composición-de-g7-fases-45-y-clipboard--2026-10-03); las secciones anteriores conservan la integración y remediación históricas. Esta composición no corrige defectos abiertos ni cambia estados de tickets.
 
 ## Identidad y alcance
 
@@ -342,3 +342,82 @@ fusionar el PR borrador #1. Resolver con el usuario las decisiones del resumen
 y purge/outbox antes de ampliar las matrices; los gates humanos/reboot/FDE,
 firma y targets no acreditados siguen pendientes. La aceptación global nativa
 continúa FAIL; las dos fronteras de regresión solicitadas sí están restauradas.
+
+## Composición de G7 fases 4–5 y clipboard — 2026-10-03
+
+### Identidad, merges y preservación
+
+Base local/remota verificada después de fetch: `36eecc8c365328ca4c8ca074ae013564767d79b7`.
+Mismo worktree `.worktrees/integration-26-28` y rama `codex/pm-integration-26-28`.
+SHA final de código/fixtures/workflows: `272aac8f7383464fd1e0448717110cccfab0fa9f`.
+La actualización posterior de este informe es exclusivamente documental; no es otra versión de producto ejecutada por los runs indicados abajo.
+
+| Orden | Candidata, local = origin | Operación y resultado |
+| --- | --- | --- |
+| 1 | `codex/pm-28-phase4` / `b4e8ad79ebdad92d8c7a3863b328a799ed011f98` | Fast-forward desde `36eecc8`, sin commit de merge adicional. |
+| 2 | `codex/pm-26-clipboard` / `0fadac6f604e7ae3344151665be0b0b5fe958657` | Merge commit `272aac8`; mensaje cita el SHA completo. Padres: `b4e8ad7`, `0fadac6`. |
+
+**Cero conflictos**, textuales o decisiones de producto necesarias. Los 28 paths de G7 y los seis de clipboard son disjuntos; sus objetos Git en la composición son idénticos a los de cada candidata. Ambos commits siguen en la ascendencia. Se conserva el engine único, sin edición del merger en producto, tests, límites, deadlines, KDF o fallbacks. Las únicas ediciones posteriores al merge son de este informe.
+
+### Gates locales y comparación
+
+Mismo método, cwd y requisitos del baseline, con `PM_KEYCLOAK_DIST`, `PM_CFT_DIR` y `PYTHONDONTWRITEBYTECODE=1` indicados arriba. Cada comando adquiere `flock /tmp/pm-cargo-window.lock`; barridos secuenciales, sin instalación local de dependencias. Runners: `/tmp/pmint3-run-local.py` y `/tmp/pmint3-run-g7.py`. Logs nuevos exclusivamente `/tmp/pmint3-*.log`; ninguna limpieza de paths ajenos.
+
+Comparación caso por caso con `/tmp/pm28p5-local-results.json`: **36 casos, 33 rc0, cero cambios de rc**, 372.65 s. Check rc0 en 44.79 s; build limpio locked/offline rc0 en 42.12 s. Los 26 labs Linux conservan 25 PASS y el mismo FAIL TUI operations. Publication backup/plaintext/attachment y custody-audit/sqlite-sync/bootstrap-completed conservan 3/3 y 3/3 rc0. Detalle: `/tmp/pmint3-local-results.json`; resumen: `/tmp/pmint3-local-summary.log`. Sin raíces residuales nuevas en el inventario acotado; no es prueba integral de cleanup.
+
+El único mismatch de gates sigue siendo `exact-duplicates=1`: la pantalla recorta `Mapping=chrome duplicate-action=keep; Preview values hidden: total=1 new=0 re…`. Vault-loss completado conserva replacement=1/rc1; purge conserva `QueryReturnedNoRows`, pending=4, signed-headers=4, roots=0/rc1. Ambos RED permanecen fuera de gates, con sus oráculos intactos.
+
+Diez modos adicionales, `/tmp/pmint3-g7-results.json` y `/tmp/pmint3-g7-summary.log`:
+
+| Argumentos de `verify-ticket28-custody-loss.sh`, después de flock | rc inicial | Comparación; log en `/tmp/` |
+| --- | ---: | --- |
+| `matrix` | 1 | RED conocido: commit/outbox/audit EIO y ENOSPC conservan staging 1/1/17 tras error/restart; atomicidad/autoridad pasan. `pmint3-g7-matrix.log`. |
+| `inflight result-sync` | 1 | **FAIL adicional** tras EIO: `partial state settlement after fsync failure`. `pmint3-g7-inflight-result-sync.log`. |
+| `inflight bootstrap` | 0 | Cierre/restitución/INDETERMINATE, calls=1. `pmint3-g7-inflight-bootstrap.log`. |
+| `inflight audit` | 0 | Mismos controles. `pmint3-g7-inflight-audit.log`. |
+| `inflight crash` | 0 | SIGABRT real, WCOREDUMP=false, calls=1. `pmint3-g7-inflight-crash.log`. |
+| `canaries` | 0 | Canales activos/históricos y controles UID/scanner completos en su alcance. `pmint3-g7-canaries.log`. |
+| `inflight vault` | 1 | RED conocido, replacement=1. `pmint3-red-inflight-vault.log`. |
+| `inflight-live bootstrap` | 1 | RED conocido, CREATED; fixture cancela antes de otro login. `pmint3-red-live-bootstrap.log`. |
+| `inflight-live audit` | 1 | Mismo RED de admisión en caliente. `pmint3-red-live-audit.log`. |
+| `inflight-live vault` | 1 | Admisión rechazada; RED conocido replacement=1 en recuperación. `pmint3-red-live-vault.log`. |
+
+Primera barrida: cuatro positivos rc0, cinco RED conocidos rc1 y un FAIL adicional rc1; 43.85 s. Todos los teardown de esos modos reportan errors=0. Una repetición enfocada de `inflight result-sync`, con vaults nuevos y el mismo SHA/comando/oráculo/plazos, termina rc0 en 5.07 s: control, EIO y ENOSPC, calls=1, INDETERMINATE y autoridad exacta. Evidencia: `/tmp/pmint3-g7-result-sync-repeat.{log,json}`. **La repetición no convierte la primera barrida en PASS.** El fallo es intermitente y no documentado en el baseline; su causa y si refleja producto o carrera del observador están sin demostrar. El producto y fixture Linux son idénticos a 28; no hay evidencia para atribuirle una corrección mecánica de merge ni reclasificarlo como RED conocido. Se entrega al dueño de G7.
+
+### CI nativa y publicación
+
+Repositorio público y workflows manuales activos comprobados por API. Guards CI, shell/YAML/AST y diff pasan. Runners estándar de los workflows, contents/read, datos sintéticos, sin caches/artifacts/secrets. La gratuidad de runners estándar en repositorios públicos se revalidó contra [GitHub](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+
+Un dispatch aceptado por modo, todos sobre `272aac8f7383464fd1e0448717110cccfab0fa9f`:
+
+| Run | Inputs y referencia | Resultado |
+| --- | --- | --- |
+| [macOS normal 37110528957](https://github.com/SantanaJcp/passwordmanager/actions/runs/37110528957) | pasteboard_diagnostic=false, final_phase_only=false; referencia [37107763341](https://github.com/SantanaJcp/passwordmanager/actions/runs/37107763341), SHA `e3f02d4f34ea45c50754b150f5eec96e9c1a77b6` | **FAIL terminado, ambas CPU**, happy sync/integrity conocido. Intel conserva el punto de referencia; ARM supera el aviso de rotación y también llega a happy sync. |
+| [macOS independiente 37110533130](https://github.com/SantanaJcp/passwordmanager/actions/runs/37110533130) | pasteboard_diagnostic=false, final_phase_only=true; referencia [37107761539](https://github.com/SantanaJcp/passwordmanager/actions/runs/37107761539), SHA `e3f02d4f34ea45c50754b150f5eec96e9c1a77b6` | **PASS acotado terminado, Intel + ARM**, mismo alcance que referencia; Full25 NOT_RUN, acceptance NOT_CLAIMED. |
+| [Windows 37110536568](https://github.com/SantanaJcp/passwordmanager/actions/runs/37110536568) | diagnostic_only=false, service_diagnostics=false, tui_conpty_red=true; referencia [37101489213](https://github.com/SantanaJcp/passwordmanager/actions/runs/37101489213), SHA `9c9ab960d6c23ce43d46c9fdfbb3696e572d4734` | **FAIL terminado**, mismo preview CSV/`exact-duplicates=0` que referencia; sin regresión de build. Storage diagnostics skipped por input, no PASS de producto. |
+
+Mac normal: jobs [Intel 111167387879](https://github.com/SantanaJcp/passwordmanager/actions/runs/37110528957/job/111167387879) y [ARM 111167387756](https://github.com/SantanaJcp/passwordmanager/actions/runs/37110528957/job/111167387756). Ambos pasan build/tests/Mach-O, control humano abierto, discovery concurrente, Ticket23/partial24 y AppKit aislado: nil/exit69 explícito, canarios ausentes, controles humanos positivos estables y dentro del lease. Ambos alcanzan Full25-import/offline+wrong-pin/local, incluido restore/rotation y las colisiones backup/plaintext sin cambiar el oráculo. Fallan únicamente en el wait original de 20 s de happy sync: `durable=integrity screen=integrity process=same`, missing-items=5, blocks=2 y roots=0. El baseline Intel tenía blocks=25; ese conteo no es oráculo de aceptación ni prueba de una causa nueva. ARM supera el fallo previo del aviso de rotación, sin que una sola observación cierre su intermitencia histórica. No llegan a los grupos posteriores de sync ni a las fases finales del modo normal.
+
+Mac independiente: jobs [Intel 111167400244](https://github.com/SantanaJcp/passwordmanager/actions/runs/37110533130/job/111167400244) y [ARM 111167400415](https://github.com/SantanaJcp/passwordmanager/actions/runs/37110533130/job/111167400415). Ambos emiten el PASS acotado después de cleanup estricto: core, AppKit aislado, expiración real empty/nil con coercion-1700 humana, canario embebido, suspensión persistida, primer restart real con identidad intacta, resume y segundo restart con autorización/metadata preservadas y humano locked, y probes nativos TTY/core/AppKit. Se conserva expresamente `full25=NOT_RUN acceptance=NOT_CLAIMED`.
+
+Windows: job [111167410650](https://github.com/SantanaJcp/passwordmanager/actions/runs/37110536568/job/111167410650). Build nativo y grupos primitives13/pipe1/observer16/sync-lib1 pasan. ConPTY first-prompt/hidden-input/unlock/footer-horizontal PASS; mismo FAIL de resumen recortado a 15 s antes de IMPORT. Teardown del servicio y raíz exacta termina sin fallo adicional reportado. No acredita colisiones/operaciones posteriores ni los Drops heredados.
+
+| Entorno observado | Label / imagen | Toolchain y OS |
+| --- | --- | --- |
+| Mac Intel, ambos modos | macos-15-intel / macos15 20260824.0482.1 | Rust1.98.1 x86_64-apple-darwin; macOS15.7.9/kernel24.6.0. |
+| Mac ARM, ambos modos | macos-15 / macos15 20260907.0337.1 | Rust1.98.1 aarch64-apple-darwin; macOS15.7.9/kernel24.6.0. |
+| Windows ARM64 | windows-11-vs2026-arm / win11-vs2026-arm64 20260924.168.1 | Rust1.98.1 aarch64-pc-windows-msvc; Windows11 Enterprise10.0.26200/build26200, libsodium1.0.22 autenticada/ARM64/MT. |
+
+**Sin FAIL nativo nuevo ni regresión de composición observada** frente a las referencias. Los tres runs y todos sus jobs han terminado; no queda run propio activo. Logs y metadata: `/tmp/pmint3-native-{macos-normal,macos-independent,windows}.{log,json}`. Comparación por marcadores: `/tmp/pmint3-native-comparison.json`. Preflight solo acredita entorno; ni los PASS parciales ni el modo independiente certifican soporte o aceptación global.
+
+GitHub rechazó con HTTP422 la solicitud inicial que usaba SHA como ref, sin crear run. Después se usó el nombre de esta rama, comprobando su SHA por API antes/después de cada dispatch y el headSha de cada run. Registro: `/tmp/pmint3-dispatch-record.json`; no se repite ningún dispatch aceptado. Logs/metadata de referencias y corridas usan el mismo prefijo `pmint3`.
+
+Push normal del merge y del informe únicamente a la rama de integración. El helper configurado apuntaba a un gh inexistente; se usó el override por comando autorizado, sin cambiar configuración persistente. GitHub informó bypass de los permisos existentes sobre el ref protegido; no se cambiaron reglas. El commit del informe se identifica por ser el hijo documental de `272aac8`; la CI corresponde al SHA exacto de código indicado, sin dispatch repetido por la actualización documental.
+
+### Fallos heredados y decisiones pendientes
+
+Se conservan los inventarios de fallbacks de [28](ticket-28.md), [26](ticket-26.md) y este informe: SQLite crea DB vacía cuando falta vault; reducer busca kind en otra revisión; getters/diagnósticos de providers sustituyen campos ausentes y varios caminos de worker/transporte/cleanup agrupan o descartan errores. También se observó `linux.rs::run_provider_once`: ante AccessSuspended/AgentRevoked/CredentialUnavailable descarta el error de `attempts.settle` y retorna Ok, ocultando un eventual fallo de persistir AUTHORITY_REVOKED. Se conserva, sin corregirlo ni usarlo para aceptar la composición.
+
+Pendientes: presentación completa de resumen/avisos; purge/outbox; vault-loss; composición de staging preparado con cleanup G7; retirada en caliente de bootstrap/audit; clasificación del FAIL intermitente result-sync; memoria restante, segundo agente/proveedor y gates humanos, reboot/FDE, firma y targets no acreditados. No se decide producto ni se cambian tickets. La raíz y `codex/implement-passwordmanager` se preservan; PR borrador #1 no se fusiona ni se modifica.
+
+Entrega: composición publicada y verificación ejecutada; **aceptación global continúa FAIL**. No hay fix mecánico de composición pendiente identificado. El dueño de G7 debe clasificar la primera falla result-sync antes de declarar ese gate estable; las demás decisiones/RED anteriores requieren su autorización específica. No se transforma la documentación en cierre de G7 ni en revisión formal final.
