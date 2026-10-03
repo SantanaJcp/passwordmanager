@@ -177,3 +177,52 @@ La rama contiene cuatro merges y este informe; **composición realizada, aceptac
 5. Nueva autorización para CI después de un candidato corregido: los dos dispatch permitidos se consumieron y terminaron. Además quedan gates humanos/reboot/FDE, firma y targets no acreditados.
 
 El helper Git configurado falló por apuntar a un gh inexistente. Se usó el override de credenciales autorizado, exclusivamente en los comandos push normales de esta rama; no se alteró configuración persistente ni se hizo force. La creación remota informó bypass de restricción de creación por los permisos existentes; no se cambiaron reglas. El PR borrador #1 y su base permanecen fuera de esta entrega.
+
+## Remediación de integración autorizada — 2026-10-03
+
+Solicitud posterior: corregir únicamente las dos regresiones de composición,
+push normal a esta rama y nuevos dispatch exactos (máximo razonable cuatro por
+plataforma). No cambia estados de tickets ni autoriza los defectos conocidos.
+
+### Discriminante macOS previo a la corrección
+
+La comparación con `c206c5a` identifica una llamada adicional a
+`configure_unix_stream` en `pm-sync/src/main.rs:serve`, antes de crear el worker.
+Su `?` puede terminar el servidor. La candidata mantenía esta guarda solamente
+en el handler por conexión. El helper nativo conserva exactamente su guard
+Darwin `SO_NOSIGPIPE`; el readiness conecta y cierra el peer sin enviar TLS.
+La composición también duplica la guarda cliente en `client_exchange`.
+
+Hipótesis discriminadas: (1) guarda del socket aceptado fatal al listener;
+(2) lectura/locking de la clave protegida, permisos/rutas o inicialización del
+store antes de bind; (3) publicación exclusiva del sync paginado. La tercera
+no está en el camino de arranque/readiness: `publish_staged_file` se invoca
+únicamente al terminar `download_paged_file`. La primera se comprobará con una
+línea fija `SYNC_FAILURE phase=accepted-socket-guard` al retornar el error ya
+existente; el fixture publica exclusivamente la categoría failed/unobserved.
+No imprime rutas, errores nativos, claves ni payloads y no altera el resultado.
+
+Método solicitado: gate y barrida local de los mismos 36 casos, secuenciales
+con flock y las mismas variables; comparar rc caso por caso con el baseline.
+Sin targets Darwin/Windows instalados localmente (solo x86_64 Linux), no se
+instala ninguno. CI Windows normal comprueba exhaustividad del cfg y el avance
+hasta el preview; CI macOS observa primero el discriminante sin parchear la
+guarda y después el mismo readiness/matriz sobre la corrección demostrada.
+Mismos límites, aserciones y inputs que los runs de integración originales.
+Logs nuevos exclusivamente `/tmp/pmint2-20261003-*.log`.
+
+Windows: `after_native_cleanup` incorpora el brazo explícito DestinationExists,
+con primary idéntico y cleanup NativeResourceRestoration; los brazos restantes
+ya conservan la variante en todos los cfg. La seam sigue conectada desde
+`windows.rs:rpc_download_atomic` y `pm-sync/src/lib.rs:publish_staged_file` a
+`pm-vault/src/publication.rs:publish_native` (`MoveFileExW`, flags 0, sin
+REPLACE_EXISTING/COPY_ALLOWED). Esto es revisión fuente; aún falta la nueva CI.
+
+Primer candidato de remediación (Windows + discriminante macOS): `check.sh`
+rc0 (42.55 s), clean offline rc0 (42.55 s), 36 casos en 371.93 s y **cero
+cambios de rc respecto al baseline**. Los únicos rc1 son TUI operations
+(mismo `exact-duplicates=1` recortado), RED vault y RED purge. Sync y las tres
+publicaciones PASS; cero raíces residuales nuevas en el inventario acotado.
+Resumen `/tmp/pmint2-20261003-local-summary.log`, detalle
+`/tmp/pmint2-20261003-local-results.json`. AST Python, configuración CI y
+enlaces relativos del informe comprobados; no cambia ningún workflow.

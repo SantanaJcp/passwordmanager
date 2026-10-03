@@ -83,6 +83,10 @@ impl Failure {
                 primary: PrimaryFailure::Unavailable,
                 cleanups: vec![failure],
             },
+            Self::DestinationExists => Self::WithCleanup {
+                primary: PrimaryFailure::DestinationExists,
+                cleanups: vec![failure],
+            },
             Self::WithCleanup {
                 primary,
                 mut cleanups,

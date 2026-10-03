@@ -147,7 +147,9 @@ fn serve(
     fs::set_permissions(socket, fs::Permissions::from_mode(0o666)).map_err(|_| ())?;
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
+        pm_native_channel::configure_unix_stream(&stream).map_err(|_| {
+            eprintln!("SYNC_FAILURE phase=accepted-socket-guard");
+        })?;
         let store_path = db.to_owned();
         let config = Arc::clone(&config);
         std::thread::spawn(move || {
