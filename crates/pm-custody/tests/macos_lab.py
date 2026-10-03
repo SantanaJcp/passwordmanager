@@ -913,6 +913,7 @@ class MacPtySession:
 
     def run_while_draining(
         self, command, *, check=True, timeout=30, ready_path=None, ready_timeout=2,
+        progress=None,
     ):
         """Run a fixture helper while continuously consuming this PTY."""
         argv = [str(value) for value in command]
@@ -932,6 +933,8 @@ class MacPtySession:
 
         def pump(deadline, *, read_pty=True):
             while streams or process.poll() is None:
+                if progress is not None and read_pty:
+                    progress(process)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
@@ -1068,12 +1071,14 @@ class MacPtySession:
             )
         return result
 
-    def run_sudo_while_draining(self, command, *, user=None, check=True, timeout=30):
+    def run_sudo_while_draining(
+        self, command, *, user=None, check=True, timeout=30, progress=None,
+    ):
         prefix = ["sudo", "-n"]
         if user is not None:
             prefix += ["-u", user]
         return self.run_while_draining(
-            prefix + list(command), check=check, timeout=timeout,
+            prefix + list(command), check=check, timeout=timeout, progress=progress,
         )
 
     @staticmethod
@@ -2400,6 +2405,43 @@ def safe_sudo_while_draining(session, command, *, user=None, timeout=30):
     return result, b"ok"
 
 
+def diagnose_agent_accept_lane(binary, profile, private, endpoint,
+                               agent_profile, agent_private, agent_endpoint):
+    """One pending operation; human lock is a causal control, never acceptance."""
+    before = running_launchd_pid(sudo(["launchctl", "print", f"system/{LABEL}"]))
+    assert before is not None
+    session = start_macos_tui(binary, profile, private, endpoint, idle=30, reveal=1, copy=5)
+    released = False
+    started = time.monotonic()
+
+    def release_human(process):
+        nonlocal released
+        if not released and process.poll() is None and time.monotonic() - started >= 2:
+            session.send_key("l")
+            released = True
+
+    try:
+        result = session.run_sudo_while_draining(
+            [binary, "agent-discover", "--profile", agent_profile,
+             "--private", agent_private, "--socket", agent_endpoint],
+            user=AGENT, check=False, timeout=30, progress=release_human,
+        )
+        assert result.returncode == 0 and result.stderr == b"" \
+            and result.stdout.startswith(b"PASS delegated-discovery count=1"), (
+                "accept-lane causal control did not complete the same discovery",
+                result.returncode,
+            )
+        if not released:
+            session.send_key("l")
+        assert session.wait_exit(timeout=8) == 0
+        after = running_launchd_pid(sudo(["launchctl", "print", f"system/{LABEL}"]))
+        assert before == after
+        category = "completed-after-human-lock" if released else "completed-with-human-open"
+        print("PM26_ACCEPT_LANE control=" + category + " process=same result=zero", flush=True)
+    finally:
+        close_session_preserving_primary(session)
+
+
 def diagnostic_agent_discovery(session, binary, profile, private, endpoint):
     """Run one discovery while draining the TUI and emit only fixed categories."""
     before, before_cleanup = safe_sudo_while_draining(
@@ -2835,6 +2877,9 @@ def run_tui_ticket24_matrix(
     agent_directory,
 ):
     """Exercise Ticket 24 authority and pending keyboard contracts on macOS."""
+    diagnose_agent_accept_lane(
+        binary, profile, private, endpoint, agent_profile, agent_private, agent_endpoint,
+    )
     enrollment_private = agent_directory / "ticket24-enrollment.key"
     enrollment_public = agent_directory / "ticket24-enrollment.pub"
     assert not enrollment_private.exists() and not enrollment_public.exists()

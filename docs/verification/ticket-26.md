@@ -1675,3 +1675,44 @@ its worktree, log /tmp/pm-handoff-mac-worktree-check.log. No native claim.
 Final bounded local verification: focused observer/helper regression PASS;
 `cd .worktrees/26-macos && ./scripts/check.sh` PASS in
 `/tmp/pm-handoff-mac-worktree-check.log` (Linux, no native acceptance).
+
+
+### Concurrent discovery isolation method — 2026-10-02
+
+User-authorized continuation starts at `8951e6bab642edf5fe99ac51b48a963882b62c1c`.
+Recovered [run 35300789424](https://github.com/SantanaJcp/passwordmanager/actions/runs/35300789424)
+executed that exact SHA and failed on Intel and Apple silicon after the catalog,
+reveal/expiry, favorites and isolated clipboard assertions. Both jobs observed
+`before=ok discovery=failed after=ok cleanup=ok process=same result=nonzero
+stderr=custody-unavailable elapsed=io-bound-or-later`. No crash or restart was
+observed. Previous run logs remain available in GitHub, not in the removed
+September `/tmp` handoff directory.
+
+Source isolation: `serve_loop` synchronously calls `accept_one` for the agent,
+then the human; `accept_one` synchronously calls `handle_connection`, whose
+human branch stays in `handle_human_rpc` until the human locks/disconnects.
+A live TUI can therefore prevent the next agent accept. This is a hypothesis
+supported by the call graph, not yet a native root-cause finding.
+
+Discriminant, before changing product behavior: start a fresh ordinary TUI,
+unlock over the existing native channel, and start **one** real agent discovery
+while continuously draining the PTY. At two seconds, only if that same helper
+is still pending, send the human `l` key once. Keep the original helper bound
+(30 seconds), product I/O bound (15 seconds), KDF and all original assertions.
+Require the same helper to complete, the TUI to exit zero and launchd to retain
+its PID. Emit only `completed-with-human-open` or
+`completed-after-human-lock`, plus fixed process/result categories. This is
+supporting evidence: the original Ticket 24 concurrent discovery still runs
+and must pass with the human connection open; releasing a blocking human
+connection cannot substitute for that requirement. No operation is retried.
+
+The fixture pump gains one explicit progress callback solely to send that key
+while its existing selector keeps draining. Check Python AST, the existing
+observer/helper regressions, shell/CI guards and diff before native dispatch.
+Native confirmation requires the same causal classification on both CPUs.
+Only after that result may a bounded macOS accept-lane correction be made.
+Linux's existing serialized accept behavior is outside this port's correction.
+
+Inherited behavior reported and retained: `accept_one` ignores listener accept,
+stream-configuration and individual connection-handler errors; the client
+fails visibly while the service continues. It is not changed by this diagnosis.
