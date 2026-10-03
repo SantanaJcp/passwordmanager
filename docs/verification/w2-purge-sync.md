@@ -4,7 +4,11 @@
 `codex/pm-w2-purge-sync`, base `ee3c1fd31cad59060e4120f3e2518b1196a90c1a`.
 Sin integración, cambios de tickets, merge de PR ni cambios ajenos.
 
-**Estado actual de fase 4: fix de sesión y RED/GREEN Linux publicados en el próximo checkpoint; gates finales y macOS pendientes. W2 NO terminado.**
+**Estado actual de fase 4: corrección publicada, RED/GREEN y gates Linux sin
+regresión (40 casos, 38 rc0). Happy sync TUI Intel confirmado dentro de 20 s;
+ARM no ejecuta ese job por una colisión de backup previa, frontera W1. Las
+cuatro corridas nativas terminaron; todos los workflows siguen failure.
+W2 NO cerrado: falta aceptación del happy TUI en ambas CPU.**
 
 **Registro de fase 3: Linux sin regresión; macOS incompleto.** Se retoma
 `1aff66ee0834d473438d8c269fae63b7c65fee6e`, limpio y publicado, con replay
@@ -20,7 +24,8 @@ publicado en `7b4b5f591470de8ffcb0ac39b5039163a3126af0` sí publica un root y
 converge en ambas CPU; los 29 E2EE pasan nativamente. El happy sync de la TUI
 sigue rojo. Se detiene ante la decisión de ampliar el diagnóstico hacia la
 fixture que pertenece a W1 o cambiar la estrategia del cliente; no se integra
-ni se cambian tickets. Quedan dos de las cuatro corridas autorizadas.
+ni se cambian tickets. En aquel checkpoint quedaban dos de las cuatro
+corridas autorizadas para fase 3; ese saldo no es el presupuesto de fase 4.
 
 ## Decisiones y formato exacto
 
@@ -688,3 +693,112 @@ la última verificación: únicamente se devuelve el fixture al plist normal y
 el opt-in `PMW2_TIMING=1` pasa a ser explícito. Hipótesis final: discriminar
 instrumentación de los fallos ARM pre-sync. No se cambia ninguna aserción;
 se emiten también los contadores del registro durable válido, sin su ID.
+
+### Verificación 2 final: plist normal, Intel confirmado y ARM bloqueado antes de sync
+
+[37133730351](https://github.com/SantanaJcp/passwordmanager/actions/runs/37133730351),
+SHA `4282843c3cc9acb4fdda893d23f56b68f5e4b893`, completed/failure en ambas CPU.
+Labels estándar `macos-15` y `macos-15-intel`; repo público, flags false/false,
+sin secrets, caches ni artifacts. Los 32 E2EE pasan por CPU. `PMW2_TIMING`
+está ausente: plist original y sin redirección de timing del custodio. El
+producto es idéntico al SHA `1b1df06` del segundo barrido Linux; este checkpoint
+solo cambia fixtures/documentación. No se consume otra corrida.
+
+Intel alcanza el happy sync exacto en **18.054 s** observados por la TUI:
+`durable=succeeded screen=succeeded`, `pushed=59 pulled=59`, 287 bloques y
+1 root. Custodio y servidor mantienen sus PIDs. Después falla la misma
+aserción visual intacta de `macos_tui_migration_lab.py:585`, que exige
+`pushed=/pulled=` en la pantalla capturada. El diagnóstico lee únicamente
+contadores del registro PMSS1 validado y no sustituye esa aserción. Hay dos
+éxitos acotados del motor/job Intel, con y sin perfilado; el workflow no pasa.
+
+ARM llega a `full25-local=observed` y falla en
+`macos_tui_migration_lab.py:558`, `expect_output_collision(..., "backup", ...)`:
+`result=unclassified destination=same`. La espera de error visual vence antes
+del happy sync. Ese job es **NOT_RUN**, no un timeout de transporte W2. La
+colisión y su fixture son de W1; no se cambian. Quitar la instrumentación
+permite avanzar más que los anteriores fallos password-prompt, pero las
+corridas no aíslan causalmente esos fallos: no atribuirlos al timing ni
+declararlos corregidos. Logs `/tmp/pmw2d-macos-verification2-{arm,intel}.log`;
+metadata final `/tmp/pmw2d-macos-verification2.json` confirma ambos completed.
+
+### Comparación final y límites de la evidencia
+
+Control E2EE real, mismo escenario de 39 eventos en una página, 271 puts y
+272 gets. Tiempos desde el inicio del push, no latencia exclusiva de publish:
+
+| CPU | Fase 3: raíz publicada / convergencia | Verificación 2: raíz publicada / convergencia |
+| --- | --- | --- |
+| ARM | 15.342 / 27.716 s | 4.851 / 6.965 s |
+| Intel | 22.124 / 36.387 s | 10.226 / 12.817 s |
+
+El control no sustituye el happy TUI, cuyo workload tiene 59 eventos y 287
+bloques. Para Intel, antes: cutoff 20 s, 0 roots y pushing; después: motor
+15.725 s y TUI 18.328 s perfilados, TUI 18.054 s con plist normal. Los scopes
+de push/pull/fsync/SQLite constan en la tabla de diagnóstico 2. Para ARM no
+hay desglose del job TUI exacto, antes ni después: las cuatro corridas de fase
+4 se detienen antes de él. No se extrapolan las latencias Intel al ARM.
+
+Latencias por RPC Intel (muestra parcial inicial de 115 puts, frente al job
+final completo de 287 puts, 287 gets, publish y list; scopes anidados):
+
+| Medición | Antes: media / máximo | Después: media / máximo |
+| --- | --- | --- |
+| Temporal+fsync por put | 72.831 / 113.097 ms | 0 temporales auxiliares |
+| RPC put, sin el temporal previo | 77.774 / 277.604 ms | 25.251 / 119.656 ms |
+| RPC get | No alcanzado | 3.656 / 15.439 ms |
+| Publish / list | No alcanzado | 0.949 / 0.845 ms, un RPC cada uno |
+| TLS exchange | 24.736 / 173.517 ms | 13.135 / 112.355 ms |
+| SQLite dispatch | 21.057 / 158.215 ms | 11.572 / 106.381 ms |
+
+Antes hubo 115 procesos/handshakes en la muestra, después 1 para 576 RPCs.
+El handshake pasó de 0.166 s acumulados parciales a 0.036 s por sesión; no
+era el coste dominante. El RED de WAL confirma el checkpoint por cierre de
+última conexión, pero no hay una medición nativa aislada de su mejora.
+Los commits permanecen FULL y por put; sin eliminación de fsync durable.
+No se registró backoff en los happy jobs medidos. No hubo cambio de PID al
+final del job; no se acredita ausencia de todos los eventos internos de
+launchd. La diferencia entre observación TUI y motor perfilado (2.603 s)
+incluye interacción/consulta y no se atribuye a launchd. Las esperas de
+arranque de servicios del fixture preceden al job y no forman parte de
+estos scopes. El protocolo, deadlines y límites permanecen intactos.
+
+| Corrida de fase 4 | SHA exacto | Resultado acotado |
+| --- | --- | --- |
+| [Diagnóstico 1](https://github.com/SantanaJcp/passwordmanager/actions/runs/37129675339) | `d6acdb63d3333a167d5965b4e17f5924b3069d9b` | Intel 0 roots/cutoff; ARM pre-sync |
+| [Verificación 1](https://github.com/SantanaJcp/passwordmanager/actions/runs/37131160116) | `0bd0721d4d5610c184e9fde26edd77f64651c1c7` | Intel 1 root/pull pendiente; ARM pre-sync |
+| [Diagnóstico 2](https://github.com/SantanaJcp/passwordmanager/actions/runs/37132696664) | `1b1df0663bd1d786bcb9b72575a6a9e154fd4086` | Intel happy succeeded; ARM pre-sync |
+| [Verificación 2](https://github.com/SantanaJcp/passwordmanager/actions/runs/37133730351) | `4282843c3cc9acb4fdda893d23f56b68f5e4b893` | Intel 59 pushed/pulled; ARM colisión backup previa |
+
+Todas completed/failure; dos diagnósticos y dos verificaciones, sin repeats
+idénticos. Ninguna acredita Full25 completo ni aceptación global. Gates
+finales: check y clean offline PASS, barrido 40 casos/38 rc0/0 regresiones
+frente a `/tmp/pmw2c-gate-results.json`. Se conservan los rc1 de
+`lab-tui-operations` (truncación exact-duplicates a 80 columnas) y `g7-matrix`
+(staging retenido en commit-outbox-audit EIO/ENOSPC). Sin nuevos skips,
+reintentos, aserciones o plazos. Todo cargo/check/lab local se ejecutó con
+`flock /tmp/pm-cargo-window.lock`; ningún lock retenido esperando CI.
+
+### Archivos de fase 4 y entrega al orquestador
+
+Nueve paths desde `8c17220`: `crates/pm-sync/src/{lib.rs,main.rs,session.rs,timing.rs}`,
+`crates/pm-sync/tests/e2ee_replication/purge_sync.rs`,
+`crates/pm-custody/src/sync_job.rs`,
+`crates/pm-custody/tests/{macos_lab.py,macos_tui_migration_lab.py}` y este informe.
+El transporte de sesión está seleccionado explícitamente en Unix y no se
+prueba Windows nativo aquí. Listener/admisión/proveedor y TUI no se modifican.
+Instrumentación de staging se limita a tiempos; sus fallbacks conservados
+no son la causa medida y no se alteran. No se integra ni se cambian tickets.
+
+W1 comparte ambos fixtures Mac: preservar sus hunks de backup y los nuestros
+de sync/opt-in/counters al componer; el footer/aserción visual también queda
+en su frontera. Inspección de refs publicados W3 `e0eec49` y W4 `549c512`:
+sin paths productivos compartidos nuevos de fase 4. Los conflictos posibles
+de `backup.rs`/`reducer.rs` de fases anteriores con W3 siguen requiriendo
+composición del orquestador. Esta revisión no equivale a un merge probado.
+
+**Siguiente acción:** el orquestador compone la corrección W1 de colisión
+ARM/presentación con los checkpoints W2 y verifica el happy TUI en ambas CPU.
+Las cuatro corridas W2 autorizadas se agotaron: una nueva aceptación nativa
+requiere autorización adicional y un cambio verificable, no repetir este SHA.
+W2 entrega la corrección y su evidencia; permanece abierto por ese gate.
