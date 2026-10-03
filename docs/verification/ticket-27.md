@@ -2251,3 +2251,66 @@ longitud, fin LF/CRLF y booleano de coincidencia del contenido público para
 discriminar cualquier desacuerdo restante de redirección/decodificación; no
 volcar stdout. El siguiente run debe superar este oráculo y conservar el RED
 CSV, sin cambiar producto/layout ni elevar la matriz a PASS.
+
+[Run45](https://github.com/SantanaJcp/passwordmanager/actions/runs/37091487207),
+SHA `d63cd87ad89f582fa3ff9611a5f2c9f89216eca5`, job `111112593786`, terminó
+FAIL y se esperó su conclusión. Build + 13 nativos + 1 pipe + 15 observer +
+1 sync-lib PASS. Caso independiente completo: prompt/input oculto/unlock,
+salida natural 0, restauración exacta CP437 y stdout `chars=17 lf=True
+crlf=False exact=True`. Corrige y confirma el defecto del oráculo de run44.
+La segunda sesión alcanza unlock y reproduce el RED CSV: modelo=true,
+frame-sufijo=false, 107/82 columnas, 80×24 y 15 s intactos. No acredita
+CSV, 1PUX ni operaciones posteriores. No se observan errores de cleanup
+del harness; su criterio cerrado de ausencia se ejecutó antes de propagar el
+fallo de cuerpo. Ningún run lanzado queda pendiente.
+
+Comandos del corte, desde `.worktrees/27-windows-composed` y toolchain 1.98.1:
+
+```sh
+# Modo normal: run42. Los restantes experimentos usan true.
+gh workflow run ticket-27-windows.yml --ref codex/pm-27-composed -f diagnostic_only=false -f service_diagnostics=false -f tui_conpty_red=true
+gh workflow run ticket-27-windows.yml --ref codex/pm-27-composed -f diagnostic_only=false -f service_diagnostics=true -f tui_conpty_red=true
+gh run watch 37091487207 --exit-status --interval 20
+gh run view 37091487207 --log
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh fmt --all
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh check -p pm-custody --all-targets --locked --offline
+bash scripts/verify-native-ci-config.sh
+bash scripts/verify-windows-libsodium-build.sh
+git diff --check
+```
+
+Local: rustfmt y check cfg Linux PASS, checks estáticos PASS; no cargo test,
+check.sh ni labs Linux ejecutados en este corte. La regresión ECH, lease nula y
+el escenario de salida se verificaron en Windows real. Linux/macOS UI no se
+acreditan por este check. Se comprobaron enlace local del documento, continuidad
+de estados y ausencia de modificación de §15/contratos/ticket `claimed`.
+
+Cobertura al entregar; los criterios integrales del ticket permanecen abiertos:
+
+| Criterio o componente de 27 | Estado | Evidencia y límite |
+| --- | --- | --- |
+| Servicio virtual, DPAPI/DACL, pipe bilateral/RPK y unlock reales Win11 ARM64 | PASS nativo | Prefijo del lab y primitives; no completa toda la defensa G1. |
+| Rechazo integral de sustitución/impersonación/dump/lectura/fallos de custodia | no demostrado | Negativas completas/ataques nativos pendientes; los tests de primitives no las sustituyen. |
+| ConPTY primer prompt, input oculto, unlock, encoding y restauración natural | PASS nativo | RED40 → GREEN41; normal42; salida45. Windows Terminal humano sigue pendiente. |
+| Matriz creciente CSV + 1PUX y contenido/copy/org/history/generator/access/pending/audit/backup/export/trash | FAIL | Se detiene antes del Enter CSV; las operaciones siguientes no se ejecutaron. |
+| Tipos completos, resize/redraw, restore/rotaciones y pair-sync-retire TUI | bloqueado | Decisión del footer/input largo necesaria para continuar la matriz, según frontera del usuario. |
+| Lease DACL exacta antes/durante/después, segundo lease, cambio visible y DACL nulo | PASS nativo | Tests propios serializados; no demuestra muestreo del lease real de la TUI ni todos los fallos Win32. |
+| Peer/PID/source 1PUX completos, SID agente, reparse/multilink y fracaso de transferencia real | no demostrado | Matriz nativa pendiente; source grande no llegó a transferirse en este corte. |
+| Sync completo nativo, reinicio/offline/retire | no demostrado | Un test sync-lib pasa; no acredita el binario/replicación E2E. |
+| Persistencia compuesta 23–25, x64/reboot/FDE y terminal humano | no demostrado | Evidencia parcial histórica; gates 32/34 y post-matriz pendientes. |
+| TDD discriminante del cambio de encoding | PASS nativo | Runs40/41/42/45; no equivale a TDD de todos los requisitos de 27. |
+| Revisión contra contrato e integración por merger separado | bloqueado | No integrar ni fusionar PR#1; no resolver el ticket. |
+
+Producto tocado desde `b26c066`: `crates/pm-custody/src/tui.rs` (guard CP y
+diagnóstico cfg Windows), nuevo `windows_console_diagnostic.rs`, feature Console
+existente en Cargo.toml. `pm-native-channel/src/windows.rs` sólo añade un test;
+no cambia su producto. Otros cambios son fixture, PowerShell, checker y este
+documento. No se tocaron human_wire.rs, agent_wire.rs ni sync_job.rs, ni split_exact.
+
+Siguiente acción concreta del orquestador: acordar la presentación/scroll del
+input largo en el footer común con 26/28, manteniendo 80×24, visibilidad y
+capacidades existentes. Después aplicar ese cambio único y correr la matriz
+normal exacta; continuar tipos/resize/restore/rotaciones, negativas de lease y
+peer/source y sync E2E. No repetir este candidato sin cambio/experimento.
+Siguen reportados sin corregir los cleanups WindowsServerPipe/SD/LocalFree,
+WindowsClipboardWindow y la lista del handoff: su autorización no fue concedida.
