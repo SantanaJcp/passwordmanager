@@ -1519,6 +1519,7 @@ mod windows_fixture {
         fixture: &Fixture,
         password: &[u8],
         paths: MatrixPaths<'_>,
+        encoding_exit: bool,
     ) -> io::Result<()> {
         if let Err(primary) = fixture.observer.wait_for("Password required") {
             let observer = fixture.observer.diagnostic().map_err(io::Error::other)?;
@@ -1552,6 +1553,12 @@ mod windows_fixture {
             .map_err(io::Error::other)?;
 
         eprintln!("TUI_STAGE stage=unlock result=pass");
+        if encoding_exit {
+            press(fixture, "q")?;
+            require_tui_exit(fixture.process)?;
+            eprintln!("TUI_STAGE stage=encoding-natural-exit result=pass");
+            return Ok(());
+        }
         // Ticket 25 migration is driven through the real keyboard and common
         // human handler. The service result is awaited before the next input;
         // no operation is retried by the fixture.
@@ -1816,7 +1823,7 @@ mod windows_fixture {
         if args.len() < 11
             || !matches!(
                 args.get(3).map(String::as_str),
-                Some("--matrix" | "--matrix-probe")
+                Some("--matrix" | "--matrix-probe" | "--encoding-exit")
             )
             || args.get(8).map(String::as_str) != Some("--")
         {
@@ -1827,10 +1834,14 @@ mod windows_fixture {
         }
         let password = read_synthetic_password()?;
         let mut fixture = Fixture::new();
-        let diagnostic_path =
-            std::path::Path::new(&args[4]).with_file_name("console-diagnostic.txt");
+        let encoding_exit = args[3] == "--encoding-exit";
+        let diagnostic_path = std::path::Path::new(&args[4]).with_file_name(if encoding_exit {
+            "encoding-exit.txt"
+        } else {
+            "console-diagnostic.txt"
+        });
         let mut child_arguments = args[9..].to_vec();
-        let diagnostics_enabled = args[3] == "--matrix-probe";
+        let diagnostics_enabled = matches!(args[3].as_str(), "--matrix-probe" | "--encoding-exit");
         if diagnostics_enabled {
             child_arguments.push("--console-diagnostics".into());
             child_arguments.push(
@@ -1855,6 +1866,7 @@ mod windows_fixture {
                     backup: &args[6],
                     plaintext: &args[7],
                 },
+                encoding_exit,
             )
         })();
         let cleanup = fixture.cleanup();
@@ -1878,6 +1890,17 @@ mod windows_fixture {
                 ));
             }
             eprint!("{metrics}");
+            if encoding_exit {
+                let restoration = metrics
+                    .lines()
+                    .filter(|line| line.starts_with("TUI_PROBE stage=restore "))
+                    .collect::<Vec<_>>();
+                if restoration.len() != 1 || !restoration[0].ends_with(" restored=true") {
+                    return Err(io::Error::other(
+                        "encoding exit did not prove exactly one successful CP restoration",
+                    ));
+                }
+            }
             Ok(())
         })();
         let operation = match (operation, diagnostic) {

@@ -2195,3 +2195,14 @@ Si resulta necesario elegir prioridades de layout, se respeta la frontera de
 decisión del usuario: reportar la causa y detener la matriz, sin elegir diseño.
 La sonda se activa al consumir `keep` y distingue además si el modelo tiene
 el sufijo completo con separadores; así no confunde pérdida de `|` con recorte.
+
+Verificación independiente de la corrección CP, antes de ejecutarla: añadir
+`--encoding-exit` al fixture, opt-in diagnóstico. En una sesión ConPTY propia
+80×24 exigir prompt/input oculto/unlock, teclear q y exigir salida natural 0 y
+una única métrica `stage=restore ... restored=true`. El producto comprueba que
+el CP observado sea exactamente el original. Después se limpia esa ConPTY;
+la matriz usa otra sesión y archivo diagnóstico nuevos. No se reintenta una
+operación fallida ni se usa este caso como sustituto de la matriz: son dos
+escenarios independientes (restauración de terminal y operaciones 23–25).
+No modifica el layout ni depende de su decisión; registra el criterio de
+restauración incluso si la matriz sigue bloqueada por el siguiente defecto.
