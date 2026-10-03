@@ -368,6 +368,10 @@ struct TerminalGuard {
     writer: File,
     state: TerminalState,
     cleanup_attempted: bool,
+    #[cfg(windows)]
+    original_output_cp: Option<u32>,
+    #[cfg(windows)]
+    console_report: Option<File>,
 }
 
 #[derive(Clone, Copy)]
@@ -385,7 +389,52 @@ impl TerminalGuard {
         let mut operations = CrosstermRestore {
             writer: &mut self.writer,
         };
-        restore_terminal_with(self.state, &mut operations)
+        let terminal = restore_terminal_with(self.state, &mut operations);
+        #[cfg(windows)]
+        {
+            combine_failures([terminal, self.restore_output_cp()])
+        }
+        #[cfg(not(windows))]
+        {
+            terminal
+        }
+    }
+
+    #[cfg(windows)]
+    fn configure_output_utf8(&mut self) -> Result<(), Failure> {
+        use windows_sys::Win32::System::Console::{GetConsoleOutputCP, SetConsoleOutputCP};
+        let original = unsafe { GetConsoleOutputCP() };
+        if original == 0 {
+            return Err(Failure::Unavailable);
+        }
+        self.original_output_cp = Some(original);
+        if unsafe { SetConsoleOutputCP(65001) } == 0 || unsafe { GetConsoleOutputCP() } != 65001 {
+            return Err(Failure::Unavailable);
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn restore_output_cp(&mut self) -> Result<(), Failure> {
+        use windows_sys::Win32::System::Console::{GetConsoleOutputCP, SetConsoleOutputCP};
+        let Some(expected) = self.original_output_cp.take() else {
+            return Ok(());
+        };
+        let applied = unsafe { SetConsoleOutputCP(expected) } != 0;
+        let observed = unsafe { GetConsoleOutputCP() };
+        let restored = applied && observed != 0 && observed == expected;
+        let encoding = if restored {
+            Ok(())
+        } else {
+            Err(Failure::Unavailable)
+        };
+        let report = match self.console_report.as_mut() {
+            Some(file) => writeln!(file,
+                "TUI_PROBE stage=restore output-cp={observed} expected={expected} restored={restored}"
+            ).map_err(|_| Failure::Unavailable),
+            None => Ok(()),
+        };
+        combine_failures([encoding, report])
     }
 }
 
@@ -633,8 +682,19 @@ fn run_terminal(
             cursor_hidden: false,
         },
         cleanup_attempted: false,
+        #[cfg(windows)]
+        original_output_cp: None,
+        #[cfg(windows)]
+        console_report: None,
     };
     let operation = (|| {
+        #[cfg(windows)]
+        {
+            if let Some(probe) = diagnostic.as_ref() {
+                guard.console_report = Some(probe.report_file()?);
+            }
+            guard.configure_output_utf8()?;
+        }
         guard.state.alternate = true;
         execute!(guard.writer, EnterAlternateScreen).map_err(|_| Failure::Unavailable)?;
         #[cfg(windows)]

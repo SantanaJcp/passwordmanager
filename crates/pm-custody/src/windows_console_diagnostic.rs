@@ -22,6 +22,10 @@ pub(super) struct Diagnostic {
 }
 
 impl Diagnostic {
+    pub(super) fn report_file(&self) -> Result<File, Failure> {
+        self.output.try_clone().map_err(|_| Failure::Unavailable)
+    }
+
     pub(super) fn create(path: &Path, writer: &File) -> Result<Self, Failure> {
         let output = File::options()
             .write(true)
@@ -146,7 +150,10 @@ impl Diagnostic {
                 if let Some(x) = row.find(marker) {
                     markers[index] = true;
                     if index == 2 {
-                        prompt_at = Some((x, y));
+                        prompt_at = Some((
+                            usize::from(area.x) + ratatui::text::Line::raw(&row[..x]).width(),
+                            y,
+                        ));
                     }
                 }
             }
