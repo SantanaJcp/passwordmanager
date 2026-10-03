@@ -1,0 +1,3 @@
+# Authenticated native build inputs must retain their committed bytes on every host.
+third_party/libsodium/LATEST.tar.gz -text
+third_party/libsodium/LATEST.tar.gz.minisig -text

@@ -6,17 +6,32 @@
 
 extern crate self as pm_custody;
 
-pub use pm_native_channel::{AuthenticatedHumanChannel, ChannelAuthenticationError, unix_peer_uid};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod agent_wire;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
+pub use pm_native_channel::unix_peer_uid;
+pub use pm_native_channel::{AuthenticatedHumanChannel, ChannelAuthenticationError};
+#[cfg(target_os = "windows")]
+pub use pm_native_channel::{WindowsClientPipe, WindowsEndpoint, WindowsServerPipe};
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod failure;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod human_wire;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod linux;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod sync_job;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod tui;
+#[cfg(target_os = "windows")]
+mod windows;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use failure::Failure;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn take_path(
     arguments: &mut impl Iterator<Item = std::ffi::OsString>,
     flag: &str,
@@ -42,4 +57,14 @@ pub fn agent_rpc(
     request: Option<&[u8]>,
 ) -> Result<pm_crypto::ProtectedBytes, String> {
     linux::agent_rpc(profile, private, socket, request)
+}
+
+#[cfg(target_os = "windows")]
+pub fn agent_rpc(
+    profile: &std::path::Path,
+    private: &std::path::Path,
+    vault: &std::path::Path,
+    request: Option<&[u8]>,
+) -> Result<pm_crypto::ProtectedBytes, String> {
+    windows::agent_rpc(profile, private, vault, request)
 }

@@ -145,7 +145,7 @@ def main():
             input=wire_fields([password]), check=False)
         assert streamed.returncode == 0 and streamed.stdout.startswith(b"PASS streaming-file"), streamed
 
-        source = root / "human" / "import.csv"
+        source = root / "human" / ("footer-long-" + "synthetic-" * 6 + "import.csv")
         source.write_text("name,url,username,password,note\nKeyboard import,https://keyboard.invalid,u,synthetic-ticket25-import,n\n", encoding="utf-8")
         os.chown(source, HUMAN, HUMAN); source.chmod(0o400)
         before_source = source.read_bytes()
@@ -166,14 +166,14 @@ def main():
         assert tmux(root, "has-session", check=False).returncode == 0
         send(root, "m"); wait_text(root, "Migration:")
         send(root, "1"); wait_text(root, "CSV source")
-        send(root, f"{source}|chrome|keep", enter=True)
+        send_long(root, f"{source}|chrome|keep", "|chrome|keep")
         preview = wait_text(root, "Preview values hidden")
         assert "new=1" in preview and "synthetic-ticket25-import" not in preview
         send(root, "IMPORT", enter=True); wait_text(root, "Import committed transactionally")
         assert source.read_bytes() == before_source
         query(root, "Keyboard import")
         before_cancel = sqlite3.connect(vault).execute("select count(*) from vault_items").fetchone()[0]
-        send(root, "m"); send(root, "1"); send(root, f"{source}|chrome|keep", enter=True)
+        send(root, "m"); send(root, "1"); send_long(root, f"{source}|chrome|keep", "|chrome|keep")
         wait_text(root, "exact-duplicates=1"); send(root, "NOT IMPORT", enter=True)
         wait_text(root, "Confirmation mismatch; import cancelled")
         assert sqlite3.connect(vault).execute("select count(*) from vault_items").fetchone()[0] == before_cancel

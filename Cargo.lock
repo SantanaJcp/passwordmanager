@@ -1592,6 +1592,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "pm-build-input-verifier"
+version = "0.1.0"
+dependencies = [
+ "minisign-verify",
+]
+
+[[package]]
 name = "pm-cli"
 version = "0.1.0"
 dependencies = [
@@ -1629,6 +1636,7 @@ dependencies = [
  "russh",
  "rustls",
  "signature",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -1644,6 +1652,10 @@ name = "pm-native-channel"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "pm-crypto",
+ "unicode-width",
+ "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -1692,6 +1704,7 @@ dependencies = [
  "pm-crypto",
  "pm-native-channel",
  "rusqlite",
+ "windows-sys 0.61.2",
  "zeroize",
  "zip",
 ]

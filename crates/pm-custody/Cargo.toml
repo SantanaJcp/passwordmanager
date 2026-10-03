@@ -35,5 +35,13 @@ russh.workspace = true
 signature = "=3.0.0"
 zeroize.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Services",
+    "Win32_System_Threading",
+] }
+
 [lints]
 workspace = true

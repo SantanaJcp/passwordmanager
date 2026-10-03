@@ -10,6 +10,7 @@ pub(crate) enum PrimaryFailure {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum CleanupFailureKind {
     OwnedPathRemoval,
+    NativeResourceRestoration,
 }
 
 #[derive(Debug)]
@@ -61,6 +62,37 @@ impl Failure {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn after_native_cleanup(
+        self,
+        cleanup: Result<(), pm_native_channel::ChannelAuthenticationError>,
+    ) -> Self {
+        let Err(source) = cleanup else {
+            return self;
+        };
+        let failure = CleanupFailure {
+            kind: CleanupFailureKind::NativeResourceRestoration,
+            source: std::io::Error::other(source),
+        };
+        match self {
+            Self::Usage => Self::WithCleanup {
+                primary: PrimaryFailure::Usage,
+                cleanups: vec![failure],
+            },
+            Self::Unavailable => Self::WithCleanup {
+                primary: PrimaryFailure::Unavailable,
+                cleanups: vec![failure],
+            },
+            Self::WithCleanup {
+                primary,
+                mut cleanups,
+            } => {
+                cleanups.push(failure);
+                Self::WithCleanup { primary, cleanups }
+            }
+        }
+    }
+
     pub(crate) const fn primary(&self) -> PrimaryFailure {
         match self {
             Self::Usage => PrimaryFailure::Usage,
@@ -78,6 +110,34 @@ impl Failure {
         match self {
             Self::WithCleanup { cleanups, .. } => cleanups,
             Self::Usage | Self::Unavailable | Self::DestinationExists => &[],
+        }
+    }
+
+    pub(crate) fn has_native_cleanup_failure(&self) -> bool {
+        self.cleanups()
+            .iter()
+            .any(|cleanup| cleanup.kind == CleanupFailureKind::NativeResourceRestoration)
+    }
+
+    pub(crate) fn merge(self, other: Self) -> Self {
+        let (primary, mut cleanups) = match self {
+            Self::Usage => (PrimaryFailure::Usage, Vec::new()),
+            Self::Unavailable => (PrimaryFailure::Unavailable, Vec::new()),
+            Self::DestinationExists => (PrimaryFailure::DestinationExists, Vec::new()),
+            Self::WithCleanup { primary, cleanups } => (primary, cleanups),
+        };
+        cleanups.extend(match other {
+            Self::Usage | Self::Unavailable | Self::DestinationExists => Vec::new(),
+            Self::WithCleanup { cleanups, .. } => cleanups,
+        });
+        if cleanups.is_empty() {
+            match primary {
+                PrimaryFailure::Usage => Self::Usage,
+                PrimaryFailure::Unavailable => Self::Unavailable,
+                PrimaryFailure::DestinationExists => Self::DestinationExists,
+            }
+        } else {
+            Self::WithCleanup { primary, cleanups }
         }
     }
 }
@@ -112,6 +172,28 @@ mod tests {
                 .cleanups()
                 .iter()
                 .all(|cleanup| cleanup.source.raw_os_error().is_some())
+        );
+    }
+
+    #[test]
+    fn merging_failures_retains_cleanup_evidence() {
+        let directory = std::env::temp_dir().join(format!(
+            "pm-custody-combined-cleanup-errors-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("fixture directory should be unique");
+        let cleanup = std::fs::remove_file(&directory);
+        std::fs::remove_dir(&directory).expect("fixture should remove its exact directory");
+
+        let failure = Failure::Unavailable
+            .after_owned_path_cleanup(cleanup)
+            .merge(Failure::Unavailable);
+
+        assert_eq!(failure.primary(), PrimaryFailure::Unavailable);
+        assert_eq!(failure.cleanups().len(), 1);
+        assert_eq!(
+            failure.cleanups()[0].kind,
+            CleanupFailureKind::OwnedPathRemoval
         );
     }
 }

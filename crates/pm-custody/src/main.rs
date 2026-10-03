@@ -1,12 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-#![cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+#![cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    allow(dead_code)
+)]
 
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod agent_wire;
 mod failure;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod human_wire;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod linux;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod sync_job;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+mod tui;
+#[cfg(target_os = "windows")]
+mod windows;
 
 use failure::{CleanupFailureKind, Failure, PrimaryFailure};
 
@@ -40,7 +53,8 @@ fn main() -> ExitCode {
             if !failure.cleanups().is_empty() {
                 for cleanup in failure.cleanups() {
                     match cleanup.kind {
-                        CleanupFailureKind::OwnedPathRemoval => {}
+                        CleanupFailureKind::OwnedPathRemoval
+                        | CleanupFailureKind::NativeResourceRestoration => {}
                     }
                     let _ = cleanup.source.kind();
                 }
@@ -52,11 +66,14 @@ fn main() -> ExitCode {
 }
 
 fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
-        linux::run(arguments)
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return linux::run(arguments);
+        #[cfg(target_os = "windows")]
+        return windows::run(arguments);
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = arguments;
         Err(Failure::Unavailable)

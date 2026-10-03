@@ -35,3 +35,18 @@ Pendiente de implementación y evidencia.
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-13 — Claimed por Sol medium para port Windows nativo. Método CI adicional autorizado aporta ejecución Win11 ARM64; Win11 x64, reboot/FDE/humano/firma permanecen en 32/34 sin evidencia. No usar Windows Server/emulación como sustituto.
+
+2026-09-13 — Checkpoint parcial: primitives Win32 de pipe/DACL/SID+PID bilateral,
+SCM, DPAPI, ConPTY y clipboard sequence implementados en `pm-native-channel`,
+con API clipboard coordinada con Darwin. Falta integración `pm-custody`/TLS-RPK,
+servicio y laboratorio Windows real; no se marca aceptación. Evidencia y método
+futuro en [ticket 27](../../../docs/verification/ticket-27.md).
+
+2026-09-13 — Checkpoint de composición `b503961`: `pm-custody` entra por SCM,
+compone pipes agent/human con TLS 1.3 RPK y DPAPI, y ambos transportes llegan al
+vault real. El wire engine agent fue extraído y es único para Linux/Windows; no
+se copió el protocolo humano completo ni se creó otro ledger. Se añadió lab y
+workflow manual Windows 11 ARM64, aún sin ejecución de producto. Preflight de
+entorno `34763094631` pasó 5/5; el fallback MSVC existente de
+`libsodium-sys-stable` sigue sin cambios/autorización, por lo que no hay
+candidato aceptado y todos los criterios permanecen abiertos.

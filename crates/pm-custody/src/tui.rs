@@ -6,21 +6,11 @@
 
 use std::{
     ffi::OsString,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::Write,
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-
-#[cfg(target_os = "linux")]
-use std::{
-    os::unix::fs::MetadataExt,
-    process::{Child, Command, Stdio},
-};
-
-#[cfg(target_os = "macos")]
-use pm_native_channel::OwnedClipboard;
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -28,6 +18,8 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use pm_crypto::ProtectedBytes;
+#[cfg(target_os = "macos")]
+use pm_native_channel::OwnedClipboard;
 use pm_vault::PasskeyStatus;
 use ratatui::{
     Terminal,
@@ -38,17 +30,36 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use rustls::{ClientConnection, StreamOwned};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+#[cfg(target_os = "linux")]
+use std::process::{Child, Command, Stdio};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::{
-    Cursor, HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared, connect,
-    decode_prepared_response, finish_arguments, hex, open_1pux_source, protected_copy, push_bytes,
-    read_frame, read_import_source, read_key, read_profile, rpc_commit, rpc_download_atomic,
-    rpc_history, rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore,
-    rpc_unlock, send_file_descriptor, write_frame,
+use crate::human_wire::{Cursor, protected_copy, read_frame, write_frame};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::linux::{
+    HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared, connect,
+    decode_prepared_response, finish_arguments, hex, open_1pux_source, push_bytes,
+    read_import_source, read_key, read_profile, rpc_commit, rpc_download_atomic, rpc_history,
+    rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore, rpc_unlock,
+    send_file_descriptor,
+};
+#[cfg(target_os = "windows")]
+use crate::windows::{
+    HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared,
+    connect_tui as connect, decode_prepared_response, finish_arguments, hex, open_1pux_source,
+    push_bytes, read_import_source, read_profile, rpc_commit, rpc_download_atomic, rpc_history,
+    rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore, rpc_unlock,
+    send_file_handle,
 };
 use crate::{Failure, take_path};
+
+#[cfg(windows)]
+#[path = "windows_console_diagnostic.rs"]
+mod console_diagnostic;
 
 const DEFAULT_IDLE: u64 = 300;
 const DEFAULT_REVEAL: u64 = 15;
@@ -198,6 +209,10 @@ struct App {
     attachments: Vec<AttachmentDescriptor>,
     sync_job: Option<[u8; 16]>,
     sync_poll_at: Instant,
+    #[cfg(windows)]
+    initial_diagnostic: Option<console_diagnostic::Diagnostic>,
+    #[cfg(windows)]
+    csv_diagnostic: Option<console_diagnostic::Diagnostic>,
 }
 
 enum PendingOperation {
@@ -315,6 +330,10 @@ impl App {
             attachments: Vec::new(),
             sync_job: None,
             sync_poll_at: Instant::now(),
+            #[cfg(windows)]
+            initial_diagnostic: None,
+            #[cfg(windows)]
+            csv_diagnostic: None,
         })
     }
 
@@ -379,6 +398,8 @@ enum ClipboardBackend {
     Wayland(Child),
     #[cfg(target_os = "macos")]
     AppKit(Option<OwnedClipboard>),
+    #[cfg(target_os = "windows")]
+    Windows(Option<pm_native_channel::OwnedClipboard>),
 }
 
 struct ClipboardLease {
@@ -393,6 +414,13 @@ impl ClipboardLease {
             return Ok(());
         }
         match &mut self.backend {
+            #[cfg(target_os = "windows")]
+            ClipboardBackend::Windows(owner) => owner
+                .take()
+                .ok_or(Failure::Unavailable)?
+                .clear_if_owned()
+                .map(|_| ())
+                .map_err(|_| Failure::Unavailable),
             #[cfg(target_os = "linux")]
             ClipboardBackend::Wayland(child) => stop_clipboard_with(child),
             #[cfg(target_os = "macos")]
@@ -422,6 +450,10 @@ struct TerminalGuard {
     writer: File,
     state: TerminalState,
     cleanup_attempted: bool,
+    #[cfg(windows)]
+    original_output_cp: Option<u32>,
+    #[cfg(windows)]
+    console_report: Option<File>,
 }
 
 #[derive(Clone, Copy)]
@@ -439,7 +471,52 @@ impl TerminalGuard {
         let mut operations = CrosstermRestore {
             writer: &mut self.writer,
         };
-        restore_terminal_with(self.state, &mut operations)
+        let terminal = restore_terminal_with(self.state, &mut operations);
+        #[cfg(windows)]
+        {
+            combine_failures([terminal, self.restore_output_cp()])
+        }
+        #[cfg(not(windows))]
+        {
+            terminal
+        }
+    }
+
+    #[cfg(windows)]
+    fn configure_output_utf8(&mut self) -> Result<(), Failure> {
+        use windows_sys::Win32::System::Console::{GetConsoleOutputCP, SetConsoleOutputCP};
+        let original = unsafe { GetConsoleOutputCP() };
+        if original == 0 {
+            return Err(Failure::Unavailable);
+        }
+        self.original_output_cp = Some(original);
+        if unsafe { SetConsoleOutputCP(65001) } == 0 || unsafe { GetConsoleOutputCP() } != 65001 {
+            return Err(Failure::Unavailable);
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn restore_output_cp(&mut self) -> Result<(), Failure> {
+        use windows_sys::Win32::System::Console::{GetConsoleOutputCP, SetConsoleOutputCP};
+        let Some(expected) = self.original_output_cp.take() else {
+            return Ok(());
+        };
+        let applied = unsafe { SetConsoleOutputCP(expected) } != 0;
+        let observed = unsafe { GetConsoleOutputCP() };
+        let restored = applied && observed != 0 && observed == expected;
+        let encoding = if restored {
+            Ok(())
+        } else {
+            Err(Failure::Unavailable)
+        };
+        let report = match self.console_report.as_mut() {
+            Some(file) => writeln!(file,
+                "TUI_PROBE stage=restore output-cp={observed} expected={expected} restored={restored}"
+            ).map_err(|_| Failure::Unavailable),
+            None => Ok(()),
+        };
+        combine_failures([encoding, report])
     }
 }
 
@@ -459,6 +536,7 @@ impl Drop for TerminalGuard {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 trait ClipboardControl {
     fn try_exited(&mut self) -> Result<bool, ()>;
     fn kill_process(&mut self) -> Result<(), ()>;
@@ -482,6 +560,7 @@ impl ClipboardControl for Child {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn stop_clipboard_with(control: &mut impl ClipboardControl) -> Result<(), Failure> {
     let exited = control.try_exited();
     let should_stop = !matches!(exited, Ok(true));
@@ -547,25 +626,85 @@ fn report_cleanup_failure(component: &str) {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 type HumanTls = StreamOwned<ClientConnection, UnixStream>;
+#[cfg(target_os = "windows")]
+type HumanTls = StreamOwned<ClientConnection, pm_native_channel::WindowsClientPipe>;
 
 pub(super) fn run(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    let parsed = parse_arguments(arguments)?;
+    let profile = read_profile(&parsed.profile_path)?;
+    if profile.role != Role::Human {
+        return Err(Failure::Unavailable);
+    }
+    let key = read_tui_key(&parsed.private_path)?;
+    run_terminal(
+        &profile,
+        &key,
+        &parsed.endpoint,
+        parsed.idle,
+        parsed.reveal,
+        parsed.copy,
+        #[cfg(windows)]
+        parsed.diagnostic_path.as_deref(),
+    )
+}
+
+struct TuiArguments {
+    profile_path: PathBuf,
+    private_path: PathBuf,
+    endpoint: PathBuf,
+    idle: u64,
+    reveal: u64,
+    copy: u64,
+    #[cfg(windows)]
+    diagnostic_path: Option<PathBuf>,
+}
+
+fn parse_arguments(
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<TuiArguments, Failure> {
     let profile_path = take_path(arguments, "--profile")?;
     let private_path = take_path(arguments, "--private")?;
-    let socket_path = take_path(arguments, "--socket")?;
+    #[cfg(unix)]
+    let endpoint = take_path(arguments, "--socket")?;
+    #[cfg(windows)]
+    let endpoint = take_path(arguments, "--vault-id")?;
     let idle = take_seconds(arguments, "--idle-seconds", DEFAULT_IDLE)?;
     let reveal = take_seconds(arguments, "--reveal-seconds", DEFAULT_REVEAL)?;
     let copy = take_seconds(arguments, "--copy-seconds", DEFAULT_COPY)?;
+    #[cfg(windows)]
+    let diagnostic_path = match arguments.next() {
+        None => None,
+        Some(flag) if flag == "--console-diagnostics" => {
+            Some(PathBuf::from(arguments.next().ok_or(Failure::Usage)?))
+        }
+        Some(_) => return Err(Failure::Usage),
+    };
     finish_arguments(arguments)?;
     if idle > DEFAULT_IDLE || reveal > DEFAULT_REVEAL || copy > DEFAULT_COPY {
         return Err(Failure::Usage);
     }
-    let profile = read_profile(&profile_path)?;
-    if profile.role != Role::Human {
-        return Err(Failure::Unavailable);
-    }
-    let key = read_key(&private_path, super::current_uid())?;
-    run_terminal(&profile, &key, &socket_path, idle, reveal, copy)
+    Ok(TuiArguments {
+        profile_path,
+        private_path,
+        endpoint,
+        idle,
+        reveal,
+        copy,
+        #[cfg(windows)]
+        diagnostic_path,
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_tui_key(path: &Path) -> Result<KeyMaterial, Failure> {
+    read_key(path, crate::linux::current_uid())
+}
+
+#[cfg(target_os = "windows")]
+fn read_tui_key(path: &Path) -> Result<KeyMaterial, Failure> {
+    crate::windows::read_key(path)
 }
 
 fn take_seconds(
@@ -596,12 +735,17 @@ fn run_terminal(
     idle: u64,
     reveal: u64,
     copy: u64,
+    #[cfg(windows)] diagnostic_path: Option<&Path>,
 ) -> Result<(), Failure> {
-    let writer = File::options()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .map_err(|_| Failure::Unavailable)?;
+    let writer = open_terminal()?;
+    #[cfg(windows)]
+    let mut diagnostic = diagnostic_path
+        .map(|path| console_diagnostic::Diagnostic::create(path, &writer))
+        .transpose()?;
+    #[cfg(windows)]
+    if let Some(probe) = diagnostic.as_mut() {
+        probe.record("before-alt")?;
+    }
     if enable_raw_mode().is_err() {
         if disable_raw_mode().is_err() {
             report_cleanup_failure("terminal-initialization");
@@ -620,10 +764,26 @@ fn run_terminal(
             cursor_hidden: false,
         },
         cleanup_attempted: false,
+        #[cfg(windows)]
+        original_output_cp: None,
+        #[cfg(windows)]
+        console_report: None,
     };
     let operation = (|| {
+        #[cfg(windows)]
+        {
+            if let Some(probe) = diagnostic.as_ref() {
+                guard.console_report = Some(probe.report_file()?);
+            }
+            guard.configure_output_utf8()?;
+        }
         guard.state.alternate = true;
         execute!(guard.writer, EnterAlternateScreen).map_err(|_| Failure::Unavailable)?;
+        #[cfg(windows)]
+        if let Some(probe) = diagnostic.as_mut() {
+            probe.record("after-alt")?;
+            probe.writer_experiments()?;
+        }
         guard.state.cursor_hidden = true;
         execute!(guard.writer, crossterm::cursor::Hide).map_err(|_| Failure::Unavailable)?;
         let backend = CrosstermBackend::new(writer);
@@ -637,10 +797,32 @@ fn run_terminal(
             Duration::from_secs(reveal),
             Duration::from_secs(copy),
         )?;
+        #[cfg(windows)]
+        {
+            app.initial_diagnostic = diagnostic;
+        }
         run_authenticated_session(profile, key, socket, &mut terminal, &mut app)
     })();
     let restoration = guard.restore();
     combine_failures([operation, restoration])
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_terminal() -> Result<File, Failure> {
+    File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|_| Failure::Unavailable)
+}
+
+#[cfg(target_os = "windows")]
+fn open_terminal() -> Result<File, Failure> {
+    File::options()
+        .read(true)
+        .write(true)
+        .open("CONOUT$")
+        .map_err(|_| Failure::Unavailable)
 }
 
 fn run_authenticated_session(
@@ -722,11 +904,16 @@ fn run_authenticated_session(
 }
 
 fn combine_failures<const N: usize>(results: [Result<(), Failure>; N]) -> Result<(), Failure> {
-    if results.into_iter().all(|result| result.is_ok()) {
-        Ok(())
-    } else {
-        Err(Failure::Unavailable)
+    let mut failure: Option<Failure> = None;
+    for result in results {
+        if let Err(error) = result {
+            failure = Some(match failure {
+                Some(previous) => previous.merge(error),
+                None => error,
+            });
+        }
     }
+    failure.map_or(Ok(()), Err)
 }
 
 fn event_loop(
@@ -766,6 +953,7 @@ fn event_loop(
                 match handle_key(app, tls, key) {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
+                    Err(error) if error.has_native_cleanup_failure() => return Err(error),
                     Err(error) => {
                         app.operation = None;
                         app.input.clear();
@@ -1207,11 +1395,30 @@ fn preview_1pux(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Fa
     if *read_frame(tls)? != [0] {
         return Err(Failure::Unavailable);
     }
-    send_file_descriptor(&tls.sock, source.as_raw_fd())?;
-    let (summary, prepared) = decode_import_preview(&read_frame(tls)?)?;
+    let response = transfer_import_file(tls, &source)?;
+    let (summary, prepared) = decode_import_preview(&response)?;
     app.operation = Some(PendingOperation::Import(prepared));
     begin_prompt(app, Mode::ConfirmImport, &summary);
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn transfer_import_file(tls: &mut HumanTls, source: &File) -> Result<ProtectedBytes, Failure> {
+    send_file_descriptor(&tls.sock, source.as_raw_fd()).and_then(|()| read_frame(tls))
+}
+
+#[cfg(target_os = "windows")]
+fn transfer_import_file(tls: &mut HumanTls, source: &File) -> Result<ProtectedBytes, Failure> {
+    let lease = pm_native_channel::ProcessHandleTransferLease::begin()
+        .map_err(|error| Failure::Unavailable.after_native_cleanup(error.cleanup_result()))?;
+    let operation = send_file_handle(tls, source).and_then(|()| read_frame(tls));
+    match operation {
+        Ok(response) => match lease.finish() {
+            Ok(()) => Ok(response),
+            Err(cleanup) => Err(Failure::Unavailable.after_native_cleanup(Err(cleanup))),
+        },
+        Err(error) => Err(error.after_native_cleanup(lease.finish())),
+    }
 }
 
 fn confirm_import(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
@@ -1641,12 +1848,7 @@ fn decode_hex_44(value: &str) -> Result<[u8; 44], Failure> {
 }
 
 fn create_private_output(path: &Path) -> Result<File, Failure> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|_| Failure::Unavailable)
+    pm_native_channel::create_private_file(path, true, true).map_err(|_| Failure::Unavailable)
 }
 
 fn pair_device(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
@@ -1693,7 +1895,7 @@ fn sync_now(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failur
         app.status = "Confirmation mismatch; sync not started".into();
         return Ok(());
     }
-    if UnixStream::connect(&socket).is_err() {
+    if !sync_endpoint_available(Path::new(&socket))? {
         app.status = "Sync endpoint offline; no sync was performed".into();
         return Ok(());
     }
@@ -1718,6 +1920,17 @@ fn sync_now(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failur
         hex(&job)
     );
     Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(clippy::unnecessary_wraps)]
+fn sync_endpoint_available(path: &Path) -> Result<bool, Failure> {
+    Ok(UnixStream::connect(path).is_ok())
+}
+
+#[cfg(target_os = "windows")]
+fn sync_endpoint_available(path: &Path) -> Result<bool, Failure> {
+    pm_native_channel::windows_named_pipe_available(path).map_err(|_| Failure::Unavailable)
 }
 
 fn select_sync_job(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
@@ -2410,8 +2623,19 @@ fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Fail
     })
 }
 
+#[cfg(target_os = "windows")]
+fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Failure> {
+    let owned =
+        pm_native_channel::OwnedClipboard::copy(secret).map_err(|_| Failure::Unavailable)?;
+    Ok(ClipboardLease {
+        backend: ClipboardBackend::Windows(Some(owned)),
+        until: Instant::now() + duration,
+        cleanup_attempted: false,
+    })
+}
+
 fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Result<(), Failure> {
-    terminal.draw(|frame| {
+    let completed = terminal.draw(|frame| {
         let chunks = Layout::default().direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(6)]).split(frame.area());
         let title = Paragraph::new("Password Manager — human TLS-RPK content")
@@ -2463,30 +2687,126 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
         };
         let mut state = ListState::default(); if !rows.is_empty() { state.select(Some(selected)); }
         frame.render_stateful_widget(List::new(rows).highlight_symbol("› ").block(Block::default().title(list_title).borders(Borders::ALL)), chunks[1], &mut state);
-        let prompt = if matches!(
-            app.mode,
-            Mode::Unlock
-                | Mode::ConfirmPasskeyPassword
-                | Mode::MasterRotate
-                | Mode::RecoveryRotate
-        ) {
-            "•".repeat(app.input.chars().count())
-        } else {
-            sanitize_text(&app.input)
-        };
-        let exposure = app.reveal.as_ref().map_or_else(|| "<hidden>".into(), |(secret, _)| display_secret(secret));
-        let controls = match app.screen {
-            Screen::Content => "↑↓/jk select  / search  t tag  f favorite  g generate  h history  d trash  u restore  p/P purge  r reveal  c copy  a access  w pending  m migrate  b backup  y sync  z audit  D download  l lock  q quit",
-            Screen::Access => "↑↓/jk select  n enroll  s suspend/resume  x revoke agent  e enable/disable credential  Esc content",
-            Screen::Pending => "↑↓/jk select  x cancel  v confirm passkey  Esc content",
-        };
-        let footer = Paragraph::new(vec![
-            Line::from(sanitize_text(&app.status)), Line::from(format!("Input: {prompt}")),
+        render_footer(frame, chunks[2], app);
+    }).map_err(|_| Failure::Unavailable)?;
+    #[cfg(windows)]
+    if let Some(mut probe) = app.initial_diagnostic.take() {
+        probe.frame(completed.buffer)?;
+        probe.record("after-draw")?;
+        app.csv_diagnostic = Some(probe);
+    }
+    #[cfg(windows)]
+    if app.mode == Mode::CsvImport && app.input.ends_with("keep") {
+        if let Some(mut probe) = app.csv_diagnostic.take() {
+            probe.csv_frame(
+                completed.buffer,
+                app.input.ends_with("|chrome|keep"),
+                Line::raw(app.input.as_str()).width(),
+                Line::raw(app.status.as_str()).width(),
+            )?;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = completed;
+    Ok(())
+}
+
+fn render_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+    let status = ellipsize_status(&sanitize_text(&app.status), usize::from(inner.width));
+    frame.render_widget(Paragraph::new(status), rows[0]);
+
+    let prompt = if matches!(
+        app.mode,
+        Mode::Unlock | Mode::ConfirmPasskeyPassword | Mode::MasterRotate | Mode::RecoveryRotate
+    ) {
+        "•".repeat(app.input.chars().count())
+    } else {
+        sanitize_text(&app.input)
+    };
+    // Reserve one cell after the representation so the insertion cursor never
+    // covers its final glyph or the border. Editing currently occurs at the end.
+    let prefix = "Input: ";
+    let available = usize::from(rows[1].width).saturating_sub(prefix.len() + 1);
+    let visible = input_suffix(&prompt, available);
+    let cursor_offset = Line::raw(format!("{prefix}{visible}")).width();
+    frame.render_widget(Paragraph::new(format!("{prefix}{visible}")), rows[1]);
+    if rows[1].height > 0 && cursor_offset < usize::from(rows[1].width) {
+        let offset = u16::try_from(cursor_offset).expect("cursor is within the u16 row width");
+        frame.set_cursor_position((rows[1].x + offset, rows[1].y));
+    }
+
+    let exposure = app
+        .reveal
+        .as_ref()
+        .map_or_else(|| "<hidden>".into(), |(secret, _)| display_secret(secret));
+    let controls = match app.screen {
+        Screen::Content => {
+            "↑↓/jk select  / search  t tag  f favorite  g generate  h history  d trash  u restore  p/P purge  r reveal  c copy  a access  w pending  m migrate  b backup  y sync  z audit  D download  l lock  q quit"
+        }
+        Screen::Access => {
+            "↑↓/jk select  n enroll  s suspend/resume  x revoke agent  e enable/disable credential  Esc content"
+        }
+        Screen::Pending => "↑↓/jk select  x cancel  v confirm passkey  Esc content",
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
             Line::from(format!("Exposure: {exposure}")),
             Line::from(controls),
-        ]).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL));
-        frame.render_widget(footer, chunks[2]);
-    }).map(|_| ()).map_err(|_| Failure::Unavailable)
+        ])
+        .wrap(Wrap { trim: true }),
+        rows[2],
+    );
+}
+
+fn input_suffix(prompt: &str, width: usize) -> String {
+    if Line::raw(prompt).width() <= width {
+        return prompt.to_owned();
+    }
+    let span = Span::raw(prompt);
+    let graphemes = span.styled_graphemes(Style::default()).collect::<Vec<_>>();
+    let mut occupied = 1; // The left-hidden marker is one screen cell.
+    let mut first = graphemes.len();
+    for (index, grapheme) in graphemes.iter().enumerate().rev() {
+        let cells = Line::raw(grapheme.symbol).width();
+        if occupied + cells > width {
+            break;
+        }
+        occupied += cells;
+        first = index;
+    }
+    let mut visible = String::from("‹");
+    for grapheme in &graphemes[first..] {
+        visible.push_str(grapheme.symbol);
+    }
+    visible
+}
+
+fn ellipsize_status(status: &str, width: usize) -> String {
+    if Line::raw(status).width() <= width {
+        return status.to_owned();
+    }
+    let span = Span::raw(status);
+    let mut visible = String::new();
+    let mut occupied = 1; // The ellipsis is one screen cell.
+    for grapheme in span.styled_graphemes(Style::default()) {
+        let cells = Line::raw(grapheme.symbol).width();
+        if occupied + cells > width {
+            break;
+        }
+        occupied += cells;
+        visible.push_str(grapheme.symbol);
+    }
+    visible.push('…');
+    visible
 }
 
 fn display_secret(value: &[u8]) -> String {
@@ -2525,6 +2845,221 @@ const fn kind_label(kind: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use ratatui::backend::TestBackend;
+
+    fn render_test_footer(terminal: &mut Terminal<TestBackend>, app: &App) {
+        terminal
+            .draw(|frame| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(5),
+                        Constraint::Length(6),
+                    ])
+                    .split(frame.area());
+                render_footer(frame, chunks[2], app);
+            })
+            .unwrap();
+    }
+
+    fn footer_app(input: &str) -> App {
+        let mut app = App::new(
+            Duration::from_secs(300),
+            Duration::from_secs(15),
+            Duration::from_secs(30),
+        )
+        .expect("protected footer fixture");
+        app.mode = Mode::CsvImport;
+        for character in input.chars() {
+            app.input.push(character);
+        }
+        app.status =
+            "CSV source path|chrome|keep with synthetic mapping and confirmation before importing"
+                .into();
+        app
+    }
+
+    fn footer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        (1..79)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    #[test]
+    fn footer_long_input_keeps_suffix_and_cursor_at_80x24() {
+        let input = format!("{}|chrome|keep", "synthetic-path/".repeat(8));
+        let app = footer_app(&input);
+        assert!(app.input.ends_with("|chrome|keep"));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        render_test_footer(&mut terminal, &app);
+        let expected = format!("Input: ‹{}", &input[input.len() - 69..]);
+        assert_eq!(footer_row(&terminal, 20), expected);
+        assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        assert!(footer_row(&terminal, 19).ends_with('…'));
+        assert_eq!(footer_row(&terminal, 21), "Exposure: <hidden>");
+    }
+
+    #[test]
+    fn footer_exact_input_width_and_one_more_cell() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for (length, expected) in [
+            (70, format!("Input: {}", "a".repeat(70))),
+            (71, format!("Input: ‹{}", "a".repeat(69))),
+        ] {
+            render_test_footer(&mut terminal, &footer_app(&"a".repeat(length)));
+            assert_eq!(footer_row(&terminal, 20), expected);
+            assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        }
+    }
+
+    #[test]
+    fn footer_wide_glyph_at_the_edge_is_never_split_or_omitted() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for (length, expected) in [
+            (68, format!("Input: {}界", "a".repeat(68))),
+            (69, format!("Input: ‹{}界", "a".repeat(67))),
+        ] {
+            render_test_footer(
+                &mut terminal,
+                &footer_app(&format!("{}界", "a".repeat(length))),
+            );
+            assert!(footer_row(&terminal, 20).starts_with(&expected));
+            assert_eq!(terminal.backend().buffer()[(76, 20)].symbol(), "界");
+            assert_eq!(terminal.backend().buffer()[(78, 20)].symbol(), " ");
+            assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        }
+    }
+
+    #[test]
+    fn footer_combining_graphemes_scroll_as_screen_cells() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for (length, expected) in [
+            (70, format!("Input: {}", "e\u{301}".repeat(70))),
+            (71, format!("Input: ‹{}", "e\u{301}".repeat(69))),
+        ] {
+            render_test_footer(&mut terminal, &footer_app(&"e\u{301}".repeat(length)));
+            assert_eq!(footer_row(&terminal, 20), expected);
+            assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        }
+    }
+
+    #[test]
+    fn footer_secret_scroll_only_renders_the_existing_mask() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for mode in [
+            Mode::Unlock,
+            Mode::ConfirmPasskeyPassword,
+            Mode::MasterRotate,
+            Mode::RecoveryRotate,
+        ] {
+            let mut app = footer_app(&"synthetic-secret-界e\u{301}".repeat(8));
+            app.mode = mode;
+            render_test_footer(&mut terminal, &app);
+            assert_eq!(
+                footer_row(&terminal, 20),
+                format!("Input: ‹{}", "•".repeat(69))
+            );
+            assert!(!format!("{:?}", terminal.backend().buffer()).contains("synthetic-secret"));
+            assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        }
+    }
+
+    #[test]
+    fn footer_long_status_cannot_overwrite_input_and_preserves_graphemes() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut app = footer_app("typed-suffix");
+        app.status = format!("{}界e\u{301}tail", "s".repeat(75));
+        render_test_footer(&mut terminal, &app);
+        assert!(footer_row(&terminal, 19).starts_with(&"s".repeat(75)));
+        assert_eq!(terminal.backend().buffer()[(76, 19)].symbol(), "界");
+        assert_eq!(terminal.backend().buffer()[(78, 19)].symbol(), "…");
+        assert_eq!(footer_row(&terminal, 20), "Input: typed-suffix");
+        assert_eq!(terminal.get_cursor_position().unwrap(), (20, 20).into());
+    }
+
+    #[test]
+    fn footer_resize_recomputes_scroll_at_80x24() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let app = footer_app(&format!("{}|chrome|keep", "synthetic/".repeat(9)));
+        render_test_footer(&mut terminal, &app);
+        terminal.backend_mut().resize(80, 24);
+        terminal.autoresize().unwrap();
+        render_test_footer(&mut terminal, &app);
+        assert!(footer_row(&terminal, 20).ends_with("|chrome|keep"));
+        assert!(footer_row(&terminal, 20).starts_with("Input: ‹"));
+        assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        assert!(footer_row(&terminal, 19).ends_with('…'));
+    }
+
+    fn arguments<'a>(values: &'a [&'a str]) -> impl Iterator<Item = OsString> + 'a {
+        values.iter().map(OsString::from)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_tui_arguments_match_the_native_harness() {
+        let mut values = arguments(&[
+            "--profile",
+            r"C:\fixture\human.profile",
+            "--private",
+            r"C:\fixture\human.key",
+            "--vault-id",
+            "0123456789abcdef0123456789abcdef",
+            "--idle-seconds",
+            "300",
+            "--reveal-seconds",
+            "15",
+            "--copy-seconds",
+            "30",
+        ]);
+        let parsed = parse_arguments(&mut values).unwrap();
+        assert_eq!(
+            parsed.endpoint,
+            Path::new("0123456789abcdef0123456789abcdef")
+        );
+
+        let mut wrong_endpoint = arguments(&[
+            "--profile",
+            r"C:\fixture\human.profile",
+            "--private",
+            r"C:\fixture\human.key",
+            "--socket",
+            r"\\.\pipe\PasswordManager-test-human",
+            "--idle-seconds",
+            "300",
+            "--reveal-seconds",
+            "15",
+            "--copy-seconds",
+            "30",
+        ]);
+        assert!(parse_arguments(&mut wrong_endpoint).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_tui_arguments_keep_the_socket_contract() {
+        let mut values = arguments(&[
+            "--profile",
+            "/tmp/human.profile",
+            "--private",
+            "/tmp/human.key",
+            "--socket",
+            "/tmp/human.sock",
+            "--idle-seconds",
+            "300",
+            "--reveal-seconds",
+            "15",
+            "--copy-seconds",
+            "30",
+        ]);
+        let parsed = parse_arguments(&mut values).unwrap();
+        assert_eq!(parsed.endpoint, Path::new("/tmp/human.sock"));
+    }
 
     #[test]
     fn terminal_text_never_preserves_control_sequences() {
