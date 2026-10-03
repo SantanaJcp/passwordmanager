@@ -849,6 +849,21 @@ fn serve_loop(
         });
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        serve_independent_accept_lanes(
+            &agent_listener,
+            human_listener,
+            bootstrap.agent_uid,
+            bootstrap.human_uid,
+            &bootstrap.agent_spki,
+            &agent_config,
+            human_config,
+            vault,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
     loop {
         accept_one(
             &agent_listener,
@@ -865,6 +880,55 @@ fn serve_loop(
             &human_config,
             vault,
             None,
+        )?;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+// Darwin's ordinary service must accept delegated requests while a persistent
+// human RPC/TUI is open. There are exactly two accept lanes, not one thread
+// per client. Keep Linux's existing dispatcher outside this port's change.
+#[allow(clippy::too_many_arguments)]
+fn serve_independent_accept_lanes(
+    agent_listener: &UnixListener,
+    human_listener: UnixListener,
+    agent_uid: u32,
+    human_uid: u32,
+    agent_spki: &[u8],
+    agent_config: &Arc<ServerConfig>,
+    human_config: Arc<ServerConfig>,
+    vault: Option<&VaultService>,
+) -> Result<(), Failure> {
+    let human_vault = vault.cloned();
+    let human_lane = std::thread::Builder::new()
+        .name("pm-human-accept".to_owned())
+        .spawn(move || -> Result<(), Failure> {
+            loop {
+                accept_one(
+                    &human_listener,
+                    human_uid,
+                    Role::Human,
+                    &human_config,
+                    human_vault.as_ref(),
+                    None,
+                )?;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .map_err(|_| Failure::Unavailable)?;
+    loop {
+        // A stopped or panicked human lane is a fatal custody condition. The
+        // binary's existing top-level error path terminates the whole process.
+        if human_lane.is_finished() {
+            return Err(Failure::Unavailable);
+        }
+        accept_one(
+            agent_listener,
+            agent_uid,
+            Role::Agent,
+            agent_config,
+            vault,
+            Some(agent_spki),
         )?;
         std::thread::sleep(Duration::from_millis(5));
     }

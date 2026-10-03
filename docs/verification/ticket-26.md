@@ -1778,3 +1778,55 @@ and the required post-probe human read returned AppleScript conversion error
 immediately after authorization setup, before clipboard/content matrices,
 so that unrelated later failures cannot prevent observation. All original
 clipboard assertions and the concurrent acceptance gate remain intact.
+
+
+[Run 37087946638](https://github.com/SantanaJcp/passwordmanager/actions/runs/37087946638),
+exact `7038e667e67b1521df04d10efdc68569c92c31ae`, completed FAILED. **Both Intel
+and Apple silicon** emitted `completed-after-human-lock process=same result=zero`
+before later isolated-clipboard indeterminacy and post-control AppleScript
+`-1700`. This confirms the shared synchronous accept loop is the concurrent
+discovery root cause, not a catalog expectation or VT repaint race. The
+clipboard failure is independent and remains an explicit failed prerequisite.
+
+Minimal product correction now authorized by the task's native defect scope:
+on macOS only, allocate exactly one human accept thread at service startup
+and retain the agent accept lane on the main thread. The human lane owns its
+listener, the same verified TLS config and a cloned service handle (Arc audit
+custody and sync manager, no new engine or plaintext roots). Thread creation
+failure or unexpected lane termination is `CUSTODY_UNAVAILABLE`; no unbounded
+per-connection threads are introduced. Existing bilateral UID/RPK/ALPN,
+blocking accepted-stream normalization, socket bounds and provider settings
+remain unchanged. Linux's existing accept loop remains intact. Validate with
+repository check under the shared flock, then the ordinary native concurrency
+assertions on both CPUs. The causal control should now complete while the
+human TUI is open. Do not count the clipboard prerequisite as a denial if it
+is indeterminate; the next run enables its existing categorical observation.
+
+
+Independent-matrix ordering refinement: retain the initial seeded catalog,
+three terminal sizes and core keyboard lock; run the unchanged full Ticket23
+and partial Ticket24 matrices before the independent isolated clipboard gate.
+Then run Full25 even if the clipboard assertion failed, provided the verified
+custody PID is unchanged. Aggregate every failure and finish strict cleanup;
+any error prevents all overall PASS lines. `PM26_MATRIX ...=observed` labels
+name completed assertion groups, never whole-ticket acceptance. A changed or
+missing custody process stops further matrices, rather than inventing a
+recovered service. This ordering gives useful native evidence despite a
+separate clipboard prerequisite failure and does not substitute any gate.
+Full25 keeps idle=30; during the 75-second bounded transport observation,
+keyboard status queries every 20 seconds select the same job ID. They do not
+restart sync or repeat authentication. Invalid server-side CSV/1PUX requests
+currently terminate their human channel; dedicated negative sessions require
+the visible failure, subsequent exit 4 and unchanged item count. No product
+error handling is changed to keep those sessions alive.
+
+
+Local correction evidence (Linux x86_64, exact worktree cwd):
+`flock /tmp/pm-cargo-window.lock ./scripts/check.sh` first completed all tests
+but failed Clippy on four needless by-value arguments in the new lane helper.
+The agent listener/config/RPK and service are now borrowed; only the human
+listener/config and cloned service move into its fixed thread. The same full
+check subsequently passed (`/tmp/pm26-20261002-check-final.log`). This is local
+build/regression evidence, not native concurrency evidence. Python ASTs,
+existing VT/helper/pasteboard-parser regressions, shared 1PUX construction,
+CI guards and diff checks passed; no local macOS or provider result is claimed.
