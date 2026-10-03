@@ -1481,3 +1481,44 @@ fn authenticated_session_connection_loss_is_explicit_without_internal_replay() {
     );
     server.transport.finish().unwrap();
 }
+
+#[test]
+fn authenticated_session_preserves_wal_and_durable_commits_between_blocks() {
+    let mut f = PurgeFixture::new();
+    let mut server = TlsServer::start(&mut f);
+    let bytes = b"PMW2_SYNTHETIC_DURABLE_WAL_BLOCK";
+    let hash = pm_crypto::digest(bytes);
+    server.transport.put(f.namespace, hash, bytes).unwrap();
+    let db_path = f.dir.path("tls-store.sqlite3");
+    let wal_path = f.dir.path("tls-store.sqlite3-wal");
+    assert!(
+        wal_path.exists(),
+        "a block must not close the last WAL connection and force a checkpoint"
+    );
+    assert!(fs::metadata(wal_path).unwrap().len() > 0);
+    let db = rusqlite::Connection::open(&db_path).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2,
+        "FULL durability remains enabled"
+    );
+    drop(db);
+    server.transport.publish(f.namespace, hash).unwrap();
+    assert_eq!(server.transport.get(f.namespace, hash).unwrap(), bytes);
+    server.transport.finish().unwrap();
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    let reopened = OpaqueSyncStore::create(&db_path).unwrap();
+    assert_eq!(
+        reopened.get(f.namespace, &f.client_rpk, hash).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        reopened
+            .list(f.namespace, &f.client_rpk, None, 128)
+            .unwrap()
+            .len(),
+        1
+    );
+}

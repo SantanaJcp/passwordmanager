@@ -667,7 +667,10 @@ impl SyncReplica {
                     graphs.push(self.download_graph(&server, hash, &stage)?);
                     stages.push(stage);
                 }
+                let opening = timing::Span::new("pull_reducer_open");
                 let mut reducer = CausalReducer::open(&self.vault)?;
+                drop(opening);
+                timing::count("group_activate_started", 1);
                 let activating = timing::Span::new("group_activate");
                 reducer.apply_received_group(&events, &graphs, Some(*root), &page_lengths)?;
                 drop(activating);
@@ -795,6 +798,8 @@ impl SyncReplica {
         root: [u8; 32],
         stage: &Path,
     ) -> Result<ReceivedCiphertextGraph, SyncError> {
+        timing::count("graph_download_started", 1);
+        let _download = timing::Span::new("graph_download");
         std::fs::create_dir_all(stage).map_err(|_| SyncError::Unavailable)?;
         let sealed = retry(|| t.get(*self.pairing.namespace(), root))?;
         let wire = decode_graph(&self.pairing.open(&sealed)?)?;
@@ -1032,7 +1037,9 @@ fn publish_staged_file(
     temporary: &Path,
     output: &Path,
 ) -> Result<(), SyncError> {
+    let syncing = timing::Span::new("download_file_fsync");
     file.sync_all().map_err(|_| SyncError::Unavailable)?;
+    drop(syncing);
     drop(file);
     pm_vault::publish_new_file(temporary, output).map_err(|error| {
         if error.kind() == std::io::ErrorKind::AlreadyExists {

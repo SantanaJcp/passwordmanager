@@ -342,8 +342,22 @@ fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) ->
     }
     let opening = timing::Span::new("server_sqlite_open");
     let store = OpaqueSyncStore::create(db).map_err(|_| ())?;
+    #[cfg(unix)]
+    let database = {
+        // Keep the WAL attached between RPCs. Each store mutation still commits
+        // durably; closing its short-lived connection is no longer the last
+        // close/checkpoint. No read transaction or altered PRAGMA is retained.
+        let connection = rusqlite::Connection::open(db).map_err(|_| ())?;
+        connection
+            .execute_batch("PRAGMA trusted_schema=OFF")
+            .map_err(|_| ())?;
+        connection
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))
+            .map_err(|_| ())?;
+        connection
+    };
     drop(opening);
-    loop {
+    let result = (|| loop {
         let dispatching = timing::Span::new("server_dispatch");
         let response = dispatch(
             &store,
@@ -360,7 +374,14 @@ fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) ->
         {
             request = read_frame(&mut tls)?;
         }
+    })();
+    #[cfg(unix)]
+    {
+        let closed = database.close().map_err(|_| ());
+        result.and(closed)
     }
+    #[cfg(windows)]
+    result
 }
 
 fn dispatch(store: &OpaqueSyncStore, rpk: &[u8], json: &str) -> Result<String, ()> {

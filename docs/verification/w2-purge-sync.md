@@ -591,3 +591,56 @@ happy job; no se imprimen. Se medirá también wall time observado por la TUI.
 No se afirma que el PID server de la primera muestra pruebe continuidad del
 PID del custodio; sus métricas indican dos launches contando el wrong-pin
 anterior, pero no se tomó ese segundo PID explícito en diagnóstico 1.
+
+### Verificación 1: publicación recuperada, convergencia TUI pendiente
+
+[37131160116](https://github.com/SantanaJcp/passwordmanager/actions/runs/37131160116),
+SHA `0bd0721d4d5610c184e9fde26edd77f64651c1c7`, completed/failure.
+31/31 E2EE y las negativas IPC pasan por CPU. Control de 39 eventos:
+ARM publish 7.518 s/convergencia 10.505 s; Intel 9.986/13.084 s,
+frente a 15.342/27.716 y 22.124/36.387 s de fase 3. Un solo proceso,
+271 puts y 272 gets conservados. No sustituye la fixture TUI exacta.
+
+Intel happy: 287 bloques/1 root al cutoff, `pulling`, custodio y servidor
+ambos con PID estable. 59 eventos/1 página; push completo 12.769 s,
+287 puts 7.343 s, 287 gets completados 1.222 s, publish 0.002139 s,
+59 exportaciones 4.249 s, fsync joined 0.306 s y ack 0.178 s.
+Un handshake 0.032160 s y spawn 0.000857 s; ningún fsync de temporal put
+ni backoff registrado. El tiempo de pull/activación no había terminado
+cuando se leyó la muestra: no inventar su duración.
+ARM falla antes del sync en `diagnose_agent_accept_lane`, password-prompt;
+no es fallo W2 medido ni evidencia de aceptación TUI.
+
+Método adicional acotado: probar con servidor real que una sesión no fuerza
+cierre/checkpoint de WAL después de cada put. RED: WAL ausente después de
+un put confirmado; GREEN: WAL presente con commit, lectura válida, y cierre
+real del servidor seguido de reapertura conserva bloque/root. Mantener una
+conexión SQLite abierta durante TLS, sin transacción lectora retenida, cambios
+synchronous, deshabilitar checkpoint ni agrupar commits. SQLite documenta
+checkpoint al cerrar la última conexión y FULL conserva sync por commit:
+[WAL §3.1 y §2.3](https://www.sqlite.org/wal.html). Si no mejora el job dentro
+20 s, registrar el fallo y el siguiente cuello sin ampliar plazos. Añadir scopes
+solo de download y activación para discriminar la recepción pendiente.
+
+WAL RED `/tmp/pmw2d-wal-red.log` rc101: falta WAL inmediatamente después del
+primer put real. GREEN `/tmp/pmw2d-wal-green-check.log` rc0: WAL/commit durables,
+reapertura después de parar el servidor, 32 E2EE y check/Clippy completos.
+Una conexión de servidor se mantiene abierta sin transacción lectora;
+`Connection::close` se comprueba explícitamente al finalizar el canal. No se
+cambia `synchronous`, autocheckpoint ni commit por put. El efecto funcional
+está confirmado; la reducción de coste nativo queda por medir, no se atribuye
+una mejora Linux significativa al keeper (control focalizado 3.309/4.208 s).
+
+Primer barrido del fix de sesión en `0bd0721`: `/tmp/pmw2d-gate-results.json`,
+40 casos/38 rc0/0 regresiones; check 56.925 s y clean 41.115 s. Los rc1
+siguen en TUI operaciones y matriz G7, misma razón que el baseline. Tras el
+nuevo cambio productivo SQLite se exige otro barrido completo, logs
+`/tmp/pmw2d-wal-gate-*.log`, resultados `...-results.json`, sin sobrescribir
+ninguna evidencia previa. Próxima corrida: diagnóstico 2 con hipótesis distinta
+(checkpoint por último close y scopes de recepción/activación); quedan luego
+hasta una verificación adicional dentro de las cuatro autorizadas.
+
+Fallbacks heredados adicionales observados y conservados: `serve_one` convierte
+error de parser/dispatch a `{"ok":false}` genérico; `sync_job::record_journal_failure`
+ignora el error secundario de persistencia de su estado de emergencia mientras
+expone JournalFailure en memoria. No son la causa medida y no se modifican.
