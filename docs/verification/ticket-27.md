@@ -2,8 +2,9 @@
 
 Corte actual: 2026-10-02. Estado: **checkpoint parcial Win11 ARM64, no candidato
 aceptado**; ticket `claimed`. El primer prompt/input oculto/unlock pasan en
-modo normal; la matriz se detiene por recorte del input CSV en el footer común,
-con decisión de presentación pendiente. Los métodos y runs exactos del corte
+modo normal; fase 2 corrige el scroll del footer común en Linux. La matriz se
+detiene ahora porque el status recortado oculta datos del resumen de importación;
+su ubicación completa requiere decisión del usuario. Los métodos y runs exactos del corte
 están al final. No acredita soporte completo, x64/reboot ni resuelve el ticket.
 Las entradas desde 2026-09-13 se conservan como cronología de checkpoints,
 no como declaraciones simultáneas sobre el candidato actual.
@@ -2356,3 +2357,58 @@ PM_CFT_DIR=<ruta autorizada> ./scripts/test-linux-tui-operations-lab.sh`
 retornó 1 en el oráculo `|chrome|keep` a 80×24: status en dos filas, `Input:`
 en otra y path recortado en la última. No se envió Enter. Log:
 `/tmp/pm27-phase2-linux-tui-red.log`; cleanup propio sin error agregado.
+
+
+Primer GREEN parcial: 6/7 casos pasan; el caso de status ancho falla por su
+oráculo, que concatena la celda de continuación del glyph ancho como un espacio
+entre `界` y `…`. Hipótesis verificable: exigir las celdas exactas 76=`界`,
+78=`…`, además del input/cursor intactos. Se corrige sólo esa aserción, sin
+cambiar producto. Log preservado: `/tmp/pm27-phase2-footer-green1.log`.
+Una invocación check quedó en cola por error antes de finalizar el focused;
+se canceló antes de ejecutar Cargo (log vacío), y no cuenta como verificación.
+
+
+GREEN de render: 7/7 en library y 7/7 en binary, dentro de 20+20 tests
+pm-custody; bootstrap 1/1; check pm-custody rc0. Log:
+`/tmp/pm27-phase2-custody-green.log`. Check.sh completo rc0 (fmt,
+check/tests/clippy workspace), `/tmp/pm27-phase2-check2.log`.
+
+Barrida TUI Linux: content PASS (siete tipos/campos, Unicode, resize, reveal/
+clipboard/lock), access PASS (autoridad y pending); operations FAIL después del
+primer CSV largo confirmado, en la previsualización duplicada. El footer ya
+muestra el sufijo antes de Enter y el primer import es durable, pero la nueva
+fila status contiene `Mapping=chrome duplicate-action=keep; Preview values
+hidden: total=1 new=0 re…` y oculta `exact-duplicates=1`. No se cambia esa
+aserción ni se presenta la barrida como verde. Logs:
+`/tmp/pm27-phase2-linux-tui-{content,access,operations}-green1.log` y
+`/tmp/pm27-phase2-linux-tui-suite1.log`. Es un nuevo déficit de presentación del
+resumen previo a confirmación, no un fallo del scroll de input.
+
+Frontera nueva comunicada al usuario: dónde mostrar completo el resumen
+obligatorio de importación sin volver a expandir el status sobre el input.
+Recomendación: panel de contenido durante preview; alternativa: vista explícita
+de detalle con tecla. La decisión anterior del footer se conserva; no se
+implementa otra vista ni se debilita el lab mientras falta esa decisión.
+
+Extensión nativa independiente, antes de ejecutar: la primera entrada CSV debe
+observar en una misma pantalla reconstruida `Input: ‹`, el sufijo y cursor
+(78,20) a 80×24 antes de Enter. Se emite sólo `footer-horizontal=pass`.
+Después del preview se exige `exact-duplicates=0` antes de escribir IMPORT;
+si el dato obligatorio está recortado, el lab falla sin confirmar ese import.
+Así la corrida normal puede acreditar scroll/teclado y preservar el nuevo
+bloqueo sin aceptar una confirmación con resumen incompleto. No amplía plazos,
+no cambia paths ni cambia el producto/encoding. La matriz posterior permanece
+bloqueada hasta la decisión y su verificación. Se espera toda corrida lanzada.
+
+
+Build limpio locked/offline rc0, 33.91 s:
+`flock /tmp/pm-cargo-window.lock ./scripts/clean-offline-build.sh`, log
+`/tmp/pm27-phase2-clean.log`. No se instalaron dependencias ni se amplió el
+alcance a código de 26/28. La revisión estática del ejecutable sync detecta
+además el déficit heredado `sync_job::validate_program` Windows: acepta fichero
+regular no vacío, todavía no comprueba firma Authenticode fijada. El checkpoint
+previo ya lo declaraba pendiente; no se cambia ni se acredita sync seguro.
+Otros fallbacks observados, sin modificar: `tui_content_lab.py::screen` reemplaza
+UTF-8 inválido al capturar PTY; `pm-sync/src/main.rs::serve` Unix continúa al
+fallar un accept y omite el resultado de `serve_one_unix` en el worker. No son
+nuevos ni una autorización para ocultar fallos en esta fase.

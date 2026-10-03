@@ -2617,29 +2617,101 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
 }
 
 fn render_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
-        let prompt = if matches!(
-            app.mode,
-            Mode::Unlock
-                | Mode::ConfirmPasskeyPassword
-                | Mode::MasterRotate
-                | Mode::RecoveryRotate
-        ) {
-            "•".repeat(app.input.chars().count())
-        } else {
-            sanitize_text(&app.input)
-        };
-        let exposure = app.reveal.as_ref().map_or_else(|| "<hidden>".into(), |(secret, _)| display_secret(secret));
-        let controls = match app.screen {
-            Screen::Content => "↑↓/jk select  / search  t tag  f favorite  g generate  h history  d trash  u restore  p/P purge  r reveal  c copy  a access  w pending  m migrate  b backup  y sync  z audit  D download  l lock  q quit",
-            Screen::Access => "↑↓/jk select  n enroll  s suspend/resume  x revoke agent  e enable/disable credential  Esc content",
-            Screen::Pending => "↑↓/jk select  x cancel  v confirm passkey  Esc content",
-        };
-        let footer = Paragraph::new(vec![
-            Line::from(sanitize_text(&app.status)), Line::from(format!("Input: {prompt}")),
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+    let status = ellipsize_status(&sanitize_text(&app.status), usize::from(inner.width));
+    frame.render_widget(Paragraph::new(status), rows[0]);
+
+    let prompt = if matches!(
+        app.mode,
+        Mode::Unlock | Mode::ConfirmPasskeyPassword | Mode::MasterRotate | Mode::RecoveryRotate
+    ) {
+        "•".repeat(app.input.chars().count())
+    } else {
+        sanitize_text(&app.input)
+    };
+    // Reserve one cell after the representation so the insertion cursor never
+    // covers its final glyph or the border. Editing currently occurs at the end.
+    let prefix = "Input: ";
+    let available = usize::from(rows[1].width).saturating_sub(prefix.len() + 1);
+    let visible = input_suffix(&prompt, available);
+    let cursor_offset = Line::raw(format!("{prefix}{visible}")).width();
+    frame.render_widget(Paragraph::new(format!("{prefix}{visible}")), rows[1]);
+    if rows[1].height > 0 && cursor_offset < usize::from(rows[1].width) {
+        let offset = u16::try_from(cursor_offset).expect("cursor is within the u16 row width");
+        frame.set_cursor_position((rows[1].x + offset, rows[1].y));
+    }
+
+    let exposure = app
+        .reveal
+        .as_ref()
+        .map_or_else(|| "<hidden>".into(), |(secret, _)| display_secret(secret));
+    let controls = match app.screen {
+        Screen::Content => {
+            "↑↓/jk select  / search  t tag  f favorite  g generate  h history  d trash  u restore  p/P purge  r reveal  c copy  a access  w pending  m migrate  b backup  y sync  z audit  D download  l lock  q quit"
+        }
+        Screen::Access => {
+            "↑↓/jk select  n enroll  s suspend/resume  x revoke agent  e enable/disable credential  Esc content"
+        }
+        Screen::Pending => "↑↓/jk select  x cancel  v confirm passkey  Esc content",
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
             Line::from(format!("Exposure: {exposure}")),
             Line::from(controls),
-        ]).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL));
-        frame.render_widget(footer, area);
+        ])
+        .wrap(Wrap { trim: true }),
+        rows[2],
+    );
+}
+
+fn input_suffix(prompt: &str, width: usize) -> String {
+    if Line::raw(prompt).width() <= width {
+        return prompt.to_owned();
+    }
+    let span = Span::raw(prompt);
+    let graphemes = span.styled_graphemes(Style::default()).collect::<Vec<_>>();
+    let mut occupied = 1; // The left-hidden marker is one screen cell.
+    let mut first = graphemes.len();
+    for (index, grapheme) in graphemes.iter().enumerate().rev() {
+        let cells = Line::raw(grapheme.symbol).width();
+        if occupied + cells > width {
+            break;
+        }
+        occupied += cells;
+        first = index;
+    }
+    let mut visible = String::from("‹");
+    for grapheme in &graphemes[first..] {
+        visible.push_str(grapheme.symbol);
+    }
+    visible
+}
+
+fn ellipsize_status(status: &str, width: usize) -> String {
+    if Line::raw(status).width() <= width {
+        return status.to_owned();
+    }
+    let span = Span::raw(status);
+    let mut visible = String::new();
+    let mut occupied = 1; // The ellipsis is one screen cell.
+    for grapheme in span.styled_graphemes(Style::default()) {
+        let cells = Line::raw(grapheme.symbol).width();
+        if occupied + cells > width {
+            break;
+        }
+        occupied += cells;
+        visible.push_str(grapheme.symbol);
+    }
+    visible.push('…');
+    visible
 }
 
 fn display_secret(value: &[u8]) -> String {
@@ -2682,25 +2754,42 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn render_test_footer(terminal: &mut Terminal<TestBackend>, app: &App) {
-        terminal.draw(|frame| {
-            let chunks = Layout::default().direction(Direction::Vertical)
-                .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(6)])
-                .split(frame.area());
-            render_footer(frame, chunks[2], app);
-        }).unwrap();
+        terminal
+            .draw(|frame| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(5),
+                        Constraint::Length(6),
+                    ])
+                    .split(frame.area());
+                render_footer(frame, chunks[2], app);
+            })
+            .unwrap();
     }
 
     fn footer_app(input: &str) -> App {
-        let mut app = App::new(Duration::from_secs(300), Duration::from_secs(15), Duration::from_secs(30));
+        let mut app = App::new(
+            Duration::from_secs(300),
+            Duration::from_secs(15),
+            Duration::from_secs(30),
+        );
         app.mode = Mode::CsvImport;
         app.input.push_str(input);
-        app.status = "CSV source path|chrome|keep with synthetic mapping and confirmation before importing".into();
+        app.status =
+            "CSV source path|chrome|keep with synthetic mapping and confirmation before importing"
+                .into();
         app
     }
 
     fn footer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
         let buffer = terminal.backend().buffer();
-        (1..79).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned()
+        (1..79)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
     }
 
     #[test]
@@ -2720,7 +2809,10 @@ mod tests {
     #[test]
     fn footer_exact_input_width_and_one_more_cell() {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        for (length, expected) in [(70, format!("Input: {}", "a".repeat(70))), (71, format!("Input: ‹{}", "a".repeat(69)))] {
+        for (length, expected) in [
+            (70, format!("Input: {}", "a".repeat(70))),
+            (71, format!("Input: ‹{}", "a".repeat(69))),
+        ] {
             render_test_footer(&mut terminal, &footer_app(&"a".repeat(length)));
             assert_eq!(footer_row(&terminal, 20), expected);
             assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
@@ -2730,8 +2822,14 @@ mod tests {
     #[test]
     fn footer_wide_glyph_at_the_edge_is_never_split_or_omitted() {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        for (length, expected) in [(68, format!("Input: {}界", "a".repeat(68))), (69, format!("Input: ‹{}界", "a".repeat(67)))] {
-            render_test_footer(&mut terminal, &footer_app(&format!("{}界", "a".repeat(length))));
+        for (length, expected) in [
+            (68, format!("Input: {}界", "a".repeat(68))),
+            (69, format!("Input: ‹{}界", "a".repeat(67))),
+        ] {
+            render_test_footer(
+                &mut terminal,
+                &footer_app(&format!("{}界", "a".repeat(length))),
+            );
             assert!(footer_row(&terminal, 20).starts_with(&expected));
             assert_eq!(terminal.backend().buffer()[(76, 20)].symbol(), "界");
             assert_eq!(terminal.backend().buffer()[(78, 20)].symbol(), " ");
@@ -2742,7 +2840,10 @@ mod tests {
     #[test]
     fn footer_combining_graphemes_scroll_as_screen_cells() {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        for (length, expected) in [(70, format!("Input: {}", "e\u{301}".repeat(70))), (71, format!("Input: ‹{}", "e\u{301}".repeat(69)))] {
+        for (length, expected) in [
+            (70, format!("Input: {}", "e\u{301}".repeat(70))),
+            (71, format!("Input: ‹{}", "e\u{301}".repeat(69))),
+        ] {
             render_test_footer(&mut terminal, &footer_app(&"e\u{301}".repeat(length)));
             assert_eq!(footer_row(&terminal, 20), expected);
             assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
@@ -2752,11 +2853,19 @@ mod tests {
     #[test]
     fn footer_secret_scroll_only_renders_the_existing_mask() {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        for mode in [Mode::Unlock, Mode::ConfirmPasskeyPassword, Mode::MasterRotate, Mode::RecoveryRotate] {
+        for mode in [
+            Mode::Unlock,
+            Mode::ConfirmPasskeyPassword,
+            Mode::MasterRotate,
+            Mode::RecoveryRotate,
+        ] {
             let mut app = footer_app(&"synthetic-secret-界e\u{301}".repeat(8));
             app.mode = mode;
             render_test_footer(&mut terminal, &app);
-            assert_eq!(footer_row(&terminal, 20), format!("Input: ‹{}", "•".repeat(69)));
+            assert_eq!(
+                footer_row(&terminal, 20),
+                format!("Input: ‹{}", "•".repeat(69))
+            );
             assert!(!format!("{:?}", terminal.backend().buffer()).contains("synthetic-secret"));
             assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
         }
@@ -2768,7 +2877,9 @@ mod tests {
         let mut app = footer_app("typed-suffix");
         app.status = format!("{}界e\u{301}tail", "s".repeat(75));
         render_test_footer(&mut terminal, &app);
-        assert!(footer_row(&terminal, 19).starts_with(&format!("{}界…", "s".repeat(75))));
+        assert!(footer_row(&terminal, 19).starts_with(&"s".repeat(75)));
+        assert_eq!(terminal.backend().buffer()[(76, 19)].symbol(), "界");
+        assert_eq!(terminal.backend().buffer()[(78, 19)].symbol(), "…");
         assert_eq!(footer_row(&terminal, 20), "Input: typed-suffix");
         assert_eq!(terminal.get_cursor_position().unwrap(), (20, 20).into());
     }

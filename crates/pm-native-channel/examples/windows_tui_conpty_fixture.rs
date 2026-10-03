@@ -684,6 +684,31 @@ mod windows_fixture {
         }
 
         fn wait_for(&self, expected: &str) -> Result<(), String> {
+            self.wait_for_matching(expected, |state| state.contains(expected))
+        }
+
+        fn wait_for_footer_suffix(&self, expected: &str) -> Result<(), String> {
+            self.wait_for_matching("footer suffix and insertion cursor", |state| {
+                let mut row = String::new();
+                for cell in &state.cells[20 * SCREEN_COLUMNS..21 * SCREEN_COLUMNS] {
+                    match cell {
+                        ScreenCell::Empty => row.push(' '),
+                        ScreenCell::Glyph(value) => row.push_str(value),
+                        ScreenCell::WideContinuation => {}
+                    }
+                }
+                row.starts_with("│Input: ‹")
+                    && row.trim_end_matches('│').trim_end().ends_with(expected)
+                    && state.row == 20
+                    && state.column == 78
+            })
+        }
+
+        fn wait_for_matching(
+            &self,
+            expected: &str,
+            predicate: impl Fn(&ScreenState) -> bool,
+        ) -> Result<(), String> {
             let deadline = Instant::now() + SCREEN_WAIT;
             let mut state = self
                 .state
@@ -693,7 +718,7 @@ mod windows_fixture {
                 if let Some(error) = state.error.as_ref() {
                     return Err(error.clone());
                 }
-                if state.contains(expected) {
+                if predicate(&state) {
                     return Ok(());
                 }
                 if state.closed {
@@ -713,7 +738,7 @@ mod windows_fixture {
                     .wait_timeout(state, remaining)
                     .map_err(|_| "ConPTY screen observer wait poisoned".to_owned())?;
                 state = next;
-                if wait.timed_out() && !state.contains(expected) {
+                if wait.timed_out() && !predicate(&state) {
                     return Err(format!(
                         "ConPTY screen did not show expected text within 15 seconds: {expected}"
                     ));
@@ -1565,10 +1590,21 @@ mod windows_fixture {
         open_menu(fixture, "m", "Migration:")?;
         open_menu(fixture, "1", "CSV source")?;
         let csv_request = format!("{}|chrome|keep", encode_operation_field(paths.csv));
-        type_visible_and_submit(fixture, &csv_request, "|chrome|keep")?;
+        press(fixture, &csv_request)?;
+        fixture
+            .observer
+            .wait_for_footer_suffix("|chrome|keep")
+            .map_err(io::Error::other)?;
+        eprintln!("TUI_STAGE stage=footer-horizontal result=pass");
+        press(fixture, "\r")?;
         fixture
             .observer
             .wait_for("Preview values hidden")
+            .map_err(io::Error::other)?;
+        // Required review data must be visible before the fixture confirms.
+        fixture
+            .observer
+            .wait_for("exact-duplicates=0")
             .map_err(io::Error::other)?;
         type_visible_and_submit(fixture, "IMPORT", "IMPORT")?;
         fixture
@@ -1943,6 +1979,16 @@ mod windows_fixture {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn observer_matches_footer_suffix_and_cursor_in_one_screen() {
+            let observer = TerminalObserver::new();
+            observer
+                .feed("\x1b[21;1H│Input: ‹synthetic|chrome|keep".as_bytes())
+                .unwrap();
+            observer.feed(b"\x1b[21;79H").unwrap();
+            observer.wait_for_footer_suffix("|chrome|keep").unwrap();
+        }
 
         #[test]
         fn observer_reconstructs_positioned_unicode_screen() {
