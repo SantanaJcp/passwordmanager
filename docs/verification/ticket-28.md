@@ -1411,8 +1411,8 @@ se integra en principal, no se fusiona PR #1 ni se resuelve ticket 28.
 
 ### Estado histórico de criterios 28/G7 — fase 3 (checkpoint parcial)
 
-Esta tabla sustituyó el estado de fase 2. El estado vigente está al final de
-fase 5; se conserva esta cronología.
+Esta tabla sustituyó el estado de fase 2. El estado vigente está en W3 al final
+de este documento; se conserva esta cronología.
 
 | Criterio | Estado y alcance vigente | Evidencia |
 |---|---|---|
@@ -1679,8 +1679,8 @@ copian credenciales reales ni se imprimen payloads secretos en asserts.
 
 ### Estado histórico de criterios 28/G7 — fase 4 (checkpoint parcial)
 
-Esta tabla sustituyó el estado de fase 3; el estado vigente está al final de
-fase 5. Ningún PASS acotado cierra G7 ni el ticket. La integración y la revisión
+Esta tabla sustituyó el estado de fase 3; el estado vigente está en W3 al final de
+este documento. Ningún PASS acotado cierra G7 ni el ticket. La integración y la revisión
 independiente siguen a cargo del orquestador.
 
 | Criterio | Estado y alcance vigente | Evidencia |
@@ -2081,9 +2081,10 @@ sintaxis shell, AST de los 29 fixtures Python, enlaces/tabla vigente, paths
 autorizados y logs finales completos sin canarios literales. Producto y
 estado del ticket permanecen idénticos a la base.
 
-### Estado vigente de criterios 28/G7 — fase 5 (checkpoint parcial)
+### Estado histórico de criterios 28/G7 — fase 5 (checkpoint parcial)
 
-Esta tabla sustituye la de fase 4 sin cambiar acuerdos de [spec §15](../../.scratch/passwordmanager/spec.md)
+Esta tabla registró la fase 5; la tabla vigente está en W3 al final de este
+documento. Se conserva sin cambiar acuerdos de [spec §15](../../.scratch/passwordmanager/spec.md)
 ni estado del [ticket 28](../../.scratch/passwordmanager/issues/28-fallos-operativos-canarios-y-crash-safety-integral.md).
 Se conserva el contrato de [G7](../design/security-operations.md).
 PASS significa evidencia con el alcance indicado; **G7 sigue
@@ -2323,3 +2324,525 @@ otros RED fuera de gates, memoria restante, gates humanos/reboot/FDE y targets
 no acreditados. No hay integración ni merge del PR. Siguiente acción del
 orquestador: revisión independiente de la rama `codex/pm-g7-result-sync` y,
 si se acepta, integración/verificación por el merger designado.
+
+
+## W3 — vault y admisión cerrada, 2026-10-03
+
+Base `ee3c1fd31cad59060e4120f3e2518b1196a90c1a`; worktree propio
+`.worktrees/w3-g7-failclosed`, rama `codex/pm-w3-g7-failclosed`.
+Autorización explícita de W3: puntos (2), (7), (6), (5), en ese orden;
+se conserva el estado `claimed` del ticket y el PR borrador #1 sin integración.
+SHA del código/fixtures comprobados: `4913a86d97d1a1e9ba302c5a2fbf9dd1acee470f`.
+La actualización posterior de este informe es sólo documental.
+El alcance entregado de producto es **(2)/(7)**. Se detiene (6) por la
+composición descrita debajo; (5) y el inventario opcional posterior no avanzan
+antes de esa decisión. No se presenta W3 ni G7 como completos.
+
+### Cambios y método aplicado
+
+(2): todas las aperturas de un vault existente en human, authorization,
+attempts, audit, passkey, backup y las dos seams de conexión del reducer
+eliminan exclusivamente `SQLITE_OPEN_CREATE` de los flags originales de
+rusqlite. Se conservan READ_WRITE, NO_MUTEX y URI; no se alteran PRAGMAs,
+reductor/purge/export ni transacciones. La creación inicial sigue exclusivamente
+en `PendingVault::persist` y su publicación privada existente. Una ruta ausente
+no prueba primera inicialización ni permite generar otra base; el estado ya
+inicializado conserva bootstrap/custodia y abre exclusivamente almacenamiento
+existente. No se añade un marcador alternativo ni reparación automática.
+
+(7): `custody_admission::CustodyAdmission` conserva paths y fingerprints internos
+de la custodia válida cargada al arrancar. La función acotada
+`agent_wire::verify_admission_custody` comprueba los opcodes de admisión
+30/33/40/41 antes de construir el intento. Relee bootstrap con el mismo parser
+nativo; audit con los controles de owner/tipo/modo/nlink del arranque y destino
+locked antes de recibir sus bytes. Ausencia, ilegibilidad, corrupción o identidad
+sustituida propagan `Failure::Unavailable`. La apertura delegada posterior
+continúa comprobando el paquete de auditoría ligado al vault/device. No crea
+archivos, generaciones, otra revisión ni un segundo request de proveedor.
+Los hashes privados nunca se imprimen ni se serializan a diagnóstico.
+
+Se conserva el engine compartido Linux/macOS/Windows. Los callers nativos
+aportan el mismo guard; Windows usa el reader DPAPI existente. Linux x86_64 es
+el único target ejecutado. No se acredita build/ejecución macOS o Windows,
+VirtualLock/WER, reboot/FDE ni firma por inspeccionar esas seams.
+
+Se reutilizan §§1–4, los fixtures de fase 5 y result-sync completos, sin editar
+oráculos, interposer, scanner, límites o plazos. Los tests adicionales de función
+cubren ilegibilidad del vault ya inicializado, pérdida con handle delegado vivo,
+restore exacto y pérdida/ilegibilidad/corrupción/reemplazo de custodia. Son
+cobertura adicional del mismo criterio §3; no se inventa un RED separado para
+comportamiento que ya rechazaba archivos ilegibles.
+
+### RED y GREEN preservados
+
+Todos los comandos siguientes se ejecutan desde este worktree, con
+`PYTHONDONTWRITEBYTECODE=1` y `flock /tmp/pm-cargo-window.lock`; `V` abrevia
+únicamente `./scripts/verify-ticket28-custody-loss.sh`.
+
+| Punto / comando después de flock | RED válido antes de producto | GREEN enfocado |
+| --- | --- | --- |
+| (2), `"$V" vault completed` | `/tmp/pmw3-red-vault-completed.log`, rc1: SUCCEEDED/calls=1, replacement=1, closed=1, restore exacto, cleanup=0 | `/tmp/pmw3-green-vault-completed.log`, rc0: replacement=0, closed=1, calls=1, restore exacto |
+| (2), `"$V" inflight vault` | `/tmp/pmw3-red-inflight-vault.log`, rc1: intención running/provider_sent=1, replacement=1, calls=1 | `/tmp/pmw3-green-inflight-vault.log`, rc0: replacement=0, mismo ID INDETERMINATE/calls=1 |
+| (2), `"$V" inflight-live vault` | RED heredado de fase 5 conservado; no se atribuye otro RED a este cambio | `/tmp/pmw3-green-inflight-live-vault.log`, rc0: cierre y ausencia de reemplazo |
+| (7), `"$V" inflight-live bootstrap` | `/tmp/pmw3-red-inflight-live-bootstrap.log`, rc1: accepted=1, rc0; fixture cancela antes del segundo login | `/tmp/pmw3-green-inflight-live-bootstrap-2.log`, rc0: accepted=0, rc4, calls=1 |
+| (7), `"$V" inflight-live audit` | `/tmp/pmw3-red-inflight-live-audit.log`, rc1: accepted=1, rc0; misma contención | `/tmp/pmw3-green-inflight-live-audit-2.log`, rc0: accepted=0, rc4, calls=1 |
+| (6), `"$V" matrix` | `/tmp/pmw3-red-matrix.log`, rc1: exactamente los dos RED commit-outbox-audit EIO/ENOSPC, staging 1/1/17 tras error/restart, autoridad íntegra | **No GREEN**; bloqueado por la composición siguiente |
+| (5), errores SSH/agente | **No RED nuevo ejecutado**; inventario heredado de fase 4 | **No implementado**, detrás de (6) |
+
+La primera composición del guard omitió declarar su módulo en el binario:
+`pmw3-green-inflight-live-{bootstrap,audit}.log` terminan rc101/E0433. Son
+bookkeeping de compilación, **no RED**. El módulo se declaró sin cambiar
+oráculos; los logs `-2` preservan el GREEN. `/tmp/pmw3-focused-custody.log`
+termina rc0, 7/7 funciones, incluidos los dos nuevos controles. Después se
+preservaron los flags originales salvo CREATE y se ejecuta el gate final de
+ese código. El primer runner de gates leyó un nombre de baseline equivocado:
+`/tmp/pmw3-gate-summary.log` falla antes de invocar un gate; no es RED de producto.
+La corrida real usa `/tmp/pmw3-gate-summary-2.log`.
+
+### Decisión concreta pendiente de (6)
+
+La autorización exige limpiar transaccionalmente el staging **sin perder
+intenciones durables ni autoridad**, componiendo G7 con preparado/receipt G4.
+El preparado actual conserva en human_staging/streams/chunks el payload cifrado
+referenciado por el body firmado. `HumanVault::commit` valida ese payload y lo
+elimina dentro del commit final; un rollback lo conserva. La regresión existente
+`audit_failure_rolls_back_every_commit_part_and_lost_response_recovers_receipt`
+en `crates/pm-vault/tests/human_transactions.rs` exige explícitamente repetir
+el **mismo** commit preparado después de un fallo sin efectos, y recuperar el
+receipt tras perder la respuesta. Borrar esos payloads al fallar, sin otra
+representación durable confirmada, rompería ese comportamiento. Challenge y
+body_hash solos no permiten reconstruir ciphertext/stream.
+
+Opciones elevadas al orquestador/usuario, sin implementación anticipada:
+
+1. **Recomendada:** distinguir intención cifrada durable, íntegra y ligada al
+   challenge/body/expected_state, de staging temporal; conservar replay exacto y
+   receipts. Definir su recuperación, retención y transición terminal antes de
+   implementar; no basta renombrar residuos para satisfacer los conteos.
+2. Abortar de forma durable el preparado tras un fallo, limpiando el staging y
+   exigiendo preparar/firmar de nuevo. Reduce el flujo de replay existente y
+   requiere aprobación explícita de esa semántica.
+3. Entregar (2)/(7) y resolver esta composición en el siguiente despacho.
+
+La instrucción del usuario “Si algo exige decidir diseño o semántica no cubierta
+por lo anterior, detente y repórtalo” determina esta pausa. No se cambia el test
+G4, se descarta el preparado, se fabrica receipt ni se reinterpreta el RED de
+staging como éxito. (5) queda pendiente porque el orden solicitado lo sitúa
+tras (6); no está bloqueado técnicamente por los cambios de (2)/(7).
+
+### Archivos, composición y fallbacks
+
+Producto: `pm-vault/src/{authorization,human,attempts,audit,passkey,backup,reducer}.rs`
+(exclusivamente política de apertura); `pm-custody/src/{agent_wire,linux,windows,lib,main}.rs`
+y el módulo nuevo `custody_admission.rs`. Test: `audit_custody_tests.rs`.
+Documento: este método. Cargo/lock/dependencias, fixtures existentes, workflows,
+TUI/layout, provider None y loops listener/dispatcher permanecen idénticos a la base.
+
+W1: posibles conflictos en lib/main/windows por declaraciones/callers, sin
+cambios de TUI. W2: composición mecánica de flags en human/backup/reducer;
+las dos ediciones del reducer son conexiones, no cambios de purge/sync ni de
+su fallback kind. W4: nuevos campos en VaultService/AgentService y una llamada
+acotada antes de admitir el intento. Al componer su dispatcher/multiagente debe
+conservarse esa llamada en el engine común; no depende de un agent UID único
+ni cambia la identificación de agentes.
+
+Fallbacks adicionales identificados en W3: la creación implícita de SQLite
+estaba también en attempts, audit, passkey (7 aperturas), backup y reducer
+(2 aperturas), además de human/authorization; activaba al perder main-vault y
+sustituía ausencia por una DB vacía. Se retira exclusivamente ese flag bajo (2).
+Los demás fallbacks heredados de fases 1–5/result-sync se conservan, incluidos
+reducer kind alternativo, getters a vacío, diagnósticos browser con sustitutos,
+provider serve/handlers, Browser::stop, ProcessTlsTransport::put, sync_stage,
+from_utf8_lossy, WindowsServerPipe/DestroyWindow y los errores SSH/agente de (5).
+No se incorporan rutas alternativas ni salidas de éxito ante fallo.
+
+
+### Reanudación de W3 — verificación y publicación, 2026-10-03
+
+Se reconstruyeron `git status`, `git log ee3c1fd..HEAD`, `git show --stat HEAD`
+y `git diff` antes de ejecutar o editar. Se preservaron el commit local
+`4913a86d97d1a1e9ba302c5a2fbf9dd1acee470f` y todo el borrador anterior de este
+informe. La publicación de ese SHA se hizo **después** de la verificación enfocada
+y `check.sh`; `origin/codex/pm-w3-g7-failclosed` se comprobó por `ls-remote`.
+No se integra W3, modifica un worktree ajeno, cambia tickets ni fusiona el PR #1.
+
+RED actual: copia detached propia de `ee3c1fd` en
+`/tmp/pmw3-resume-baseline-ee3c1fd`, sin cambios de producto ni fixtures.
+GREEN actual: este worktree en `4913a86`. Se usan exactamente los mismos
+fixtures/oráculos; sólo cambia el código de ese commit. El baseline y los logs
+se conservan para revisión. Todas las llamadas Cargo/check/build/lab usan
+`flock /tmp/pm-cargo-window.lock`, un bloque por vez; la espera del lock está
+incluida en las duraciones, sin ampliar deadlines del producto o fixture.
+Artefactos y `PYTHONDONTWRITEBYTECODE=1` son los indicados arriba.
+
+`V` sigue siendo `./scripts/verify-ticket28-custody-loss.sh`. Cada comando de
+esta tabla está precedido por `flock /tmp/pm-cargo-window.lock`.
+Los nombres de logs se expanden desde `/tmp/pmw3-resume-`.
+
+| Punto / comando | RED fresco en ee3c1fd | GREEN fresco en 4913a86 |
+| --- | --- | --- |
+| (2), `V vault completed` | rc1, reemplazo SQLite=1; control SUCCEEDED, calls=1, rechazo y restitución exactos. `red-vault-completed.log` | rc0, reemplazo=0, cerrado, calls=1, restitución exacta. `green-vault-completed.log` |
+| (2), `V inflight vault` | rc1, reemplazo=1 tras intención running/provider_sent=1. `red-inflight-vault.log` | rc0, reemplazo=0, mismo ID INDETERMINATE/calls=1. `green-inflight-vault.log` |
+| (2), `V inflight-live vault` | rc1 por reemplazo en recuperación; la admisión viva ya rechazaba. `red-inflight-live-vault.log` | rc0, ninguna sustitución y rechazo; no se atribuye un nuevo RED a la admisión viva. `green-inflight-live-vault.log` |
+| (7), `V inflight-live bootstrap` | rc1, accepted=1; segundo intento cancelado antes del proveedor. `red-inflight-live-bootstrap.log` | rc0, accepted=0, rc4, calls=1. `green-inflight-live-bootstrap.log` |
+| (7), `V inflight-live audit` | rc1, accepted=1; misma contención. `red-inflight-live-audit.log` | rc0, accepted=0, rc4, calls=1. `green-inflight-live-audit.log` |
+| (6), `V matrix` | rc1, exactamente los dos RED EIO/ENOSPC de commit/outbox/audit; staging 1/1/17 tras error y restart. `red-matrix.log` | **No GREEN**: mismo RED en `gate-g7-matrix.log`, atomicidad/autoridad intactas |
+| (5), propagación SSH/agente | Sin RED nuevo; inventario estático heredado | **Pendiente**, no se cambia producto tras la frontera de (6) |
+
+Los cinco GREEN verifican cleanup `errors=0`, autoridad y una sola llamada del
+proveedor. La matriz verifica cleanup del fixture en todos sus casos; ese
+cleanup correcto no convierte el staging residual productivo en PASS.
+
+Regresión adicional, con los mismos prerrequisitos y fixtures del método:
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody --lib linux::audit_custody_tests --locked --offline -- --nocapture
+# /tmp/pmw3-resume-custody-function.log: rc0, 7/7
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-vault --test human_transactions audit_failure_rolls_back_every_commit_part_and_lost_response_recovers_receipt --locked --offline -- --exact --nocapture
+# /tmp/pmw3-resume-g4-same-prepared.log: rc0, 1/1
+```
+
+La segunda prueba confirma **observablemente** el replay existente del mismo
+preparado tras un fallo sin efectos. Por inspección, borrar su única representación
+cifrada impediría ese replay: no se ejecutó una variante productiva que lo borrara.
+El contrato G4
+[§9](../design/agent-identity.md#9-cierre-de-comandos-humanos-y-autoridad-distribuida)
+referencia esos objetos por hash; `human.rs::load_staging` y
+`validate_staged` requieren el paquete/streams/chunks, no sólo challenge/body_hash.
+Los borrados dentro del commit final se revierten al fallar esa transacción.
+La autorización de (6) no permite perder el preparado o fabricar un receipt.
+Se mantiene la decisión concreta descrita arriba: **recomendada**, representación
+cifrada durable diferenciada de los parciales, con replay/receipt íntegros y
+recuperación/retención/transición terminal definidas; alternativa, aborto durable
+y preparar/firmar de nuevo, que reduce el flujo existente y exige aprobación.
+No se resuelve ese conflicto renombrando residuos para eludir el oráculo.
+La instrucción explícita de detenerse ante semántica no cubierta delimita
+este checkpoint; (5) y el inventario opcional posterior quedan pendientes.
+
+El primer runner de reanudación olvidó reconocer el marcador
+`PM28_SQLITE_SYNC_CLEANUP` y paró tras un RED válido de inflight. El log del
+producto se conservó y sólo se corrigió el reconocimiento del marcador del
+resumen, sin repetir ese caso ni editar el fixture/oráculo. Historia:
+`focused-summary.log`, `focused-results-initial.json`; continuación y resultados
+completos: `focused-summary-2.log`, `focused-results.json` (14 invocaciones).
+No se cuenta el error del runner como RED de producto.
+
+### Gates reejecutados y comparación de causas
+
+Runner `/tmp/pmw3-resume-run-gates.py`; resultados
+`/tmp/pmw3-resume-gate-results.json` y resumen
+`/tmp/pmw3-resume-gate-summary.log`. Enumera los 40 casos de
+`/tmp/pmrs-gate-results.json` y ocho modos adicionales. Sólo reutiliza el
+`check.sh` fresco anterior (misma versión de producto), indicado explícitamente
+como `reused_log=true`; los otros 47 comandos se ejecutan de nuevo con su flock.
+
+| Comprobación | Resultado actual | Log en `/tmp/pmw3-resume-` |
+| --- | --- | --- |
+| `check.sh` | PASS rc0, 47.216 s; fmt/check/test/clippy locked/offline | `check.log` |
+| `clean-offline-build.sh` | PASS rc0, 72.562 s con espera de lock | `gate-final-clean.log` |
+| 26 wrappers Linux | 25 rc0; mismo FAIL TUI `exact-duplicates=1` con preview recortado, sin cambio de oráculo | `gate-lab-*.log`, `gate-lab-tui-operations.log` |
+| Publication backup/plaintext/attachment | 3/3 rc0 | `gate-publication-*.log` |
+| Audit/sqlite-sync/bootstrap completed | 3/3 rc0 | `gate-custody-audit.log`, `gate-sqlite-sync.log`, `gate-bootstrap-completed.log` |
+| Matrix EIO/ENOSPC | **rc1**, exactamente los mismos dos RED staging; no hay otro defecto ni cleanup fallido del fixture | `gate-g7-matrix.log` |
+| Inflight result-sync/bootstrap/audit/crash y canaries | 5/5 rc0; controles/canales completos en el alcance del método | `gate-g7-inflight-*.log`, `gate-g7-canaries.log` |
+| Vault completed/inflight vault y tres inflight-live | 5/5 rc0, GREEN nuevos dentro del barrido | `gate-g7-extra-vault-completed.log`, `gate-g7-extra-inflight-vault.log`, `gate-g7-extra-inflight-live-*.log` |
+| Matrix trace | rc0, control de fronteras íntegro | `gate-g7-extra-matrix-trace.log` |
+| Bootstrap/vault, modos ambiguos sin `completed` | **rc1 diagnóstico**, sólo cambia el conteo audit: unchanged=(1,0,1,1,1), replacement=0, closed=1, cleanup errors=0; conserva la limitación de reconciliación ya documentada en fase 2 | `gate-g7-extra-bootstrap.log`, `gate-g7-extra-vault.log` |
+
+Comparación de los **40 casos originales: 38 rc0, cero regresiones de rc o
+causa frente al baseline**. Barrido ampliado: **48 casos, 44 rc0**; los cuatro
+rc1 son TUI, matriz staging y los dos modos ambiguos anteriores. El runner rc0
+significa coincidencia con las causas conocidas, **no** gates G7 todos verdes.
+Los GREEN de vault-loss y retirada en caliente sí están en el barrido; staging
+no está corregido. No se modifica W1, purge/sync de W2 o dispatcher/proveedor
+W4 para cambiar estos resultados. No se reintenta un login ni se relaja un plazo.
+
+### Fallback adicional inspeccionado al reanudar
+
+`agent_wire.rs::serve_agent`, respuesta inicial de discovery: cualquier error
+propagado por `DelegatedVault::discover`, incluidos Storage, Integrity o
+Vault(ResourceUnavailable), se convierte en frame `[1]` igual al rechazo de
+identidad/autoridad. Puede ocultar la causa de indisponibilidad como rechazo genérico.
+Hallazgo **estático**, sin RED propio ni corrección; está antes de la función
+acotada de nueva admisión. Los fallbacks SSH/read_frame/consumer ya inventariados
+en fase 4 son precisamente (5), que sigue pendiente. Getters a vacío,
+diagnóstico browser con sustitutos, etiqueta binaria TUI, provider serve/handlers,
+Browser::stop, ProcessTlsTransport::put, sync_stage, from_utf8_lossy,
+WindowsServerPipe y DestroyWindow se conservan en su alcance heredado.
+
+### Estado vigente de criterios 28/G7 — W3 (5) verificado (checkpoint parcial)
+
+Esta tabla sustituye la tabla de fase 5 e incorpora W3 (5); conserva
+[spec §15](../../.scratch/passwordmanager/spec.md), G4/G7 y `Status: claimed`.
+
+| Criterio | Estado y alcance vigente | Evidencia |
+| --- | --- | --- |
+| Records/AuthRecord/serializers, CSV/JSON/PMF1 y passkey 32 bytes | PASS acotado heredado, regresión workspace | Fases 1–4; check fresco |
+| Frames/responses y requests propios custody/web/HTTP/JSON/CDP | PASS acotado heredado; no todo SSH ni heaps de terceros | Fases 1–4; labs y check frescos |
+| Owners TUI split y requests restore/rotate | PASS acotado heredado; no presentación integral | Fase 4; labs TUI excepto FAIL conocido |
+| Memoria propia integral, wires/presentación/ZIP/DEFLATE restantes | **FAIL de inventario**; bloque opcional no avanzado | Inventario fase 4 preservado |
+| Presupuesto agregado 32 MiB y overhead físicos | **No demostrado**; contador test-only PASS, host 8 MiB sin modificar | Fase 2; check fresco |
+| Guardas Linux/core/dumpable/stdin y crash real propio | PASS acotado, sin core en SIGABRT | Labs fault-safety/protected-input/inflight crash |
+| 17.º RATE_LIMITED y CLOCK_UNTRUSTED | PASS acotado heredado | check y autorización frescos |
+| Otros límites, incluido techo custodial 128 | **No demostrado integralmente** | Sin matriz nueva de esos techos |
+| ENOSPC físico y spill WAL real EIO/ENOSPC | PASS acotado de rollback/restart | storage-fault/matrix frescos |
+| Matriz WAL/staging/commit/outbox/audit | PASS atomicidad/autoridad; **FAIL cleanup (6)**, staging 1/1/17 | matrix RED fresco y gate; composición G4 pendiente |
+| Replay del mismo preparado después de fallo, receipt tras pérdida de respuesta | PASS existente; limita la limpieza de (6) | `g4-same-prepared.log` y check |
+| Resultado tras transmisión/intención/crash, INDETERMINATE sin doble login | PASS acotado con proveedor controlado calls=1 | inflight result-sync/crash frescos; no todos los proveedores |
+| Bootstrap/audit ausentes con restart/ilegibilidad/restauración | PASS acotado heredado y regresión de función | audit, bootstrap completed, inflight, 7/7 función |
+| (2) Vault perdido completado/en vuelo/con custodio vivo e ilegibilidad | **PASS acotado Linux**, rechazo sin SQLite sustituto; primera creación conserva su camino | Tres RED/GREEN frescos de vault y función; incluido en gates |
+| (7) Retirada de bootstrap/audit con custodio vivo | **PASS acotado Linux**, nuevas admisiones cerradas, calls=1 | RED/GREEN inflight-live y gates |
+| (5) Categorías/propagación SSH y agente | **PASS acotado Linux**, RED/GREEN y gates sin regresión; wire existente conservado | W3 (5) al final; causas tipadas y estado/logs seguros, sin ampliar W4 |
+| Canarios/canales propios, activos/históricos y UID agente | PASS acotado de controles/scanner; cobertura global **no demostrada** | canaries/matrix/inflight frescos |
+| Purge/outbox de revisión purgada | **Pendiente de W2**, RED heredado no reejecutado ni corregido por W3 | Fase 5/integración; fuera de este workstream |
+| macOS/Windows, VirtualLock/WER, reboot/FDE, firma y aceptación humana | **Diferido/no acreditado**; seams del engine común preparadas | No CI nativa ejecutada por W3 |
+| Check/build limpio/barrido Linux | PASS check/build; **48 casos, 44 rc0, cero regresiones** frente al baseline; aceptación global sigue **FAIL** | Gates W3 (5) finales frescos, mismos cuatro rc1 conocidos |
+| Integración/revisión independiente y cierre de 28/G7 | **Pendientes**, fuera de esta entrega | Rama propia publicada; PR #1 borrador, ticket claimed |
+
+macOS conserva el mismo engine y readers Unix de bootstrap/audit; Windows
+conserva el mismo guard con sus readers DPAPI. Los futuros laboratorios nativos
+deben repetir inicialización, pérdida/ilegibilidad/restauración exacta, admisión
+viva cerrada, calls=1 y limpieza del fixture. Inspección de esas seams y PASS
+Linux no acreditan compilación o aceptación de los targets nativos.
+
+Archivos/posibles conflictos siguen siendo los detallados en W3 arriba:
+W1 lib/main/windows; W2 sólo composición de flags de apertura en
+human/backup/reducer; W4 campos de VaultService/AgentService y llamada acotada
+`verify_admission_custody` antes de cada nueva admisión, que debe conservar.
+Al reanudar no se cambió ningún Rust/fixture: sólo se completa este informe.
+Siguiente acción: resolver la composición durable de (6) conservando G4,
+observar su GREEN sin tocar el oráculo, continuar (5), repetir gates tras
+producto nuevo y entregar al merger/revisor independiente. W3 y G7 siguen
+**incompletos**.
+
+## W3 (5) — método acotado de errores SSH/agente, 2026-10-03
+
+El despacho posterior autoriza únicamente (5); (6) sigue pendiente de decisión.
+Se conservan el discovery inicial `[1]`, listener/dispatcher/admisión W4,
+TUI W1 y purge/sync W2. No hay categorías públicas nuevas del protocolo agente.
+`RESOURCE_UNAVAILABLE` ya está previsto por G7 §2.1; la frontera pública de
+custodia conserva `CUSTODY_UNAVAILABLE` y sus frames existentes.
+
+Método para (a): controles de frame y copia protegida pequeños antes de bajar
+RLIMIT_MEMLOCK sólo en un hijo de test; con límite cero, header completo sin
+body y copia de password deben conservar `RESOURCE_UNAVAILABLE`, separada de
+I/O. Método para (b): servidor SSH real, peer UID admitido y control de referencia
+inexistente `[1]`; luego errores de header o parseo deben retornar error en vez
+de desaparecer en el loop. Método para (c): se extrae sin cambiar comportamiento
+el loop de requests de `serve_agent`, después del discovery; errores de lectura,
+frame truncado/malformado y memoria deben terminar con error, nunca `Ok`.
+La clasificación interna debe conservar origen/fase sin imprimir mensajes del
+SO, payloads, rutas, destinos ni identificadores privados. Se comprueban también
+lecturas válidas, códigos públicos fijos y ausencia de canarios en diagnósticos.
+
+REDs sobre los seams heredados → GREENs enfocados → check/build limpio → los
+48 comandos de `/tmp/pmw3-resume-gate-results.json`, en secuencia y cada uno
+bajo `flock /tmp/pm-cargo-window.lock`, desde este worktree. Logs propios
+`/tmp/pmw3c-*.log`; artefactos Keycloak/CFT absolutos del despacho. Comparación
+por rc y causa, conservando los cuatro rc1 conocidos y cleanup errors=0.
+No se altera el oráculo de staging, el estado de tickets ni ningún otro fallback.
+
+### Inventario y cambio de (5)
+
+| Punto | Seam exacto heredado | Resultado del candidato |
+| --- | --- | --- |
+| (a) | `crates/pm-ssh-client/src/lib.rs::read_frame`, `authenticate` (copia de password), `serve` (brazo del proveedor) | `Error::Memory(CryptoError)` conserva la causa; `Display/Debug=RESOURCE_UNAVAILABLE`. El fallo llega tipado al brazo de `serve`, registra RESOURCE_UNAVAILABLE/cause=protected-memory y conserva el frame3 indeterminado del wire existente. No lee body cuando falla el owner. |
+| (a), cadena del firmante | mismo archivo, `CustodySigner::auth_sign` → `authenticate_publickey_with` en `authenticate` | El `SignError` vacío y su conversión final a Protocol también perdían el fallo de `read_frame`. El firmante usa el mismo `Error` y conserva memoria/I/O/SendError hasta la frontera SSH. |
+| (b) | mismo archivo, `serve`, brazo consumer: `let Ok(read_frame) else continue` y parser `.ok()` | Lectura y `parse_consumer_reference` retornan error tipado desde `serve`; diagnóstico interno de causa y ninguna respuesta de éxito. Referencia inexistente conserva `[1]`. |
+| (c) | `crates/pm-custody/src/agent_wire.rs::serve_agent`, loop de lectura posterior al discovery | Loop extraído `serve_agent_requests`; `read_agent_frame` conserva I/O original y fase header/body, memoria y frame inválido. En la frontera existente registra sólo clasificación segura y retorna `Failure::Unavailable`, nunca `Ok` tras error. |
+
+`Error::Io`/`Ssh` conservan sus fuentes originales por `std::error::Error::source`.
+Los mensajes públicos/Debug contienen sólo códigos; logs internos tienen fase,
+ErrorKind, errno, categoría criptográfica o discriminante de russh de la versión
+fijada, nunca `Display/Debug` del I/O/SSH upstream. No se serializa una fuente
+upstream. `main.rs` sólo adapta la construcción del runtime al nuevo error I/O.
+La lectura agente conserva exactamente el límite heredado 18 MiB; SSH conserva
+128 KiB, IO_TIMEOUT, host-key pinning, métodos, checks y sus frames existentes.
+La propagación de lectura/parseo del consumidor sale de `serve` como error
+terminal, con rc4/código fijo. En el proveedor, el frame3 indeterminado conserva
+el contrato existente mientras la causa de memoria queda tipada y registrada.
+No añade reintentos ni reparación de conexiones.
+
+El discovery inicial de `serve_agent` sigue convirtiendo **cualquier** error de
+`DelegatedVault::discover` (storage/integridad/memoria incluidos) en `[1]`.
+Es separable: se preservó íntegramente su código previo al loop, sin corregirlo.
+Listener, dispatcher, admisión, handlers de intentos/proveedor, W1/W2/W4 y (6)
+no se modificaron. El clasificador `human_wire::FrameReadFailure` queda intacto.
+
+### RED/GREEN de (5)
+
+Desde este worktree, comandos completos (sin instalar ni usar red):
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-ssh-client --lib error_propagation_tests --locked --offline -- --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody --lib agent_wire::error_propagation_tests --locked --offline -- --nocapture
+```
+
+| Punto | RED conductual previo al cambio de producto | GREEN enfocado |
+| --- | --- | --- |
+| (a) | `/tmp/pmw3c-red-ssh.log`, rc101: controles válidos; frame y copia password con memlock=0 observan SSH_UNAVAILABLE | `/tmp/pmw3c-green3-ssh.log`, rc0: ambos RESOURCE_UNAVAILABLE; servidor conserva frame3, causa interna ResourceUnavailable y sigue vivo antes de body |
+| (b) | mismo RED SSH, rc101: control `[1]` del servidor vivo, después header mayor al máximo descartado (`returned=false`) | mismo GREEN SSH final, rc0: header, parseo y EOF parcial retornan error (`returned=true`), referencia desconocida mantiene `[1]` |
+| (c) | `/tmp/pmw3c-red-agent.log`, rc101: timeout del reader produce `success=true` en el loop real posterior al discovery | `/tmp/pmw3c-green3-agent.log`, rc0: timeout/I/O/UnexpectedEof/header/body truncados/frame inválido `success=false`; memoria tipada, frame válido y cierre ordenado explícito cubiertos |
+
+La extracción de `copy_password` y del loop conservó literalmente la semántica
+heredada para ejecutar los RED: no era una corrección previa ni fallo de setup.
+Los GREEN iniciales `green-ssh.log`/`green-agent.log` también se conservan; el
+segundo tenía un warning corregido sin cambiar comportamiento. El check inicial
+`/tmp/pmw3c-gate-final-check.log` pasó tests y falló únicamente en Clippy
+(semicolon/let-else/single-match); **no es RED conductual**. Las correcciones son
+de estilo, sin cambiar límites ni aserciones. Dos entradas `ignored` nuevas son
+hijos memlock ejecutados obligatoriamente por sus padres, no casos omitidos.
+Los controles adicionales de servidor, fuentes tipadas y canarios no se atribuyen
+como REDs separados. Los logs GREEN no contienen el password sintético ni el
+canario de path/payload del I/O; fixtures sockets propios restantes=0.
+
+### Fallbacks heredados adicionales inspeccionados
+
+- `pm-ssh-client::serve`, `channel_open_session`: ante error SSH devuelve `[1]`,
+  igual que referencia inexistente. Conserva ese contrato; ahora registra sólo
+  clasificación interna segura de la causa SSH. No se convierte en éxito.
+- `pm-ssh-client::consume`: cualquier respuesta diferente de `[0]` se convierte
+  en `AUTH_REJECTED`, incluidos frames inválidos. Conservado sin corrección.
+- `pm-ssh-client::Profile::read_installed`: errores de metadata/read se agrupan
+  en `INVALID_PROFILE`; el getter `Profile::value` devuelve `""` si falta la
+  clave. Conservados; parser cerrado y validaciones previas no cambian.
+- `CustodySigner` perdía fuentes en `SignError` y Protocol; se corrigió sólo la
+  cadena necesaria de (a). Sus owners Vec propios de firma no se migran aquí.
+
+Los demás fallbacks excluidos expresamente por el despacho siguen intactos.
+No se detecta necesidad de otra categoría pública del protocolo del agente.
+
+### Checkpoint publicado antes del barrido completo
+
+Tras las correcciones de estilo, `/tmp/pmw3c-gate2-final-check.log` termina rc0
+(38.290 s, incluye lock), fmt/check/test/clippy locked/offline.
+`/tmp/pmw3c-gate2-final-clean.log` termina rc0 (45.465 s, incluye lock), clean y
+build workspace/all-targets locked/offline. Producto y pruebas enfocados quedan
+verificados; el runner `/tmp/pmw3c-run-gates2.py` está ejecutando los otros 46
+comandos y conserva resultados por invocación, sin reutilizar logs.
+Este checkpoint no declara el barrido aceptado ni el cierre de W3/G7.
+
+### Corrección de compatibilidad observada en el primer barrido
+
+El checkpoint inicial `eba30006ca6019e745e9f8dc7a408a543e2f118b` tenía check y
+clean verdes, pero el barrido detectó dos regresiones reales. Sus gates parciales
+`/tmp/pmw3c-gate2-results.json` y logs se conservan; **no** son aceptación.
+
+- `lab-adapter-protected-frame` rc1: el candidato cerraba el adaptador SSH por
+  memoria en vez de devolver su frame3 existente. Se corrigió exclusivamente
+  el brazo `Error::Memory`: conserva ese wire y el servicio vivo, con causa
+  tipada ResourceUnavailable y diagnóstico seguro diferente de I/O/SSH.
+- `lab-attempts`/`lab-authorization` (y otros consumidores del mismo helper)
+  rc1: el nuevo diagnóstico imprimía UnexpectedEof ante el cierre ordenado
+  entre requests, vulnerando su stderr vacío. El reader ahora reconoce un
+  `read` exitoso de cero bytes antes del header como `Ok(None)`; el loop lo
+  termina normalmente sin log. Un Err real, timeout, header/body parcial o
+  alloc/mlock sigue propagando fallo, con su causa y fase. Interrupted conserva
+  la semántica de `read_exact`, sin modificar deadlines ni inventar otro canal.
+
+No se cambió ningún lab/oráculo heredado. Los tests nuevos mantienen la
+aserción de denegar cada **error** de lectura y agregan el control de EOF limpio.
+El control nuevo de servidor SSH ahora exige el frame existente, causa de
+memoria exacta y servicio vivo. No se atribuye el primer GREEN del checkpoint
+inicial a la aceptación del wire ni a preservación de stderr normal.
+
+El runner inicial se detuvo sólo después de terminar su caso activo
+`lab-passkey-login` (log preservado); no se interrumpió su lab, no se señaló
+ningún proceso ajeno ni se reutilizan resultados parciales para el gate final.
+La corrida final usa `/tmp/pmw3c-run-final.py`, se detiene entre casos ante
+cualquier regresión, reejecuta los 48 comandos y conserva un log nuevo por caso.
+
+El contrato real TLS precisa otro control: `rustls` devuelve UnexpectedEof si
+un cliente cierra sin close_notify; los clientes existentes no envían siempre
+ese cierre TLS. No se convierte ese **Err** en éxito. Antes de producir el
+Failure público se conserva el error original en `LAST_READ_FAILURE`, estado
+interno acotado al último fallo del hilo de conexión. Sólo UnexpectedEof **antes
+de recibir el primer byte** del siguiente header queda sin stderr; el mismo
+error después de empezar header/body se diagnostica. Este estado guarda la
+fuente tipada original sin clones ni serialización de mensajes upstream; no es
+un historial durable. Timeout, I/O, memoria y frame inválido siguen retornando
+Failure::Unavailable. Ok(None) existe exclusivamente por un read exitoso de
+cero bytes. Se comprueba que el error EOF observado conserva source y estado,
+y se repiten adapter-protected-frame, authorization y attempts antes del gate.
+No se cambia el cliente, su protocolo ni el dispatcher W4 para este control.
+
+Los checks intermedios `/tmp/pmw3c-gate3-final-check.log` y
+`/tmp/pmw3c-gate4-final-check.log` acabaron rc101 exclusivamente por Clippy
+(needless_continue y match_same_arms). No ejecutaron labs ni son RED de
+comportamiento. `/tmp/pmw3c-corrective2-clippy.log` pasa rc0 sobre el correctivo.
+Los GREEN definitivos enfocados son `green3-ssh.log` y `green3-agent.log`,
+3/3 padres por crate, hijos memlock incluidos. Los labs correctivos
+`corrective-adapter.log`, `corrective-authorization.log`, `corrective-attempts.log`
+pasan rc0 con sus aserciones originales y stderr normal vacío.
+
+### Checkpoint correctivo verificado
+
+El correctivo pasa `check.sh` (19.153 s, rc0) y clean/offline
+(41.526 s, rc0), con logs `/tmp/pmw3c-final-final-check.log`
+y `/tmp/pmw3c-final-final-clean.log`. Los GREEN enfocados y tres labs correctivos anteriores
+también pasan. El manifiesto `/tmp/pmw3c-final-source-manifest.json` y patch
+`/tmp/pmw3c-final-code.patch` identifican los cuatro Rust bajo este gate;
+no se modifica producto durante el barrido. Los 48 casos siguen en ejecución
+con logs frescos; este checkpoint sustituye el candidato incompatible eba3000,
+pero no adelanta aceptación integral.
+
+
+### Gates finales de W3 (5) y entrega al coordinador
+
+Código verificado y publicado: `daada55` (correctivo de `eba3000`), sobre
+`1df6319`. El commit documental final no modifica esos cuatro Rust.
+Runner `/tmp/pmw3c-run-final.py`, resultados `/tmp/pmw3c-final-results.json`,
+resumen `/tmp/pmw3c-final-summary.log`. Los **48 casos se reejecutaron**,
+ningún log reutilizado, una invocación local por bloque bajo el mismo flock.
+El manifiesto de fuentes permaneció exacto desde el inicio hasta el fin.
+Artefactos PM_KEYCLOAK_DIST y PM_CFT_DIR absolutos del despacho.
+
+| Gate | Resultado final frente a `/tmp/pmw3-resume-gate-results.json` | Log propio |
+| --- | --- | --- |
+| `scripts/check.sh` | rc0, fmt/check/test/clippy workspace/all-targets locked/offline | `/tmp/pmw3c-final-final-check.log` |
+| `scripts/clean-offline-build.sh` | rc0, build limpio locked/offline | `/tmp/pmw3c-final-final-clean.log` |
+| 26 wrappers funcionales Linux, incluido SSH | 25 rc0; TUI operations conserva su rc1 y causa exact-duplicates=1/preview recortado | `/tmp/pmw3c-final-lab-*.log` |
+| Wrapper publication, tres modos backup/plaintext/attachment | 3/3 rc0; juntos con los anteriores cubren los 27 wrappers `test-linux-*-lab.sh` existentes | `/tmp/pmw3c-final-publication-*.log` |
+| Custody audit, sqlite-sync, bootstrap completed | 3/3 rc0 | `/tmp/pmw3c-final-custody-audit.log`, `final-sqlite-sync.log`, `final-bootstrap-completed.log` |
+| Matrix EIO/ENOSPC | rc1, exactamente los dos RED staging commit-outbox-audit; ningún otro defecto, cleanup errors=0 | `/tmp/pmw3c-final-g7-matrix.log` |
+| Inflight result-sync/bootstrap/audit/crash y canaries | 5/5 rc0, causes/control/scanners completos dentro del método vigente | `/tmp/pmw3c-final-g7-inflight-*.log`, `final-g7-canaries.log` |
+| Vault completed/inflight vault, tres inflight-live | 5/5 rc0; se preservan los GREEN (2)/(7) | `/tmp/pmw3c-final-g7-extra-*.log` |
+| Matrix trace | rc0, control de fronteras conservado | `/tmp/pmw3c-final-g7-extra-matrix-trace.log` |
+| Bootstrap/vault sin completed, modos ambiguos | mismos dos rc1 diagnósticos: unchanged=(1,0,1,1,1), replacement=0, closed=1, cleanup errors=0 | `/tmp/pmw3c-final-g7-extra-bootstrap.log`, `final-g7-extra-vault.log` |
+
+Total: **48 casos / 44 rc0 / cero regresiones de rc o causa**. Duración agregada
+390.101 s (cada invocación incluye espera de lock); rc0 del runner acredita
+coincidencia con el baseline, **no** aceptación global de G7. El RED de (6)
+sigue intacto y no hay implementación de staging. Las comprobaciones
+enfocadas adicionales de (5) no se agregan artificialmente al conteo de 48.
+Los GREEN enfocados definitivos no contienen canarios de password/path/payload,
+no tienen warnings y los fixtures de sockets propios restantes son cero.
+No hubo cambios de aserciones/oráculos heredados, límites/KDF/deadlines,
+dependencias, credenciales reales, estados de tickets ni otros worktrees.
+
+Archivos de este despacho y conflictos previsibles:
+
+- `crates/pm-ssh-client/src/lib.rs`: errores, firmante y brazo consumidor.
+- `crates/pm-ssh-client/src/main.rs`: conversión del error del runtime.
+- `crates/pm-ssh-client/src/error_propagation_tests.rs`: nuevas regresiones Linux.
+- `crates/pm-custody/src/agent_wire.rs`: sólo loop/reader/causa de lectura y tests;
+  `AgentService`, discovery, dispatcher de opcodes y admisión quedan iguales.
+- `docs/verification/ticket-28.md`: método, evidencia y tabla vigente.
+
+W1/W2 no comparten Rust tocado por este despacho. W4 puede entrar en conflicto
+textual en `serve_agent`/loop de conexión; conservar discovery existente, campos
+actuales, `verify_admission_custody` y la propagación/estado acotados de lectura.
+El informe común ticket-28 requiere composición documental con los otros
+workstreams. No se integra ninguna rama ni se fusiona el PR borrador #1.
+
+Siguiente acción: revisión e integración por el coordinador/merger independiente
+del **HEAD final completo** de esta rama, comprobando el net diff desde 1df6319;
+no seleccionar sólo eba3000. (6) queda para decisión del usuario y su despacho
+posterior. W3/G7 globales siguen incompletos y 28 conserva `claimed`.
+macOS/Windows/VirtualLock/WER/reboot/FDE/firma y aceptación humana no se
+acreditan con esta ejecución Linux x86_64.
+
+El único bytecode generado por los labs correctivos sin PYTHONDONTWRITEBYTECODE,
+`crates/pm-custody/tests/__pycache__/linux_lab.cpython-314.pyc`, se verificó como
+archivo regular owned del worktree inicialmente limpio y se retiró por esa
+ruta exacta junto al directorio ya vacío; no se barrió ninguna ruta ajena.

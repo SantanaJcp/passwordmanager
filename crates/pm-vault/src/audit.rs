@@ -1289,7 +1289,10 @@ pub(crate) fn current_frontier(connection: &Connection) -> Result<[u8; 32], Huma
         .map_or(Ok([0; 32]), |v| fixed(&v))
 }
 fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
-    let c = Connection::open(path)?;
+    let c = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+    )?;
     crate::configure_platform_durability(&c)?;
     c.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY; PRAGMA trusted_schema=OFF;")?;
     Ok(c)

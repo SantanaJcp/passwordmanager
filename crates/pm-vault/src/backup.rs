@@ -167,7 +167,10 @@ pub(crate) fn write_backup(
     root: &UnlockedRoot,
     output: &mut dyn Write,
 ) -> Result<BackupSummary, HumanCommitError> {
-    let mut connection = Connection::open(path)?;
+    let mut connection = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+    )?;
     connection.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
     let (bundle, trusted) = load_and_validate_bundle(&connection)?;
     if trusted.vault_id() != root.vault_id() {

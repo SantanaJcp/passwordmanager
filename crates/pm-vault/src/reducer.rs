@@ -476,7 +476,10 @@ impl CausalReducer {
     /// # Errors
     /// Returns an error for invalid vault metadata or storage.
     pub fn open(path: &Path) -> Result<Self, ReductionError> {
-        let connection = rusqlite::Connection::open(path)?;
+        let connection = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
         let (_, trusted) = crate::load_and_validate_bundle(&connection)?;
         Ok(Self {
             path: path.to_owned(),
@@ -2082,7 +2085,10 @@ fn parse_kind(value: &str) -> Result<CausalEventKind, ReductionError> {
     }
 }
 fn open_connection(path: &Path) -> Result<rusqlite::Connection, ReductionError> {
-    let c = rusqlite::Connection::open(path)?;
+    let c = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+    )?;
     crate::configure_platform_durability(&c)?;
     c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")?;
     Ok(c)
