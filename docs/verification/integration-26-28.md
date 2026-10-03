@@ -599,3 +599,92 @@ ajeno `.gitignore`, `.pi/`, `odd/` preservados. PR#1 continúa sin fusionar.
 El commit posterior de este informe es exclusivamente documental: su árbol
 de código/fixtures/workflows coincide con el SHA de los runs, sin atribuirle
 una ejecución nativa diferente.
+
+## Remediación de composición — método pmint5 (2026-10-03)
+
+Encargo explícito sobre `8f29e49`, únicamente las dos regresiones locales y la
+observación de sync Intel. Resize Windows, defectos abiertos, estados de
+tickets, límites/KDF/deadlines y fallbacks heredados permanecen fuera del cambio.
+
+Se conserva el método de 52 casos anterior, cada invocación bajo
+`flock /tmp/pm-cargo-window.lock`, artefactos absolutos y logs `/tmp/pmint5-*`.
+Los discriminantes de proceso registran sólo categorías, estado de recursos y
+cantidad de stderr pendiente antes de SIGTERM; nunca contenidos. El scanner
+sigue rechazando recursos desconocidos y exige lectura completa sin canario.
+Si el recurso es transitorio, se comprueba la quiescencia documentada de todos
+los tasks, conservando el presupuesto de parada de 5 s; no se añade una lista
+blanca por tipo o sufijo.
+
+Para transporte: negativa pública del cliente `session` con endpoint realmente
+cerrado, respuesta IPC de error explícita, exit no cero y reap del cliente; la
+negativa TUI conserva estado unavailable, ausencia de éxito, mismo job tras
+restart y oráculo de stderr intacto. No sustituir un error por respuesta válida.
+
+Para Intel: control sintético de repaint con prefijo de éxito antes de job y
+contadores, y sufijo posterior en el panel actual. La observación exige juntos
+el mensaje terminal, ID canónico y ambos contadores, dentro del mismo wait20s.
+Medir por separado envío/espera/repaint y job durable mediante categorías y
+tiempos. Un resultado posterior al deadline conserva FAIL; no ampliar el plazo.
+Hasta tres corridas macOS y una Windows autorizadas, SHAs exactos publicados,
+workflows normales gratuitos/sintéticos sin cache/artifacts/secrets, sin lock
+local retenido durante la espera. No repetir SHA/hipótesis sin cambio pertinente.
+
+### Causas y controles enfocados
+
+**Operations:** RED reproducido `/tmp/pmint5-red-lab-tui-operations.log`.
+`/tmp/pmint5-probe-stop2.log` registra **17 bytes ya pendientes en stderr antes
+de SIGTERM**. El endpoint que cierra causa un fallo real de handshake del hijo
+`pm-sync session`; W2 había cambiado su canal de diagnóstico a stderr heredado.
+No lo crea el dispatcher al parar. Se reporta ahora el fallo por el IPC
+enmarcado propio (`ok=false/code=unavailable`) y exit4; el padre devuelve
+`SyncError::Unavailable`, cierra/recolecta esa sesión y conserva el retry/backoff
+y estado público fallido del mismo job. Stderr sigue heredado y un fallo al
+escribir el error IPC todavía llega a stderr; no se descarta ni se filtra.
+Los demás modos CLI conservan su diagnóstico anterior. RED público del IPC:
+`/tmp/pmint5-red-session-ipc.log`, rc101, respuesta ausente en vez del error;
+GREEN del endpoint que corta el handshake:
+`/tmp/pmint5-green-closing-session.log`. También pasa la negativa de pérdida
+real de conexión sin replay interno. Operations completo rc0:
+`/tmp/pmint5-green-lab-tui-operations.log`, mismo job tras restart/idle,
+bounded-unavailable, sin éxito inventado y stderr vacío exigido por el lab.
+
+**Scanner:** el log pmint4 no conservó la identidad del descriptor. Muestreo
+de los fd en el custodio restaurado identifica **SHM de este vault, regular,
+desvinculado**, transitorio durante cierre SQLite, no un recurso de sync.
+`/tmp/pmint5-monitor-bootstrap-{3,5}.log` conserva sólo categoría/deleted; ambos
+terminan rc0 y el recurso deja de aparecer. La fuente SQLite3.53.2 fijada en
+el grafo explica la ventana: `unixShmUnmap` hace unlink al llegar a nRef0 antes
+de `unixShmPurge`/close. W4 permite solapar conexiones y detenerse en ese
+intervalo. No se puede recuperar el inode concreto del log antiguo; atribuirle
+ese mismo descriptor es una inferencia respaldada por el muestreo y el control.
+
+Se clasifica exclusivamente el alias Linux `vault.sqlite3-shm (deleted)` del
+SHM exacto registrado, con tipo regular, nlink0 y propietario esperado; se lee
+**todo el inode por `/proc/<pid>/fd`**, con estabilidad/tamaño/overlap y sin
+canarios. No hay permiso para otros deleted, SQLite o temporales. El control
+reproduce unlink antes de close: RED
+`/tmp/pmint5-red-unlinked-shm-control.log`, rc1 por recurso no clasificado;
+GREEN `/tmp/pmint5-green-unlinked-shm-control.log`, con detección de canario
+entre chunks y rechazo de otro recurso deleted. `pause_owned` comprueba todos
+los tasks detenidos dentro de los mismos5s. Bootstrap enfocado rc0:
+`/tmp/pmint5-green-g7-inflight-bootstrap.log`, closed1/replacement0/calls1,
+autoridad exacta y cleanup0. El primer replay y el stress sin barrera no
+reprodujeron el fallo antiguo; no se presentan como RED. Una pausa diagnóstica
+adelantada produjo timeout del get y cleanup0, no un RED válido del scanner
+(`/tmp/pmint5-stop-monitor-bootstrap-3.log`), y se retiró.
+
+**Panel Intel:** `/tmp/pmint5-red-panel.log` reproduce determinísticamente el
+prefijo visible antes del job/contadores; `wait_information` devolvía esa
+captura parcial. El observador conserva el mismo wait20, panel actual y mark,
+y añade el patrón completo ID32/pushed/pulled a su condición de devolución;
+las aserciones originales se conservan. Helpers con repaint partido rc0:
+`/tmp/pmint5-final-macos-helpers.log`. El producto TUI y sync no reciben cambios
+de rendimiento. CI medirá submit y espera por separado, prefijo frente a panel
+completo; la evidencia nativa todavía está pendiente de ejecución.
+
+Fallos heredados inspeccionados y conservados: `serve_one` sustituye un error
+parser/dispatch por `ok=false` genérico; `sync_job::record_journal_failure`
+descarta el error secundario al persistir el estado de emergencia; los accept
+loops descartan errores de handler y el worker de proveedor descarta errores
+de ejecución/settle. Se activan en esas respectivas fallas y mantienen el
+comportamiento documentado en W2/W4. No se usan para aceptar esta remediación.

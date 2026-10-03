@@ -100,7 +100,20 @@ fn run() -> Result<(), ()> {
             }
         }
         #[cfg(unix)]
-        Some("session") => client_session(&mut a),
+        Some("session") => {
+            if client_session(&mut a).is_err() {
+                // This owned client's result channel is framed IPC. Report the
+                // failed transport there, retaining a failed exit; stderr is
+                // still used if reporting the error itself fails. The replica
+                // owns retry/backoff and the job owns the public failure state.
+                write_frame(
+                    &mut std::io::stdout().lock(),
+                    br#"{"ok":false,"code":"unavailable"}"#,
+                )?;
+                std::process::exit(4);
+            }
+            Ok(())
+        }
         Some(method @ ("put" | "get" | "publish" | "list" | "delete")) => client(method, &mut a),
         _ => Err(()),
     }

@@ -150,13 +150,19 @@ impl ProcessTlsTransport {
             .as_mut()
             .ok_or(SyncError::Unavailable)?
             .exchange(request.as_bytes());
-        if response.is_err() {
+        let unavailable = response
+            .as_ref()
+            .is_ok_and(|value| value == "{\"ok\":false,\"code\":\"unavailable\"}");
+        if response.is_err() || unavailable {
             // Reconnection is only on a subsequent explicit caller attempt (the
             // existing replica retry/backoff); never replay inside this call.
             let mut session = state.take().ok_or(SyncError::Unavailable)?;
             if session.abort().is_err() {
                 eprintln!("SYNC_SESSION_CLEANUP_FAILED");
             }
+        }
+        if unavailable {
+            return Err(SyncError::Unavailable);
         }
         let response = response?;
         if !response.starts_with("{\"ok\":true") {

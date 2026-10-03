@@ -13,6 +13,8 @@ import zipfile
 from tui_migration_fixtures import onepux, pairing_namespace, information_text, recovery_code
 from tui_operations_lab import ClosingEndpoint
 
+SYNC_COMPLETE_PATTERN = r"Sync complete through pinned TLS: job=[0-9a-f]{32} pushed=[0-9]+ pulled=[0-9]+(?:\s|$)"
+
 REMOTE_DEVICE = "25252525252525252525252525252525"
 SYNC_LABEL = "com.santanajcp.passwordmanager.ticket26.sync"
 REMOTE_LABEL = "com.santanajcp.passwordmanager.ticket26.remote"
@@ -618,15 +620,19 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
                 session.w2_timing_offsets[source] = len(value.stdout)
         sync_started = m.time.monotonic()
         mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value)
+        wait_started = m.time.monotonic()
         try:
-            complete = session.wait_information("Sync complete through pinned TLS", timeout=20, since=mark)
+            complete = session.wait_information("Sync complete through pinned TLS", timeout=20,
+                                                since=mark, pattern=SYNC_COMPLETE_PATTERN)
         except BaseException as error:
+            print(f"PMINT5_SYNC_OBSERVER submit_ms={round((wait_started - sync_started) * 1000)} wait_ms={round((m.time.monotonic() - wait_started) * 1000)} complete-panel=0", flush=True)
             try:
                 diagnose_sync_wait(m, session, mark, sync_db, sync_pid)
             except BaseException as diagnostic_error:
                 raise error from diagnostic_error
             raise
         print(f"PMW2_TUI elapsed_ms={round((m.time.monotonic() - sync_started) * 1000)}", flush=True)
+        print(f"PMINT5_SYNC_OBSERVER submit_ms={round((wait_started - sync_started) * 1000)} wait_ms={round((m.time.monotonic() - wait_started) * 1000)} complete-panel=1", flush=True)
         diagnose_sync_wait(m, session, mark, sync_db, sync_pid)
         assert "pushed=" in complete and "pulled=" in complete
         job = re.search(r"job=([0-9a-f]{32})", complete); assert job

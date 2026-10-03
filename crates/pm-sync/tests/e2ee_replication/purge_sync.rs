@@ -1456,6 +1456,58 @@ fn authenticated_session_checks_acl_on_every_rpc_and_keeps_integrity_limits() {
 }
 
 #[test]
+fn session_endpoint_failure_returns_explicit_ipc_error_and_failed_exit() {
+    use std::io::{Read, Write};
+    let mut f = PurgeFixture::new();
+    let server = TlsServer::start(&mut f);
+    let closing = f.dir.path("closing-sync.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&closing).unwrap();
+    let peer = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.read_exact(&mut [0; 1]).unwrap();
+        // Close during the real TLS handshake, as in the TUI negative.
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pm-sync"))
+        .arg("session")
+        .arg("--socket")
+        .arg(closing)
+        .arg("--client-key")
+        .arg(f.dir.path("w2-client.key"))
+        .arg("--server-pub")
+        .arg(f.dir.path("w2-server.pub"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The request is never acknowledged. The transport failure must use the
+    // owned IPC result channel instead of the custodian's inherited stderr.
+    let request = b"{}";
+    let mut input = child.stdin.take().unwrap();
+    input
+        .write_all(&(request.len() as u32).to_be_bytes())
+        .unwrap();
+    input.write_all(request).unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    peer.join().unwrap();
+    let error = br#"{"ok":false,"code":"unavailable"}"#;
+    let mut frame = (error.len() as u32).to_be_bytes().to_vec();
+    frame.extend_from_slice(error);
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(
+        output.stdout, frame,
+        "failed endpoint must be reported explicitly over IPC"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "IPC error must not become a custodian error"
+    );
+    assert_eq!(count_rows(&f.dir.path("tls-store.sqlite3"), "roots"), 0);
+    server.transport.finish().unwrap();
+}
+
+#[test]
 fn authenticated_session_connection_loss_is_explicit_without_internal_replay() {
     let mut f = PurgeFixture::new();
     let mut server = TlsServer::start(&mut f);
