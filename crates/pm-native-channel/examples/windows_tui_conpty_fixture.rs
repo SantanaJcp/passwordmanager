@@ -2029,7 +2029,9 @@ mod windows_fixture {
             assert!(observer.state.lock().unwrap().contains("ab   f"));
             observer.feed(b"\x1b[1;6H\x1b[0X").unwrap();
             assert!(!observer.state.lock().unwrap().contains("f"));
-            observer.feed("\x1b[2;1HA🌎Z\x1b[2;3H\x1b[X".as_bytes()).unwrap();
+            observer
+                .feed("\x1b[2;1HA🌎Z\x1b[2;3H\x1b[X".as_bytes())
+                .unwrap();
             {
                 let state = observer.state.lock().unwrap();
                 assert!(state.contains("A  Z"));
@@ -2037,7 +2039,10 @@ mod windows_fixture {
             }
             observer.feed(b"\x1b[1;80Hz\x1b[32767X").unwrap();
             let state = observer.state.lock().unwrap();
-            assert_eq!((state.row, state.column, state.wrap_pending), (0, 79, false));
+            assert_eq!(
+                (state.row, state.column, state.wrap_pending),
+                (0, 79, false)
+            );
             assert_eq!(state.cells[79], ScreenCell::Empty);
             assert_eq!(state.cells[SCREEN_COLUMNS], ScreenCell::Glyph("A".into()));
         }
