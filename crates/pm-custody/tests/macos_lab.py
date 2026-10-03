@@ -2877,9 +2877,6 @@ def run_tui_ticket24_matrix(
     agent_directory,
 ):
     """Exercise Ticket 24 authority and pending keyboard contracts on macOS."""
-    diagnose_agent_accept_lane(
-        binary, profile, private, endpoint, agent_profile, agent_private, agent_endpoint,
-    )
     enrollment_private = agent_directory / "ticket24-enrollment.key"
     enrollment_public = agent_directory / "ticket24-enrollment.pub"
     assert not enrollment_private.exists() and not enrollment_public.exists()
@@ -3492,6 +3489,10 @@ def main():
             INSTALL / "pm-custody", human_profile, human_key, RUNTIME / "human.sock",
             published_agent_pub.read_bytes(), published_other_pub.read_bytes(), pid,
             diagnostic,
+        )
+        diagnose_agent_accept_lane(
+            INSTALL / "pm-custody", human_profile, human_key, RUNTIME / "human.sock",
+            agent_profile, agent_key, RUNTIME / "agent.sock",
         )
         run_tui_core_lab(
             INSTALL / "pm-custody", human_profile, human_key, RUNTIME / "human.sock",

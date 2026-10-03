@@ -1716,3 +1716,65 @@ Linux's existing serialized accept behavior is outside this port's correction.
 Inherited behavior reported and retained: `accept_one` ignores listener accept,
 stream-configuration and individual connection-handler errors; the client
 fails visibly while the service continues. It is not changed by this diagnosis.
+
+
+### Full25 native keyboard fixture method — 2026-10-02
+
+The Linux source present in this checkout is `tui_operations_lab.py`, not
+`tui_migration_lab.py`. Extract its unchanged deterministic 1PUX3 builder and
+pairing-CBOR namespace reader into a shared test-only module, keeping Linux's
+owner mapping explicit. macOS uses the logged-in human's UID, private sources,
+the existing `MacPtySession` and native descriptor/streaming channel. No tmux,
+Linux namespace, provider double or direct operation command counts as TUI
+acceptance. CLI CRUD/stream commands below are clearly named fixture setup.
+
+Before the TUI, create the same synthetic remote-device signed history through
+a separate real custody process (owner stopped, distinct device/audit custody,
+then owner restarted), and seed the existing >16 MiB streaming attachment.
+Install architecture-checked `pm-sync` in a custody-owned private fixture path,
+create synthetic server/client RPKs, and start a real system-domain sync job
+against a private opaque store. Every job/path joins the strict ownership
+ledger; any setup or cleanup error fails, no PASS precedes verified cleanup.
+
+Replay by keyboard: Chrome, Apple and mappable CSV preview and commit; missing
+source, malformed/hostile 1PUX, duplicate keep/replace preview, Esc and wrong
+confirmation without item-count changes; 1PUX3 import with source-digest
+preservation; protected pairing, real pinned sync and same-job status,
+wrong-pin rejection, offline endpoint and bounded transport failure across
+custody restart and human lock/idle; causal retirement of the seeded device;
+encrypted backup and warned plaintext export, collision/confirmation failures;
+selected large-attachment download with exact bytes/length and mode 0600;
+audit query/purge preserving content; restore preserving current authority;
+recovery exact re-entry and historical-copy warning; master rotation, rejection
+of the old password and successful fresh unlock using the new password.
+
+Synchronize menus/prompts, current status and visible input suffix before Enter.
+Keep existing waits (8 seconds for ordinary UI, 20 seconds for happy sync,
+75 seconds for the already documented bounded-backoff terminal observation),
+product deadlines, KDF, frame limits and lease/idle settings. Queries observe
+the original job ID, never resubmit sync. Read-only durable counts and file
+checks supplement keyboard results; they do not replace operations. Stream
+verification compares bounded chunks against the existing synthetic pattern.
+No secret/canary, recovery code or screen dump is printed. Individual native
+PASS labels are emitted only after the entire fixture and strict cleanup.
+
+Full24 remains blocked beyond the existing slice: ordinary `serve_vault` sets
+`provider: None`, and `serve_loop` pins `bootstrap.agent_uid/agent_spki` in the
+only agent listener. The second enrolled RPK cannot use that endpoint. Running
+`serve-attempt-lab` or a second bootstrap listener would not demonstrate the
+ordinary service's provider worker or multi-agent transport. No substitute is
+introduced; WAITING, passkey UP/UV and a second working agent remain open.
+
+
+Discriminant run [37087372922](https://github.com/SantanaJcp/passwordmanager/actions/runs/37087372922),
+exact `c5735f66d923eee2ce92931a0ac171e6e7e3786d`, completed FAILED on both CPUs.
+Apple silicon emitted `PM26_ACCEPT_LANE control=completed-after-human-lock
+process=same result=zero`, then the untouched concurrent gate failed with the
+original 15-second-or-later category. This confirms the serialized human lane
+blocks agent acceptance on ARM, with no operation retry. Intel failed earlier
+in the independent isolated pasteboard probe: its result was indeterminate,
+and the required post-probe human read returned AppleScript conversion error
+`-1700`. No Intel causal classification is claimed. The discriminant is moved
+immediately after authorization setup, before clipboard/content matrices,
+so that unrelated later failures cannot prevent observation. All original
+clipboard assertions and the concurrent acceptance gate remain intact.
