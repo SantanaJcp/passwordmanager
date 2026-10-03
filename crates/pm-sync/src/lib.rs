@@ -1153,7 +1153,6 @@ fn decode_descriptor(bytes: &[u8]) -> Result<(Vec<[u8; 32]>, Vec<[u8; 32]>), Syn
     }
     if d.position() != bytes.len()
         || !out.windows(2).all(|w| w[0] < w[1])
-        || !graphs.windows(2).all(|w| w[0] < w[1])
         || encode_descriptor(&out, &graphs) != bytes
     {
         return Err(SyncError::Integrity);

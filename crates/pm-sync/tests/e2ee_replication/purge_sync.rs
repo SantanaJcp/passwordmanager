@@ -1015,3 +1015,128 @@ fn missing_device_signature_rejects_at_wire_boundary_without_mutation() {
     assert_eq!(snapshot(&f.receiver), before);
     println!("PASS rejection=missing device signature authority/content/outbox/markers unchanged");
 }
+
+#[test]
+fn losing_graph_never_substitutes_kind_of_exact_local_winner() {
+    let mut f = PurgeFixture::new();
+    let store = f.store();
+    let t = (&store, &[0x61; 44][..]);
+    let events = CausalReducer::open(&f.sender)
+        .unwrap()
+        .pending_outbox()
+        .unwrap();
+    let graph = CausalReducer::open(&f.sender)
+        .unwrap()
+        .export_ciphertext_graph(&events[0], &f.dir.path("losing-note"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(f.replica(&f.sender).push(&t).unwrap(), 1);
+    assert_eq!(f.replica(&f.receiver).pull(&t).unwrap(), 1);
+    let record = LogicalRecord::new(
+        RecordKind::File,
+        HumanMetadata {
+            title: "synthetic newer file".into(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: pm_crypto::ProtectedText::copy_from_str("").unwrap(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![
+            Attachment::new(
+                [0x81; 16],
+                "synthetic.txt",
+                "text/plain",
+                b"synthetic W2 attachment",
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let edit = f.remote.prepare_edit_record(f.item, &record).unwrap();
+    commit(&mut f.remote, &edit);
+    let before = snapshot(&f.receiver);
+    // Only the old, losing note graph is supplied. The local winner is a file.
+    CausalReducer::open(&f.receiver)
+        .unwrap()
+        .apply_received_package(&events, &[graph])
+        .unwrap();
+    assert_eq!(snapshot(&f.receiver), before);
+    let kind: String = rusqlite::Connection::open(&f.receiver)
+        .unwrap()
+        .query_row(
+            "SELECT kind FROM vault_items WHERE item_id=?1",
+            [f.item.as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind, "file");
+    assert_eq!(
+        f.remote.read_record(f.item).unwrap().kind(),
+        RecordKind::File
+    );
+    println!("PASS exact local winner kind=file; losing note graph never substitutes kind");
+}
+
+#[test]
+fn historical_v2_graph_reference_order_remains_compatible() {
+    let mut f = PurgeFixture::new();
+    let other = f
+        .owner
+        .prepare_create_record(&note("synthetic other legacy item"))
+        .unwrap();
+    commit(&mut f.owner, &other);
+    let store = f.store();
+    let t = (&store, &[0x61; 44][..]);
+    assert_eq!(f.replica(&f.sender).push(&t).unwrap(), 2);
+    let root = t.list(f.namespace, None, 128).unwrap()[0].1;
+    let root_bytes = pairing(&f)
+        .open(&t.get(f.namespace, root).unwrap())
+        .unwrap();
+    let mut d = minicbor::Decoder::new(&root_bytes);
+    assert_eq!(d.array().unwrap(), Some(3));
+    assert_eq!(d.u64().unwrap(), 3);
+    assert_eq!(d.u64().unwrap(), 2);
+    assert_eq!(d.array().unwrap(), Some(1));
+    assert_eq!(d.array().unwrap(), Some(2));
+    assert_eq!(d.u64().unwrap(), 0);
+    let page_hash = d.bytes().unwrap().try_into().unwrap();
+    let page = pairing(&f)
+        .open(&t.get(f.namespace, page_hash).unwrap())
+        .unwrap();
+    let mut d = minicbor::Decoder::new(&page);
+    assert_eq!(d.array().unwrap(), Some(3));
+    assert_eq!(d.u64().unwrap(), 2);
+    let n = d.array().unwrap().unwrap();
+    let events: Vec<[u8; 32]> = (0..n)
+        .map(|_| d.bytes().unwrap().try_into().unwrap())
+        .collect();
+    let n = d.array().unwrap().unwrap();
+    let mut graphs: Vec<[u8; 32]> = (0..n)
+        .map(|_| d.bytes().unwrap().try_into().unwrap())
+        .collect();
+    assert_eq!(graphs.len(), 2);
+    graphs.sort_unstable_by(|a, b| b.cmp(a));
+    let legacy = put_wire(&f, &t, &page_wire(&events, &graphs));
+    rusqlite::Connection::open(f.dir.path("purge-store.sqlite3"))
+        .unwrap()
+        .execute("DELETE FROM roots", [])
+        .unwrap();
+    t.publish(f.namespace, legacy).unwrap();
+    assert_eq!(f.replica(&f.receiver).pull(&t).unwrap(), 2);
+    assert_eq!(
+        f.remote.read_record(f.item).unwrap().human().title,
+        "synthetic W2 create"
+    );
+    assert_eq!(
+        f.remote
+            .read_record(*other.item_id())
+            .unwrap()
+            .human()
+            .title,
+        "synthetic other legacy item"
+    );
+    println!("PASS historical v2 accepts graph reference order while v3 remains mandatory on push");
+}

@@ -15,11 +15,11 @@ sin commit de fase 2. Primero verificó ese código: 11 pruebas E2EE y el
 reproductor pasaron en `/tmp/pmw2b-inherited-tests.log`. Al ampliar la prueba,
 la selección con únicamente el purge pendiente falló con `Reduction(Integrity)`
 en `/tmp/pmw2b-expanded-tests.log`; el fix incluye sus antecedentes aunque ya
-tengan acuse. Ahora pasan 25 pruebas E2EE, el reproductor integrado y Clippy:
+tengan acuse. Ahora pasan 27 pruebas E2EE, el reproductor integrado y Clippy:
 
 ```sh
 flock /tmp/pm-cargo-window.lock bash -c './scripts/cargo-local.sh fmt --all && ./scripts/cargo-local.sh test -p pm-sync --test e2ee_replication --test shared_purge --locked --offline -- --nocapture && ./scripts/cargo-local.sh clippy -p pm-sync -p pm-vault --all-targets --locked --offline'
-# rc 0; /tmp/pmw2b-green5-tests.log
+# rc 0; /tmp/pmw2b-green-final-tests.log
 ```
 
 Incluyen 259 revisiones/eventos con purge en otra página, rechazo atómico de
@@ -28,6 +28,11 @@ publicación interrumpida y recepción cuyo marcador no puede hacer commit,
 purga selectiva/replay, dos bóvedas reales con servidor TLS/RPK y la carrera
 ADR0002 + purge terminal. Cada rechazo compara autoridad, contenido, outbox y
 marcadores; varias negativas conservan además contenido válido independiente.
+El RED adicional de `.or_else` está en `/tmp/pmw2b-kind-red.log`: el grafo
+perdedor de nota sustituye incorrectamente el `kind` del ganador local archivo
+en la base. En W2 el snapshot permanece intacto. El receptor conserva el orden
+histórico permitido de grafos de roots v2; no introduce una restricción de
+orden binario ausente de ese formato.
 No se usa un test ignorado para ocultar el RED. `check.sh` descubre los tests
 nuevos mediante `cargo test --workspace --all-targets`.
 

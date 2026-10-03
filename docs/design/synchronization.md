@@ -178,8 +178,10 @@ sigue exigiendo los sobres firmados bajo claves previamente confiables.
 
 Cada página conserva el descriptor v2 exacto
 `[2, event_ciphertext_hashes[], graph_ciphertext_hashes[]]`, con 1–256 eventos
-y 0–256 grafos; ambas listas de hashes de 32 bytes van estrictamente ordenadas
-sin duplicados. Root y páginas tienen como máximo 256 KiB de plaintext.
+y 0–256 grafos. Los hashes de eventos de 32 bytes van estrictamente ordenados
+sin duplicados. Las referencias de grafos no se repiten; su orden no es causal
+y no se exige orden binario a roots v2 históricos (el emisor actual las ordena).
+Root y páginas tienen como máximo 256 KiB de plaintext.
 `event_count` debe coincidir con la suma de eventos de todas las páginas; no
 admitir eventos/grafos repetidos entre páginas ni un mismo evento firmado
 reencriptado dos veces en el grupo. Las páginas respetan el orden causal:
