@@ -3617,3 +3617,108 @@ fixtures Windows; Linux40 ya fresco no se repite. La corrida6 se prepara
 sin aplicar el diff CUP/HVP mientras falta esa autorización; mantiene ese
 FAIL y todas las aserciones de cierre wire. No se reclama GREEN de nuevas
 ramas Windows antes de ejecutar y esperar la corrida.
+
+### Corrida 6 fase3 — PID, access y rotaciones; cierre wire discriminado
+
+[Windows 37140120697](https://github.com/SantanaJcp/passwordmanager/actions/runs/37140120697),
+SHA `69e17823ca8e274060d21306f3aeafe2233d7b83`, FAIL terminado.
+PID impostor PASS: descriptor-released=true, native-server propio/distinto de
+SCM y disponible, cliente instalado realmente observado y rechazado,
+server-closed=true/endpoint-absent=true. Peer SID/ACL agente→Human vuelve a
+PASS. No modificar listener/dispatcher/admisión ni promover esto a PID cliente
+cambiado o RPK impostor.
+
+Access PASS hasta salida natural con Esc explícito tras Audit. RED Esc en
+37137025546/SHA1e533b9→recorrido completo en37140120697/SHA69e1782; candidato
+3230122 ya pasaba Esc pero fallaba el q dentro del menú. Rotations separado
+PASS antes de restore, recovery completo/reentrada exacta, maestra oculta,
+anterior denegada/nueva aceptada. Local-operations vuelve a PASS completo con
+publicación observada por el humano y ambos gates de maestra. Clipboard
+independiente repite PASS sin cambiar su lease/deadline/oráculos.
+
+Las cuatro negativas wire llegan a connect/magic/unlock/request31/ack31/
+lease exacta/token-sent; peer-read category=broken-pipe; finish-ok=true y
+DACL after exact=true; close=pass. Para null/invalid-handle/thread-pseudohandle,
+servicio registra transfer-token→duplicate-failed, sin duplicado/parser.
+Malformado7 registra ack31 sin token/parser. El fixture exige sólo
+UnexpectedEof, por lo que las cuatro permanecen FAIL. No afirmar GREEN de
+las negativas por observar únicamente rechazo del servicio.
+
+Microsoft define [ERROR_BROKEN_PIPE](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-)
+como pipe terminado; el transporte instalado devuelve el error nativo de
+ReadFile. Diff preparado `/tmp/pmw1c-native-peer-closure-proposal.patch`:
+aceptar únicamente UnexpectedEof o BrokenPipe con raw_os_error exacto109,
+y exigir además [PeekNamedPipe](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-peeknamedpipe)
+fallido con ERROR_BROKEN_PIPE. Respuestas, timeout, error genérico u otro
+estado del pipe siguen FAIL; DACL y todas las fases del servicio intactas.
+Cambio pendiente de autorización explícita por la regla del usuario
+«No relajar límites/deadlines/KDF, aserciones ni DACLs». No aplicado.
+
+Resize vuelve a FAIL en CUP fuera del viewport42×12; diff CUP/HVP también
+pendiente de autorización adicional. El oráculo nativo sí observa100×30;
+80×24 no alcanzado. El parser nunca ignora secuencias desconocidas. La
+matriz integral conserva preview crypto-resource con lease-restored y sin
+preparation/frame-send. La lectura del código confirma sólo dos pasos dentro
+de preview_1pux_file después de verificar el canal: onepux::preview_file y
+classify_1pux (que lee los registros activos); sigue sin discriminante de
+qué asignación protegida falla. No editar ese código W3.
+
+Después de los casos se alcanzan gates human-lock/cross-role y SCM STOP/
+restart/crash/restart con probes positivos y PID nuevo. El último assert
+conserva el FAIL agregado exactamente por wire-null, wire-invalid-handle,
+wire-thread-pseudohandle, wire-malformed-token, resize y matrix. Cleanup
+estricto propio ejecutado sin error agregado adicional. Log
+`/tmp/pmw1c-windows6.log`. Se consumieron6/8 corridas Windows y2/2 Mac;
+ninguna idéntica sin hipótesis/cambio. Todos los runs terminaron y la lock
+local quedó libre durante sus esperas.
+
+Reparse integral TUI/transfer sigue no demostrado. La primitive elevada de
+open_regular_file es PASS parcial, no una equivalencia. [FSCTL_SET_REPARSE_POINT](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_set_reparse_point)
+requiere privilegio de creación de symlink; no concederlo al humano/agente.
+Los helpers genéricos de seal/cleanup rechazan reparse y permanecen intactos.
+Opciones para el método pendiente: alias preparado por instalador con vida y
+cleanup explícitos sin seguimiento, o ampliar privilegios del humano. Se
+recomienda el primero; el segundo contradice la frontera vigente. Definir el
+método del alias antes de implementarlo, sin excepción genérica de cleanup.
+
+### Estado al entregar fase3 — aceptación integral sigue FAIL
+
+| Criterio de27 | Estado | Evidencia y límite vigente |
+| --- | --- | --- |
+| Servicio virtual/DACL/DPAPI/peer bilateral G1 por proceso real | PASS parcial ARM64 | SCM/TLS-RPK/roles reales, primitives13 y negativas SID/PID servidor; matriz G1 completa pendiente. |
+| Sustitución/impersonación/dump/lectura y fallos de custodia rechazados | PASS parcial | Peer agente y PID impostor; empty/directory/multilink TUI cero lease; cuatro fuentes wire rechazadas pero gate cierre FAIL. Falta reparse integral, PID cliente cambiado/RPK impostor y toda matriz de fracaso. |
+| ConPTY/clipboard/persistencia nativos sin admin del agente | PASS parcial | Tipos7/CSV/reveal/expiry, clipboard/new-owner/empty, access, backup/export/restore/rotaciones; resize FAIL, 1PUX seed8 FAIL y pair-sync-retire no demostrado. x64/reboot sigue en32. |
+| TDD RED→GREEN/comandos exactos; sin skip/stubs | PASS de cambios acotados | Clipboard37135925196→37137025546; Esc37137025546→37140120697 y salida Audit corregida; Linux40 sin regresión. No convertir candidatas sin GREEN en aceptación. |
+| Revisión contractual e integración del merger antes de resolver | pendiente | Sólo W1 publicado, sin integración, merge PR1 ni cambios de ticket. |
+
+| Matriz Windows W1 | Máximo verificado en fase3 |
+| --- | --- |
+| Tipos7/Unicode/fields/reveal/expiry y CSV con siete counters antes de IMPORT | PASS; matriz6, passkey sólo almacenamiento. |
+| 1PUX positivo con ocho registros previos | FAIL; duplicated/validaciones pasan, preview crypto-resource W3, lease restaurada; asignación parser/classify desconocida. Positivo previo fase2 con otra composición conserva su evidencia acotada. |
+| Resize100×30→42×12→80×24 | FAIL42, no80; witness100 PASS, CUP/HVP del observer pendiente de autorización. |
+| Clipboard expiry/owner nuevo/propio vacío | PASS runs4/5/6 independientes; RED previo conservado. |
+| Generator/access/pending/audit | PASS caso6 con salida natural; no acredita provider/worker multicliente. |
+| Organización/history/backup/plaintext/trash/revision/purge/restore/recovery/master | PASS casos locales5/6, warnings completos, ficheros regulares no vacíos desde humano y antigua maestra denegada/nueva aceptada. No modifica ni acepta motor W2 global. |
+| Peer SID/ACL y PID servidor impostor | PASS parcial5/6; no equivale a PID cliente cambiado, RPK impostor ni todos los fallos G1. |
+| Null/invalid/thread pseudohandle/token7 | Rechazo del servicio y ACL/cleanup observados6; oráculo wire aún FAIL por BrokenPipe frente a UnexpectedEof. |
+| Empty/directory/hardlink TUI | PASS6; cero lease/DACL exacta. Reparse integral pendiente. |
+| Pair-sync-retire/segundo dispositivo/prefijos/offline Windows | No demostrado; fixture requiere segundo dispositivo normal. Bloqueos conocidos W2 purge/outbox y W4 single-bootstrap, no integrados; no introducir un lab listener alternativo ni sustituir por Linux. |
+| SCM stop/crash/restart | PASS después de casos6; no sustituye sync journal/restart E2E. |
+
+Archivos tocados frente a eb78c5e: pm-custody/src/{human_wire.rs,tui.rs,
+windows.rs,windows_console_diagnostic.rs}, pm-native-channel/src/windows.rs;
+pm-custody/examples/windows_human_tui_seed.rs; pm-native-channel/examples/
+windows_tui_conpty_fixture.rs y windows_tui_fixture/acl.rs; scripts/
+test-windows-custody-lab.ps1; este documento. Sin vault/staging/crypto,
+listener/dispatcher/admisión, purge/sync/backup, workflows ni dependencias.
+Conflictos previsibles: W3 preview/human_wire y App/tui/windows; W4 diagnósticos
+windows.rs y harness PS/ConPTY; W2 fixtures locales y docs27. Merger debe
+revisar esas superficies antes de componer; no integrar automáticamente.
+
+Siguiente acción: resolver las dos autorizaciones acotadas CUP/HVP y cierre
+nativo; sólo entonces aplicar los diffs y usar una corrida exacta con nueva
+hipótesis (dos slots Windows disponibles). W3 debe localizar y corregir la
+asignación crypto-resource sin reducir seed8/protecciones/limites. Componer
+W2 y el transporte normal de segundo dispositivo antes de la matriz sync/
+retire; acordar fixture reparse sin cambiar guards genéricos. No repetir Mac
+con la ventana actual agotada ni cambiar estados de tickets.
