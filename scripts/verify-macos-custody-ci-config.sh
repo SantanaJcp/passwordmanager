@@ -542,6 +542,52 @@ assert module.parse_agent_pasteboard_result(
     b"probe-native": b"valid",
 }
 module.assert_pasteboard_diagnostic_regression()
+
+# Execute the actual launcher classifier with synthetic command results.
+# These are fixture oracles, never native clipboard/isolation evidence.
+import hashlib
+import os
+import subprocess
+canary = b"synthetic-classifier-canary"
+native_empty = b"PM26_PB types=empty text=nil canary=absent stable=yes\n"
+native_present = b"PM26_PB types=string text=value canary=present stable=yes\n"
+cases = (
+    ("empty", 0, native_empty, b"", "valid", "no"),
+    ("exposure", 0, native_present, b"", "valid", "yes"),
+    ("explicit-null", 69, b"PM26_PB denied=pasteboard-null\n", b"", "denied", "no"),
+    ("wrong-status", -6, b"PM26_PB denied=pasteboard-null\n", b"", "invalid", "indeterminate"),
+    ("missing-sentinel", 69, b"", b"", "invalid", "indeterminate"),
+    ("malformed", 0, b"arbitrary output\n", b"", "invalid", "indeterminate"),
+    ("unavailable", 0, native_empty.replace(b"empty", b"unavailable"), b"", "unavailable", "indeterminate"),
+    ("unstable", 0, native_empty.replace(b"stable=yes", b"stable=no"), b"", "unstable", "indeterminate"),
+    ("unexpected-stderr", 0, native_empty, b"arbitrary error", "invalid", "indeterminate"),
+    ("stderr-exposure", 69, b"PM26_PB denied=pasteboard-null\n", canary, "denied", "yes"),
+    ("timeout", None, b"", b"", "timeout", "indeterminate"),
+)
+original_run, original_argv = subprocess.run, sys.argv
+try:
+    with tempfile.TemporaryDirectory(prefix="pm26clip-classifier-") as temporary:
+        result_path = pathlib.Path(temporary) / "result"
+        for name, status, stdout, stderr, expected_native, expected_read in cases:
+            def synthetic_run(command, **kwargs):
+                if command == ["/bin/launchctl", "manageruid"]:
+                    return subprocess.CompletedProcess(command, 0, b"0\n", b"")
+                if command == ["/bin/launchctl", "managername"]:
+                    return subprocess.CompletedProcess(command, 0, b"System\n", b"")
+                assert command[0] == "/synthetic-native-probe", name
+                if status is None:
+                    raise subprocess.TimeoutExpired(command, 30, output=stdout, stderr=stderr)
+                return subprocess.CompletedProcess(command, status, stdout, stderr)
+            subprocess.run = synthetic_run
+            sys.argv = ["launcher", str(result_path), str(os.getuid()), "501", "Aqua",
+                        str(len(canary)), hashlib.sha256(canary).hexdigest(), "/synthetic-native-probe"]
+            exec(module.AGENT_PASTEBOARD_LAUNCHER, {})
+            fields = module.parse_agent_pasteboard_result(result_path.read_bytes())
+            assert fields[b"probe-native"] == expected_native.encode(), name
+            assert fields[b"probe-success-read"] == expected_read.encode(), name
+finally:
+    subprocess.run, sys.argv = original_run, original_argv
+
 assert module.parse_sodium_cflags(b"CFLAGS='-O0 -g'\n") == b"opt0"
 assert module.parse_sodium_cflags(b"CFLAGS='-O2 -g'\n") == b"optimized"
 for rejected in (b"", b"CFLAGS='-Og'\n", b"CFLAGS='-O0 -O2'\n"):
