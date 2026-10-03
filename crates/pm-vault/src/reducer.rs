@@ -533,6 +533,7 @@ impl CausalReducer {
     ) -> Result<ReducedView, ReductionError> {
         let mut connection = open_connection(&self.path)?;
         let transaction = connection.transaction()?;
+        let known_purged_revisions = local_purged_revisions(&transaction, &self.trusted)?;
         let mut unique = BTreeSet::new();
         for batch in events.chunks(256) {
             for event in batch {
@@ -576,7 +577,14 @@ impl CausalReducer {
         let purges = verified_purges(&all, &view, &structural)?;
         let mut graph_keys = BTreeSet::new();
         for graph in graphs {
-            if graph.kind.is_empty() || !graph_keys.insert((graph.item, graph.revision)) {
+            // Standalone legacy packages reject a known purged payload. A
+            // verified sync root may replay its signed headers; its graph is
+            // still verified below and its purged contents are never inserted.
+            if graph.kind.is_empty()
+                || (root.is_none()
+                    && known_purged_revisions.contains(&(graph.item, graph.revision)))
+                || !graph_keys.insert((graph.item, graph.revision))
+            {
                 return Err(ReductionError::Integrity);
             }
             let expected = events
@@ -946,6 +954,26 @@ fn hex_id(id: &[u8; 16]) -> String {
         out.push(char::from(D[usize::from(b & 15)]));
     }
     out
+}
+type RevisionKey = ([u8; 16], [u8; 16]);
+fn local_purged_revisions(
+    connection: &rusqlite::Connection,
+    trusted: &TrustedRoot,
+) -> Result<BTreeSet<RevisionKey>, ReductionError> {
+    let known = parsed_events(connection)?;
+    let local_view = view_connection(connection, trusted)?;
+    let local_purges = verified_purges(&known, &local_view, &structural_events(&known))?;
+    Ok(known
+        .values()
+        .filter_map(|parsed| match parsed.body {
+            CausalEventBody::Revision { revision_id, .. }
+                if local_purges.covers(parsed.subject, revision_id) =>
+            {
+                Some((parsed.subject, revision_id))
+            }
+            _ => None,
+        })
+        .collect())
 }
 fn activate_received_items(
     transaction: &rusqlite::Transaction<'_>,

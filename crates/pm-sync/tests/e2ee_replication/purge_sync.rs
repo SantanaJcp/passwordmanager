@@ -705,10 +705,18 @@ fn selective_purge_and_replay_preserve_newer_content_and_authority() {
     assert_eq!(count_rows(&f.receiver, "revision_parts"), 1);
     assert_eq!(count_rows(&f.receiver, "purged_revisions"), 1);
     let before = snapshot(&f.receiver);
-    // A fully authentic old package remains idempotent; it cannot erase newer evidence.
+    // Previously purged payload is explicitly rejected, even with valid signatures.
+    assert!(
+        rx.reducer()
+            .unwrap()
+            .apply_received_package(&old_events, &[old_graph])
+            .is_err()
+    );
+    assert_eq!(snapshot(&f.receiver), before);
+    // Replaying retained headers alone is idempotent under the local purge proof.
     rx.reducer()
         .unwrap()
-        .apply_received_package(&old_events, &[old_graph])
+        .apply_received_package(&old_events, &[])
         .unwrap();
     assert_eq!(snapshot(&f.receiver), before);
     assert_eq!(
@@ -716,7 +724,9 @@ fn selective_purge_and_replay_preserve_newer_content_and_authority() {
         "synthetic newer winner"
     );
     assert_eq!(f.replica(&f.receiver).pull(&t).unwrap(), 0);
-    println!("PASS authentic replay/rollback preserves newer evidence and purged revision marker");
+    println!(
+        "PASS rejection=purged payload replay/rollback authority/content/outbox/markers unchanged; header replay idempotent"
+    );
 }
 
 #[test]
@@ -1139,4 +1149,74 @@ fn historical_v2_graph_reference_order_remains_compatible() {
         "synthetic other legacy item"
     );
     println!("PASS historical v2 accepts graph reference order while v3 remains mandatory on push");
+}
+
+#[test]
+fn backup_restored_streams_remain_bound_and_publish_with_offline_purge() {
+    let mut f = PurgeFixture::new();
+    let bytes = vec![0x67; 2 * 1024 * 1024 + 37];
+    let record = LogicalRecord::new_streaming(
+        RecordKind::File,
+        HumanMetadata {
+            title: "synthetic W2 backup stream".into(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: pm_crypto::ProtectedText::copy_from_str("").unwrap(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![
+            Attachment::descriptor(
+                [0x88; 16],
+                "synthetic.bin",
+                "application/octet-stream",
+                bytes.len() as u64,
+                pm_crypto::digest(&bytes),
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut cursor = std::io::Cursor::new(&bytes);
+    let mut readers = [AttachmentReader::new([0x88; 16], &mut cursor)];
+    let create = f
+        .owner
+        .prepare_create_record_streaming(&record, &mut readers)
+        .unwrap();
+    commit(&mut f.owner, &create);
+    let mut archive = Vec::new();
+    f.owner.write_native_backup(&mut archive).unwrap();
+    let restore = f
+        .owner
+        .prepare_native_restore(&mut std::io::Cursor::new(&archive), MASTER)
+        .unwrap();
+    commit(&mut f.owner, restore.prepared());
+    f.purge();
+    let reducer = CausalReducer::open(&f.sender).unwrap();
+    for (index, event) in reducer.pending_outbox().unwrap().iter().enumerate() {
+        let db = rusqlite::Connection::open(&f.sender).unwrap();
+        let kind: String = db
+            .query_row(
+                "SELECT kind FROM authority_events WHERE event_digest=?1",
+                [event.digest().as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let graph =
+            reducer.export_ciphertext_graph(event, &f.dir.path(&format!("restore-export-{index}")));
+        if let Err(error) = graph {
+            panic!("restore/export {index} kind={kind} failed: {error:?}");
+        }
+    }
+    let store = f.store();
+    let t = (&store, &[0x61; 44][..]);
+    assert_eq!(f.replica(&f.sender).push(&t).unwrap(), 7);
+    assert_eq!(f.replica(&f.receiver).pull(&t).unwrap(), 7);
+    assert_eq!(count_rows(&f.receiver, "vault_items"), 3);
+    assert_eq!(count_rows(&f.receiver, "purged_items"), 1);
+    println!(
+        "PASS backup restore stream graphs publish alongside offline purge without integrity loss"
+    );
 }
