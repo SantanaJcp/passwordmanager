@@ -1220,3 +1220,145 @@ fn backup_restored_streams_remain_bound_and_publish_with_offline_purge() {
         "PASS backup restore stream graphs publish alongside offline purge without integrity loss"
     );
 }
+
+struct WorkloadTransport<'a> {
+    inner: &'a ProcessTlsTransport,
+    started: Instant,
+    puts: std::cell::Cell<usize>,
+    gets: std::cell::Cell<usize>,
+    publishes: std::cell::Cell<usize>,
+}
+
+fn workload_trace(message: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    // The native workflow does not use --nocapture. Write directly so only
+    // these fixed categorical counters remain observable on a passing test.
+    writeln!(std::io::stdout().lock(), "{message}").expect("write workload diagnostic");
+}
+
+impl SyncTransport for WorkloadTransport<'_> {
+    fn put(&self, n: [u8; 32], h: [u8; 32], b: &[u8]) -> Result<(), SyncError> {
+        self.inner.put(n, h, b)?;
+        let puts = self.puts.get() + 1;
+        self.puts.set(puts);
+        if puts.is_multiple_of(64) {
+            workload_trace(format_args!(
+                "PMW2_WORKLOAD phase=put puts={puts} elapsed_ms={}",
+                self.started.elapsed().as_millis()
+            ));
+        }
+        Ok(())
+    }
+
+    fn get(&self, n: [u8; 32], h: [u8; 32]) -> Result<Vec<u8>, SyncError> {
+        let bytes = self.inner.get(n, h)?;
+        self.gets.set(self.gets.get() + 1);
+        Ok(bytes)
+    }
+
+    fn publish(&self, n: [u8; 32], h: [u8; 32]) -> Result<(), SyncError> {
+        workload_trace(format_args!(
+            "PMW2_WORKLOAD phase=publish-start puts={} elapsed_ms={}",
+            self.puts.get(),
+            self.started.elapsed().as_millis()
+        ));
+        self.inner.publish(n, h)?;
+        self.publishes.set(self.publishes.get() + 1);
+        workload_trace(format_args!(
+            "PMW2_WORKLOAD phase=publish-complete roots={} elapsed_ms={}",
+            self.publishes.get(),
+            self.started.elapsed().as_millis()
+        ));
+        Ok(())
+    }
+
+    fn list(
+        &self,
+        n: [u8; 32],
+        c: Option<u64>,
+        l: usize,
+    ) -> Result<Vec<(u64, [u8; 32])>, SyncError> {
+        self.inner.list(n, c, l)
+    }
+}
+
+#[test]
+fn restored_large_workload_measures_real_tls_root_publication() {
+    let mut f = PurgeFixture::new();
+    let server = TlsServer::start(&mut f);
+    for _ in 0..16 {
+        let create = f
+            .owner
+            .prepare_create_record(&note("PMW2_SYNTHETIC_WORKLOAD_NOTE"))
+            .unwrap();
+        commit(&mut f.owner, &create);
+    }
+    let bytes = vec![0x67; 16 * 1024 * 1024 + 4096];
+    let record = LogicalRecord::new_streaming(
+        RecordKind::File,
+        HumanMetadata {
+            title: "PMW2_SYNTHETIC_WORKLOAD_FILE".into(),
+            destinations: vec![],
+            tags: vec![],
+            favorite: false,
+            notes: pm_crypto::ProtectedText::copy_from_str("").unwrap(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![],
+        vec![
+            Attachment::descriptor(
+                [0x89; 16],
+                "synthetic.bin",
+                "application/octet-stream",
+                bytes.len() as u64,
+                pm_crypto::digest(&bytes),
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut cursor = std::io::Cursor::new(&bytes);
+    let mut readers = [AttachmentReader::new([0x89; 16], &mut cursor)];
+    let create = f
+        .owner
+        .prepare_create_record_streaming(&record, &mut readers)
+        .unwrap();
+    commit(&mut f.owner, &create);
+    let mut archive = Vec::new();
+    f.owner.write_native_backup(&mut archive).unwrap();
+    let restore = f
+        .owner
+        .prepare_native_restore(&mut std::io::Cursor::new(&archive), MASTER)
+        .unwrap();
+    commit(&mut f.owner, restore.prepared());
+    f.purge();
+    let measured = WorkloadTransport {
+        inner: &server.transport,
+        started: Instant::now(),
+        puts: std::cell::Cell::new(0),
+        gets: std::cell::Cell::new(0),
+        publishes: std::cell::Cell::new(0),
+    };
+    assert_eq!(f.replica(&f.sender).push(&measured).unwrap(), 39);
+    assert_eq!(count_rows(&f.sender, "outbox"), 0);
+    let roots = measured.list(f.namespace, None, 128).unwrap();
+    assert_eq!(roots.len(), 1);
+    let root = pairing(&f)
+        .open(&measured.get(f.namespace, roots[0].1).unwrap())
+        .unwrap();
+    let mut decoder = minicbor::Decoder::new(&root);
+    assert_eq!(decoder.array().unwrap(), Some(3));
+    assert_eq!(decoder.u64().unwrap(), 3);
+    assert_eq!(decoder.u64().unwrap(), 39);
+    assert_eq!(decoder.array().unwrap(), Some(1));
+    assert_eq!(f.replica(&f.receiver).pull(&measured).unwrap(), 39);
+    assert_eq!(count_rows(&f.receiver, "vault_items"), 35);
+    assert_eq!(count_rows(&f.receiver, "purged_items"), 1);
+    workload_trace(format_args!(
+        "PMW2_WORKLOAD phase=converged events=39 pages=1 roots=1 puts={} gets={} elapsed_ms={}",
+        measured.puts.get(),
+        measured.gets.get(),
+        measured.started.elapsed().as_millis()
+    ));
+}

@@ -4,15 +4,17 @@
 `codex/pm-w2-purge-sync`, base `ee3c1fd31cad59060e4120f3e2518b1196a90c1a`.
 Sin integración, cambios de tickets, merge de PR ni cambios ajenos.
 
-**Estado de fase 3: candidato en verificación; W2 NO terminado.** Se retoma
+**Estado de fase 3: Linux sin regresión; macOS incompleto; W2 NO terminado.** Se retoma
 `1aff66ee0834d473438d8c269fae63b7c65fee6e`, limpio y publicado, con replay
 legado corregido y RED de backup/restore. El encargo del 2026-10-03 amplía la
 zona exclusivamente a `backup.rs::restore_graph_digest` y autoriza hasta
 cuatro corridas adicionales de macOS sobre SHAs exactos, cada una con cambio
 o hipótesis distinta. El fix mínimo y las dos comparaciones unitarias contra
-el reductor pasan, junto con el RED PMB1/purge ahora GREEN. Gates completos y
-aceptación nativa pendientes en este checkpoint; no se integra ni se cambian
-tickets.
+el reductor pasan, junto con el RED PMB1/purge ahora GREEN. El checkpoint
+`fa8049e94d0c98b67ceca4fc59f5f19f1e1babb3` pasa los 40 gates Linux sin
+regresión. macOS ya no observa el rechazo de integridad en ARM, pero ambas
+CPU vencen en `pushing` sin publicar roots. Un diagnóstico nativo de volumen
+queda en preparación; no se integra ni se cambian tickets.
 
 ## Decisiones y formato exacto
 
@@ -238,6 +240,29 @@ purge con exportación íntegra de cada grafo. No se relajó ninguna aserción.
 
 ## Gates Linux frente al baseline
 
+### Fase 3 — gates del digest corregido
+
+Los mismos 40 comandos se ejecutaron una vez, serialmente, con los mismos
+artefactos/lock/prerrequisitos, sobre el árbol de producto publicado en
+`fa8049e`. Runner `/tmp/pmw2c-gates.py`, log `/tmp/pmw2c-gates.log`, resultados
+`/tmp/pmw2c-gate-results.json`, logs `/tmp/pmw2c-gate-*.log`:
+
+```text
+SUMMARY cases=40 rc0=38 regressions=0
+check.sh rc0 (89.071 s); clean-offline-build.sh rc0 (43.126 s)
+```
+
+`check.sh` ejecutó los dos unitarios de digest, los 28 casos E2EE incluido
+PMB1/restore/purge y el probe; fmt/check/test/Clippy verdes. Los dos rc1 son
+los mismos del baseline: `lab-tui-operations` vence al observar
+`exact-duplicates=1` truncado en 80 columnas; `g7-matrix` conserva staging
+streaming tras EIO/ENOSPC en `commit-outbox-audit`. No se cambian sus
+aserciones ni se presentan como aceptación; corresponden a las fronteras
+W1/W3. No se repiten labs para ocultar un fallo. La sección siguiente conserva
+los resultados históricos rojos de fase 2.
+
+### Fase 2 — evidencia histórica
+
 Se ejecutaron los 40 comandos exactos de `/tmp/pmrs-gate-results.json`, uno a
 la vez bajo flock, con artefactos fijados, sin reintentos de cada lab ni cambios
 de deadlines/KDF/oráculos. Runner propio `/tmp/pmw2b-gates.py`; logs
@@ -275,7 +300,74 @@ su entrada cuando falla la prueba de backup. No se añade skip ni ignore.
 Clippy de los nuevos paths pasó en `/tmp/pmw2b-replay-compatibility.log`.
 `git diff --check` y todos los enlaces relativos de ambos documentos W2 pasaron.
 
-## macOS: corrida terminada, no GREEN
+## macOS: integridad corregida, happy sync todavía sin GREEN
+
+### Método diagnóstico de fase 3
+
+Tras `fa8049e`, la corrida 37127063353 ya no observa `Integrity` en ARM:
+ambas CPU quedan en `pushing` al vencer la misma observación de 20 s, con
+208/89 bloques y cero roots. Para distinguir subida de objetos de espera de
+commit root, el segundo candidato habilita la suite E2EE de `pm-sync` en
+macOS nativo: usa únicamente UnixStream, UID propio y TLS/RPK reales. Los
+sockets macOS se provisionan en un path corto explícito de
+`/private/var/tmp`, sin intentar otra ruta después de un fallo. No se toca
+la TUI, el listener ni el workflow.
+
+`restored_large_workload_measures_real_tls_root_publication` usa 16 notas,
+un archivo de 16 MiB + 4096, PMB1 real, restore y purge offline: 39 eventos
+y una sola página v3. Un wrapper del transporte real solo emite categorías,
+contadores y milisegundos: cada 64 puts, antes/después de publish y después
+de la convergencia. Exige un root real, outbox vacío después de publish,
+39 eventos recibidos y 35 elementos más un marcador de purge. No hay skip,
+deadline/KDF cambiado ni acuse fabricado. El tiempo total es diagnóstico,
+**no sustituye** el happy sync de la TUI dentro de sus 20 s.
+
+Comando local bajo el método W2, seguido del check completo antes de publicar:
+
+```sh
+flock /tmp/pm-cargo-window.lock bash -c './scripts/cargo-local.sh fmt --all && ./scripts/cargo-local.sh test -p pm-sync --test e2ee_replication restored_large_workload_measures_real_tls_root_publication --locked --offline -- --nocapture && ./scripts/check.sh'
+# /tmp/pmw2c-workload-check.log
+```
+
+Local: ese bloque pasó. Para que CI conserve los contadores también cuando el
+test pasa sin `--nocapture`, se escribe directamente a stdout únicamente el
+schema fijo `PMW2_WORKLOAD`. El check posterior de esa variante también pasa:
+`/tmp/pmw2c-workload-final-check.log`, 29 E2EE, unitarios/probe y Clippy.
+Mide 271 puts, 272 gets, una página y un root; publish comienza a 10875 ms,
+termina a 10895 ms y la réplica converge a 19200 ms. Son tiempos Linux,
+no evidencia macOS ni cumplimiento de una latencia universal.
+Clean offline del mismo candidato pasa en `/tmp/pmw2c-workload-clean.log`
+(41.63 s). Solo se añadieron tests/diagnóstico/documentación desde el barrido
+de 40 gates; el código productivo es idéntico al de `fa8049e`. No se repiten
+los labs sin una nueva modificación productiva o preocupación pendiente.
+
+Native CI sigue `native-ci.md`: mismo workflow/labels/flags, SHA exacto,
+sin caches/artifacts/secrets. Solo una corrida con este nuevo diagnóstico;
+su resultado no convierte el timeout anterior en PASS.
+
+### Primera corrida de fase 3
+
+[37127063353](https://github.com/SantanaJcp/passwordmanager/actions/runs/37127063353),
+SHA `fa8049e94d0c98b67ceca4fc59f5f19f1e1babb3`, `completed/failure`.
+Ambos tests unitarios de restore pasan en las dos CPU. Flags
+`pasteboard_diagnostic=false`, `final_phase_only=false`, repo público y
+labels estándar comprobados; workflow sin cambios, sin caches/artifacts/secrets.
+Logs/API `/tmp/pmw2c-macos-run1.log` y `.json` (ARM además en `-arm.log`).
+
+| CPU | Resultado al vencer observación de 20 s | Bloques | Roots |
+| --- | --- | --- | --- |
+| Apple silicon | `durable=pushing`, `screen=pushing`, mismo PID sync | 208 | 0 |
+| Intel | `durable=pushing`, `screen=pushing`, mismo PID sync | 89 | 0 |
+
+Se comprobó la fixture: `macos_tui_migration_lab.py` restaura PMB1 antes del
+sync (restore en líneas 489–500, sync en 532–537). En ARM el rechazo de
+integridad anterior desaparece después del fix; esto acredita ese avance,
+no la terminación del sync. En Intel todavía no alcanza el root y por tanto
+no se afirma que ya recorrió todas las revisiones restauradas.
+Entorno observado: macOS 15.7.9/kernel 24.6.0, Rust 1.98.1 con hosts nativos
+`aarch64-apple-darwin` y `x86_64-apple-darwin`.
+
+### Corrida anterior de fase 2
 
 [37124954337](https://github.com/SantanaJcp/passwordmanager/actions/runs/37124954337),
 SHA `eae7d84abaccad9d3c01a9e62c57616fd41fbd3b`, `completed/failure`, ambos jobs
@@ -297,7 +389,7 @@ integridad que no emitió. Mayor número de bloques no prueba publicación ni
 convergencia. El defecto PMB1 local explica un camino de integridad relevante,
 pero no se declara causa nativa aislada sin otra corrida. La CI se lanzó antes
 del ajuste posterior de replay; no acredita el SHA posterior. Una corrida extra
-no se lanzará sin ampliar la autorización explícita de una corrida.
+no estaba autorizada en fase 2. La fase 3 amplió ese permiso a cuatro corridas.
 
 ## Fallbacks conservados y frontera de entrega
 
@@ -320,6 +412,7 @@ otro valor sustitutivo: `kind` ausente/corrupto se rechaza.
 sin modificaciones W2.
 
 Archivos propios: `pm-sync/src/lib.rs`, `pm-vault/src/reducer.rs`,
+`pm-vault/src/backup.rs` exclusivamente dentro de `restore_graph_digest`,
 `pm-sync/examples/shared_purge_probe.rs`, `pm-sync/tests/shared_purge.rs`,
 `pm-sync/tests/e2ee_replication.rs` y su módulo `purge_sync.rs`,
 `docs/design/synchronization.md`, este informe. No TUI W1, aperturas/custodia/staging
@@ -329,6 +422,7 @@ apertura y las verificaciones de W2. `pm-sync/src/lib.rs` puede compartir edici�
 con W4; su listener en `main.rs` no se tocó. El módulo nuevo al final de los
 tests puede dar conflicto menor con otros añadidos. No se integra desde W2.
 
-**Siguiente acción:** resolver la ampliación concreta de backup/CI, luego
-GREEN del nuevo RED, check/clean finales y comparación sin regresión; publicar
-el SHA final y pasar al merger. Mientras quede esa frontera, W2 es incompleto.
+**Siguiente acción de fase 3:** completar la corrida diagnóstica y decidir la
+corrección de latencia que permita happy sync dentro del plazo vigente. El
+fix del digest y los gates Linux ya están publicados; no pasar W2 como cerrado
+al merger mientras ese happy sync siga rojo.
