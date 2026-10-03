@@ -627,14 +627,14 @@ fn prepare_role(
             Role::Human => ServiceDiagnosticPhase::HumanTlsOk,
         })?;
     }
-    let pipe = WindowsServerPipe::create(
-        role.endpoint(),
+    let pipe = create_role_pipe(
+        role,
         vault_id,
         &bootstrap.service_sid,
         client_sid,
         stop,
-    )
-    .map_err(|_| Failure::Unavailable)?;
+        true,
+    )?;
     if let Some(diagnostics) = service.diagnostics.as_ref() {
         diagnostics.record(match role {
             Role::Agent => ServiceDiagnosticPhase::AgentPipeOk,
@@ -680,21 +680,103 @@ fn serve_role(
         client_sid,
     } = prepared;
     let mut next_pipe = Some(pipe);
-    loop {
-        let pipe = next_pipe.take().ok_or(Failure::Unavailable)?;
-        let _ = handle_server_connection(pipe, role, &config, service, &peer_rpk);
-        if stop.is_signalled().map_err(|_| Failure::Unavailable)? {
-            return Ok(());
+    let mut connections = crate::connection_dispatch::AgentConnections::new();
+    let result = (|| {
+        loop {
+            let mut pipe = next_pipe.take().ok_or(Failure::Unavailable)?;
+            if role == Role::Agent {
+                connections.reap()?;
+                // Accept and verify the kernel SID before handing off TLS. W3's
+                // live custody admission gate belongs between this and dispatch.
+                let accepted = pipe.accept().is_ok();
+                if stop.is_signalled().map_err(|_| Failure::Unavailable)? {
+                    drop(pipe);
+                    return Ok(());
+                }
+                // Keep an acceptor alive even after rejected native admission.
+                // Two transient acceptor handles coexist while replacing an instance;
+                // neither is a TLS/domain worker and both share the fixed DACL.
+                next_pipe = Some(create_role_pipe(
+                    role,
+                    vault_id,
+                    &service_sid,
+                    &client_sid,
+                    stop,
+                    false,
+                )?);
+                if accepted {
+                    let config = Arc::clone(&config);
+                    let service = service.clone();
+                    let peer_rpk = peer_rpk.clone();
+                    connections.dispatch(move || {
+                        // The existing connection-error disposition is preserved.
+                        let _ = handle_server_connection(pipe, role, &config, &service, &peer_rpk);
+                    })?;
+                }
+            } else {
+                let _ = handle_server_connection(pipe, role, &config, service, &peer_rpk);
+            }
+            if stop.is_signalled().map_err(|_| Failure::Unavailable)? {
+                return Ok(());
+            }
+            if next_pipe.is_none() {
+                next_pipe = Some(create_role_pipe(
+                    role,
+                    vault_id,
+                    &service_sid,
+                    &client_sid,
+                    stop,
+                    true,
+                )?);
+            }
         }
-        next_pipe = Some(
-            WindowsServerPipe::create(role.endpoint(), vault_id, &service_sid, &client_sid, stop)
-                .map_err(|_| Failure::Unavailable)?,
-        );
+    })();
+    let signalled = if result.is_err() {
+        stop.signal().map_err(|_| Failure::Unavailable)
+    } else {
+        Ok(())
+    };
+    let joined = connections.finish();
+    let mut failure = result.err();
+    for error in [signalled.err(), joined.err()].into_iter().flatten() {
+        failure = Some(match failure {
+            Some(previous) => previous.merge(error),
+            None => error,
+        });
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
+fn create_role_pipe(
+    role: Role,
+    vault_id: &str,
+    service_sid: &str,
+    client_sid: &str,
+    stop: &WindowsStopEvent,
+    first: bool,
+) -> Result<WindowsServerPipe, Failure> {
+    match role {
+        Role::Agent => WindowsServerPipe::create_agent_instance(
+            vault_id,
+            service_sid,
+            client_sid,
+            stop,
+            first,
+            u32::try_from(crate::connection_dispatch::MAX_AGENT_CONNECTIONS + 2)
+                .map_err(|_| Failure::Unavailable)?,
+        ),
+        Role::Human => {
+            WindowsServerPipe::create(role.endpoint(), vault_id, service_sid, client_sid, stop)
+        }
+    }
+    .map_err(|_| Failure::Unavailable)
+}
+
 fn handle_server_connection(
-    mut pipe: WindowsServerPipe,
+    pipe: WindowsServerPipe,
     role: Role,
     config: &Arc<ServerConfig>,
     service: &VaultService,
@@ -714,7 +796,8 @@ fn handle_server_connection(
         }
         (tls_pipe, Some(channel), Some(transfer_pipe))
     } else {
-        pipe.accept().map_err(|_| Failure::Unavailable)?;
+        // Agent accept/authentication already happened in the native acceptor.
+        pipe.verify().map_err(|_| Failure::Unavailable)?;
         let tls_pipe = pipe.try_clone().map_err(|_| Failure::Unavailable)?;
         (tls_pipe, None, None)
     };

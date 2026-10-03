@@ -888,45 +888,21 @@ fn serve_loop(
         });
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        serve_independent_accept_lanes(
-            &agent_listener,
-            human_listener,
-            bootstrap.agent_uid,
-            bootstrap.human_uid,
-            &bootstrap.agent_spki,
-            &agent_config,
-            human_config,
-            vault,
-        )
-    }
-
-    #[cfg(target_os = "linux")]
-    loop {
-        accept_one(
-            &agent_listener,
-            bootstrap.agent_uid,
-            Role::Agent,
-            &agent_config,
-            vault,
-            Some(&bootstrap.agent_spki),
-        )?;
-        accept_one(
-            &human_listener,
-            bootstrap.human_uid,
-            Role::Human,
-            &human_config,
-            vault,
-            None,
-        )?;
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    serve_independent_accept_lanes(
+        &agent_listener,
+        human_listener,
+        bootstrap.agent_uid,
+        bootstrap.human_uid,
+        &bootstrap.agent_spki,
+        &agent_config,
+        human_config,
+        vault,
+    )
 }
 
-// Darwin's ordinary service must accept delegated requests while a persistent
-// human RPC/TUI is open. There are exactly two accept lanes, not one thread
-// per client. Keep Linux's existing dispatcher outside this port's change.
+// One orchestration for Linux and Darwin. A persistent human RPC/TUI cannot
+// occupy the agent acceptor. Agent connections use the same bounded dispatcher
+// as Windows; each keeps its own TLS state and uses the sole vault engine.
 #[allow(clippy::too_many_arguments)]
 fn serve_independent_accept_lanes(
     agent_listener: &UnixListener,
@@ -950,17 +926,20 @@ fn serve_independent_accept_lanes(
                     &human_config,
                     human_vault.as_ref(),
                     None,
+                    None,
                 )?;
                 std::thread::sleep(Duration::from_millis(5));
             }
         })
         .map_err(|_| Failure::Unavailable)?;
+    let mut connections = crate::connection_dispatch::AgentConnections::new();
     loop {
         // A stopped or panicked human lane is a fatal custody condition. The
         // binary's existing top-level error path terminates the whole process.
         if human_lane.is_finished() {
             return Err(Failure::Unavailable);
         }
+        connections.reap()?;
         accept_one(
             agent_listener,
             agent_uid,
@@ -968,6 +947,7 @@ fn serve_independent_accept_lanes(
             agent_config,
             vault,
             Some(agent_spki),
+            Some(&mut connections),
         )?;
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -4046,6 +4026,7 @@ pub(super) fn hex(value: &[u8]) -> String {
     output
 }
 
+#[allow(clippy::too_many_arguments)]
 fn accept_one(
     listener: &UnixListener,
     expected_uid: u32,
@@ -4053,6 +4034,7 @@ fn accept_one(
     config: &Arc<ServerConfig>,
     vault: Option<&VaultService>,
     peer_rpk: Option<&[u8]>,
+    connections: Option<&mut crate::connection_dispatch::AgentConnections>,
 ) -> Result<(), Failure> {
     let Ok((stream, _)) = listener.accept() else {
         return Ok(());
@@ -4062,6 +4044,31 @@ fn accept_one(
         return Ok(());
     }
     ticket26_diagnostic(Ticket26DiagnosticPhase::ServerStreamConfigured);
+    if let Some(connections) = connections {
+        // Native identity is checked before consuming an expensive worker.
+        // W3's live-custody admission check belongs immediately before dispatch;
+        // this change deliberately does not duplicate custody loading/validation.
+        match unix_peer_uid(&stream) {
+            Ok(uid) if uid == expected_uid => {}
+            Ok(_) | Err(_) => return Ok(()),
+        }
+        let config = Arc::clone(config);
+        let vault = vault.cloned();
+        let peer_rpk = peer_rpk.map(<[u8]>::to_vec);
+        connections.dispatch(move || {
+            // Preserve the inherited handler-error policy; changing its error
+            // taxonomy is outside W4's approved concurrency correction.
+            let _ = handle_connection(
+                stream,
+                expected_uid,
+                role,
+                &config,
+                vault.as_ref(),
+                peer_rpk.as_deref(),
+            );
+        })?;
+        return Ok(());
+    }
     let _ = handle_connection(stream, expected_uid, role, config, vault, peer_rpk);
     Ok(())
 }
