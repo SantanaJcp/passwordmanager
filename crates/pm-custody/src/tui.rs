@@ -2684,6 +2684,31 @@ fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Fail
 
 fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Result<(), Failure> {
     let completed = terminal.draw(|frame| {
+        render_app(frame, app);
+    }).map_err(|_| Failure::Unavailable)?;
+    #[cfg(windows)]
+    if let Some(mut probe) = app.initial_diagnostic.take() {
+        probe.frame(completed.buffer)?;
+        probe.record("after-draw")?;
+        app.csv_diagnostic = Some(probe);
+    }
+    #[cfg(windows)]
+    if app.mode == Mode::CsvImport && app.input.ends_with("keep") {
+        if let Some(mut probe) = app.csv_diagnostic.take() {
+            probe.csv_frame(
+                completed.buffer,
+                app.input.ends_with("|chrome|keep"),
+                Line::raw(app.input.as_str()).width(),
+                Line::raw(app.status.as_str()).width(),
+            )?;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = completed;
+    Ok(())
+}
+
+fn render_app(frame: &mut ratatui::Frame, app: &mut App) {
         let chunks = Layout::default().direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(6)]).split(frame.area());
         let title = Paragraph::new("Password Manager — human TLS-RPK content")
@@ -2736,27 +2761,6 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
         let mut state = ListState::default(); if !rows.is_empty() { state.select(Some(selected)); }
         frame.render_stateful_widget(List::new(rows).highlight_symbol("› ").block(Block::default().title(list_title).borders(Borders::ALL)), chunks[1], &mut state);
         render_footer(frame, chunks[2], app);
-    }).map_err(|_| Failure::Unavailable)?;
-    #[cfg(windows)]
-    if let Some(mut probe) = app.initial_diagnostic.take() {
-        probe.frame(completed.buffer)?;
-        probe.record("after-draw")?;
-        app.csv_diagnostic = Some(probe);
-    }
-    #[cfg(windows)]
-    if app.mode == Mode::CsvImport && app.input.ends_with("keep") {
-        if let Some(mut probe) = app.csv_diagnostic.take() {
-            probe.csv_frame(
-                completed.buffer,
-                app.input.ends_with("|chrome|keep"),
-                Line::raw(app.input.as_str()).width(),
-                Line::raw(app.status.as_str()).width(),
-            )?;
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = completed;
-    Ok(())
 }
 
 fn render_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
@@ -3042,6 +3046,66 @@ mod tests {
         assert!(footer_row(&terminal, 20).starts_with("Input: ‹"));
         assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
         assert!(footer_row(&terminal, 19).ends_with('…'));
+    }
+
+    fn render_test_app(terminal: &mut Terminal<TestBackend>, app: &mut App) {
+        terminal.draw(|frame| render_app(frame, app)).unwrap();
+    }
+
+    fn panel_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        (4..area.height - 7)
+            .map(|y| (1..area.width - 1).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn information_import_counters_are_complete_in_panel_at_80x24() {
+        let mut app = footer_app("IMPORT");
+        let summary = "Mapping=chrome duplicate-action=keep; Preview values hidden: total=1 new=0 replaced=0 exact-duplicates=1 excluded=0 preserved-fields=3 pages=1; type IMPORT to commit";
+        begin_prompt(&mut app, Mode::ConfirmImport, summary);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        render_test_app(&mut terminal, &mut app);
+        let panel = panel_text(&terminal);
+        for token in ["Mapping=chrome", "duplicate-action=keep;", "total=1", "new=0", "replaced=0", "exact-duplicates=1", "excluded=0", "preserved-fields=3", "pages=1;", "type IMPORT to commit"] {
+            assert!(panel.contains(token), "missing mandatory token: {token}");
+        }
+        assert_eq!(footer_row(&terminal, 21), "Exposure: <hidden>");
+    }
+
+    #[test]
+    fn information_long_counters_survive_resize_in_panel() {
+        let mut app = footer_app("");
+        let summary = "Preview values hidden: total=18446744073709551615 new=18446744073709551615 replaced=18446744073709551615 exact-duplicates=18446744073709551615 excluded=18446744073709551615 preserved-fields=18446744073709551615 pages=18446744073709551615; type IMPORT to commit";
+        begin_prompt(&mut app, Mode::ConfirmImport, summary);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        render_test_app(&mut terminal, &mut app);
+        terminal.backend_mut().resize(80, 24);
+        terminal.autoresize().unwrap();
+        render_test_app(&mut terminal, &mut app);
+        let panel = panel_text(&terminal);
+        for key in ["total", "new", "replaced", "exact-duplicates", "excluded", "preserved-fields", "pages"] {
+            assert!(panel.contains(&format!("{key}=18446744073709551615")), "missing {key}");
+        }
+    }
+
+    #[test]
+    fn information_mandatory_confirmation_warnings_are_in_panel() {
+        let mut app = footer_app("");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for (mode, warning) in [
+            (Mode::ConfirmPlaintextExport, "PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:"),
+            (Mode::MasterRotate, "New master password|ROTATE (old backups retain historical recovery paths):"),
+            (Mode::NativeRestore, "Archive path|RESTORE (adds new IDs/keys; current authority is preserved):"),
+            (Mode::ConfirmPurgeItem, "Type PURGE to permanently delete trashed item:"),
+            (Mode::RecoveryRotate, "Recovery code shown temporarily; store externally, then re-enter it exactly to commit:"),
+        ] {
+            begin_prompt(&mut app, mode, warning);
+            render_test_app(&mut terminal, &mut app);
+            assert_eq!(panel_text(&terminal).split_whitespace().collect::<Vec<_>>(), warning.split_whitespace().collect::<Vec<_>>());
+        }
     }
 
     fn arguments<'a>(values: &'a [&'a str]) -> impl Iterator<Item = OsString> + 'a {

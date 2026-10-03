@@ -2522,3 +2522,49 @@ aprobación. Tras esa decisión, ejecutar GREEN del lab operations conservando
 el contador, verificar el nuevo render y continuar matriz nativa46 desde el
 nuevo commit, incluidas lease/negativas/sync. No repetir e536 sin cambio o
 experimento ni resolver27. No queda Cargo/lab/CI propio activo al entregar.
+
+## W1: información obligatoria en panel — 2026-10-03
+
+Decisión vinculante del usuario: resumen completo de importación, avisos de
+recuperación/rotación y toda información contractual previa a confirmar en el
+panel principal, nunca únicamente en el status recortable. Se conserva el
+footer horizontal del 2026-10-02. El código de recuperación es la exposición
+temporal explícitamente solicitada por ese flujo; no se trasladan secretos
+del input, contenido de elementos ni valores del preview al panel.
+
+Método autorizado para W1: extracción mecánica de draw a un render común y
+TestBackend real 80×24; RED de contadores completos y avisos, GREEN con panel,
+bordes exactos, u64 máximos, grafemas anchos/combinantes, scroll dentro del
+panel y resize. PgUp/PgDn desplazan el panel sin insertar input ni confirmar;
+no se añade un paso de confirmación ni se cambia el protocolo. Los fixtures
+leen la región principal actual y conservan contadores/confirmaciones exactos,
+con el mismo timeout. Código recovery se observa sin imprimirlo, con la misma
+lease; warning completo antes y después de reentrada. Cargo/check/clean/labs
+bajo `flock /tmp/pm-cargo-window.lock`, cwd `.worktrees/w1-tui-panel`.
+Barrido contra `/tmp/pmrs-gate-results.json` (40 casos, 38 rc0); los defectos
+G7 y purge/sync ajenos se conservan como evidencia pendiente. CI manual Windows
+normal y macOS completo sobre commits exactos, método native-ci, esperando
+conclusión; cada fallo nuevo requiere discriminante antes de corregir.
+
+Inventario de `tui.rs` inspeccionado:
+
+| Información | Clase y tratamiento W1 |
+| --- | --- |
+| CSV/1PUX mapping, keep/replace, total/new/replaced/exact-duplicates/excluded/preserved-fields/pages, IMPORT | Obligatoria previa al commit; panel completo. Los siete contadores son los existentes en el wire; W1 no inventa valores ni cambia schemas. G6/V19 siguen requiriendo validación integral de categorías del importador. |
+| Recovery: guardar externamente, reentrada exacta, código temporal, copias históricas | Obligatoria; contexto público y código temporal explícito en panel; sin copia persistente del código. |
+| Master: ROTATE y copias/backups históricos antes/después | Obligatoria; panel. Input sigue enmascarado. |
+| Plaintext: alcance/riesgo de copia persistente y EXPORT; aviso posterior de proteger/eliminar | Obligatoria; panel. |
+| Restore: RESTORE, IDs/keys nuevas, autoridad actual conservada y grants importados inactivos | Obligatoria; panel previo y resultado completo. |
+| Purge item/revisions y rango de audit/gap | Obligatoria previa a confirmar; panel. Resultado audit con discontinuidad completo. |
+| Passkey: RP/account/origin/document/request antes de APPROVE; reautenticación fresca | Obligatoria previa a confirmar; panel público, input secreto separado. |
+| Pair/pin/custodia humana; sync/job/fase/contadores/fallo explícito; retire/prefijos/offline | Contexto de confirmación y resultados observables exigidos por fixtures; panel completo, sin cambiar motor. |
+| Backup/download bytes y colisión; audit records/discontinuities/segments; history | Resultados completos observables; panel. |
+| Menús y sintaxis de prompts | Ayuda completa en panel; no se convierte en requisito nuevo de autorización. |
+| Password required, unlock/lock, selección/reveal/copy/expiry, CRUD breve, cancel/mismatch, error explícito | Status breve; se conserva su semántica y recorte. Descriptores/listas conservan su vista. |
+
+Fallbacks heredados observados y sin cambio: `WindowsServerPipe`/`LocalFree`
+y `WindowsClipboardWindow::drop`/DestroyWindow omiten errores de liberación;
+Crossterm TERM puede declarar soporte tras fallo VT; Ratatui reflow omite un
+glyph mayor que su ancho (el nuevo panel usa wrapping explícito por grafema);
+`tui_content_lab.py::screen` reemplaza UTF-8 inválido. El `unwrap_or(0)` de
+selección de catálogo conserva selección inicial si falta el ID, sin cambio.
