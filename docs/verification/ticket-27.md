@@ -2074,3 +2074,19 @@ el fixture agrega el flag/path diagnóstico sólo al CreateProcessW interno de
 ConPTY. No cambia identidad/API ni usa un launcher alternativo. El próximo
 run discrimina esta precondición y el primer frame; no se presenta run37 como
 RED del producto ni como validación del diagnóstico.
+
+[Run38](https://github.com/SantanaJcp/passwordmanager/actions/runs/37087936513)
+exacto `a9f969925a77cba2409d7337740908434d3c889b`, job `111101978715`, terminó
+FAIL. Build + 12/1/14/1 PASS; el launcher ya funciona. Sólo se obtuvo
+`before-alt writer vt=true mode=7 buffer=80x24 viewport=0,0,79,23` y el
+child salió 4 antes de dibujar. El diagnóstico trataba una consulta stdout
+fallida como requisito del producto; no alcanzó alternate ni frame y no explica
+el fallo original. El render original sigue sin corrección.
+
+Extensión del experimento, antes de repetir: una consulta Win32 fallida se
+registra como `query=mode-failed|geometry-failed|cells-failed code=<Win32>`,
+sin inventar modo, geometría o celdas ni seleccionar otro handle para esa
+observación. Así se mide explícitamente stdout no-console/ausente, que es una
+de las hipótesis, y se conserva el flujo original con CONOUT$. Un fallo al
+escribir métricas, tamaño fuera del límite o lectura parcial continúa siendo
+error. Estas categorías de diagnóstico no acreditan soporte del handle.

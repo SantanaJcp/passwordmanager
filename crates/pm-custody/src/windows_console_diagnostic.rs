@@ -5,7 +5,7 @@ use std::{fs::File, io::Write, os::windows::io::AsRawHandle, path::Path};
 
 use ratatui::buffer::Buffer;
 use windows_sys::Win32::{
-    Foundation::HANDLE,
+    Foundation::{GetLastError, HANDLE},
     System::Console::{
         CONSOLE_SCREEN_BUFFER_INFO, COORD, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode,
         GetConsoleScreenBufferInfo, GetStdHandle, ReadConsoleOutputCharacterW, STD_OUTPUT_HANDLE,
@@ -46,10 +46,11 @@ impl Diagnostic {
     fn snapshot(&mut self, stage: &str, name: &str, handle: HANDLE) -> Result<(), Failure> {
         let mut mode = 0;
         let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
-        if unsafe { GetConsoleMode(handle, &raw mut mode) } == 0
-            || unsafe { GetConsoleScreenBufferInfo(handle, &raw mut info) } == 0
-        {
-            return Err(Failure::Unavailable);
+        if unsafe { GetConsoleMode(handle, &raw mut mode) } == 0 {
+            return self.query_failure(stage, name, "mode");
+        }
+        if unsafe { GetConsoleScreenBufferInfo(handle, &raw mut info) } == 0 {
+            return self.query_failure(stage, name, "geometry");
         }
         let width = usize::try_from(info.dwSize.X).map_err(|_| Failure::Unavailable)?;
         let height = usize::try_from(info.dwSize.Y).map_err(|_| Failure::Unavailable)?;
@@ -68,8 +69,10 @@ impl Diagnostic {
                 &raw mut read,
             )
         } == 0
-            || read as usize != cells
         {
+            return self.query_failure(stage, name, "cells");
+        }
+        if read as usize != cells {
             return Err(Failure::Unavailable);
         }
         let markers = ["Password Manager", "human TLS-RPK", "Password required"].map(|marker| {
@@ -83,6 +86,15 @@ impl Diagnostic {
             info.srWindow.Left, info.srWindow.Top, info.srWindow.Right, info.srWindow.Bottom,
             info.dwCursorPosition.X, info.dwCursorPosition.Y, markers[0], markers[1], markers[2]
         ).map_err(|_| Failure::Unavailable)
+    }
+
+    fn query_failure(&mut self, stage: &str, name: &str, query: &str) -> Result<(), Failure> {
+        let code = unsafe { GetLastError() };
+        writeln!(
+            self.output,
+            "TUI_PROBE stage={stage} handle={name} query={query}-failed code={code}"
+        )
+        .map_err(|_| Failure::Unavailable)
     }
 
     pub(super) fn frame(&mut self, buffer: &Buffer) -> Result<(), Failure> {
