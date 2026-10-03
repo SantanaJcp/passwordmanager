@@ -411,8 +411,8 @@ impl DataCollector for RestoreCollector<'_> {
                         issuer_device: self.device,
                         modified_at,
                         kind: record.kind().crypto(),
-                        human_plaintext: &record.encode_human(),
-                        auth_plaintext: record.encode_auth().as_deref(),
+                        human_plaintext: &record.encode_human()?,
+                        auth_plaintext: record.encode_auth()?.as_deref(),
                     })?
                     .to_bytes();
                 self.tx.execute(
@@ -641,9 +641,8 @@ fn parse_backup(
     loop {
         let next = read_cipher_frame(input)?;
         let final_chunk = next.is_none();
-        let mut plain = Zeroizing::new(opener.open_chunk(&current, final_chunk)?);
+        let plain = opener.open_chunk(&current, final_chunk)?;
         parser.push(&plain, &opener)?;
-        plain.zeroize();
         if let Some(frame) = next {
             current = frame;
         } else {
@@ -916,7 +915,7 @@ fn export_revisions(
             item,
             *opened.issuer_device(),
             opened.modified_at(),
-            &record.to_descriptor_bytes(),
+            &record.to_descriptor_bytes()?,
         );
         writer.write_data("revision", revision, &payload, state)?;
     }
@@ -1023,8 +1022,7 @@ fn export_attachments(
             let mut total = 0_u64;
             let mut index = 0_u64;
             if let Some(package) = inline {
-                let mut plain =
-                    Zeroizing::new(root.open_file(attachment_id, revision, &package)?);
+                let mut plain = root.open_file(attachment_id, revision, &package)?;
                 if plain.is_empty() {
                     write_attachment_chunk(
                         writer,
@@ -1066,8 +1064,7 @@ fn export_attachments(
                         return Err(HumanCommitError::Integrity);
                     }
                     let frame: Vec<u8> = row.get(1)?;
-                    let mut plain =
-                        Zeroizing::new(file_opener.open_chunk(&frame, stored + 1 == count)?);
+                    let plain = file_opener.open_chunk(&frame, stored + 1 == count)?;
                     write_attachment_chunk(
                         writer,
                         state,
@@ -1078,7 +1075,6 @@ fn export_attachments(
                         &mut digest_state,
                         &mut total,
                     )?;
-                    plain.zeroize();
                     index += 1;
                 }
             }

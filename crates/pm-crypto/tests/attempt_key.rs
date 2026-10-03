@@ -13,11 +13,10 @@ fn device_only_attempt_key_is_context_bound_signed_and_reused_for_state_updates(
         .seal_attempt_state(vault, device, 7, attempt, canary)
         .unwrap();
     assert!(!package.windows(canary.len()).any(|v| v == canary));
-    assert_eq!(
-        keys.open_attempt_state(&package, vault, device, 7, attempt)
-            .unwrap(),
-        canary
-    );
+    let opened = keys
+        .open_attempt_state(&package, vault, device, 7, attempt)
+        .unwrap();
+    assert!(opened.as_ref() == canary, "attempt plaintext mismatch");
     assert!(
         keys.open_attempt_state(&package, vault, device, 8, attempt)
             .is_err()
@@ -30,10 +29,12 @@ fn device_only_attempt_key_is_context_bound_signed_and_reused_for_state_updates(
         .update_attempt_state(&package, vault, device, 7, attempt, b"terminal")
         .unwrap();
     assert_ne!(package, replacement);
-    assert_eq!(
-        keys.open_attempt_state(&replacement, vault, device, 7, attempt)
-            .unwrap(),
-        b"terminal"
+    let opened = keys
+        .open_attempt_state(&replacement, vault, device, 7, attempt)
+        .unwrap();
+    assert!(
+        opened.as_ref() == b"terminal",
+        "terminal plaintext mismatch"
     );
     let mut altered = replacement;
     *altered.last_mut().unwrap() ^= 1;

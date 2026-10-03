@@ -13,7 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use pm_crypto::{KdfProfile, verify_passkey_signature};
+use pm_crypto::{KdfProfile, ProtectedBytes, verify_passkey_signature};
 use pm_vault::{
     AgentEnrollment, AgentPeer, AttemptOutcome, AttemptState, AttemptVault, AuditDeviceCustody,
     AuthorizationReason, DelegatedVault, HumanChannel, HumanVault, HumanVerification,
@@ -195,7 +195,7 @@ fn human_registration_generates_one_independent_g6_key_and_replays_public_respon
     assert_eq!(user_handle, b"synthetic-user-handle");
     assert_eq!(credential_id, public.credential_id());
     assert_eq!(*cose_alg, -8);
-    assert_ne!(private_key, &[0; 32]);
+    assert!(private_key.as_ref() != [0; 32]);
     assert_eq!(public_key, public.public_key());
     assert_eq!(user_name, "synthetic-user");
     assert_eq!(display_name, "Synthetic User");
@@ -353,7 +353,8 @@ fn assertion_needs_bound_up_uv_and_live_attempt_authority_before_signing() {
         .settle(
             &lease,
             AttemptOutcome::Succeeded {
-                result: b"validated-oidc-result".to_vec(),
+                result: ProtectedBytes::copy_from_slice(b"validated-oidc-result")
+                    .expect("fixture protected bytes"),
             },
         )
         .unwrap();

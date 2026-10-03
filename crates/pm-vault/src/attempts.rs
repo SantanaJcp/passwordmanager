@@ -11,9 +11,8 @@
 use std::{fmt, sync::Arc};
 
 use minicbor::{Decoder, Encoder};
-use pm_crypto::{TrustedRoot, digest, random_id};
+use pm_crypto::{ProtectedBytes, TrustedRoot, digest, random_id};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use zeroize::Zeroizing;
 
 use crate::{
     AgentIdentity, AgentPeer, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent,
@@ -207,7 +206,6 @@ impl StartAttempt {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttemptSnapshot {
     attempt_id: [u8; 16],
     credential_id: [u8; 16],
@@ -218,7 +216,7 @@ pub struct AttemptSnapshot {
     created_at_us: i64,
     expires_at_us: i64,
     reason: Option<String>,
-    result: Option<Vec<u8>>,
+    result: Option<ProtectedBytes>,
 }
 
 /// Secret-free attempt context shown only on an authenticated human surface.
@@ -325,9 +323,9 @@ pub struct AttemptLease {
     integration_id: String,
     method: String,
     owner: AgentIdentity,
-    username: String,
-    password: Zeroizing<Vec<u8>>,
-    subject_token: Option<Zeroizing<Vec<u8>>>,
+    username: ProtectedUtf8,
+    password: ProtectedBytes,
+    subject_token: Option<ProtectedBytes>,
     totp: Option<TotpLease>,
     ssh: Option<SshLease>,
     reconciliation: bool,
@@ -335,9 +333,9 @@ pub struct AttemptLease {
 
 pub struct SshLease {
     private_format: PrivateKeyFormat,
-    private_key: Zeroizing<Vec<u8>>,
+    private_key: ProtectedBytes,
     public_key: Vec<u8>,
-    passphrase: Option<Zeroizing<Vec<u8>>>,
+    passphrase: Option<ProtectedBytes>,
 }
 
 impl SshLease {
@@ -351,7 +349,7 @@ impl SshLease {
         &self.public_key
     }
     pub fn passphrase(&self) -> Option<&[u8]> {
-        self.passphrase.as_ref().map(|value| value.as_slice())
+        self.passphrase.as_deref()
     }
 }
 
@@ -384,7 +382,7 @@ impl AttemptLease {
         self.owner.generation()
     }
     pub fn username(&self) -> &str {
-        &self.username
+        self.username.as_str()
     }
     pub fn password(&self) -> &[u8] {
         &self.password
@@ -393,7 +391,7 @@ impl AttemptLease {
     /// adapter. It remains inside the custodian/provider boundary.
     #[must_use]
     pub fn subject_token(&self) -> Option<&[u8]> {
-        self.subject_token.as_ref().map(|value| value.as_slice())
+        self.subject_token.as_deref()
     }
     pub const fn totp(&self) -> Option<&TotpLease> {
         self.totp.as_ref()
@@ -407,7 +405,7 @@ impl AttemptLease {
 }
 
 pub struct TotpLease {
-    secret: Zeroizing<Vec<u8>>,
+    secret: ProtectedBytes,
     algorithm: TotpAlgorithm,
     digits: u8,
     period: u16,
@@ -433,8 +431,8 @@ impl TotpLease {
 }
 
 pub enum AttemptOutcome {
-    Succeeded { result: Vec<u8> },
-    WaitingForHuman { challenge: Vec<u8> },
+    Succeeded { result: ProtectedBytes },
+    WaitingForHuman { challenge: ProtectedBytes },
     Failed { reason: &'static str },
     Indeterminate,
 }
@@ -487,14 +485,14 @@ impl AttemptVault {
         &self,
         request_id: [u8; 16],
         package: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>, AttemptError> {
-        Ok(Zeroizing::new(self.custody.open_attempt_state(
+    ) -> Result<ProtectedBytes, AttemptError> {
+        Ok(self.custody.open_attempt_state(
             package,
             *self.trusted.vault_id(),
             self.device,
             self.generation,
             request_id,
-        )?))
+        )?)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -706,7 +704,7 @@ impl AttemptVault {
         )?)?;
         snapshot.state = AttemptState::Succeeded;
         snapshot.reason = None;
-        snapshot.result = Some(response.clone());
+        snapshot.result = Some(protected_copy(&response)?);
         update_snapshot(
             &tx,
             &self.custody,
@@ -1324,8 +1322,11 @@ impl AttemptVault {
                     return Err(AttemptError::InvalidArgument);
                 }
                 snap.state = AttemptState::WaitingForHuman;
-                snap.reason =
-                    Some(String::from_utf8(challenge).map_err(|_| AttemptError::InvalidArgument)?);
+                snap.reason = Some(
+                    std::str::from_utf8(&challenge)
+                        .map_err(|_| AttemptError::InvalidArgument)?
+                        .to_owned(),
+                );
                 (AuditOutcome::Accepted, false)
             }
             AttemptOutcome::Failed { reason } => {
@@ -1564,7 +1565,9 @@ fn decode_snapshot(bytes: &[u8]) -> Result<AttemptSnapshot, AttemptError> {
         d.null().unwrap();
         None
     } else {
-        Some(d.bytes().map_err(|_| AttemptError::Integrity)?.to_vec())
+        Some(protected_copy(
+            d.bytes().map_err(|_| AttemptError::Integrity)?,
+        )?)
     };
     d.skip().map_err(|_| AttemptError::Integrity)?;
     if d.position() != bytes.len() {
@@ -1615,22 +1618,22 @@ fn decode_execution(bytes: &[u8]) -> Result<(String, Vec<u8>, String), AttemptEr
 }
 
 struct CredentialMaterial {
-    username: String,
-    password: Zeroizing<Vec<u8>>,
-    subject_token: Option<Zeroizing<Vec<u8>>>,
+    username: ProtectedUtf8,
+    password: ProtectedBytes,
+    subject_token: Option<ProtectedBytes>,
     totp: Option<TotpLease>,
     ssh: Option<SshLease>,
 }
 
 impl CredentialMaterial {
-    fn empty() -> Self {
-        Self {
-            username: String::new(),
-            password: Zeroizing::new(Vec::new()),
+    fn empty() -> Result<Self, AttemptError> {
+        Ok(Self {
+            username: ProtectedUtf8::empty()?,
+            password: protected_copy(b"")?,
             subject_token: None,
             totp: None,
             ssh: None,
-        }
+        })
     }
 }
 
@@ -1638,24 +1641,46 @@ impl CredentialMaterial {
 enum DecodedPassphrase {
     #[default]
     Absent,
-    Present(Option<Zeroizing<Vec<u8>>>),
+    Present(Option<ProtectedBytes>),
 }
 
 #[derive(Default)]
 struct DecodedAuthMethod {
     method: Option<String>,
-    username: Option<String>,
-    password: Option<Zeroizing<Vec<u8>>>,
-    secret: Option<Zeroizing<Vec<u8>>>,
+    username: Option<ProtectedUtf8>,
+    password: Option<ProtectedBytes>,
+    secret: Option<ProtectedBytes>,
     algorithm: Option<TotpAlgorithm>,
     digits: Option<u8>,
     period: Option<u16>,
     t0: Option<u64>,
-    account: Option<String>,
+    account: Option<ProtectedUtf8>,
     private_format: Option<PrivateKeyFormat>,
-    private_key: Option<Zeroizing<Vec<u8>>>,
+    private_key: Option<ProtectedBytes>,
     public_key: Option<Vec<u8>>,
     passphrase: DecodedPassphrase,
+}
+
+struct ProtectedUtf8(ProtectedBytes);
+
+impl ProtectedUtf8 {
+    fn empty() -> Result<Self, AttemptError> {
+        Ok(Self(protected_copy(b"")?))
+    }
+
+    fn copy_from_str(value: &str) -> Result<Self, AttemptError> {
+        Ok(Self(protected_copy(value.as_bytes())?))
+    }
+
+    fn as_str(&self) -> &str {
+        // The only constructors accept a previously validated `str`.
+        unsafe { std::str::from_utf8_unchecked(&self.0) }
+    }
+}
+
+fn protected_copy(value: &[u8]) -> Result<ProtectedBytes, AttemptError> {
+    ProtectedBytes::copy_from_slice(value)
+        .map_err(|error| AttemptError::Vault(crate::VaultError::Crypto(error)))
 }
 
 fn decode_auth_method(
@@ -1674,28 +1699,19 @@ fn decode_auth_method(
                 );
             }
             "username" => {
-                parsed.username = Some(
-                    decoder
-                        .str()
-                        .map_err(|_| AttemptError::Integrity)?
-                        .to_owned(),
-                );
+                parsed.username = Some(ProtectedUtf8::copy_from_str(
+                    decoder.str().map_err(|_| AttemptError::Integrity)?,
+                )?);
             }
             "password" => {
-                parsed.password = Some(Zeroizing::new(
-                    decoder
-                        .bytes()
-                        .map_err(|_| AttemptError::Integrity)?
-                        .to_vec(),
-                ));
+                parsed.password = Some(protected_copy(
+                    decoder.bytes().map_err(|_| AttemptError::Integrity)?,
+                )?);
             }
             "secret" => {
-                parsed.secret = Some(Zeroizing::new(
-                    decoder
-                        .bytes()
-                        .map_err(|_| AttemptError::Integrity)?
-                        .to_vec(),
-                ));
+                parsed.secret = Some(protected_copy(
+                    decoder.bytes().map_err(|_| AttemptError::Integrity)?,
+                )?);
             }
             "algorithm" => parsed.algorithm = Some(decode_totp_algorithm(decoder)?),
             "digits" => parsed.digits = Some(decoder.u8().map_err(|_| AttemptError::Integrity)?),
@@ -1704,12 +1720,9 @@ fn decode_auth_method(
             }
             "t0" => parsed.t0 = Some(decoder.u64().map_err(|_| AttemptError::Integrity)?),
             "account" => {
-                parsed.account = Some(
-                    decoder
-                        .str()
-                        .map_err(|_| AttemptError::Integrity)?
-                        .to_owned(),
-                );
+                parsed.account = Some(ProtectedUtf8::copy_from_str(
+                    decoder.str().map_err(|_| AttemptError::Integrity)?,
+                )?);
             }
             "private_format" => {
                 parsed.private_format =
@@ -1720,12 +1733,9 @@ fn decode_auth_method(
                     });
             }
             "private_key" => {
-                parsed.private_key = Some(Zeroizing::new(
-                    decoder
-                        .bytes()
-                        .map_err(|_| AttemptError::Integrity)?
-                        .to_vec(),
-                ));
+                parsed.private_key = Some(protected_copy(
+                    decoder.bytes().map_err(|_| AttemptError::Integrity)?,
+                )?);
             }
             "public_key" => {
                 parsed.public_key = Some(
@@ -1743,12 +1753,9 @@ fn decode_auth_method(
                         decoder.null().map_err(|_| AttemptError::Integrity)?;
                         None
                     } else {
-                        Some(Zeroizing::new(
-                            decoder
-                                .bytes()
-                                .map_err(|_| AttemptError::Integrity)?
-                                .to_vec(),
-                        ))
+                        Some(protected_copy(
+                            decoder.bytes().map_err(|_| AttemptError::Integrity)?,
+                        )?)
                     },
                 );
             }
@@ -1776,13 +1783,13 @@ fn credential_material(
     now: i64,
 ) -> Result<CredentialMaterial, AttemptError> {
     if reconcile {
-        Ok(CredentialMaterial::empty())
+        CredentialMaterial::empty()
     } else if integration == "keycloak-token-exchange" {
         token_exchange_material(auth, destination, now)
     } else if integration == "keycloak-webauthn" || method == "webauthn" {
         Ok(CredentialMaterial {
-            username: passkey_material(auth)?.user_name,
-            password: Zeroizing::new(Vec::new()),
+            username: ProtectedUtf8::copy_from_str(&passkey_material(auth)?.user_name)?,
+            password: protected_copy(b"")?,
             subject_token: None,
             totp: None,
             ssh: None,
@@ -1867,7 +1874,7 @@ fn password_material(
         } else if decoded.method.as_deref() == Some("ssh") && requested_method == "publickey" {
             return Ok(CredentialMaterial {
                 username: decoded.username.ok_or(AttemptError::Integrity)?,
-                password: Zeroizing::new(Vec::new()),
+                password: protected_copy(b"")?,
                 subject_token: None,
                 totp: None,
                 ssh: Some(SshLease {
@@ -1886,7 +1893,7 @@ fn password_material(
     let password = password.ok_or(AttemptError::CredentialUnavailable)?;
     let totp = if requested_method == "password_totp" {
         let (account, material) = totp.ok_or(AttemptError::CredentialUnavailable)?;
-        if account != username {
+        if account.as_str() != username.as_str() {
             return Err(AttemptError::CredentialUnavailable);
         }
         Some(material)
@@ -1993,28 +2000,17 @@ fn token_exchange_material(
     {
         return Err(AttemptError::Integrity);
     }
-    let subject_token = Zeroizing::new(
-        decoder
-            .bytes()
-            .map_err(|_| AttemptError::Integrity)?
-            .to_vec(),
-    );
+    let subject_token = protected_copy(decoder.bytes().map_err(|_| AttemptError::Integrity)?)?;
     if decoder.str().map_err(|_| AttemptError::Integrity)? != "requester_client_id" {
         return Err(AttemptError::Integrity);
     }
-    let requester_client_id = decoder
-        .str()
-        .map_err(|_| AttemptError::Integrity)?
-        .to_owned();
+    let requester_client_id =
+        ProtectedUtf8::copy_from_str(decoder.str().map_err(|_| AttemptError::Integrity)?)?;
     if decoder.str().map_err(|_| AttemptError::Integrity)? != "requester_client_secret" {
         return Err(AttemptError::Integrity);
     }
-    let requester_client_secret = Zeroizing::new(
-        decoder
-            .bytes()
-            .map_err(|_| AttemptError::Integrity)?
-            .to_vec(),
-    );
+    let requester_client_secret =
+        protected_copy(decoder.bytes().map_err(|_| AttemptError::Integrity)?)?;
     if decoder.str().map_err(|_| AttemptError::Integrity)? != "provider"
         || decoder.str().map_err(|_| AttemptError::Integrity)? != "keycloak"
         || decoder.str().map_err(|_| AttemptError::Integrity)? != "profile_id"
@@ -2070,12 +2066,7 @@ fn github_token_material(
     {
         return Err(AttemptError::Integrity);
     }
-    let token = Zeroizing::new(
-        decoder
-            .bytes()
-            .map_err(|_| AttemptError::Integrity)?
-            .to_vec(),
-    );
+    let token = protected_copy(decoder.bytes().map_err(|_| AttemptError::Integrity)?)?;
     if decoder.str().map_err(|_| AttemptError::Integrity)? != "provider"
         || decoder.str().map_err(|_| AttemptError::Integrity)? != "github"
         || decoder.str().map_err(|_| AttemptError::Integrity)? != "profile_id"
@@ -2109,8 +2100,8 @@ fn github_token_material(
         return Err(AttemptError::CredentialUnavailable);
     }
     Ok(CredentialMaterial {
-        username: String::new(),
-        password: Zeroizing::new(Vec::new()),
+        username: ProtectedUtf8::empty()?,
+        password: protected_copy(b"")?,
         subject_token: Some(token),
         totp: None,
         ssh: None,

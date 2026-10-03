@@ -12,6 +12,7 @@ mod human;
 mod migration;
 mod onepux;
 mod passkey;
+mod plaintext;
 
 mod reducer;
 

@@ -2,6 +2,8 @@
 
 //! Closed CSV import profiles and loss-visible preview data.
 
+use pm_crypto::{ProtectedBytes, ProtectedText, ProtectedWriter};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
@@ -355,7 +357,10 @@ pub(crate) fn parse(
         return Err(HumanCommitError::InvalidInput);
     }
     let headers = if has_header {
-        table[0].clone()
+        table[0]
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
     } else {
         (0..width).map(|i| format!("column:{i}")).collect()
     };
@@ -381,7 +386,7 @@ pub(crate) fn parse(
         let values = mapping
             .columns
             .iter()
-            .map(|(i, f)| (*f, row[*i].clone()))
+            .map(|(i, f)| (*f, &*row[*i]))
             .collect::<BTreeMap<_, _>>();
         let mut source_fields = Vec::new();
         for (i, value) in row.iter().enumerate() {
@@ -389,7 +394,7 @@ pub(crate) fn parse(
                 source_fields.push(SourceField {
                     path: headers[i].clone(),
                     encoding: SourceEncoding::Utf8,
-                    value: value.as_bytes().to_vec(),
+                    value: ProtectedBytes::copy_from_slice(value.as_bytes())?,
                 });
             }
         }
@@ -397,14 +402,15 @@ pub(crate) fn parse(
             source_fields.push(SourceField {
                 path: "OTPAuth".into(),
                 encoding: SourceEncoding::Utf8,
-                value: value.as_bytes().to_vec(),
+                value: ProtectedBytes::copy_from_slice(value.as_bytes())?,
             });
         }
-        let title = values.get(&CsvField::Title).cloned().unwrap_or_default();
+        let title = values
+            .get(&CsvField::Title)
+            .map_or_else(String::new, |value| (*value).to_owned());
         let destination = values
             .get(&CsvField::Destination)
-            .cloned()
-            .unwrap_or_default();
+            .map_or_else(String::new, |value| (*value).to_owned());
         let destinations = if destination.is_empty() {
             Vec::new()
         } else {
@@ -421,39 +427,51 @@ pub(crate) fn parse(
         let mut auth = Vec::new();
         match mapping.kind {
             RecordKind::Password => auth.push(AuthRecord::Password {
-                username: values.get(&CsvField::Username).cloned().unwrap_or_default(),
-                password: values
-                    .get(&CsvField::Password)
-                    .map_or_else(Vec::new, |v| v.as_bytes().to_vec()),
+                username: values
+                    .get(&CsvField::Username)
+                    .map_or_else(String::new, |value| (*value).to_owned()),
+                password: ProtectedBytes::copy_from_slice(
+                    values
+                        .get(&CsvField::Password)
+                        .map_or(b"".as_slice(), |v| v.as_bytes()),
+                )?,
                 destination_refs: refs.clone(),
             }),
             RecordKind::Totp | RecordKind::Note => {}
             RecordKind::Token => auth.push(AuthRecord::Token {
-                secret: values
-                    .get(&CsvField::TokenSecret)
-                    .map_or_else(Vec::new, |v| v.as_bytes().to_vec()),
-                provider: values.get(&CsvField::Provider).cloned().unwrap_or_default(),
+                secret: ProtectedBytes::copy_from_slice(
+                    values
+                        .get(&CsvField::TokenSecret)
+                        .map_or(b"".as_slice(), |v| v.as_bytes()),
+                )?,
+                provider: values
+                    .get(&CsvField::Provider)
+                    .map_or_else(String::new, |value| (*value).to_owned()),
                 profile_id: values
                     .get(&CsvField::ProfileId)
-                    .cloned()
-                    .unwrap_or_default(),
+                    .map_or_else(String::new, |value| (*value).to_owned()),
                 destination_refs: refs.clone(),
                 expires_at: None,
             }),
             RecordKind::Ssh => auth.push(AuthRecord::Ssh {
                 private_format: crate::PrivateKeyFormat::OpenSsh,
-                private_key: values
-                    .get(&CsvField::SshPrivateKey)
-                    .map_or_else(Vec::new, |v| v.as_bytes().to_vec()),
+                private_key: ProtectedBytes::copy_from_slice(
+                    values
+                        .get(&CsvField::SshPrivateKey)
+                        .map_or(b"".as_slice(), |v| v.as_bytes()),
+                )?,
                 public_key: values
                     .get(&CsvField::SshPublicKey)
                     .map_or_else(Vec::new, |v| v.as_bytes().to_vec()),
-                username: values.get(&CsvField::Username).cloned().unwrap_or_default(),
+                username: values
+                    .get(&CsvField::Username)
+                    .map_or_else(String::new, |value| (*value).to_owned()),
                 destination_refs: refs.clone(),
                 passphrase: values
                     .get(&CsvField::SshPassphrase)
                     .filter(|v| !v.is_empty())
-                    .map(|v| v.as_bytes().to_vec()),
+                    .map(|v| ProtectedBytes::copy_from_slice(v.as_bytes()))
+                    .transpose()?,
             }),
             _ => return Err(HumanCommitError::InvalidInput),
         }
@@ -467,7 +485,9 @@ pub(crate) fn parse(
                 destinations,
                 tags: Vec::new(),
                 favorite: false,
-                notes: values.get(&CsvField::Notes).cloned().unwrap_or_default(),
+                notes: ProtectedText::copy_from_str(
+                    values.get(&CsvField::Notes).copied().unwrap_or(""),
+                )?,
                 fields: Vec::new(),
                 source_fields,
             },
@@ -520,11 +540,12 @@ fn chrome_mapping(headers: &[String]) -> Result<CsvMapping, HumanCommitError> {
     )
 }
 
-fn decode_text(bytes: &[u8], encoding: CsvEncoding) -> Result<String, HumanCommitError> {
+fn decode_text(bytes: &[u8], encoding: CsvEncoding) -> Result<ProtectedText, HumanCommitError> {
     match encoding {
         CsvEncoding::Utf8 => {
             let b = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-            String::from_utf8(b.to_vec()).map_err(|_| HumanCommitError::InvalidInput)
+            let text = std::str::from_utf8(b).map_err(|_| HumanCommitError::InvalidInput)?;
+            Ok(ProtectedText::copy_from_str(text)?)
         }
         CsvEncoding::Utf16Le | CsvEncoding::Utf16Be => {
             let bom = match encoding {
@@ -538,28 +559,74 @@ fn decode_text(bytes: &[u8], encoding: CsvEncoding) -> Result<String, HumanCommi
             if b.len() % 2 != 0 {
                 return Err(HumanCommitError::InvalidInput);
             }
-            let units = b.as_chunks::<2>().0.iter().map(|v| {
-                if encoding == CsvEncoding::Utf16Le {
-                    u16::from_le_bytes([v[0], v[1]])
-                } else {
-                    u16::from_be_bytes([v[0], v[1]])
+            let encoded = crate::plaintext::encode(usize::MAX, |output| {
+                let units = b.as_chunks::<2>().0.iter().map(|v| {
+                    if encoding == CsvEncoding::Utf16Le {
+                        u16::from_le_bytes(*v)
+                    } else {
+                        u16::from_be_bytes(*v)
+                    }
+                });
+                for character in char::decode_utf16(units) {
+                    let mut utf8 = [0; 4];
+                    output.write_all(
+                        character
+                            .map_err(|_| HumanCommitError::InvalidInput)?
+                            .encode_utf8(&mut utf8)
+                            .as_bytes(),
+                    )?;
                 }
-            });
-            char::decode_utf16(units)
-                .collect::<Result<String, _>>()
-                .map_err(|_| HumanCommitError::InvalidInput)
+                Ok(())
+            })?;
+            Ok(ProtectedText::from_bytes(encoded)?)
         }
     }
 }
 
-fn parse_csv(bytes: &[u8], delimiter: u8) -> Result<Vec<Vec<String>>, HumanCommitError> {
-    let mut rows = Vec::new();
-    let mut row = Vec::new();
-    let mut field = Vec::new();
-    let mut quoted = false;
-    let mut after_quote = false;
+struct CsvSpan {
+    start: usize,
+    end: usize,
+    length: usize,
+    row: usize,
+}
+
+fn parse_csv(bytes: &[u8], delimiter: u8) -> Result<Vec<Vec<ProtectedText>>, HumanCommitError> {
+    let spans = scan_csv(bytes, delimiter)?;
+    let mut rows: Vec<Vec<ProtectedText>> = Vec::new();
+    for span in spans {
+        if rows.len() == span.row {
+            rows.push(Vec::new());
+        }
+        let raw = &bytes[span.start..span.end];
+        let mut destination = ProtectedWriter::new(span.length)?;
+        if raw.starts_with(b"\"") {
+            let body = raw
+                .get(
+                    1..raw
+                        .len()
+                        .checked_sub(1)
+                        .ok_or(HumanCommitError::InvalidInput)?,
+                )
+                .ok_or(HumanCommitError::InvalidInput)?;
+            let mut position = 0;
+            while position < body.len() {
+                let byte = body[position];
+                destination.put(&[byte])?;
+                position += if byte == b'"' { 2 } else { 1 };
+            }
+        } else {
+            destination.put(raw)?;
+        }
+        rows[span.row].push(ProtectedText::from_bytes(destination.finish_exact()?)?);
+    }
+    Ok(rows)
+}
+
+fn scan_csv(bytes: &[u8], delimiter: u8) -> Result<Vec<CsvSpan>, HumanCommitError> {
+    let mut spans = Vec::new();
+    let (mut row, mut columns, mut start, mut length, mut row_bytes) = (0, 0, 0, 0, 0);
+    let (mut quoted, mut after_quote) = (false, false);
     let mut i = 0;
-    let mut row_bytes = 0;
     while i < bytes.len() {
         let b = bytes[i];
         row_bytes += 1;
@@ -569,80 +636,67 @@ fn parse_csv(bytes: &[u8], delimiter: u8) -> Result<Vec<Vec<String>>, HumanCommi
         if quoted {
             if b == b'"' {
                 if bytes.get(i + 1) == Some(&b'"') {
-                    field.push(b'"');
+                    length += 1;
                     i += 1;
                 } else {
                     quoted = false;
                     after_quote = true;
                 }
             } else {
-                field.push(b);
+                length += 1;
             }
-        } else if after_quote {
-            if b == delimiter {
-                push_field(&mut row, &mut field)?;
-                after_quote = false;
-            } else if b == b'\n' {
-                push_field(&mut row, &mut field)?;
-                rows.push(std::mem::take(&mut row));
-                check_row_count(&rows)?;
-                after_quote = false;
-                row_bytes = 0;
-            } else if b == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
-                push_field(&mut row, &mut field)?;
-                rows.push(std::mem::take(&mut row));
-                check_row_count(&rows)?;
-                after_quote = false;
-                row_bytes = 0;
-                i += 1;
-            } else {
-                return Err(HumanCommitError::InvalidInput);
-            }
-        } else if b == b'"' && field.is_empty() {
-            quoted = true;
-        } else if b == delimiter {
-            push_field(&mut row, &mut field)?;
-        } else if b == b'\n' {
-            push_field(&mut row, &mut field)?;
-            rows.push(std::mem::take(&mut row));
-            check_row_count(&rows)?;
-            row_bytes = 0;
-        } else if b == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
-            push_field(&mut row, &mut field)?;
-            rows.push(std::mem::take(&mut row));
-            check_row_count(&rows)?;
-            row_bytes = 0;
-            i += 1;
-        } else if b == b'\r' {
-            return Err(HumanCommitError::InvalidInput);
         } else {
-            field.push(b);
+            let newline = b == b'\n' || b == b'\r' && bytes.get(i + 1) == Some(&b'\n');
+            if b == delimiter || newline {
+                if columns >= MAX_COLUMNS {
+                    return Err(HumanCommitError::InvalidInput);
+                }
+                spans.push(CsvSpan {
+                    start,
+                    end: i,
+                    length,
+                    row,
+                });
+                columns += 1;
+                after_quote = false;
+                length = 0;
+                if newline {
+                    if b == b'\r' {
+                        i += 1;
+                    }
+                    row += 1;
+                    if row > MAX_RECORDS + 1 {
+                        return Err(HumanCommitError::InvalidInput);
+                    }
+                    columns = 0;
+                    row_bytes = 0;
+                }
+                start = i + 1;
+            } else if after_quote || b == b'\r' {
+                return Err(HumanCommitError::InvalidInput);
+            } else if b == b'"' && length == 0 {
+                quoted = true;
+            } else {
+                length += 1;
+            }
         }
         i += 1;
     }
     if quoted {
         return Err(HumanCommitError::InvalidInput);
     }
-    if after_quote || !field.is_empty() || !row.is_empty() {
-        push_field(&mut row, &mut field)?;
-        rows.push(row);
-        check_row_count(&rows)?;
+    if after_quote || length != 0 || columns != 0 {
+        if columns >= MAX_COLUMNS || row > MAX_RECORDS {
+            return Err(HumanCommitError::InvalidInput);
+        }
+        spans.push(CsvSpan {
+            start,
+            end: i,
+            length,
+            row,
+        });
     }
-    Ok(rows)
-}
-fn check_row_count(rows: &[Vec<String>]) -> Result<(), HumanCommitError> {
-    if rows.len() > MAX_RECORDS + 1 {
-        Err(HumanCommitError::InvalidInput)
-    } else {
-        Ok(())
-    }
-}
-fn push_field(row: &mut Vec<String>, field: &mut Vec<u8>) -> Result<(), HumanCommitError> {
-    if row.len() >= MAX_COLUMNS {
-        return Err(HumanCommitError::InvalidInput);
-    }
-    row.push(String::from_utf8(std::mem::take(field)).map_err(|_| HumanCommitError::InvalidInput)?);
-    Ok(())
+    Ok(spans)
 }
 
 pub(crate) fn parse_totp(uri: &str, refs: &[u16]) -> Result<AuthRecord, HumanCommitError> {
@@ -659,7 +713,7 @@ pub(crate) fn parse_totp(uri: &str, refs: &[u16]) -> Result<AuthRecord, HumanCom
         }
     }
     let secret = base32(values.get("secret").ok_or(HumanCommitError::InvalidInput)?)?;
-    let algorithm = match values.get("algorithm").map_or("SHA1", String::as_str) {
+    let algorithm = match values.get("algorithm").map_or("SHA1", |value| &**value) {
         "SHA1" => TotpAlgorithm::Sha1,
         "SHA256" => TotpAlgorithm::Sha256,
         "SHA512" => TotpAlgorithm::Sha512,
@@ -673,8 +727,10 @@ pub(crate) fn parse_totp(uri: &str, refs: &[u16]) -> Result<AuthRecord, HumanCom
     })?;
     let (issuer, account) = label.split_once(':').map_or(
         (
-            values.get("issuer").cloned().unwrap_or_default(),
-            label.clone(),
+            values
+                .get("issuer")
+                .map_or_else(String::new, |value| value.to_string()),
+            label.to_string(),
         ),
         |(i, a)| (i.to_owned(), a.to_owned()),
     );
@@ -689,55 +745,121 @@ pub(crate) fn parse_totp(uri: &str, refs: &[u16]) -> Result<AuthRecord, HumanCom
         destination_refs: refs.to_vec(),
     })
 }
-fn percent(v: &str) -> Result<String, HumanCommitError> {
+fn percent(v: &str) -> Result<ProtectedText, HumanCommitError> {
     let b = v.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' {
-            if i + 2 >= b.len() {
-                return Err(HumanCommitError::InvalidInput);
-            }
-            let h = |x: u8| match x {
-                b'0'..=b'9' => Some(x - b'0'),
-                b'a'..=b'f' => Some(x - b'a' + 10),
-                b'A'..=b'F' => Some(x - b'A' + 10),
-                _ => None,
-            };
-            out.push(
-                h(b[i + 1])
+    let encoded = crate::plaintext::encode(v.len(), |out| {
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' {
+                if i + 2 >= b.len() {
+                    return Err(HumanCommitError::InvalidInput);
+                }
+                let h = |x: u8| match x {
+                    b'0'..=b'9' => Some(x - b'0'),
+                    b'a'..=b'f' => Some(x - b'a' + 10),
+                    b'A'..=b'F' => Some(x - b'A' + 10),
+                    _ => None,
+                };
+                out.write_all(&[h(b[i + 1])
                     .zip(h(b[i + 2]))
                     .map(|(a, c)| (a << 4) | c)
-                    .ok_or(HumanCommitError::InvalidInput)?,
-            );
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
+                    .ok_or(HumanCommitError::InvalidInput)?])?;
+                i += 3;
+            } else {
+                out.write_all(&[b[i]])?;
+                i += 1;
+            }
         }
-    }
-    String::from_utf8(out).map_err(|_| HumanCommitError::InvalidInput)
+        Ok(())
+    })?;
+    Ok(ProtectedText::from_bytes(encoded)?)
 }
-fn base32(v: &str) -> Result<Vec<u8>, HumanCommitError> {
-    let mut out = Vec::new();
-    let mut acc = 0_u32;
-    let mut bits = 0;
-    for b in v.bytes().filter(|v| *v != b'=') {
-        let n = match b.to_ascii_uppercase() {
-            b'A'..=b'Z' => b.to_ascii_uppercase() - b'A',
-            b'2'..=b'7' => b - b'2' + 26,
-            _ => return Err(HumanCommitError::InvalidInput),
-        };
-        acc = (acc << 5) | u32::from(n);
-        bits += 5;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(u8::try_from(acc >> bits).map_err(|_| HumanCommitError::InvalidInput)?);
-            acc &= (1 << bits) - 1;
+fn base32(v: &str) -> Result<ProtectedBytes, HumanCommitError> {
+    let encoded = crate::plaintext::encode(128, |out| {
+        let mut acc = 0_u32;
+        let mut bits = 0;
+        for b in v.bytes().filter(|v| *v != b'=') {
+            let n = match b.to_ascii_uppercase() {
+                b'A'..=b'Z' => b.to_ascii_uppercase() - b'A',
+                b'2'..=b'7' => b - b'2' + 26,
+                _ => return Err(HumanCommitError::InvalidInput),
+            };
+            acc = (acc << 5) | u32::from(n);
+            bits += 5;
+            if bits >= 8 {
+                bits -= 8;
+                out.write_all(&[
+                    u8::try_from(acc >> bits).map_err(|_| HumanCommitError::InvalidInput)?
+                ])?;
+                acc &= (1 << bits) - 1;
+            }
         }
-    }
-    if out.len() < 10 || out.len() > 128 {
+        Ok(())
+    })?;
+    if encoded.len() < 10 || encoded.len() > 128 {
         return Err(HumanCommitError::InvalidInput);
     }
-    Ok(out)
+    Ok(encoded)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod protected_csv_tests {
+    use super::*;
+    use pm_crypto::CryptoError;
+    use std::process::Command;
+    static CANARY: [u8; 512 * 1024] = [b'Z'; 512 * 1024];
+    #[test]
+    fn parser_requires_locked_destination() {
+        if std::env::var_os("PM28_CSV_CHILD").is_some() {
+            let limit = libc::rlimit {
+                rlim_cur: 128 * 1024,
+                rlim_max: 128 * 1024,
+            };
+            // SAFETY: isolated child's own limit only.
+            assert_eq!(
+                unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const limit) },
+                0
+            );
+            let control = parse_csv(b"PM28_SMALL", b',').expect("small CSV control");
+            drop(control);
+            println!("PM28_PARSER_CONTROL_READY");
+            assert!(
+                matches!(
+                    parse_csv(&CANARY, b','),
+                    Err(HumanCommitError::Crypto(CryptoError::ResourceUnavailable))
+                ),
+                "ordinary parser destination accepted"
+            );
+            println!("PM28_PARSER_LOCK_DENIED");
+            return;
+        }
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "migration::protected_csv_tests::parser_requires_locked_destination",
+                "--nocapture",
+            ])
+            .env("PM28_CSV_CHILD", "1")
+            .output()
+            .expect("isolated parser child");
+        assert!(
+            output
+                .stdout
+                .windows(b"PM28_PARSER_CONTROL_READY".len())
+                .any(|v| v == b"PM28_PARSER_CONTROL_READY"),
+            "parser control marker missing"
+        );
+        println!("PM28_PARSER_CONTROL_READY");
+        assert!(
+            output.status.success(),
+            "ordinary parser destination accepted after control"
+        );
+        assert!(
+            output
+                .stdout
+                .windows(b"PM28_PARSER_LOCK_DENIED".len())
+                .any(|v| v == b"PM28_PARSER_LOCK_DENIED"),
+            "parser denial marker missing"
+        );
+    }
 }

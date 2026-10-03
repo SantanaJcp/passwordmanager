@@ -6,11 +6,15 @@
 //! not claim later authority reducers, CRUD flows, backups, or native custody.
 
 mod native_stdin;
+mod protected_text;
+mod protected_writer;
 mod root;
 
 use std::ffi::CStr;
 
 pub use native_stdin::NativeStdin;
+pub use protected_text::ProtectedText;
+pub use protected_writer::ProtectedWriter;
 
 pub use root::{
     AuditDeviceKeyPair, AuditKey, AuditKeyPackage, BackupOpener, BackupRootEnvelopes, BackupSealer,

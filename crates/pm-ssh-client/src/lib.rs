@@ -34,7 +34,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
 };
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
 const MAX_FRAME: usize = 128 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -397,16 +397,15 @@ async fn authenticate(
         if cursor.byte()? != 5 {
             return Err(Error::Protocol);
         }
-        let mut password = Zeroizing::new(cursor.bytes()?.to_vec());
+        let password =
+            pm_crypto::ProtectedBytes::copy_from_slice(cursor.bytes()?).map_err(|_| Error::Io)?;
         cursor.finish()?;
         let text = std::str::from_utf8(&password)
             .map_err(|_| Error::Protocol)?
             .to_owned();
-        let result = handle
+        handle
             .authenticate_password(profile.username(), text)
-            .await?;
-        password.zeroize();
-        result
+            .await?
     } else {
         let mut signer = CustodySigner { stream };
         handle
@@ -454,7 +453,7 @@ pub async fn consume(socket: &Path, reference: &str) -> Result<(), Error> {
     let mut request = vec![1];
     put_bytes(&mut request, reference.as_bytes())?;
     write_frame(&mut stream, &request).await?;
-    match read_frame(&mut stream).await?.as_slice() {
+    match &*read_frame(&mut stream).await? {
         [0] => Ok(()),
         _ => Err(Error::Rejected),
     }
@@ -495,12 +494,12 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, Error> {
     }
     Ok(cred.uid)
 }
-async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, Error> {
+async fn read_frame(stream: &mut UnixStream) -> Result<pm_crypto::ProtectedBytes, Error> {
     let len = stream.read_u32().await? as usize;
     if len == 0 || len > MAX_FRAME {
         return Err(Error::Protocol);
     }
-    let mut value = vec![0; len];
+    let mut value = pm_crypto::ProtectedBytes::zeroed(len).map_err(|_| Error::Io)?;
     stream.read_exact(&mut value).await?;
     Ok(value)
 }

@@ -80,6 +80,14 @@ const STREAM_CHUNK_BYTES: usize = 1024 * 1024;
 const LAB_AGENT_A: [u8; 16] = [0xa1; 16];
 const LAB_AGENT_B: [u8; 16] = [0xb2; 16];
 
+fn protected_copy(value: &[u8]) -> Result<ProtectedBytes, Failure> {
+    ProtectedBytes::copy_from_slice(value).map_err(|_| Failure::Unavailable)
+}
+
+fn protected_equal(left: &ProtectedBytes, right: &ProtectedBytes) -> bool {
+    left.as_ref() == right.as_ref()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Role {
     Agent,
@@ -118,7 +126,7 @@ impl Role {
 }
 
 struct KeyMaterial {
-    private: Zeroizing<Vec<u8>>,
+    private: ProtectedBytes,
     spki: Vec<u8>,
 }
 
@@ -199,19 +207,17 @@ fn human_ssh_lab_setup(arguments: &mut impl Iterator<Item = OsString>) -> Result
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
-    let ssh_private = Zeroizing::new(read_wire_field(&mut input, 16 * 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
+    let ssh_private = read_protected_wire_field(&mut input, 16 * 1024)?;
     let ssh_public = read_wire_field(&mut input, 16 * 1024)?;
-    let account_password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let account_password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
         .map_err(|_| Failure::Unavailable)?;
     rpc_unlock(&mut tls, &password)?;
-    let mut request = vec![45];
-    push_bytes(&mut request, &ssh_private)?;
-    push_bytes(&mut request, &ssh_public)?;
-    push_bytes(&mut request, &account_password)?;
+    let mut request =
+        protected_fields_frame(&[45], &[&ssh_private, &ssh_public, &account_password])?;
     write_frame(&mut tls, &request)?;
     request.zeroize();
     let response = read_frame(&mut tls)?;
@@ -238,9 +244,9 @@ fn human_github_lab_setup(arguments: &mut impl Iterator<Item = OsString>) -> Res
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
-    let token = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
+    let token = read_protected_wire_field(&mut input, 1024)?;
     let record = LogicalRecord::new(
         RecordKind::Token,
         HumanMetadata {
@@ -251,12 +257,13 @@ fn human_github_lab_setup(arguments: &mut impl Iterator<Item = OsString>) -> Res
             }],
             tags: vec!["synthetic".to_owned()],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
         vec![AuthRecord::Token {
-            secret: token.to_vec(),
+            secret: pm_crypto::ProtectedBytes::copy_from_slice(&(token))
+                .map_err(|_| Failure::Unavailable)?,
             provider: "github".to_owned(),
             profile_id: "github-assigned-issues/1".to_owned(),
             destination_refs: vec![0],
@@ -290,7 +297,7 @@ pub fn agent_rpc(
     private_path: &Path,
     socket_path: &Path,
     request: Option<&[u8]>,
-) -> Result<Vec<u8>, String> {
+) -> Result<ProtectedBytes, String> {
     let profile = read_profile(profile_path).map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())?;
     if profile.role != Role::Agent {
         return Err("UNAUTHORIZED".to_owned());
@@ -326,11 +333,7 @@ fn keygen(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure>
     push_bytes(&mut encoded, document.as_ref())?;
     encoded.extend_from_slice(&spki);
 
-    if let Err(error) = write_new(&private_path, &encoded, 0o400) {
-        encoded.zeroize();
-        return Err(error);
-    }
-    encoded.zeroize();
+    write_new(&private_path, &encoded, 0o400)?;
     if let Err(error) = write_new(&public_path, &spki, 0o444) {
         return Err(error.after_owned_path_cleanup(fs::remove_file(private_path)));
     }
@@ -369,9 +372,7 @@ fn provision_bootstrap(arguments: &mut impl Iterator<Item = OsString>) -> Result
     encoded.extend_from_slice(&agent_spki);
     encoded.extend_from_slice(&human_uid.to_be_bytes());
     encoded.extend_from_slice(&human_spki);
-    let result = write_new(&path, &encoded, 0o400);
-    encoded.zeroize();
-    result
+    write_new(&path, &encoded, 0o400)
 }
 
 fn provision_profile(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
@@ -418,10 +419,15 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
     let device = decode_hex_16(&device_value)?;
     let audit_path = std::path::PathBuf::from(format!("{}.audit-custody", vault_path.display()));
     let sync_jobs = sync_job::Manager::open(&vault_path)?;
+    let audit_custody = Arc::new(load_or_create_audit_custody(
+        &audit_path,
+        &vault_path,
+        device,
+    )?);
     let service = VaultService {
         path: vault_path,
         device,
-        audit_custody: Arc::new(load_or_create_audit_custody(&audit_path)?),
+        audit_custody,
         provider: None,
         sync_jobs,
     };
@@ -446,10 +452,15 @@ fn serve_attempt_lab(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
     let device = decode_hex_16(&device_value)?;
     let audit_path = std::path::PathBuf::from(format!("{}.audit-custody", vault_path.display()));
     let sync_jobs = sync_job::Manager::open(&vault_path)?;
+    let audit_custody = Arc::new(load_or_create_audit_custody(
+        &audit_path,
+        &vault_path,
+        device,
+    )?);
     let service = VaultService {
         path: vault_path,
         device,
-        audit_custody: Arc::new(load_or_create_audit_custody(&audit_path)?),
+        audit_custody,
         provider: Some(ControlledProvider {
             socket: provider_socket,
             uid: provider_uid,
@@ -465,10 +476,40 @@ fn serve_attempt_lab(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
     )
 }
 
-fn load_or_create_audit_custody(path: &Path) -> Result<AuditDeviceCustody, Failure> {
-    if path.exists() {
-        let bytes = read_regular(path, current_uid(), 0o400)?;
-        return AuditDeviceCustody::from_protected_bytes(&bytes).map_err(|_| Failure::Unavailable);
+fn load_or_create_audit_custody(
+    path: &Path,
+    vault_path: &Path,
+    device: [u8; 16],
+) -> Result<AuditDeviceCustody, Failure> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            let bytes = read_regular(path, current_uid(), 0o400)?;
+            return AuditDeviceCustody::from_protected_bytes(&bytes)
+                .map_err(|_| Failure::Unavailable);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(Failure::Unavailable),
+    }
+    // An initialized generation survives loss of the native private file.
+    // Only a successful read proving this device has no generation permits
+    // first provisioning. Never create a database to answer that question.
+    let connection = rusqlite::Connection::open_with_flags(
+        vault_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|_| Failure::Unavailable)?;
+    connection
+        .execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")
+        .map_err(|_| Failure::Unavailable)?;
+    let initialized: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM audit_keys WHERE device_id=?1)",
+            [device.as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(|_| Failure::Unavailable)?;
+    if initialized {
+        return Err(Failure::Unavailable);
     }
     let custody = AuditDeviceCustody::generate().map_err(|_| Failure::Unavailable)?;
     let mut bytes = Zeroizing::new(custody.to_protected_bytes());
@@ -477,6 +518,9 @@ fn load_or_create_audit_custody(path: &Path) -> Result<AuditDeviceCustody, Failu
     result?;
     Ok(custody)
 }
+
+#[cfg(test)]
+mod audit_custody_tests;
 
 fn serve_loop(
     bootstrap_path: &Path,
@@ -610,10 +654,10 @@ fn agent_discover(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), 
     for _ in 0..count {
         let item = cursor.fixed(16)?;
         let _revision = cursor.fixed(16)?;
-        let kind = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
-        let title = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
-        let destination = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
-        let account = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+        let kind = cursor.public_string()?;
+        let title = cursor.public_string()?;
+        let destination = cursor.public_string()?;
+        let account = cursor.public_string()?;
         rendered.push(format!(
             "{}:{kind}:{title}:{destination}:{account}",
             hex(item)
@@ -684,8 +728,8 @@ fn agent_attempt(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), F
     let attempt = c.fixed(16)?;
     let _item = c.fixed(16)?;
     let revision = c.fixed(16)?;
-    let state = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
-    let reason = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
+    let state = c.public_string()?;
+    let reason = c.public_string()?;
     let result = c.bytes()?;
     let _integration = c.bytes()?;
     let _version = c.fixed(4)?;
@@ -696,7 +740,7 @@ fn agent_attempt(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), F
         hex(revision),
         state,
         reason,
-        String::from_utf8_lossy(&result)
+        String::from_utf8_lossy(result)
     );
     Ok(())
 }
@@ -716,8 +760,8 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let (opcode, mut request) = match action.to_str() {
         Some("setup") => (19, vec![19]),
         Some("suspend") => (20, vec![20]),
@@ -742,8 +786,8 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
         }
     }
     if opcode == 41 {
-        let subject_token = Zeroizing::new(read_wire_field(&mut input, 64 * 1024)?);
-        let requester_secret = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+        let subject_token = read_protected_wire_field(&mut input, 64 * 1024)?;
+        let requester_secret = read_protected_wire_field(&mut input, 1024)?;
         push_bytes(&mut request, &subject_token)?;
         push_bytes(&mut request, &requester_secret)?;
     }
@@ -796,14 +840,13 @@ fn human_csv_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<()
     }
     let key = read_key(&private_path, current_uid())?;
     let source = read_import_source(&source_path)?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
         .map_err(|_| Failure::Unavailable)?;
     rpc_unlock(&mut tls, &password)?;
-    let mut request = vec![23, format, u8::from(replace_candidates)];
-    push_bytes(&mut request, &source)?;
+    let request = protected_fields_frame(&[23, format, u8::from(replace_candidates)], &[&source])?;
     write_frame(&mut tls, &request)?;
     let response = read_frame(&mut tls)?;
     let mut cursor = Cursor::new(&response);
@@ -834,8 +877,8 @@ fn human_csv_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<()
             .fixed(16)?
             .try_into()
             .map_err(|_| Failure::Unavailable)?,
-        command: cursor.bytes()?,
-        body: cursor.bytes()?,
+        command: protected_copy(cursor.bytes()?)?,
+        body: protected_copy(cursor.bytes()?)?,
         signature: cursor
             .fixed(64)?
             .try_into()
@@ -857,7 +900,7 @@ fn human_csv_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<()
             .map_err(|_| Failure::Unavailable)?;
         rpc_unlock(&mut recovered, &password)?;
         let receipt = rpc_receipt(&mut recovered, prepared.transaction_id)?;
-        if rpc_commit(&mut recovered, &prepared)? != receipt {
+        if !protected_equal(&rpc_commit(&mut recovered, &prepared)?, &receipt) {
             return Err(Failure::Unavailable);
         }
         tls = recovered;
@@ -865,8 +908,8 @@ fn human_csv_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<()
     } else {
         rpc_commit(&mut tls, &prepared)?
     };
-    if rpc_commit(&mut tls, &prepared)? != committed
-        || rpc_receipt(&mut tls, prepared.transaction_id)? != committed
+    if !protected_equal(&rpc_commit(&mut tls, &prepared)?, &committed)
+        || !protected_equal(&rpc_receipt(&mut tls, prepared.transaction_id)?, &committed)
     {
         return Err(Failure::Unavailable);
     }
@@ -932,10 +975,10 @@ fn human_passkey_confirm(arguments: &mut impl Iterator<Item = OsString>) -> Resu
         [2 | 3] => false,
         _ => return Err(Failure::Unavailable),
     };
-    let rp_id = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
-    let account = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
-    let origin = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
-    let document = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+    let rp_id = cursor.public_string()?;
+    let account = cursor.public_string()?;
+    let origin = cursor.public_string()?;
+    let document = cursor.public_string()?;
     cursor.finish()?;
     if required_uv && verification != 2 {
         return Err(Failure::Unavailable);
@@ -973,7 +1016,7 @@ fn human_passkey_confirm(arguments: &mut impl Iterator<Item = OsString>) -> Resu
     let response = read_frame(&mut tls)?;
     let mut cursor = Cursor::new(&response);
     cursor.expect(&[0])?;
-    let status = PasskeyStatus::from_bytes(&cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+    let status = PasskeyStatus::from_bytes(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
     cursor.finish()?;
     if matches!(status, PasskeyStatus::Waiting(_)) {
         return Err(Failure::Unavailable);
@@ -1102,8 +1145,8 @@ fn human_1pux_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
         .map_err(|_| Failure::Unavailable)?;
@@ -1136,8 +1179,8 @@ fn human_1pux_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
             .fixed(16)?
             .try_into()
             .map_err(|_| Failure::Unavailable)?,
-        command: cursor.bytes()?,
-        body: cursor.bytes()?,
+        command: protected_copy(cursor.bytes()?)?,
+        body: protected_copy(cursor.bytes()?)?,
         signature: cursor
             .fixed(64)?
             .try_into()
@@ -1159,7 +1202,7 @@ fn human_1pux_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
             .map_err(|_| Failure::Unavailable)?;
         rpc_unlock(&mut recovered, &password)?;
         let receipt = rpc_receipt(&mut recovered, prepared.transaction_id)?;
-        if rpc_commit(&mut recovered, &prepared)? != receipt {
+        if !protected_equal(&rpc_commit(&mut recovered, &prepared)?, &receipt) {
             return Err(Failure::Unavailable);
         }
         tls = recovered;
@@ -1167,8 +1210,8 @@ fn human_1pux_import(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
     } else {
         rpc_commit(&mut tls, &prepared)?
     };
-    if rpc_commit(&mut tls, &prepared)? != committed
-        || rpc_receipt(&mut tls, prepared.transaction_id)? != committed
+    if !protected_equal(&rpc_commit(&mut tls, &prepared)?, &committed)
+        || !protected_equal(&rpc_receipt(&mut tls, prepared.transaction_id)?, &committed)
     {
         return Err(Failure::Unavailable);
     }
@@ -1221,8 +1264,8 @@ fn human_history_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Res
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
 
     let records = content_fixture_records()?;
@@ -1250,7 +1293,7 @@ fn human_history_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Res
             }
             tls = connect_human(&profile, &key, &socket_path, &password)?;
             let receipt = rpc_receipt(&mut tls, restored.transaction_id)?;
-            if rpc_commit(&mut tls, &restored)? != receipt {
+            if !protected_equal(&rpc_commit(&mut tls, &restored)?, &receipt) {
                 return Err(Failure::Unavailable);
             }
         } else {
@@ -1301,7 +1344,7 @@ fn human_history_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Res
             destinations: vec![],
             tags: vec!["synthetic".to_owned()],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -1319,7 +1362,12 @@ fn human_history_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Res
     )
     .map_err(|_| Failure::Unavailable)?;
     let mut start = vec![17];
-    push_bytes(&mut start, &stream_record.to_descriptor_bytes())?;
+    push_bytes(
+        &mut start,
+        &stream_record
+            .to_descriptor_bytes()
+            .map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(&mut tls, &start)?;
     send_pattern(&mut tls, STREAM_SIZE)?;
     write_frame(&mut tls, &[0])?;
@@ -1337,7 +1385,8 @@ fn human_history_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Res
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: "synthetic".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("synthetic")
+                .map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -1366,7 +1415,8 @@ fn human_history_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Res
             destinations: vec![],
             tags: vec!["synthetic".to_owned()],
             favorite: false,
-            notes: "ticket18-trash-canary".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("ticket18-trash-canary")
+                .map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -1392,8 +1442,8 @@ fn human_history_list(arguments: &mut impl Iterator<Item = OsString>) -> Result<
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
     let history = rpc_history(&mut tls, item)?;
     println!(
@@ -1415,8 +1465,8 @@ fn human_history_purge_item(arguments: &mut impl Iterator<Item = OsString>) -> R
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
     let purge = rpc_prepare_purge_item(&mut tls, item)?;
     if !purge.terminal || purge.revision_ids.is_empty() {
@@ -1431,7 +1481,7 @@ fn human_history_purge_item(arguments: &mut impl Iterator<Item = OsString>) -> R
     }
     tls = connect_human(&profile, &key, &socket_path, &password)?;
     let receipt = rpc_receipt(&mut tls, purge.prepared.transaction_id)?;
-    if rpc_commit(&mut tls, &purge.prepared)? != receipt {
+    if !protected_equal(&rpc_commit(&mut tls, &purge.prepared)?, &receipt) {
         return Err(Failure::Unavailable);
     }
     println!(
@@ -1456,8 +1506,8 @@ fn human_backup_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Resu
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
 
     let records = content_fixture_records()?;
@@ -1481,7 +1531,8 @@ fn human_backup_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Resu
             destinations: vec![],
             tags: vec!["synthetic".to_owned()],
             favorite: false,
-            notes: "ticket21-stream-note-canary".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("ticket21-stream-note-canary")
+                .map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -1499,7 +1550,12 @@ fn human_backup_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Resu
     )
     .map_err(|_| Failure::Unavailable)?;
     let mut start = vec![17];
-    push_bytes(&mut start, &stream_record.to_descriptor_bytes())?;
+    push_bytes(
+        &mut start,
+        &stream_record
+            .to_descriptor_bytes()
+            .map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(&mut tls, &start)?;
     send_pattern(&mut tls, STREAM_SIZE)?;
     write_frame(&mut tls, &[0])?;
@@ -1535,7 +1591,7 @@ fn human_backup_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Resu
     write_frame(&mut tls, &[0])?;
     let restore = decode_prepared_response(&read_frame(&mut tls)?)?;
     let receipt = rpc_commit(&mut tls, &restore)?;
-    if rpc_commit(&mut tls, &restore)? != receipt {
+    if !protected_equal(&rpc_commit(&mut tls, &restore)?, &receipt) {
         return Err(Failure::Unavailable);
     }
     println!(
@@ -1556,11 +1612,10 @@ fn human_backup_restore(arguments: &mut impl Iterator<Item = OsString>) -> Resul
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
-    let mut request = vec![34];
-    push_bytes(&mut request, &password)?;
+    let request = protected_fields_frame(&[34], &[&password])?;
     write_frame(&mut tls, &request)?;
     let mut source = File::open(&archive_path).map_err(|_| Failure::Unavailable)?;
     let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
@@ -1590,15 +1645,12 @@ fn human_recovery_restore(arguments: &mut impl Iterator<Item = OsString>) -> Res
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
-    let mut recovery = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
+    let recovery = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
-    let mut request = vec![42];
-    push_bytes(&mut request, &recovery)?;
-    recovery.zeroize();
+    let request = protected_fields_frame(&[42], &[&recovery])?;
     write_frame(&mut tls, &request)?;
-    request.zeroize();
     let mut source = File::open(&archive_path).map_err(|_| Failure::Unavailable)?;
     let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
     loop {
@@ -1612,7 +1664,7 @@ fn human_recovery_restore(arguments: &mut impl Iterator<Item = OsString>) -> Res
     write_frame(&mut tls, &[0])?;
     let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
     let receipt = rpc_commit(&mut tls, &prepared)?;
-    if rpc_commit(&mut tls, &prepared)? != receipt {
+    if !protected_equal(&rpc_commit(&mut tls, &prepared)?, &receipt) {
         return Err(Failure::Unavailable);
     }
     println!(
@@ -1634,19 +1686,16 @@ fn human_master_rotate(arguments: &mut impl Iterator<Item = OsString>) -> Result
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
-    let mut replacement = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
+    let replacement = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
-    let mut request = vec![43];
-    push_bytes(&mut request, &replacement)?;
-    replacement.zeroize();
+    let request = protected_fields_frame(&[43], &[&replacement])?;
     write_frame(&mut tls, &request)?;
-    request.zeroize();
     let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
     let receipt = rpc_commit(&mut tls, &prepared)?;
-    if rpc_commit(&mut tls, &prepared)? != receipt
-        || rpc_receipt(&mut tls, prepared.transaction_id)? != receipt
+    if !protected_equal(&rpc_commit(&mut tls, &prepared)?, &receipt)
+        || !protected_equal(&rpc_receipt(&mut tls, prepared.transaction_id)?, &receipt)
     {
         return Err(Failure::Unavailable);
     }
@@ -1669,31 +1718,30 @@ fn human_recovery_rotate(arguments: &mut impl Iterator<Item = OsString>) -> Resu
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect_human(&profile, &key, &socket_path, &password)?;
     write_frame(&mut tls, &[44])?;
     let response = read_frame(&mut tls)?;
     let mut cursor = Cursor::new(&response);
     cursor.expect(&[0])?;
-    let mut code = Zeroizing::new(cursor.bytes()?);
+    let code = cursor.bytes()?;
     cursor.finish()?;
     println!(
         "Recovery code (store externally): {}",
-        std::str::from_utf8(&code).map_err(|_| Failure::Unavailable)?
+        std::str::from_utf8(code).map_err(|_| Failure::Unavailable)?
     );
     println!("Reintroduce recovery code to confirm the external copy:");
     std::io::stdout()
         .flush()
         .map_err(|_| Failure::Unavailable)?;
-    let mut confirmation = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut confirmation = read_protected_wire_field(&mut input, 1024)?;
     write_frame(&mut tls, &confirmation)?;
     confirmation.zeroize();
-    code.zeroize();
     let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
     let receipt = rpc_commit(&mut tls, &prepared)?;
-    if rpc_commit(&mut tls, &prepared)? != receipt
-        || rpc_receipt(&mut tls, prepared.transaction_id)? != receipt
+    if !protected_equal(&rpc_commit(&mut tls, &prepared)?, &receipt)
+        || !protected_equal(&rpc_receipt(&mut tls, prepared.transaction_id)?, &receipt)
     {
         return Err(Failure::Unavailable);
     }
@@ -1721,7 +1769,7 @@ fn rpc_download_atomic(
         let mut written = 0_u64;
         loop {
             let frame = read_frame_bounded(tls, STREAM_CHUNK_BYTES + 64)?;
-            if frame == [0] {
+            if *frame == [0] {
                 break;
             }
             written = written
@@ -1786,7 +1834,10 @@ fn rpc_prepare_record(
     if let Some(item) = item {
         request.extend_from_slice(&item);
     }
-    push_bytes(&mut request, &record.to_bytes())?;
+    push_bytes(
+        &mut request,
+        &record.to_bytes().map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(tls, &request)?;
     decode_prepared_response(&read_frame(tls)?)
 }
@@ -1923,8 +1974,8 @@ fn decode_purge_response(response: &[u8]) -> Result<WirePurge, Failure> {
             .fixed(16)?
             .try_into()
             .map_err(|_| Failure::Unavailable)?,
-        command: cursor.bytes()?,
-        body: cursor.bytes()?,
+        command: protected_copy(cursor.bytes()?)?,
+        body: protected_copy(cursor.bytes()?)?,
         signature: cursor
             .fixed(64)?
             .try_into()
@@ -1955,8 +2006,8 @@ fn assert_pattern_download(
     let mut digest = pm_crypto::DigestState::new().map_err(|_| Failure::Unavailable)?;
     let mut received = 0_u64;
     loop {
-        let frame = Zeroizing::new(read_frame_bounded(tls, STREAM_CHUNK_BYTES)?);
-        if frame.as_slice() == [0] {
+        let frame = read_frame_bounded(tls, STREAM_CHUNK_BYTES)?;
+        if *frame == [0] {
             break;
         }
         received += u64::try_from(frame.len()).map_err(|_| Failure::Unavailable)?;
@@ -1982,11 +2033,11 @@ fn human_password_crud(arguments: &mut impl Iterator<Item = OsString>) -> Result
     let password = read_protected_wire_field(&mut input, 1024)?;
     let title = read_wire_string(&mut input, 1024)?;
     let username = read_wire_string(&mut input, 1024 * 1024)?;
-    let secret_one = Zeroizing::new(read_wire_field(&mut input, 1024 * 1024)?);
+    let secret_one = read_protected_wire_field(&mut input, 1024 * 1024)?;
     let destination = read_wire_string(&mut input, 8 * 1024)?;
     let notes = read_wire_string(&mut input, 1024 * 1024)?;
     let edited_title = read_wire_string(&mut input, 1024)?;
-    let secret_two = Zeroizing::new(read_wire_field(&mut input, 1024 * 1024)?);
+    let secret_two = read_protected_wire_field(&mut input, 1024 * 1024)?;
 
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
@@ -2002,7 +2053,7 @@ fn human_password_crud(arguments: &mut impl Iterator<Item = OsString>) -> Result
         &destination,
         &notes,
     )?;
-    let mut changed_body = prepared.body.clone();
+    let mut changed_body = protected_copy(&prepared.body)?;
     *changed_body.last_mut().ok_or(Failure::Unavailable)? ^= 1;
     let changed = encode_commit_request(5, &prepared, &changed_body)?;
     write_frame(&mut tls, &changed)?;
@@ -2026,7 +2077,7 @@ fn human_password_crud(arguments: &mut impl Iterator<Item = OsString>) -> Result
     rpc_unlock(&mut tls, &password)?;
     let recovered = rpc_receipt(&mut tls, prepared.transaction_id)?;
     let replay = rpc_commit(&mut tls, &prepared)?;
-    if recovered != replay {
+    if !protected_equal(&recovered, &replay) {
         return Err(Failure::Unavailable);
     }
     assert_read(
@@ -2078,8 +2129,8 @@ fn human_content_flow(arguments: &mut impl Iterator<Item = OsString>) -> Result<
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
         .map_err(|_| Failure::Unavailable)?;
@@ -2089,7 +2140,10 @@ fn human_content_flow(arguments: &mut impl Iterator<Item = OsString>) -> Result<
     let fixture_records = content_fixture_records()?;
     for expected in fixture_records {
         let mut request = vec![9];
-        push_bytes(&mut request, &expected.to_bytes())?;
+        push_bytes(
+            &mut request,
+            &expected.to_bytes().map_err(|_| Failure::Unavailable)?,
+        )?;
         write_frame(&mut tls, &request)?;
         let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
         rpc_commit(&mut tls, &prepared)?;
@@ -2178,8 +2232,8 @@ fn human_audit_lifecycle(arguments: &mut impl Iterator<Item = OsString>) -> Resu
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
 
     let mut tls = connect(&profile, &key, &socket_path)?;
     tls.write_all(HUMAN_MAGIC)
@@ -2214,8 +2268,8 @@ fn human_audit_lifecycle(arguments: &mut impl Iterator<Item = OsString>) -> Resu
             .fixed(16)?
             .try_into()
             .map_err(|_| Failure::Unavailable)?,
-        command: cursor.bytes()?,
-        body: cursor.bytes()?,
+        command: protected_copy(cursor.bytes()?)?,
+        body: protected_copy(cursor.bytes()?)?,
         signature: cursor
             .fixed(64)?
             .try_into()
@@ -2245,8 +2299,8 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let hash = pattern_digest(SIZE)?;
     let descriptor = Attachment::descriptor(
         [0x7b; 16],
@@ -2263,7 +2317,7 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -2276,7 +2330,12 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
         .map_err(|_| Failure::Unavailable)?;
     rpc_unlock(&mut tls, &password)?;
     let mut start = vec![17];
-    push_bytes(&mut start, &record.to_descriptor_bytes())?;
+    push_bytes(
+        &mut start,
+        &record
+            .to_descriptor_bytes()
+            .map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(&mut tls, &start)?;
     send_pattern(&mut tls, SIZE)?;
     write_frame(&mut tls, &[0])?;
@@ -2290,8 +2349,8 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
     let mut digest = pm_crypto::DigestState::new().map_err(|_| Failure::Unavailable)?;
     let mut received = 0_u64;
     loop {
-        let frame = Zeroizing::new(read_frame_bounded(&mut tls, STREAM_CHUNK_BYTES)?);
-        if frame.as_slice() == [0] {
+        let frame = read_frame_bounded(&mut tls, STREAM_CHUNK_BYTES)?;
+        if *frame == [0] {
             break;
         }
         received += u64::try_from(frame.len()).map_err(|_| Failure::Unavailable)?;
@@ -2336,7 +2395,7 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -2350,7 +2409,12 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
         .map_err(|_| Failure::Unavailable)?;
     rpc_unlock(&mut short, &password)?;
     let mut start = vec![17];
-    push_bytes(&mut start, &short_record.to_descriptor_bytes())?;
+    push_bytes(
+        &mut start,
+        &short_record
+            .to_descriptor_bytes()
+            .map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(&mut short, &start)?;
     send_pattern(&mut short, 1024 * 1024)?;
     drop(short);
@@ -2374,8 +2438,8 @@ fn human_streaming_stall(arguments: &mut impl Iterator<Item = OsString>) -> Resu
         return Err(Failure::Unavailable);
     }
     let key = read_key(&private_path, current_uid())?;
-    let mut input = std::io::stdin().lock();
-    let password = Zeroizing::new(read_wire_field(&mut input, 1024)?);
+    let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
+    let password = read_protected_wire_field(&mut input, 1024)?;
     let descriptor = Attachment::descriptor(
         [0x7d; 16],
         "interrupted.bin",
@@ -2391,7 +2455,7 @@ fn human_streaming_stall(arguments: &mut impl Iterator<Item = OsString>) -> Resu
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -2404,7 +2468,12 @@ fn human_streaming_stall(arguments: &mut impl Iterator<Item = OsString>) -> Resu
         .map_err(|_| Failure::Unavailable)?;
     rpc_unlock(&mut tls, &password)?;
     let mut start = vec![17];
-    push_bytes(&mut start, &record.to_descriptor_bytes())?;
+    push_bytes(
+        &mut start,
+        &record
+            .to_descriptor_bytes()
+            .map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(&mut tls, &start)?;
     send_pattern(&mut tls, 1024 * 1024)?;
     println!("READY streaming-upload-transaction=open");
@@ -2451,26 +2520,33 @@ fn pattern_digest(size: u64) -> Result<[u8; 32], Failure> {
 
 #[allow(clippy::too_many_lines)]
 fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
-    let metadata = |title: &str, notes: &str| HumanMetadata {
-        title: title.to_owned(),
-        destinations: vec![Destination {
-            label: "Portal 🌎".to_owned(),
-            value: "https://e2e.invalid/雪".to_owned(),
-        }],
-        tags: vec!["synthetic".to_owned()],
-        favorite: false,
-        notes: notes.to_owned(),
-        fields: vec![CustomField {
-            id: [0x61; 16],
-            label: "extra".to_owned(),
-            value: LogicalValue::Text("exact".to_owned()),
-            concealed: false,
-        }],
-        source_fields: vec![SourceField {
-            path: "legacy.unknown".to_owned(),
-            encoding: SourceEncoding::Bytes,
-            value: b"ticket05-e2e-source-canary".to_vec(),
-        }],
+    let metadata = |title: &str, notes: &str| -> Result<HumanMetadata, Failure> {
+        Ok(HumanMetadata {
+            title: title.to_owned(),
+            destinations: vec![Destination {
+                label: "Portal 🌎".to_owned(),
+                value: "https://e2e.invalid/雪".to_owned(),
+            }],
+            tags: vec!["synthetic".to_owned()],
+            favorite: false,
+            notes: pm_crypto::ProtectedText::copy_from_str(notes)
+                .map_err(|_| Failure::Unavailable)?,
+            fields: vec![CustomField {
+                id: [0x61; 16],
+                label: "extra".to_owned(),
+                value: LogicalValue::Text(
+                    pm_crypto::ProtectedText::copy_from_str("exact")
+                        .map_err(|_| Failure::Unavailable)?,
+                ),
+                concealed: false,
+            }],
+            source_fields: vec![SourceField {
+                path: "legacy.unknown".to_owned(),
+                encoding: SourceEncoding::Bytes,
+                value: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-e2e-source-canary")
+                    .map_err(|_| Failure::Unavailable)?,
+            }],
+        })
     };
     let attachment = || {
         Attachment::new(
@@ -2487,19 +2563,23 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
     Ok(vec![
         make(
             RecordKind::Password,
-            metadata("Password", "password"),
+            metadata("Password", "password")?,
             vec![AuthRecord::Password {
                 username: "e2e".to_owned(),
-                password: b"ticket05-e2e-password-canary".to_vec(),
+                password: pm_crypto::ProtectedBytes::copy_from_slice(
+                    b"ticket05-e2e-password-canary",
+                )
+                .map_err(|_| Failure::Unavailable)?,
                 destination_refs: vec![0],
             }],
             vec![attachment()?],
         )?,
         make(
             RecordKind::Totp,
-            metadata("TOTP", "totp"),
+            metadata("TOTP", "totp")?,
             vec![AuthRecord::Totp {
-                secret: b"ticket05-e2e-totp-canary".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-e2e-totp-canary")
+                    .map_err(|_| Failure::Unavailable)?,
                 algorithm: TotpAlgorithm::Sha1,
                 digits: 6,
                 period: 30,
@@ -2512,13 +2592,14 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
         )?,
         make(
             RecordKind::Passkey,
-            metadata("Passkey", "stored only"),
+            metadata("Passkey", "stored only")?,
             vec![AuthRecord::Passkey {
                 rp_id: "e2e.invalid".to_owned(),
                 user_handle: b"e2e-user".to_vec(),
                 credential_id: b"e2e-credential".to_vec(),
                 cose_alg: -8,
-                private_key: [0x73; 32],
+                private_key: pm_crypto::ProtectedBytes::copy_from_slice(&([0x73; 32]))
+                    .map_err(|_| Failure::Unavailable)?,
                 public_key: [0x74; 32],
                 user_name: "e2e".to_owned(),
                 display_name: "E2E".to_owned(),
@@ -2530,10 +2611,11 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
         )?,
         make(
             RecordKind::Ssh,
-            metadata("SSH", "ssh"),
+            metadata("SSH", "ssh")?,
             vec![AuthRecord::Ssh {
                 private_format: PrivateKeyFormat::OpenSsh,
-                private_key: b"ticket05-e2e-ssh-canary".to_vec(),
+                private_key: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-e2e-ssh-canary")
+                    .map_err(|_| Failure::Unavailable)?,
                 public_key: b"ssh-ed25519 e2e".to_vec(),
                 username: "e2e".to_owned(),
                 destination_refs: vec![0],
@@ -2543,9 +2625,10 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
         )?,
         make(
             RecordKind::Token,
-            metadata("Token", "token"),
+            metadata("Token", "token")?,
             vec![AuthRecord::Token {
-                secret: b"ticket05-e2e-token-canary".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-e2e-token-canary")
+                    .map_err(|_| Failure::Unavailable)?,
                 provider: "synthetic".to_owned(),
                 profile_id: "e2e".to_owned(),
                 destination_refs: vec![0],
@@ -2558,13 +2641,13 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
             metadata(
                 "ticket05-e2e-search-canary 雪\u{1b}]52;c;dGlja2V0MjM=\u{7}",
                 "note",
-            ),
+            )?,
             vec![],
             vec![],
         )?,
         make(
             RecordKind::File,
-            metadata("File", "file"),
+            metadata("File", "file")?,
             vec![],
             vec![attachment()?],
         )?,
@@ -2578,14 +2661,21 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
                 }],
                 tags: vec!["synthetic".to_owned()],
                 favorite: false,
-                notes: "exchange".to_owned(),
+                notes: pm_crypto::ProtectedText::copy_from_str("exchange")
+                    .map_err(|_| Failure::Unavailable)?,
                 fields: vec![],
                 source_fields: vec![],
             },
             vec![AuthRecord::TokenExchange {
-                subject_token: b"ticket11-e2e-subject-token-canary".to_vec(),
+                subject_token: pm_crypto::ProtectedBytes::copy_from_slice(
+                    b"ticket11-e2e-subject-token-canary",
+                )
+                .map_err(|_| Failure::Unavailable)?,
                 requester_client_id: "pm-exchanger".to_owned(),
-                requester_client_secret: b"ticket11-e2e-requester-secret-canary".to_vec(),
+                requester_client_secret: pm_crypto::ProtectedBytes::copy_from_slice(
+                    b"ticket11-e2e-requester-secret-canary",
+                )
+                .map_err(|_| Failure::Unavailable)?,
                 provider: "keycloak".to_owned(),
                 profile_id: "exchange".to_owned(),
                 destination_refs: vec![0],
@@ -2618,9 +2708,23 @@ fn rpc_audit_query(
 struct WirePrepared {
     transaction_id: [u8; 16],
     item_id: [u8; 16],
-    command: Vec<u8>,
-    body: Vec<u8>,
+    command: ProtectedBytes,
+    body: ProtectedBytes,
     signature: [u8; 64],
+}
+
+enum HumanResponse {
+    Public(Vec<u8>),
+    Protected(ProtectedBytes),
+}
+
+impl AsRef<[u8]> for HumanResponse {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Public(value) => value,
+            Self::Protected(value) => value,
+        }
+    }
 }
 
 fn connect(
@@ -2650,8 +2754,7 @@ fn rpc_unlock(
     tls: &mut rustls::StreamOwned<ClientConnection, UnixStream>,
     password: &[u8],
 ) -> Result<(), Failure> {
-    let mut request = vec![1];
-    push_bytes(&mut request, password)?;
+    let request = protected_fields_frame(&[1], &[password])?;
     write_frame(tls, &request)?;
     expect_status(&read_frame(tls)?, 0)
 }
@@ -2698,8 +2801,8 @@ fn decode_prepared_response(response: &[u8]) -> Result<WirePrepared, Failure> {
         .fixed(16)?
         .try_into()
         .map_err(|_| Failure::Unavailable)?;
-    let command = cursor.bytes()?;
-    let body = cursor.bytes()?;
+    let command = protected_copy(cursor.bytes()?)?;
+    let body = protected_copy(cursor.bytes()?)?;
     let signature = cursor
         .fixed(64)?
         .try_into()
@@ -2718,18 +2821,25 @@ fn encode_commit_request(
     opcode: u8,
     prepared: &WirePrepared,
     body: &[u8],
-) -> Result<Vec<u8>, Failure> {
-    let mut request = vec![opcode];
-    push_bytes(&mut request, &prepared.command)?;
-    request.extend_from_slice(&prepared.signature);
-    push_bytes(&mut request, body)?;
-    Ok(request)
+) -> Result<ProtectedBytes, Failure> {
+    let body_len = encoded_bytes_len(body)?;
+    let encoded_len = 1_usize
+        .checked_add(encoded_bytes_len(&prepared.command)?)
+        .and_then(|value| value.checked_add(64))
+        .and_then(|value| value.checked_add(body_len))
+        .ok_or(Failure::Unavailable)?;
+    let mut request = ProtectedFrameWriter::new(encoded_len)?;
+    request.fixed(&[opcode])?;
+    request.bytes(&prepared.command)?;
+    request.fixed(&prepared.signature)?;
+    request.bytes(body)?;
+    request.finish_exact()
 }
 
 fn rpc_commit(
     tls: &mut rustls::StreamOwned<ClientConnection, UnixStream>,
     prepared: &WirePrepared,
-) -> Result<Vec<u8>, Failure> {
+) -> Result<ProtectedBytes, Failure> {
     write_frame(tls, &encode_commit_request(5, prepared, &prepared.body)?)?;
     let response = read_frame(tls)?;
     expect_success_payload(&response)
@@ -2738,7 +2848,7 @@ fn rpc_commit(
 fn rpc_receipt(
     tls: &mut rustls::StreamOwned<ClientConnection, UnixStream>,
     transaction_id: [u8; 16],
-) -> Result<Vec<u8>, Failure> {
+) -> Result<ProtectedBytes, Failure> {
     let mut request = vec![7];
     request.extend_from_slice(&transaction_id);
     write_frame(tls, &request)?;
@@ -2776,11 +2886,11 @@ fn assert_read(
     cursor.finish()
 }
 
-fn expect_success_payload(response: &[u8]) -> Result<Vec<u8>, Failure> {
+fn expect_success_payload(response: &[u8]) -> Result<ProtectedBytes, Failure> {
     if response.first() != Some(&0) || response.len() < 2 {
         return Err(Failure::Unavailable);
     }
-    Ok(response[1..].to_vec())
+    protected_copy(&response[1..])
 }
 
 fn expect_status(response: &[u8], status: u8) -> Result<(), Failure> {
@@ -2799,24 +2909,22 @@ fn handle_human_rpc(
     let unlock = read_human_unlock_frame(tls, service)?;
     let mut cursor = Cursor::new(&unlock);
     cursor.expect(&[1])?;
-    let mut password = Zeroizing::new(cursor.bytes()?);
+    let password = cursor.bytes()?;
     cursor.finish()?;
     let mut vault = HumanVault::unlock(
         &service.path,
-        &password,
+        password,
         service.device,
         channel,
         Arc::clone(&service.audit_custody),
     )
     .map_err(|_| Failure::Unavailable)?;
-    password.zeroize();
     write_frame(tls, &[0])?;
     loop {
-        let request = match read_frame(tls) {
-            Ok(value) => Zeroizing::new(value),
-            Err(_) => return Ok(()),
+        let Ok(request) = read_frame(tls) else {
+            return Ok(());
         };
-        if request.as_slice() == [14] {
+        if *request == [14] {
             drop(vault);
             let mut autonomous = AutonomousAuditVault::open(
                 &service.path,
@@ -2847,7 +2955,7 @@ fn handle_human_rpc(
             handle_stream_download(&vault, tls, &request[1..])?;
             continue;
         }
-        if request.as_slice() == [32] {
+        if *request == [32] {
             handle_native_backup_download(&mut vault, tls)?;
             continue;
         }
@@ -2873,14 +2981,14 @@ fn handle_human_rpc(
             let _ = tls.sock.shutdown(Shutdown::Both);
             return response.map(|_| ());
         }
-        write_frame(tls, &response?)?;
+        write_frame(tls, response?.as_ref())?;
     }
 }
 
 fn read_human_unlock_frame(
     tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
     service: &VaultService,
-) -> Result<Vec<u8>, Failure> {
+) -> Result<ProtectedBytes, Failure> {
     let mut unlock = read_frame(tls)?;
     if unlock.first() == Some(&0) {
         let request_id: [u8; 16] = unlock
@@ -3027,7 +3135,7 @@ fn handle_attempt_request(
                 1,
                 "password",
                 "https://ticket07.invalid/login",
-                context,
+                context.to_vec(),
                 key,
             )
             .map_err(|_| Failure::Unavailable)?;
@@ -3040,11 +3148,11 @@ fn handle_attempt_request(
                 u64::from_be_bytes(c.fixed(8)?.try_into().map_err(|_| Failure::Unavailable)?);
             let issued = i64::try_from(issued).map_err(|_| Failure::Unavailable)?;
             let nonce = c.fixed(16)?.try_into().map_err(|_| Failure::Unavailable)?;
-            let integration = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
+            let integration = c.public_string()?;
             let version =
                 u32::from_be_bytes(c.fixed(4)?.try_into().map_err(|_| Failure::Unavailable)?);
-            let method = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
-            let destination = String::from_utf8(c.bytes()?).map_err(|_| Failure::Unavailable)?;
+            let method = c.public_string()?;
+            let destination = c.public_string()?;
             let context = c.bytes()?;
             c.finish()?;
             let key = IdempotencyKey::new(issued, nonce).map_err(|_| Failure::Unavailable)?;
@@ -3054,7 +3162,7 @@ fn handle_attempt_request(
                 version,
                 &method,
                 &destination,
-                context,
+                context.to_vec(),
                 key,
             )
             .map_err(|_| Failure::Unavailable)?;
@@ -3073,7 +3181,7 @@ fn handle_attempt_request(
                 .fixed(16)?
                 .try_into()
                 .map_err(|_| Failure::Unavailable)?;
-            let origin = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+            let origin = cursor.public_string()?;
             cursor.finish()?;
             let key = IdempotencyKey::new(issued, nonce).map_err(|_| Failure::Unavailable)?;
             let start = StartAttempt::new(
@@ -3294,8 +3402,12 @@ fn call_controlled_provider(
     let value = c.bytes().map_err(|_| ())?;
     c.finish().map_err(|_| ())?;
     match status {
-        0 => Ok(AttemptOutcome::Succeeded { result: value }),
-        1 => Ok(AttemptOutcome::WaitingForHuman { challenge: value }),
+        0 => Ok(AttemptOutcome::Succeeded {
+            result: protected_copy(value).map_err(|_| ())?,
+        }),
+        1 => Ok(AttemptOutcome::WaitingForHuman {
+            challenge: protected_copy(value).map_err(|_| ())?,
+        }),
         2 => Ok(AttemptOutcome::Failed {
             reason: "AUTH_REJECTED",
         }),
@@ -3319,7 +3431,7 @@ fn call_ssh_provider(
 ) -> Result<AttemptOutcome, ()> {
     if lease.reconciliation_only() {
         return Ok(AttemptOutcome::WaitingForHuman {
-            challenge: b"additional_factor_required".to_vec(),
+            challenge: protected_copy(b"additional_factor_required").map_err(|_| ())?,
         });
     }
     let mut stream = UnixStream::connect(&provider.socket).map_err(|_| ())?;
@@ -3372,10 +3484,14 @@ fn call_ssh_provider(
         cursor.finish().map_err(|_| ())?;
         match status {
             0 => {
-                return Ok(AttemptOutcome::Succeeded { result: value });
+                return Ok(AttemptOutcome::Succeeded {
+                    result: protected_copy(value).map_err(|_| ())?,
+                });
             }
             1 => {
-                return Ok(AttemptOutcome::WaitingForHuman { challenge: value });
+                return Ok(AttemptOutcome::WaitingForHuman {
+                    challenge: protected_copy(value).map_err(|_| ())?,
+                });
             }
             2 | 4 => {
                 return Ok(AttemptOutcome::Failed {
@@ -3384,7 +3500,7 @@ fn call_ssh_provider(
             }
             3 => return Ok(AttemptOutcome::Indeterminate),
             6 if lease.method() == "publickey" && !signed => {
-                let Ok(signature) = sign_ssh_auth_payload(lease, &value) else {
+                let Ok(signature) = sign_ssh_auth_payload(lease, value) else {
                     return Ok(AttemptOutcome::Failed {
                         reason: "INTEGRITY_FAILURE",
                     });
@@ -3528,7 +3644,8 @@ fn authorization_setup(vault: &mut HumanVault, first: &[u8], second: &[u8]) -> R
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: "not authorized".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("not authorized")
+                .map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -3608,18 +3725,20 @@ fn authorization_add_keycloak(vault: &mut HumanVault) -> Result<(), Failure> {
             }],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
         vec![
             AuthRecord::Password {
                 username: "alice".to_owned(),
-                password: b"ticket10-password-canary".to_vec(),
+                password: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket10-password-canary")
+                    .map_err(|_| Failure::Unavailable)?,
                 destination_refs: vec![0],
             },
             AuthRecord::Totp {
-                secret: b"12345678901234567890".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"12345678901234567890")
+                    .map_err(|_| Failure::Unavailable)?,
                 algorithm: TotpAlgorithm::Sha1,
                 digits: 6,
                 period: 30,
@@ -3643,13 +3762,14 @@ fn authorization_add_keycloak(vault: &mut HumanVault) -> Result<(), Failure> {
             }],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
         vec![AuthRecord::Password {
             username: "charlie".to_owned(),
-            password: b"ticket10-challenge-password".to_vec(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket10-challenge-password")
+                .map_err(|_| Failure::Unavailable)?,
             destination_refs: vec![0],
         }],
         vec![],
@@ -3673,14 +3793,16 @@ fn authorization_add_keycloak_exchange(
             }],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
         vec![AuthRecord::TokenExchange {
-            subject_token: subject_token.to_vec(),
+            subject_token: pm_crypto::ProtectedBytes::copy_from_slice(subject_token)
+                .map_err(|_| Failure::Unavailable)?,
             requester_client_id: "pm-exchanger".to_owned(),
-            requester_client_secret: requester_secret.to_vec(),
+            requester_client_secret: pm_crypto::ProtectedBytes::copy_from_slice(requester_secret)
+                .map_err(|_| Failure::Unavailable)?,
             provider: "keycloak".to_owned(),
             profile_id: "keycloak-exchange-lab".to_owned(),
             destination_refs: vec![0],
@@ -3712,14 +3834,14 @@ fn handle_stream_upload(
     let mut cursor = Cursor::new(request);
     let bytes = cursor.bytes()?;
     cursor.finish()?;
-    let record = LogicalRecord::from_descriptor_bytes(&bytes).map_err(|_| Failure::Unavailable)?;
+    let record = LogicalRecord::from_descriptor_bytes(bytes).map_err(|_| Failure::Unavailable)?;
     if record.attachments().len() != 1 {
         return Err(Failure::Unavailable);
     }
     let id = *record.attachments()[0].id();
     let mut reader = FrameReader {
         tls,
-        buffer: Vec::new(),
+        buffer: ProtectedBytes::zeroed(0).map_err(|_| Failure::Unavailable)?,
         position: 0,
         ended: false,
     };
@@ -3776,7 +3898,7 @@ fn handle_plaintext_backup_download(
     write_frame(tls, &[0])?;
     let mut writer = FrameWriter { tls };
     vault
-        .write_plaintext_export(&command, &signature, &body, &mut writer)
+        .write_plaintext_export(command, &signature, body, &mut writer)
         .map_err(|_| Failure::Unavailable)?;
     write_frame(writer.tls, &[0])
 }
@@ -3787,21 +3909,20 @@ fn handle_native_backup_restore(
     request: &[u8],
 ) -> Result<(), Failure> {
     let mut cursor = Cursor::new(request);
-    let mut password = Zeroizing::new(cursor.bytes()?);
+    let password = cursor.bytes()?;
     cursor.finish()?;
     if password.len() > 1024 {
         return Err(Failure::Unavailable);
     }
     let mut reader = FrameReader {
         tls,
-        buffer: Vec::new(),
+        buffer: ProtectedBytes::zeroed(0).map_err(|_| Failure::Unavailable)?,
         position: 0,
         ended: false,
     };
     let prepared = vault
-        .prepare_native_restore(&mut reader, &password)
+        .prepare_native_restore(&mut reader, password)
         .map_err(|_| Failure::Unavailable)?;
-    password.zeroize();
     let response = encode_prepared(vault, prepared.prepared())?;
     write_frame(reader.tls, &response)
 }
@@ -3812,20 +3933,19 @@ fn handle_native_recovery(
     request: &[u8],
 ) -> Result<(), Failure> {
     let mut cursor = Cursor::new(request);
-    let mut encoded = Zeroizing::new(cursor.bytes()?);
+    let encoded = cursor.bytes()?;
     cursor.finish()?;
-    let text = std::str::from_utf8(&encoded).map_err(|_| Failure::Unavailable)?;
+    let text = std::str::from_utf8(encoded).map_err(|_| Failure::Unavailable)?;
     let recovery: RecoveryCode = text.parse().map_err(|_| Failure::Unavailable)?;
     let mut reader = FrameReader {
         tls,
-        buffer: Vec::new(),
+        buffer: ProtectedBytes::zeroed(0).map_err(|_| Failure::Unavailable)?,
         position: 0,
         ended: false,
     };
     let prepared = vault
         .prepare_native_recovery(&mut reader, &recovery)
         .map_err(|_| Failure::Unavailable)?;
-    encoded.zeroize();
     let response = encode_prepared(vault, prepared.prepared())?;
     write_frame(reader.tls, &response)
 }
@@ -3841,14 +3961,13 @@ fn handle_recovery_rotation(
     let pending = vault
         .begin_recovery_rotation()
         .map_err(|_| Failure::Unavailable)?;
-    let mut code = Zeroizing::new(pending.recovery_code().to_string());
+    let code = Zeroizing::new(pending.recovery_code().to_string());
     let mut response = vec![0];
     push_bytes(&mut response, code.as_bytes())?;
     write_frame(tls, &response)?;
-    let mut confirmation = Zeroizing::new(read_frame_bounded(tls, 1024)?);
+    let confirmation = read_frame_bounded(tls, 1024)?;
     if confirmation.is_empty() {
         write_frame(tls, &[2])?;
-        code.zeroize();
         return Ok(());
     }
     let parsed: RecoveryCode = std::str::from_utf8(&confirmation)
@@ -3858,14 +3977,12 @@ fn handle_recovery_rotation(
     let prepared = pending
         .confirm(vault, &parsed)
         .map_err(|_| Failure::Unavailable)?;
-    confirmation.zeroize();
-    code.zeroize();
     let response = encode_prepared(vault, &prepared)?;
     write_frame(tls, &response)
 }
 struct FrameReader<'a> {
     tls: &'a mut rustls::StreamOwned<ServerConnection, UnixStream>,
-    buffer: Vec<u8>,
+    buffer: ProtectedBytes,
     position: usize,
     ended: bool,
 }
@@ -3875,7 +3992,6 @@ impl Read for FrameReader<'_> {
             if self.ended {
                 return Ok(0);
             }
-            self.buffer.zeroize();
             self.buffer = read_frame_bounded(self.tls, STREAM_CHUNK_BYTES).map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -3883,7 +3999,7 @@ impl Read for FrameReader<'_> {
                 )
             })?;
             self.position = 0;
-            if self.buffer == [0] {
+            if *self.buffer == [0] {
                 self.ended = true;
                 return Ok(0);
             }
@@ -3892,11 +4008,6 @@ impl Read for FrameReader<'_> {
         output[..count].copy_from_slice(&self.buffer[self.position..self.position + count]);
         self.position += count;
         Ok(count)
-    }
-}
-impl Drop for FrameReader<'_> {
-    fn drop(&mut self) {
-        self.buffer.zeroize();
     }
 }
 struct FrameWriter<'a> {
@@ -3992,7 +4103,7 @@ fn handle_human_request(
     vault: &mut HumanVault,
     service: &VaultService,
     request: &[u8],
-) -> Result<Vec<u8>, Failure> {
+) -> Result<HumanResponse, Failure> {
     let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
     match opcode {
         2 | 3 => {
@@ -4015,24 +4126,23 @@ fn handle_human_request(
                 vault.prepare_create(&record)
             }
             .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
+            encode_prepared(vault, &prepared).map(HumanResponse::Protected)
         }
         43 => {
             let mut cursor = Cursor::new(rest);
-            let mut password = Zeroizing::new(cursor.bytes()?);
+            let password = cursor.bytes()?;
             cursor.finish()?;
             let prepared = vault
-                .prepare_master_password_rotation(&password, KdfProfile::DEFAULT)
+                .prepare_master_password_rotation(password, KdfProfile::DEFAULT)
                 .map_err(|_| Failure::Unavailable)?;
-            password.zeroize();
-            encode_prepared(vault, &prepared)
+            encode_prepared(vault, &prepared).map(HumanResponse::Protected)
         }
         4 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
             let prepared = vault
                 .prepare_delete(item)
                 .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
+            encode_prepared(vault, &prepared).map(HumanResponse::Protected)
         }
         5 | 8 => {
             let mut cursor = Cursor::new(rest);
@@ -4043,34 +4153,28 @@ fn handle_human_request(
                 .map_err(|_| Failure::Unavailable)?;
             let body = cursor.bytes()?;
             cursor.finish()?;
-            match vault.commit(&command, &signature, &body) {
+            match vault.commit(command, &signature, body) {
                 Ok(receipt) => {
                     let mut response = vec![0];
                     response.extend_from_slice(&receipt.to_bytes());
-                    Ok(response)
+                    Ok(HumanResponse::Public(response))
                 }
-                Err(HumanCommitError::BodyChanged) => Ok(vec![2]),
-                Err(_) => Ok(vec![1]),
+                Err(HumanCommitError::BodyChanged) => Ok(HumanResponse::Public(vec![2])),
+                Err(_) => Ok(HumanResponse::Public(vec![1])),
             }
         }
         6 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
             match vault.read_password(item) {
-                Ok(record) => {
-                    let mut response = vec![0];
-                    for field in [
-                        record.title().as_bytes(),
-                        record.username().as_bytes(),
-                        record.password(),
-                        record.destination().as_bytes(),
-                        record.notes().as_bytes(),
-                    ] {
-                        push_bytes(&mut response, field)?;
-                    }
-                    Ok(response)
-                }
-                Err(HumanCommitError::ItemNotFound) => Ok(vec![3]),
-                Err(_) => Ok(vec![1]),
+                Ok(record) => protected_fields_response(&[
+                    record.title().as_bytes(),
+                    record.username().as_bytes(),
+                    record.password(),
+                    record.destination().as_bytes(),
+                    record.notes().as_bytes(),
+                ]),
+                Err(HumanCommitError::ItemNotFound) => Ok(HumanResponse::Public(vec![3])),
+                Err(_) => Ok(HumanResponse::Public(vec![1])),
             }
         }
         7 => {
@@ -4079,31 +4183,30 @@ fn handle_human_request(
                 Ok(receipt) => {
                     let mut response = vec![0];
                     response.extend_from_slice(&receipt.to_bytes());
-                    Ok(response)
+                    Ok(HumanResponse::Public(response))
                 }
-                Err(_) => Ok(vec![3]),
+                Err(_) => Ok(HumanResponse::Public(vec![3])),
             }
         }
         9 => {
             let mut cursor = Cursor::new(rest);
             let bytes = cursor.bytes()?;
             cursor.finish()?;
-            let record = LogicalRecord::from_bytes(&bytes).map_err(|_| Failure::Unavailable)?;
+            let record = LogicalRecord::from_bytes(bytes).map_err(|_| Failure::Unavailable)?;
             let prepared = vault
                 .prepare_create_record(&record)
                 .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
+            encode_prepared(vault, &prepared).map(HumanResponse::Protected)
         }
         10 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
             match vault.read_record(item) {
                 Ok(record) => {
-                    let mut response = vec![0];
-                    response.extend_from_slice(&record.to_bytes());
-                    Ok(response)
+                    let encoded = record.to_bytes().map_err(|_| Failure::Unavailable)?;
+                    protected_payload_response(&encoded)
                 }
-                Err(HumanCommitError::ItemNotFound) => Ok(vec![3]),
-                Err(_) => Ok(vec![1]),
+                Err(HumanCommitError::ItemNotFound) => Ok(HumanResponse::Public(vec![3])),
+                Err(_) => Ok(HumanResponse::Public(vec![1])),
             }
         }
         11 => {
@@ -4125,18 +4228,18 @@ fn handle_human_request(
             ));
             let mut tags = Vec::with_capacity(count);
             for _ in 0..count {
-                tags.push(String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?);
+                tags.push(cursor.public_string()?);
             }
             cursor.finish()?;
             let prepared = vault
                 .prepare_organize(item, tags, favorite)
                 .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
+            encode_prepared(vault, &prepared).map(HumanResponse::Protected)
         }
         12 => {
             let mut cursor = Cursor::new(rest);
-            let text = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
-            let tag = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+            let text = cursor.public_string()?;
+            let tag = cursor.public_string()?;
             let favorite = match cursor.fixed(1)? {
                 [0] => None,
                 [1] => Some(false),
@@ -4160,7 +4263,7 @@ fn handle_human_request(
             for hit in hits {
                 response.extend_from_slice(hit.item_id());
             }
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         13 => {
             let mut cursor = Cursor::new(rest);
@@ -4184,9 +4287,7 @@ fn handle_human_request(
                     symbols: flags & 8 != 0,
                 })
                 .map_err(|_| Failure::Unavailable)?;
-            let mut response = vec![0];
-            response.extend_from_slice(generated.expose());
-            Ok(response)
+            protected_payload_response(generated.expose())
         }
         15 => {
             let mut cursor = Cursor::new(rest);
@@ -4213,19 +4314,18 @@ fn handle_human_request(
                     .map_err(|_| Failure::Unavailable)?
                     .to_be_bytes(),
             );
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         60 => {
             let pin: [u8; 44] = rest.try_into().map_err(|_| Failure::Unavailable)?;
-            let protected = Zeroizing::new(
+            let protected = ProtectedBytes::new(
                 vault
                     .create_sync_pairing(pin)
                     .map_err(|_| Failure::Unavailable)?
                     .to_protected_bytes(),
-            );
-            let mut response = vec![0];
-            push_bytes(&mut response, &protected)?;
-            Ok(response)
+            )
+            .map_err(|_| Failure::Unavailable)?;
+            protected_field_response(&protected)
         }
         61 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
@@ -4241,30 +4341,22 @@ fn handle_human_request(
                 push_bytes(&mut response, attachment.name().as_bytes())?;
                 response.extend_from_slice(&attachment.size().to_be_bytes());
             }
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         63 => {
             let mut cursor = Cursor::new(rest);
-            let protected = Zeroizing::new(cursor.bytes()?);
-            let program = std::path::PathBuf::from(
-                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
-            );
-            let socket = std::path::PathBuf::from(
-                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
-            );
-            let client_key = std::path::PathBuf::from(
-                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
-            );
-            let server_public = std::path::PathBuf::from(
-                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?,
-            );
+            let protected = cursor.bytes()?;
+            let program = std::path::PathBuf::from(cursor.public_string()?);
+            let socket = std::path::PathBuf::from(cursor.public_string()?);
+            let client_key = std::path::PathBuf::from(cursor.public_string()?);
+            let server_public = std::path::PathBuf::from(cursor.public_string()?);
             let pin: [u8; 44] = cursor
                 .fixed(44)?
                 .try_into()
                 .map_err(|_| Failure::Unavailable)?;
             cursor.finish()?;
             let pairing = vault
-                .open_sync_pairing(&protected)
+                .open_sync_pairing(protected)
                 .map_err(|_| Failure::Unavailable)?;
             let job = service.sync_jobs.start(
                 &pairing,
@@ -4276,20 +4368,20 @@ fn handle_human_request(
             )?;
             let mut response = vec![0];
             response.extend_from_slice(&job);
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         64 => {
             let device: [u8; 16] = rest.try_into().map_err(|_| Failure::Unavailable)?;
             let prepared = vault
                 .prepare_device_retirement(device)
                 .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
+            encode_prepared(vault, &prepared).map(HumanResponse::Protected)
         }
         65 => {
             if !rest.is_empty() {
                 return Err(Failure::Unavailable);
             }
-            Ok(vec![0])
+            Ok(HumanResponse::Public(vec![0]))
         }
         66 => {
             let job: [u8; 16] = rest.try_into().map_err(|_| Failure::Unavailable)?;
@@ -4297,7 +4389,7 @@ fn handle_human_request(
             let mut response = vec![0, status.phase.byte()];
             response.extend_from_slice(&status.pushed.to_be_bytes());
             response.extend_from_slice(&status.pulled.to_be_bytes());
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         16 => {
             let mut cursor = Cursor::new(rest);
@@ -4307,35 +4399,35 @@ fn handle_human_request(
             let purge = vault
                 .prepare_audit_purge(service.device, generation, through_seq)
                 .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, purge.prepared())
+            encode_prepared(vault, purge.prepared()).map(HumanResponse::Protected)
         }
         19 => {
             if rest.len() != SPKI_BYTES * 2 {
                 return Err(Failure::Unavailable);
             }
             authorization_setup(vault, &rest[..SPKI_BYTES], &rest[SPKI_BYTES..])?;
-            Ok(vec![0])
+            Ok(HumanResponse::Public(vec![0]))
         }
         20 => {
             if !rest.is_empty() {
                 return Err(Failure::Unavailable);
             }
             authorization_suspend(vault)?;
-            Ok(vec![0])
+            Ok(HumanResponse::Public(vec![0]))
         }
         21 => {
             if !rest.is_empty() {
                 return Err(Failure::Unavailable);
             }
             authorization_resume_revoke(vault)?;
-            Ok(vec![0])
+            Ok(HumanResponse::Public(vec![0]))
         }
         22 => {
             if rest.len() != SPKI_BYTES {
                 return Err(Failure::Unavailable);
             }
             authorization_reenroll(vault, rest)?;
-            Ok(vec![0])
+            Ok(HumanResponse::Public(vec![0]))
         }
         23 => {
             let mut cursor = Cursor::new(rest);
@@ -4345,7 +4437,7 @@ fn handle_human_request(
                 [1] => true,
                 _ => return Err(Failure::Unavailable),
             };
-            let source = Zeroizing::new(cursor.bytes()?);
+            let source = cursor.bytes()?;
             cursor.finish()?;
             let profile = match format {
                 0 => CsvImportProfile::chrome(),
@@ -4384,7 +4476,7 @@ fn handle_human_request(
                 _ => return Err(Failure::Unavailable),
             };
             let preview = vault
-                .preview_csv(&source, &profile)
+                .preview_csv(source, &profile)
                 .map_err(|_| Failure::Unavailable)?;
             let mut decisions = Vec::with_capacity(preview.total());
             let mut offset = 0;
@@ -4413,7 +4505,18 @@ fn handle_human_request(
                 .sign(prepared.prepared())
                 .map_err(|_| Failure::Unavailable)?;
             let report = prepared.report();
-            let mut response = vec![0];
+            let item_count =
+                u32::try_from(prepared.item_ids().len()).map_err(|_| Failure::Unavailable)?;
+            let command_len = encoded_bytes_len(prepared.prepared().command())?;
+            let body_len = encoded_bytes_len(prepared.prepared().body())?;
+            let encoded_len = 1_usize
+                .checked_add(7 * 8 + 4 + 16 + 16 + 64)
+                .and_then(|value| value.checked_add(prepared.item_ids().len().checked_mul(16)?))
+                .and_then(|value| value.checked_add(command_len))
+                .and_then(|value| value.checked_add(body_len))
+                .ok_or(Failure::Unavailable)?;
+            let mut response = ProtectedFrameWriter::new(encoded_len)?;
+            response.fixed(&[0])?;
             for value in [
                 report.total(),
                 report.new_items(),
@@ -4423,33 +4526,29 @@ fn handle_human_request(
                 report.preserved_fields(),
                 report.event_pages(),
             ] {
-                response.extend_from_slice(
+                response.fixed(
                     &u64::try_from(value)
                         .map_err(|_| Failure::Unavailable)?
                         .to_be_bytes(),
-                );
+                )?;
             }
-            response.extend_from_slice(
-                &u32::try_from(prepared.item_ids().len())
-                    .map_err(|_| Failure::Unavailable)?
-                    .to_be_bytes(),
-            );
+            response.fixed(&item_count.to_be_bytes())?;
             for item in prepared.item_ids() {
-                response.extend_from_slice(item);
+                response.fixed(item)?;
             }
-            response.extend_from_slice(prepared.prepared().transaction_id());
-            response.extend_from_slice(prepared.prepared().item_id());
-            push_bytes(&mut response, prepared.prepared().command())?;
-            push_bytes(&mut response, prepared.prepared().body())?;
-            response.extend_from_slice(&signature);
-            Ok(response)
+            response.fixed(prepared.prepared().transaction_id())?;
+            response.fixed(prepared.prepared().item_id())?;
+            response.bytes(prepared.prepared().command())?;
+            response.bytes(prepared.prepared().body())?;
+            response.fixed(&signature)?;
+            response.finish_exact().map(HumanResponse::Protected)
         }
         24 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
             let prepared = vault
                 .prepare_enable(item)
                 .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
+            encode_prepared(vault, &prepared).map(HumanResponse::Protected)
         }
         35 | 36 => {
             let mut cursor = Cursor::new(rest);
@@ -4485,7 +4584,7 @@ fn handle_human_request(
             };
             let mut response = vec![0];
             push_bytes(&mut response, &status.to_bytes())?;
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         37 => {
             let request_id = rest.try_into().map_err(|_| Failure::Unavailable)?;
@@ -4497,7 +4596,7 @@ fn handle_human_request(
                 .prepare_enable(item)
                 .map_err(|_| Failure::Unavailable)?;
             commit_authority(vault, &prepared)?;
-            Ok(vec![0])
+            Ok(HumanResponse::Public(vec![0]))
         }
         25 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
@@ -4526,7 +4625,7 @@ fn handle_human_request(
                         .to_be_bytes(),
                 );
             }
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         26 => {
             if rest.len() != 32 {
@@ -4537,7 +4636,7 @@ fn handle_human_request(
             let prepared = vault
                 .prepare_restore(item, revision)
                 .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
+            encode_prepared(vault, &prepared).map(HumanResponse::Protected)
         }
         27 => {
             let mut cursor = Cursor::new(rest);
@@ -4564,14 +4663,14 @@ fn handle_human_request(
             let purge = vault
                 .prepare_purge_revisions(item, revisions)
                 .map_err(|_| Failure::Unavailable)?;
-            encode_purge_prepared(vault, &purge)
+            encode_purge_prepared(vault, &purge).map(HumanResponse::Protected)
         }
         28 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
             let purge = vault
                 .prepare_purge_item(item)
                 .map_err(|_| Failure::Unavailable)?;
-            encode_purge_prepared(vault, &purge)
+            encode_purge_prepared(vault, &purge).map(HumanResponse::Protected)
         }
         29 => {
             let mut cursor = Cursor::new(rest);
@@ -4580,12 +4679,12 @@ fn handle_human_request(
                 .try_into()
                 .map_err(|_| Failure::Unavailable)?;
             let record =
-                LogicalRecord::from_bytes(&cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+                LogicalRecord::from_bytes(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
             cursor.finish()?;
             let prepared = vault
                 .prepare_edit_record(item, &record)
                 .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
+            encode_prepared(vault, &prepared).map(HumanResponse::Protected)
         }
         30 => {
             if rest.len() != 32 {
@@ -4596,9 +4695,8 @@ fn handle_human_request(
             let record = vault
                 .read_revision(item, revision)
                 .map_err(|_| Failure::Unavailable)?;
-            let mut response = vec![0];
-            response.extend_from_slice(&record.to_bytes());
-            Ok(response)
+            let encoded = record.to_bytes().map_err(|_| Failure::Unavailable)?;
+            protected_payload_response(&encoded)
         }
         33 => {
             if rest != [0] {
@@ -4607,28 +4705,28 @@ fn handle_human_request(
             let prepared = vault
                 .prepare_plaintext_export()
                 .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared)
+            encode_prepared(vault, &prepared).map(HumanResponse::Protected)
         }
         40 => {
             if !rest.is_empty() {
                 return Err(Failure::Unavailable);
             }
             authorization_add_keycloak(vault)?;
-            Ok(vec![0])
+            Ok(HumanResponse::Public(vec![0]))
         }
         41 => {
             let mut cursor = Cursor::new(rest);
-            let subject_token = Zeroizing::new(cursor.bytes()?);
-            let requester_secret = Zeroizing::new(cursor.bytes()?);
+            let subject_token = cursor.bytes()?;
+            let requester_secret = cursor.bytes()?;
             cursor.finish()?;
-            authorization_add_keycloak_exchange(vault, &subject_token, &requester_secret)?;
-            Ok(vec![0])
+            authorization_add_keycloak_exchange(vault, subject_token, requester_secret)?;
+            Ok(HumanResponse::Public(vec![0]))
         }
         45 => {
             let mut cursor = Cursor::new(rest);
-            let ssh_private = Zeroizing::new(cursor.bytes()?);
+            let ssh_private = cursor.bytes()?;
             let ssh_public = cursor.bytes()?;
-            let account_password = Zeroizing::new(cursor.bytes()?);
+            let account_password = cursor.bytes()?;
             cursor.finish()?;
             let ssh = LogicalRecord::new(
                 RecordKind::Ssh,
@@ -4640,14 +4738,16 @@ fn handle_human_request(
                     }],
                     tags: vec!["synthetic".into()],
                     favorite: false,
-                    notes: String::new(),
+                    notes: pm_crypto::ProtectedText::copy_from_str("")
+                        .map_err(|_| Failure::Unavailable)?,
                     fields: Vec::new(),
                     source_fields: Vec::new(),
                 },
                 vec![AuthRecord::Ssh {
                     private_format: PrivateKeyFormat::OpenSsh,
-                    private_key: ssh_private.to_vec(),
-                    public_key: ssh_public,
+                    private_key: pm_crypto::ProtectedBytes::copy_from_slice(ssh_private)
+                        .map_err(|_| Failure::Unavailable)?,
+                    public_key: ssh_public.to_vec(),
                     username: "pmssh".into(),
                     destination_refs: vec![0],
                     passphrase: None,
@@ -4667,7 +4767,7 @@ fn handle_human_request(
             let password = PasswordRecord::new(
                 "Synthetic Linux system account",
                 "pmssh",
-                &account_password,
+                account_password,
                 "ssh-lab",
                 "",
             )
@@ -4684,7 +4784,7 @@ fn handle_human_request(
             let mut response = vec![0];
             response.extend_from_slice(&key_item);
             response.extend_from_slice(&password_item);
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         46 | 49 => {
             if !rest.is_empty() {
@@ -4695,7 +4795,7 @@ fn handle_human_request(
                     .record_human_interaction(AuditAction::HumanUnlock, None)
                     .map_err(|_| Failure::Unavailable)?;
             }
-            encode_human_catalog(vault)
+            encode_human_catalog(vault).map(HumanResponse::Public)
         }
         50 => {
             let mut cursor = Cursor::new(rest);
@@ -4722,14 +4822,12 @@ fn handle_human_request(
             vault
                 .record_human_interaction(AuditAction::Reveal, None)
                 .map_err(|_| Failure::Unavailable)?;
-            let mut response = vec![0];
-            push_bytes(&mut response, generated.expose())?;
-            Ok(response)
+            protected_field_response(generated.expose())
         }
         51 => {
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
             let record = vault.read_record(item).map_err(|_| Failure::Unavailable)?;
-            let fields = human_fields(&record);
+            let fields = human_fields(&record)?;
             let mut response = vec![0];
             response.extend_from_slice(
                 &u16::try_from(fields.len())
@@ -4744,7 +4842,7 @@ fn handle_human_request(
                         .to_be_bytes(),
                 );
             }
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         52 | 53 => {
             let mut cursor = Cursor::new(rest);
@@ -4760,7 +4858,7 @@ fn handle_human_request(
             ));
             cursor.finish()?;
             let record = vault.read_record(item).map_err(|_| Failure::Unavailable)?;
-            let fields = human_fields(&record);
+            let fields = human_fields(&record)?;
             let (_, value) = fields.get(index).ok_or(Failure::Unavailable)?;
             vault
                 .record_human_interaction(
@@ -4772,9 +4870,7 @@ fn handle_human_request(
                     Some(item),
                 )
                 .map_err(|_| Failure::Unavailable)?;
-            let mut response = vec![0];
-            push_bytes(&mut response, value)?;
-            Ok(response)
+            protected_field_response(value)
         }
         54 => {
             if !rest.is_empty() {
@@ -4809,7 +4905,7 @@ fn handle_human_request(
                 response.push(u8::from(credential.enabled()));
                 push_bytes(&mut response, credential.title().as_bytes())?;
             }
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         55 => {
             let mut cursor = Cursor::new(rest);
@@ -4822,9 +4918,8 @@ fn handle_human_request(
                 .try_into()
                 .map_err(|_| Failure::Unavailable)?;
             let rpk = cursor.fixed(SPKI_BYTES)?;
-            let label = String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
-            let environment =
-                String::from_utf8(cursor.bytes()?).map_err(|_| Failure::Unavailable)?;
+            let label = cursor.public_string()?;
+            let environment = cursor.public_string()?;
             cursor.finish()?;
             let enrollment = AgentEnrollment::new(subject, request, rpk, &label, &environment)
                 .map_err(|_| Failure::Unavailable)?;
@@ -4832,7 +4927,7 @@ fn handle_human_request(
                 .prepare_agent_enrollment(&enrollment)
                 .map_err(|_| Failure::Unavailable)?;
             commit_authority(vault, prepared.prepared())?;
-            Ok(vec![0])
+            Ok(HumanResponse::Public(vec![0]))
         }
         56 => {
             let subject = rest.try_into().map_err(|_| Failure::Unavailable)?;
@@ -4840,7 +4935,7 @@ fn handle_human_request(
                 .prepare_agent_revocation(subject, AuthorizationReason::OwnerRequest)
                 .map_err(|_| Failure::Unavailable)?;
             commit_authority(vault, &prepared)?;
-            Ok(vec![0])
+            Ok(HumanResponse::Public(vec![0]))
         }
         57 => {
             let prepared = match rest {
@@ -4850,7 +4945,7 @@ fn handle_human_request(
             }
             .map_err(|_| Failure::Unavailable)?;
             commit_authority(vault, &prepared)?;
-            Ok(vec![0])
+            Ok(HumanResponse::Public(vec![0]))
         }
         58 => {
             let mut cursor = Cursor::new(rest);
@@ -4871,7 +4966,7 @@ fn handle_human_request(
             }
             .map_err(|_| Failure::Unavailable)?;
             commit_authority(vault, &prepared)?;
-            Ok(vec![0])
+            Ok(HumanResponse::Public(vec![0]))
         }
         59 => handle_human_pending(vault, service, rest),
         _ => Err(Failure::Unavailable),
@@ -4883,7 +4978,7 @@ fn handle_human_pending(
     vault: &mut HumanVault,
     service: &VaultService,
     request: &[u8],
-) -> Result<Vec<u8>, Failure> {
+) -> Result<HumanResponse, Failure> {
     let (action, rest) = request.split_first().ok_or(Failure::Unavailable)?;
     let attempts = AttemptVault::open(
         DelegatedVault::open(
@@ -4947,7 +5042,7 @@ fn handle_human_pending(
                     }
                 }
             }
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         1 => {
             let attempt = rest.try_into().map_err(|_| Failure::Unavailable)?;
@@ -4959,7 +5054,7 @@ fn handle_human_pending(
                 &mut response,
                 attempt_state_name(snapshot.state()).as_bytes(),
             )?;
-            Ok(response)
+            Ok(HumanResponse::Public(response))
         }
         2 => {
             let mut cursor = Cursor::new(rest);
@@ -4984,55 +5079,55 @@ fn handle_human_pending(
             let status = provider
                 .confirm_assertion(vault, request_id, verification)
                 .map_err(|_| Failure::Unavailable)?;
-            let mut response = vec![0];
-            push_bytes(&mut response, &status.to_bytes())?;
-            Ok(response)
+            protected_field_response(&status.to_bytes())
         }
         _ => Err(Failure::Unavailable),
     }
 }
 
 #[allow(clippy::too_many_lines)]
-fn human_fields(record: &LogicalRecord) -> Vec<(String, Zeroizing<Vec<u8>>)> {
+fn human_fields(record: &LogicalRecord) -> Result<Vec<(String, ProtectedBytes)>, Failure> {
     let mut fields = Vec::new();
-    let mut push = |label: String, value: &[u8]| {
-        fields.push((label, Zeroizing::new(value.to_vec())));
-    };
+    macro_rules! push {
+        ($label:expr, $value:expr $(,)?) => {{
+            fields.push(($label, protected_copy($value)?));
+        }};
+    }
     let human = record.human();
-    push("title".into(), human.title.as_bytes());
+    push!("title".into(), human.title.as_bytes());
     for (index, destination) in human.destinations.iter().enumerate() {
-        push(
+        push!(
             format!("destination[{index}].label"),
             destination.label.as_bytes(),
         );
-        push(
+        push!(
             format!("destination[{index}].value"),
             destination.value.as_bytes(),
         );
     }
     for (index, tag) in human.tags.iter().enumerate() {
-        push(format!("tag[{index}]"), tag.as_bytes());
+        push!(format!("tag[{index}]"), tag.as_bytes());
     }
-    push(
+    push!(
         "favorite".into(),
         if human.favorite { b"true" } else { b"false" },
     );
-    push("notes".into(), human.notes.as_bytes());
+    push!("notes".into(), human.notes.as_bytes());
     for (index, field) in human.fields.iter().enumerate() {
-        push(format!("custom[{index}].id"), hex(&field.id).as_bytes());
-        push(format!("custom[{index}].label"), field.label.as_bytes());
+        push!(format!("custom[{index}].id"), hex(&field.id).as_bytes());
+        push!(format!("custom[{index}].label"), field.label.as_bytes());
         match &field.value {
-            LogicalValue::Text(value) => push(format!("custom[{index}].text"), value.as_bytes()),
-            LogicalValue::Bytes(value) => push(format!("custom[{index}].bytes"), value),
+            LogicalValue::Text(value) => push!(format!("custom[{index}].text"), value.as_bytes()),
+            LogicalValue::Bytes(value) => push!(format!("custom[{index}].bytes"), value),
         }
-        push(
+        push!(
             format!("custom[{index}].concealed"),
             if field.concealed { b"true" } else { b"false" },
         );
     }
     for (index, field) in human.source_fields.iter().enumerate() {
-        push(format!("source[{index}].path"), field.path.as_bytes());
-        push(
+        push!(format!("source[{index}].path"), field.path.as_bytes());
+        push!(
             format!("source[{index}].encoding"),
             match field.encoding {
                 SourceEncoding::Utf8 => b"utf8",
@@ -5040,7 +5135,7 @@ fn human_fields(record: &LogicalRecord) -> Vec<(String, Zeroizing<Vec<u8>>)> {
                 SourceEncoding::Bytes => b"bytes",
             },
         );
-        push(format!("source[{index}].value"), &field.value);
+        push!(format!("source[{index}].value"), &field.value);
     }
     for (index, auth) in record.auth().iter().enumerate() {
         match auth {
@@ -5049,9 +5144,9 @@ fn human_fields(record: &LogicalRecord) -> Vec<(String, Zeroizing<Vec<u8>>)> {
                 password,
                 destination_refs,
             } => {
-                push(format!("auth[{index}].username"), username.as_bytes());
-                push(format!("auth[{index}].password"), password);
-                push(
+                push!(format!("auth[{index}].username"), username.as_bytes());
+                push!(format!("auth[{index}].password"), password);
+                push!(
                     format!("auth[{index}].destination_refs"),
                     format!("{destination_refs:?}").as_bytes(),
                 );
@@ -5066,23 +5161,23 @@ fn human_fields(record: &LogicalRecord) -> Vec<(String, Zeroizing<Vec<u8>>)> {
                 account,
                 destination_refs,
             } => {
-                push(format!("auth[{index}].secret"), secret);
-                push(
+                push!(format!("auth[{index}].secret"), secret);
+                push!(
                     format!("auth[{index}].algorithm"),
                     format!("{algorithm:?}").as_bytes(),
                 );
-                push(
+                push!(
                     format!("auth[{index}].digits"),
                     digits.to_string().as_bytes(),
                 );
-                push(
+                push!(
                     format!("auth[{index}].period"),
                     period.to_string().as_bytes(),
                 );
-                push(format!("auth[{index}].t0"), t0.to_string().as_bytes());
-                push(format!("auth[{index}].issuer"), issuer.as_bytes());
-                push(format!("auth[{index}].account"), account.as_bytes());
-                push(
+                push!(format!("auth[{index}].t0"), t0.to_string().as_bytes());
+                push!(format!("auth[{index}].issuer"), issuer.as_bytes());
+                push!(format!("auth[{index}].account"), account.as_bytes());
+                push!(
                     format!("auth[{index}].destination_refs"),
                     format!("{destination_refs:?}").as_bytes(),
                 );
@@ -5100,29 +5195,29 @@ fn human_fields(record: &LogicalRecord) -> Vec<(String, Zeroizing<Vec<u8>>)> {
                 backup_eligible,
                 backup_state,
             } => {
-                push(format!("auth[{index}].rp_id"), rp_id.as_bytes());
-                push(format!("auth[{index}].user_handle"), user_handle);
-                push(format!("auth[{index}].credential_id"), credential_id);
-                push(
+                push!(format!("auth[{index}].rp_id"), rp_id.as_bytes());
+                push!(format!("auth[{index}].user_handle"), user_handle);
+                push!(format!("auth[{index}].credential_id"), credential_id);
+                push!(
                     format!("auth[{index}].cose_alg"),
                     cose_alg.to_string().as_bytes(),
                 );
-                push(format!("auth[{index}].private_key"), private_key);
-                push(format!("auth[{index}].public_key"), public_key);
-                push(format!("auth[{index}].user_name"), user_name.as_bytes());
-                push(
+                push!(format!("auth[{index}].private_key"), private_key);
+                push!(format!("auth[{index}].public_key"), public_key);
+                push!(format!("auth[{index}].user_name"), user_name.as_bytes());
+                push!(
                     format!("auth[{index}].display_name"),
                     display_name.as_bytes(),
                 );
-                push(
+                push!(
                     format!("auth[{index}].sign_count"),
                     sign_count.to_string().as_bytes(),
                 );
-                push(
+                push!(
                     format!("auth[{index}].backup_eligible"),
                     if *backup_eligible { b"true" } else { b"false" },
                 );
-                push(
+                push!(
                     format!("auth[{index}].backup_state"),
                     if *backup_state { b"true" } else { b"false" },
                 );
@@ -5135,19 +5230,19 @@ fn human_fields(record: &LogicalRecord) -> Vec<(String, Zeroizing<Vec<u8>>)> {
                 destination_refs,
                 passphrase,
             } => {
-                push(
+                push!(
                     format!("auth[{index}].private_format"),
                     format!("{private_format:?}").as_bytes(),
                 );
-                push(format!("auth[{index}].private_key"), private_key);
-                push(format!("auth[{index}].public_key"), public_key);
-                push(format!("auth[{index}].username"), username.as_bytes());
-                push(
+                push!(format!("auth[{index}].private_key"), private_key);
+                push!(format!("auth[{index}].public_key"), public_key);
+                push!(format!("auth[{index}].username"), username.as_bytes());
+                push!(
                     format!("auth[{index}].destination_refs"),
                     format!("{destination_refs:?}").as_bytes(),
                 );
                 if let Some(passphrase) = passphrase {
-                    push(format!("auth[{index}].passphrase"), passphrase);
+                    push!(format!("auth[{index}].passphrase"), passphrase);
                 }
             }
             AuthRecord::Token {
@@ -5157,15 +5252,15 @@ fn human_fields(record: &LogicalRecord) -> Vec<(String, Zeroizing<Vec<u8>>)> {
                 destination_refs,
                 expires_at,
             } => {
-                push(format!("auth[{index}].secret"), secret);
-                push(format!("auth[{index}].provider"), provider.as_bytes());
-                push(format!("auth[{index}].profile_id"), profile_id.as_bytes());
-                push(
+                push!(format!("auth[{index}].secret"), secret);
+                push!(format!("auth[{index}].provider"), provider.as_bytes());
+                push!(format!("auth[{index}].profile_id"), profile_id.as_bytes());
+                push!(
                     format!("auth[{index}].destination_refs"),
                     format!("{destination_refs:?}").as_bytes(),
                 );
                 if let Some(expires_at) = expires_at {
-                    push(
+                    push!(
                         format!("auth[{index}].expires_at"),
                         expires_at.to_string().as_bytes(),
                     );
@@ -5180,23 +5275,23 @@ fn human_fields(record: &LogicalRecord) -> Vec<(String, Zeroizing<Vec<u8>>)> {
                 destination_refs,
                 expires_at,
             } => {
-                push(format!("auth[{index}].subject_token"), subject_token);
-                push(
+                push!(format!("auth[{index}].subject_token"), subject_token);
+                push!(
                     format!("auth[{index}].requester_client_id"),
                     requester_client_id.as_bytes(),
                 );
-                push(
+                push!(
                     format!("auth[{index}].requester_client_secret"),
                     requester_client_secret,
                 );
-                push(format!("auth[{index}].provider"), provider.as_bytes());
-                push(format!("auth[{index}].profile_id"), profile_id.as_bytes());
-                push(
+                push!(format!("auth[{index}].provider"), provider.as_bytes());
+                push!(format!("auth[{index}].profile_id"), profile_id.as_bytes());
+                push!(
                     format!("auth[{index}].destination_refs"),
                     format!("{destination_refs:?}").as_bytes(),
                 );
                 if let Some(expires_at) = expires_at {
-                    push(
+                    push!(
                         format!("auth[{index}].expires_at"),
                         expires_at.to_string().as_bytes(),
                     );
@@ -5205,29 +5300,29 @@ fn human_fields(record: &LogicalRecord) -> Vec<(String, Zeroizing<Vec<u8>>)> {
         }
     }
     for (index, attachment) in record.attachments().iter().enumerate() {
-        push(
+        push!(
             format!("attachment[{index}].id"),
             hex(attachment.id()).as_bytes(),
         );
-        push(
+        push!(
             format!("attachment[{index}].name"),
             attachment.name().as_bytes(),
         );
-        push(
+        push!(
             format!("attachment[{index}].mime"),
             attachment.mime().as_bytes(),
         );
-        push(
+        push!(
             format!("attachment[{index}].size"),
             attachment.size().to_string().as_bytes(),
         );
-        push(
+        push!(
             format!("attachment[{index}].sha256"),
             hex(attachment.sha256()).as_bytes(),
         );
-        push(format!("attachment[{index}].content"), attachment.content());
+        push!(format!("attachment[{index}].content"), attachment.content());
     }
-    fields
+    Ok(fields)
 }
 
 fn encode_human_catalog(vault: &HumanVault) -> Result<Vec<u8>, Failure> {
@@ -5271,57 +5366,66 @@ fn encode_human_catalog(vault: &HumanVault) -> Result<Vec<u8>, Failure> {
 fn encode_purge_prepared(
     vault: &HumanVault,
     purge: &pm_vault::PreparedItemPurge,
-) -> Result<Vec<u8>, Failure> {
+) -> Result<ProtectedBytes, Failure> {
     let scope = purge.scope();
-    let mut response = vec![0, u8::from(scope.terminal())];
-    response.extend_from_slice(
-        &u16::try_from(scope.revision_ids().len())
-            .map_err(|_| Failure::Unavailable)?
-            .to_be_bytes(),
-    );
-    response.extend_from_slice(
-        &u32::try_from(scope.attachment_count())
-            .map_err(|_| Failure::Unavailable)?
-            .to_be_bytes(),
-    );
-    response.extend_from_slice(&scope.encrypted_bytes().to_be_bytes());
-    for revision in scope.revision_ids() {
-        response.extend_from_slice(revision);
-    }
+    let revision_count =
+        u16::try_from(scope.revision_ids().len()).map_err(|_| Failure::Unavailable)?;
+    let attachment_count =
+        u32::try_from(scope.attachment_count()).map_err(|_| Failure::Unavailable)?;
     let prepared = encode_prepared(vault, purge.prepared())?;
-    response.extend_from_slice(&prepared[1..]);
-    Ok(response)
+    let encoded_len = 2_usize
+        .checked_add(2 + 4 + 8)
+        .and_then(|value| value.checked_add(scope.revision_ids().len().checked_mul(16)?))
+        .and_then(|value| value.checked_add(prepared.len().checked_sub(1)?))
+        .ok_or(Failure::Unavailable)?;
+    let mut response = ProtectedFrameWriter::new(encoded_len)?;
+    response.fixed(&[0, u8::from(scope.terminal())])?;
+    response.fixed(&revision_count.to_be_bytes())?;
+    response.fixed(&attachment_count.to_be_bytes())?;
+    response.fixed(&scope.encrypted_bytes().to_be_bytes())?;
+    for revision in scope.revision_ids() {
+        response.fixed(revision)?;
+    }
+    response.fixed(&prepared[1..])?;
+    response.finish_exact()
 }
 
 fn encode_prepared(
     vault: &HumanVault,
     prepared: &PreparedHumanCommand,
-) -> Result<Vec<u8>, Failure> {
+) -> Result<ProtectedBytes, Failure> {
     let signature = vault.sign(prepared).map_err(|_| Failure::Unavailable)?;
-    let mut response = vec![0];
-    response.extend_from_slice(prepared.transaction_id());
-    response.extend_from_slice(prepared.item_id());
-    push_bytes(&mut response, prepared.command())?;
-    push_bytes(&mut response, prepared.body())?;
-    response.extend_from_slice(&signature);
-    Ok(response)
+    let command_len = encoded_bytes_len(prepared.command())?;
+    let body_len = encoded_bytes_len(prepared.body())?;
+    let encoded_len = 1_usize
+        .checked_add(16 + 16 + 64)
+        .and_then(|value| value.checked_add(command_len))
+        .and_then(|value| value.checked_add(body_len))
+        .ok_or(Failure::Unavailable)?;
+    let mut response = ProtectedFrameWriter::new(encoded_len)?;
+    response.fixed(&[0])?;
+    response.fixed(prepared.transaction_id())?;
+    response.fixed(prepared.item_id())?;
+    response.bytes(prepared.command())?;
+    response.bytes(prepared.body())?;
+    response.fixed(&signature)?;
+    response.finish_exact()
 }
 
 fn decode_wire_record(cursor: &mut Cursor<'_>) -> Result<PasswordRecord, Failure> {
     let title = cursor.bytes()?;
     let username = cursor.bytes()?;
-    let mut password = Zeroizing::new(cursor.bytes()?);
+    let password = cursor.bytes()?;
     let destination = cursor.bytes()?;
     let notes = cursor.bytes()?;
     let record = PasswordRecord::new(
-        std::str::from_utf8(&title).map_err(|_| Failure::Unavailable)?,
-        std::str::from_utf8(&username).map_err(|_| Failure::Unavailable)?,
-        &password,
-        std::str::from_utf8(&destination).map_err(|_| Failure::Unavailable)?,
-        std::str::from_utf8(&notes).map_err(|_| Failure::Unavailable)?,
+        std::str::from_utf8(title).map_err(|_| Failure::Unavailable)?,
+        std::str::from_utf8(username).map_err(|_| Failure::Unavailable)?,
+        password,
+        std::str::from_utf8(destination).map_err(|_| Failure::Unavailable)?,
+        std::str::from_utf8(notes).map_err(|_| Failure::Unavailable)?,
     )
     .map_err(|_| Failure::Unavailable)?;
-    password.zeroize();
     Ok(record)
 }
 
@@ -5337,11 +5441,11 @@ fn write_frame(output: &mut impl Write, value: &[u8]) -> Result<(), Failure> {
         .map_err(|_| Failure::Unavailable)
 }
 
-fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, Failure> {
+fn read_frame(input: &mut impl Read) -> Result<ProtectedBytes, Failure> {
     read_frame_bounded(input, MAX_HUMAN_FRAME)
 }
 
-fn read_frame_bounded(input: &mut impl Read, maximum: usize) -> Result<Vec<u8>, Failure> {
+fn read_frame_bounded(input: &mut impl Read, maximum: usize) -> Result<ProtectedBytes, Failure> {
     let mut length = [0_u8; 4];
     input
         .read_exact(&mut length)
@@ -5350,7 +5454,7 @@ fn read_frame_bounded(input: &mut impl Read, maximum: usize) -> Result<Vec<u8>, 
     if length == 0 || length > maximum {
         return Err(Failure::Unavailable);
     }
-    let mut value = vec![0_u8; length];
+    let mut value = ProtectedBytes::zeroed(length).map_err(|_| Failure::Unavailable)?;
     input
         .read_exact(&mut value)
         .map_err(|_| Failure::Unavailable)?;
@@ -5683,10 +5787,8 @@ fn verify_raw_signature(
 }
 
 fn read_key(path: &Path, expected_uid: u32) -> Result<KeyMaterial, Failure> {
-    let encoded = read_regular(path, expected_uid, 0o400)?;
-    let mut cursor = Cursor::new(&encoded);
-    cursor.expect(KEY_MAGIC)?;
-    let private = Zeroizing::new(cursor.bytes()?);
+    let (private, public) = read_protected_key_file(path, expected_uid, KEY_MAGIC, SPKI_BYTES)?;
+    let mut cursor = Cursor::new(&public);
     let spki = cursor.fixed(SPKI_BYTES)?.to_vec();
     cursor.finish()?;
     validate_spki(&spki)?;
@@ -5694,10 +5796,10 @@ fn read_key(path: &Path, expected_uid: u32) -> Result<KeyMaterial, Failure> {
 }
 
 fn read_bootstrap(path: &Path) -> Result<Bootstrap, Failure> {
-    let encoded = read_regular(path, current_uid(), 0o400)?;
-    let mut cursor = Cursor::new(&encoded);
-    cursor.expect(BOOTSTRAP_MAGIC)?;
-    let private = Zeroizing::new(cursor.bytes()?);
+    let public_bytes = SPKI_BYTES + 4 + SPKI_BYTES + 4 + SPKI_BYTES;
+    let (private, public) =
+        read_protected_key_file(path, current_uid(), BOOTSTRAP_MAGIC, public_bytes)?;
+    let mut cursor = Cursor::new(&public);
     let server_spki = cursor.fixed(SPKI_BYTES)?.to_vec();
     let agent_uid = cursor.u32()?;
     let agent_spki = cursor.fixed(SPKI_BYTES)?.to_vec();
@@ -5943,6 +6045,59 @@ fn read_regular(
     Ok(bytes)
 }
 
+fn read_protected_key_file(
+    path: &Path,
+    expected_uid: u32,
+    magic: &[u8],
+    public_bytes: usize,
+) -> Result<(ProtectedBytes, Vec<u8>), Failure> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| Failure::Unavailable)?;
+    let metadata = file.metadata().map_err(|_| Failure::Unavailable)?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != expected_uid
+        || metadata.mode() & 0o7777 != 0o400
+        || metadata.nlink() != 1
+        || !(1..=MAX_PROTECTED_BYTES).contains(&metadata.len())
+    {
+        return Err(Failure::Unavailable);
+    }
+    let header_len = magic.len().checked_add(4).ok_or(Failure::Unavailable)?;
+    let mut header = vec![0_u8; header_len];
+    file.read_exact(&mut header)
+        .map_err(|_| Failure::Unavailable)?;
+    if !header.starts_with(magic) {
+        return Err(Failure::Unavailable);
+    }
+    let private_len = usize::try_from(u32::from_be_bytes(
+        header[magic.len()..]
+            .try_into()
+            .map_err(|_| Failure::Unavailable)?,
+    ))
+    .map_err(|_| Failure::Unavailable)?;
+    let expected_len = header_len
+        .checked_add(private_len)
+        .and_then(|value| value.checked_add(public_bytes))
+        .ok_or(Failure::Unavailable)?;
+    if u64::try_from(expected_len).ok() != Some(metadata.len()) {
+        return Err(Failure::Unavailable);
+    }
+    let mut private = ProtectedBytes::zeroed(private_len).map_err(|_| Failure::Unavailable)?;
+    file.read_exact(&mut private)
+        .map_err(|_| Failure::Unavailable)?;
+    let mut public = vec![0_u8; public_bytes];
+    file.read_exact(&mut public)
+        .map_err(|_| Failure::Unavailable)?;
+    let mut extra = [0_u8; 1];
+    if file.read(&mut extra).map_err(|_| Failure::Unavailable)? != 0 {
+        return Err(Failure::Unavailable);
+    }
+    Ok((private, public))
+}
+
 fn validate_spki(spki: &[u8]) -> Result<(), Failure> {
     if spki.len() != SPKI_BYTES || !spki.starts_with(ED25519_SPKI_PREFIX) {
         return Err(Failure::Unavailable);
@@ -6030,6 +6185,107 @@ fn push_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Failure> {
     Ok(())
 }
 
+struct ProtectedFrameWriter {
+    output: ProtectedBytes,
+    offset: usize,
+}
+
+impl ProtectedFrameWriter {
+    fn new(encoded_len: usize) -> Result<Self, Failure> {
+        Ok(Self {
+            output: ProtectedBytes::zeroed(encoded_len).map_err(|_| Failure::Unavailable)?,
+            offset: 0,
+        })
+    }
+
+    fn fixed(&mut self, value: &[u8]) -> Result<(), Failure> {
+        let end = self
+            .offset
+            .checked_add(value.len())
+            .ok_or(Failure::Unavailable)?;
+        self.output
+            .get_mut(self.offset..end)
+            .ok_or(Failure::Unavailable)?
+            .copy_from_slice(value);
+        self.offset = end;
+        Ok(())
+    }
+
+    fn bytes(&mut self, value: &[u8]) -> Result<(), Failure> {
+        self.fixed(
+            &u32::try_from(value.len())
+                .map_err(|_| Failure::Unavailable)?
+                .to_be_bytes(),
+        )?;
+        self.fixed(value)
+    }
+
+    fn finish_exact(self) -> Result<ProtectedBytes, Failure> {
+        if self.offset == self.output.len() {
+            Ok(self.output)
+        } else {
+            Err(Failure::Unavailable)
+        }
+    }
+}
+
+fn encoded_bytes_len(value: &[u8]) -> Result<usize, Failure> {
+    u32::try_from(value.len()).map_err(|_| Failure::Unavailable)?;
+    4_usize.checked_add(value.len()).ok_or(Failure::Unavailable)
+}
+
+fn protected_payload_response(value: &[u8]) -> Result<HumanResponse, Failure> {
+    let mut response = ProtectedFrameWriter::new(
+        1_usize
+            .checked_add(value.len())
+            .ok_or(Failure::Unavailable)?,
+    )?;
+    response.fixed(&[0])?;
+    response.fixed(value)?;
+    response.finish_exact().map(HumanResponse::Protected)
+}
+
+fn protected_field_response(value: &[u8]) -> Result<HumanResponse, Failure> {
+    let mut response = ProtectedFrameWriter::new(
+        1_usize
+            .checked_add(encoded_bytes_len(value)?)
+            .ok_or(Failure::Unavailable)?,
+    )?;
+    response.fixed(&[0])?;
+    response.bytes(value)?;
+    response.finish_exact().map(HumanResponse::Protected)
+}
+
+fn protected_fields_response(values: &[&[u8]]) -> Result<HumanResponse, Failure> {
+    let mut encoded_len = 1_usize;
+    for value in values {
+        encoded_len = encoded_len
+            .checked_add(encoded_bytes_len(value)?)
+            .ok_or(Failure::Unavailable)?;
+    }
+    let mut response = ProtectedFrameWriter::new(encoded_len)?;
+    response.fixed(&[0])?;
+    for value in values {
+        response.bytes(value)?;
+    }
+    response.finish_exact().map(HumanResponse::Protected)
+}
+
+fn protected_fields_frame(prefix: &[u8], values: &[&[u8]]) -> Result<ProtectedBytes, Failure> {
+    let mut encoded_len = prefix.len();
+    for value in values {
+        encoded_len = encoded_len
+            .checked_add(encoded_bytes_len(value)?)
+            .ok_or(Failure::Unavailable)?;
+    }
+    let mut frame = ProtectedFrameWriter::new(encoded_len)?;
+    frame.fixed(prefix)?;
+    for value in values {
+        frame.bytes(value)?;
+    }
+    frame.finish_exact()
+}
+
 struct Cursor<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -6064,9 +6320,16 @@ impl<'a> Cursor<'a> {
         Ok(u64::from_be_bytes(bytes))
     }
 
-    fn bytes(&mut self) -> Result<Vec<u8>, Failure> {
+    fn bytes(&mut self) -> Result<&'a [u8], Failure> {
         let length = usize::try_from(self.u32()?).map_err(|_| Failure::Unavailable)?;
-        Ok(self.fixed(length)?.to_vec())
+        self.fixed(length)
+    }
+
+    /// Copies a protocol field that is explicitly classified as public text.
+    fn public_string(&mut self) -> Result<String, Failure> {
+        std::str::from_utf8(self.bytes()?)
+            .map(str::to_owned)
+            .map_err(|_| Failure::Unavailable)
     }
 
     fn fixed(&mut self, length: usize) -> Result<&'a [u8], Failure> {
@@ -6088,5 +6351,68 @@ impl<'a> Cursor<'a> {
         } else {
             Err(Failure::Unavailable)
         }
+    }
+}
+
+#[cfg(test)]
+mod protected_frame_tests {
+    use super::*;
+    use std::process::Command;
+
+    const CHILD: &str = "PM28_PROTECTED_RESPONSE_CHILD";
+    static CANARY: [u8; 512 * 1024] = [0x5a; 512 * 1024];
+
+    #[test]
+    fn sensitive_response_requires_locked_owner_before_serialization() {
+        if std::env::var_os(CHILD).is_some() {
+            let limit = libc::rlimit {
+                rlim_cur: 128 * 1024,
+                rlim_max: 128 * 1024,
+            };
+            // SAFETY: the child changes only its own process limit.
+            assert_eq!(
+                unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const limit) },
+                0
+            );
+            let control = protected_field_response(b"PM28_SYNTHETIC_SMALL")
+                .expect("small response under the same memlock pressure");
+            assert_eq!(&control.as_ref()[5..], b"PM28_SYNTHETIC_SMALL");
+            drop(control);
+            println!("PM28_RESPONSE_CONTROL_READY");
+            // Synthetic static fixture; no ordinary secret heap owner.
+            assert!(
+                matches!(protected_field_response(&CANARY), Err(Failure::Unavailable)),
+                "unlocked response serialization was accepted"
+            );
+            println!("PM28_RESPONSE_LOCK_DENIED");
+            return;
+        }
+
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("linux::protected_frame_tests::sensitive_response_requires_locked_owner_before_serialization")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .output()
+            .expect("isolated response child");
+        assert!(
+            output
+                .stdout
+                .windows(b"PM28_RESPONSE_CONTROL_READY".len())
+                .any(|value| value == b"PM28_RESPONSE_CONTROL_READY"),
+            "response control marker missing"
+        );
+        println!("PM28_RESPONSE_CONTROL_READY");
+        assert!(
+            output.status.success(),
+            "unlocked response serialization was accepted after control"
+        );
+        assert!(
+            output
+                .stdout
+                .windows(b"PM28_RESPONSE_LOCK_DENIED".len())
+                .any(|value| value == b"PM28_RESPONSE_LOCK_DENIED"),
+            "response denial marker missing"
+        );
     }
 }

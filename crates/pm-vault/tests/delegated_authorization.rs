@@ -6,14 +6,14 @@ use std::{
     fs,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process,
+    process::{self, Command},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
 
-use pm_crypto::KdfProfile;
+use pm_crypto::{CryptoError, KdfProfile, ProtectedBytes};
 use pm_vault::{
     AgentEnrollment, AgentPeer, AttemptError, AttemptOutcome, AttemptState, AttemptVault,
     AuditDeviceCustody, AuthorizationError, AuthorizationReason, CausalEventBody, CausalEventDraft,
@@ -23,6 +23,45 @@ use pm_vault::{
 
 #[test]
 fn keycloak_attempt_lease_carries_password_and_matching_totp_only_to_trusted_adapter() {
+    keycloak_lease_fixture(false);
+}
+
+#[test]
+fn attempt_lease_rejects_unlocked_plaintext_owners() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            "attempt_lease_memlock_helper",
+            "--nocapture",
+        ])
+        .env_clear()
+        .output()
+        .expect("start isolated locked-budget helper");
+    if !output.status.success() {
+        const MARKER: &[u8] = b"PM28_RED:attempt_lease_memlock_helper:UNLOCKED_OUTPUT_ACCEPTED";
+        if output
+            .stderr
+            .windows(MARKER.len())
+            .any(|bytes| bytes == MARKER)
+        {
+            panic!("attempt lease key path passed and unlocked secret owners were accepted");
+        }
+        panic!(
+            "attempt lease helper failed before delivery (status={:?})",
+            output.status.code()
+        );
+    }
+}
+
+#[test]
+#[ignore = "executed in an isolated subprocess by attempt_lease_rejects_unlocked_plaintext_owners"]
+fn attempt_lease_memlock_helper() {
+    keycloak_lease_fixture(true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn keycloak_lease_fixture(deny_locked_output: bool) {
     use pm_vault::{AuthRecord, Destination, HumanMetadata, TotpAlgorithm};
 
     let directory = TestDir::new();
@@ -30,6 +69,11 @@ fn keycloak_attempt_lease_carries_password_and_matching_totp_only_to_trusted_ada
     persist_test_vault(&path);
     let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
     let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let password = if deny_locked_output {
+        vec![0x28; 512 * 1024]
+    } else {
+        b"synthetic-keycloak-password-canary".to_vec()
+    };
     let record = LogicalRecord::new(
         RecordKind::Password,
         HumanMetadata {
@@ -40,18 +84,20 @@ fn keycloak_attempt_lease_carries_password_and_matching_totp_only_to_trusted_ada
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![
             AuthRecord::Password {
                 username: "alice".to_owned(),
-                password: b"synthetic-keycloak-password-canary".to_vec(),
+                password: pm_crypto::ProtectedBytes::copy_from_slice(&password)
+                    .expect("synthetic password"),
                 destination_refs: vec![0],
             },
             AuthRecord::Totp {
-                secret: b"12345678901234567890".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"12345678901234567890")
+                    .expect("synthetic protected field"),
                 algorithm: TotpAlgorithm::Sha1,
                 digits: 6,
                 period: 30,
@@ -73,8 +119,7 @@ fn keycloak_attempt_lease_carries_password_and_matching_totp_only_to_trusted_ada
     drop(human);
 
     let peer = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
-    let attempts =
-        AttemptVault::open(DelegatedVault::open(&path, DEVICE, custody).unwrap()).unwrap();
+    let attempts = open_attempts(&path, Arc::clone(&custody));
     let now = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -96,7 +141,20 @@ fn keycloak_attempt_lease_carries_password_and_matching_totp_only_to_trusted_ada
         attempts.start(&peer, &request).unwrap().state(),
         AttemptState::Created
     );
-    let lease = attempts.claim_next().unwrap().unwrap();
+    drop(attempts);
+    let locked_budget = deny_locked_output.then(reserve_all_but_128_kib);
+    let attempts = open_attempts(&path, custody);
+    let lease_result = attempts.claim_next();
+    if deny_locked_output {
+        let Err(error) = lease_result else {
+            eprintln!("PM28_RED:attempt_lease_memlock_helper:UNLOCKED_OUTPUT_ACCEPTED");
+            panic!("lease used unlocked secret owners");
+        };
+        assert_eq!(error.to_string(), "CUSTODY_UNAVAILABLE");
+        drop(locked_budget);
+        return;
+    }
+    let lease = lease_result.unwrap().unwrap();
     assert_eq!(lease.integration_id(), "keycloak-browser-oidc");
     assert_eq!(lease.method(), "password_totp");
     assert_eq!(lease.username(), "alice");
@@ -107,6 +165,28 @@ fn keycloak_attempt_lease_carries_password_and_matching_totp_only_to_trusted_ada
     assert_eq!(totp.digits(), 6);
     assert_eq!(totp.period(), 30);
     assert_eq!(totp.t0(), 0);
+}
+
+fn open_attempts(path: &Path, custody: Arc<AuditDeviceCustody>) -> AttemptVault {
+    AttemptVault::open(DelegatedVault::open(path, DEVICE, custody).unwrap()).unwrap()
+}
+
+fn reserve_all_but_128_kib() -> Vec<ProtectedBytes> {
+    const CHUNK: usize = 128 * 1024;
+    let mut owners = Vec::new();
+    loop {
+        match ProtectedBytes::zeroed(CHUNK) {
+            Ok(owner) => owners.push(owner),
+            Err(CryptoError::ResourceUnavailable) => break,
+            Err(error) => panic!("unexpected protected allocation error: {error}"),
+        }
+    }
+    assert!(
+        owners.len() > 1,
+        "fixture could not establish bounded pressure"
+    );
+    drop(owners.pop());
+    owners
 }
 
 #[test]
@@ -172,7 +252,8 @@ fn keycloak_exchange_lease_is_context_bound_and_rechecked_before_provider_use() 
         .settle(
             &lease,
             AttemptOutcome::Succeeded {
-                result: b"closed exchanged result".to_vec(),
+                result: ProtectedBytes::copy_from_slice(b"closed exchanged result")
+                    .expect("fixture protected bytes"),
             },
         )
         .unwrap();
@@ -256,6 +337,106 @@ fn github_bearer_lease_accepts_only_the_closed_request_profile_and_keeps_token_c
         attempts.start(&peer, &injected),
         Err(AttemptError::CredentialUnavailable)
     ));
+}
+
+#[test]
+fn seventeenth_attempt_and_clock_rollback_leave_admission_atomic() {
+    let directory = TestDir::new();
+    let path = directory.vault();
+    persist_test_vault(&path);
+    let custody = Arc::new(AuditDeviceCustody::generate().unwrap());
+    let (mut human, _peer) = open_human(&path, Arc::clone(&custody));
+    let item = commit_create(&mut human, &password_record());
+    enroll(&mut human, &enrollment(AGENT_A, REQUEST_A, &RPK_A), 1);
+    enroll(&mut human, &enrollment(AGENT_B, REQUEST_B, &RPK_B), 1);
+    let prepared = human.prepare_delegated_resume().unwrap();
+    commit(&mut human, &prepared);
+    let prepared = human.prepare_enable(item).unwrap();
+    commit(&mut human, &prepared);
+    drop(human);
+    let peer_a = AgentPeer::from_transport_rpk(&RPK_A).unwrap();
+    let peer_b = AgentPeer::from_transport_rpk(&RPK_B).unwrap();
+    let attempts = open_attempts(&path, custody);
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros(),
+    )
+    .unwrap();
+    let request = |nonce| {
+        StartAttempt::new(
+            item,
+            "controlled.external",
+            1,
+            "password",
+            "https://ticket-07.invalid/login",
+            b"PM28_SYNTHETIC_RATE_CONTEXT".to_vec(),
+            IdempotencyKey::new(now, [nonce; 16]).unwrap(),
+        )
+        .unwrap()
+    };
+    let first = *attempts.start(&peer_a, &request(1)).unwrap().attempt_id();
+    for nonce in 2..=16 {
+        assert_eq!(
+            attempts.start(&peer_a, &request(nonce)).unwrap().state(),
+            AttemptState::Created
+        );
+    }
+    let database = Connection::open(&path).unwrap();
+    let before = admission_counts(&database);
+    assert_eq!(before.0, 16);
+    assert!(matches!(
+        attempts.start(&peer_a, &request(17)),
+        Err(AttemptError::RateLimited)
+    ));
+    assert_eq!(AttemptError::RateLimited.to_string(), "RATE_LIMITED");
+    assert_eq!(admission_counts(&database), before);
+    assert_eq!(
+        attempts.start(&peer_a, &request(1)).unwrap().attempt_id(),
+        &first
+    );
+    assert_eq!(admission_counts(&database), before);
+    assert_eq!(
+        attempts.start(&peer_b, &request(17)).unwrap().state(),
+        AttemptState::Created
+    );
+    let before_clock = admission_counts(&database);
+    assert_eq!(before_clock.0, 17);
+    database
+        .execute(
+            "UPDATE attempt_clock SET max_wall_us=?1 WHERE singleton=1",
+            [now + 1_000_000_000],
+        )
+        .unwrap();
+    assert!(matches!(
+        attempts.start(&peer_b, &request(18)),
+        Err(AttemptError::ClockUntrusted)
+    ));
+    assert_eq!(AttemptError::ClockUntrusted.to_string(), "CLOCK_UNTRUSTED");
+    assert_eq!(admission_counts(&database), before_clock);
+}
+
+fn admission_counts(database: &Connection) -> (i64, i64, i64, i64, i64) {
+    database
+        .query_row(
+            "SELECT (SELECT count(*) FROM authentication_attempts),
+                    (SELECT count(*) FROM encrypted_audit_records),
+                    (SELECT count(*) FROM authority_events),
+                    (SELECT count(*) FROM outbox),
+                    (SELECT count(*) FROM human_receipts)",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap()
 }
 
 #[test]
@@ -449,7 +630,8 @@ fn trusted_outcomes_pause_only_one_attempt_and_cancel_is_terminal() {
         .settle(
             &lease,
             AttemptOutcome::WaitingForHuman {
-                challenge: b"provider-ref".to_vec(),
+                challenge: ProtectedBytes::copy_from_slice(b"provider-ref")
+                    .expect("fixture protected bytes"),
             },
         )
         .unwrap();
@@ -470,7 +652,8 @@ fn trusted_outcomes_pause_only_one_attempt_and_cancel_is_terminal() {
         .settle(
             &lease,
             AttemptOutcome::Succeeded {
-                result: b"synthetic evidence".to_vec(),
+                result: ProtectedBytes::copy_from_slice(b"synthetic evidence")
+                    .expect("fixture protected bytes"),
             },
         )
         .unwrap();
@@ -973,13 +1156,14 @@ fn password_record() -> LogicalRecord {
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![AuthRecord::Password {
             username: "synthetic-ticket-07-user".to_owned(),
-            password: SECRET.to_vec(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(SECRET)
+                .expect("synthetic protected field"),
             destination_refs: vec![0],
         }],
         Vec::new(),
@@ -999,13 +1183,14 @@ fn system_password_record() -> LogicalRecord {
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![AuthRecord::Password {
             username: "pmssh".to_owned(),
-            password: b"synthetic-system-password".to_vec(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(b"synthetic-system-password")
+                .expect("synthetic protected field"),
             destination_refs: vec![0],
         }],
         Vec::new(),
@@ -1025,17 +1210,21 @@ fn ssh_record() -> LogicalRecord {
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![AuthRecord::Ssh {
             private_format: PrivateKeyFormat::OpenSsh,
-            private_key: b"synthetic-openssh-private".to_vec(),
+            private_key: pm_crypto::ProtectedBytes::copy_from_slice(b"synthetic-openssh-private")
+                .expect("synthetic protected field"),
             public_key: b"ssh-ed25519 synthetic-public".to_vec(),
             username: "pmssh".to_owned(),
             destination_refs: vec![0],
-            passphrase: Some(b"synthetic-passphrase".to_vec()),
+            passphrase: Some(
+                pm_crypto::ProtectedBytes::copy_from_slice(b"synthetic-passphrase")
+                    .expect("synthetic passphrase"),
+            ),
         }],
         Vec::new(),
     )
@@ -1054,14 +1243,20 @@ fn exchange_record() -> LogicalRecord {
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![AuthRecord::TokenExchange {
-            subject_token: b"synthetic-subject-token-A-canary".to_vec(),
+            subject_token: pm_crypto::ProtectedBytes::copy_from_slice(
+                b"synthetic-subject-token-A-canary",
+            )
+            .expect("synthetic protected field"),
             requester_client_id: "pm-exchanger".to_owned(),
-            requester_client_secret: b"synthetic-requester-secret-canary".to_vec(),
+            requester_client_secret: pm_crypto::ProtectedBytes::copy_from_slice(
+                b"synthetic-requester-secret-canary",
+            )
+            .expect("synthetic protected field"),
             provider: "keycloak".to_owned(),
             profile_id: "keycloak-exchange-lab".to_owned(),
             destination_refs: vec![0],
@@ -1084,12 +1279,13 @@ fn github_token_record() -> LogicalRecord {
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![AuthRecord::Token {
-            secret: b"synthetic-github-pat-canary".to_vec(),
+            secret: pm_crypto::ProtectedBytes::copy_from_slice(b"synthetic-github-pat-canary")
+                .expect("synthetic protected field"),
             provider: "github".to_owned(),
             profile_id: "github-assigned-issues/1".to_owned(),
             destination_refs: vec![0],
@@ -1109,7 +1305,8 @@ fn note_record() -> LogicalRecord {
             destinations: Vec::new(),
             tags: Vec::new(),
             favorite: false,
-            notes: "not delegated".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("not delegated")
+                .expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },

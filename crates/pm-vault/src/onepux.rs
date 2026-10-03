@@ -3,6 +3,7 @@
 //! Strict, non-extracting 1PUX v3 reader and loss-visible logical mapping.
 
 use pm_crypto::{DigestState, random_id};
+use pm_crypto::{ProtectedBytes, ProtectedText};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::CString,
@@ -199,12 +200,12 @@ fn preview_source(source: Source) -> Result<OnePuxImportPreview, HumanCommitErro
                     destinations: Vec::new(),
                     tags: vec!["source:unreferenced".into()],
                     favorite: false,
-                    notes: String::new(),
+                    notes: ProtectedText::copy_from_str("")?,
                     fields: Vec::new(),
                     source_fields: vec![SourceField {
                         path: "1pux.unreferenced_file".into(),
                         encoding: SourceEncoding::Utf8,
-                        value: entry.name.as_bytes().to_vec(),
+                        value: ProtectedBytes::copy_from_slice(entry.name.as_bytes())?,
                     }],
                 },
                 Vec::new(),
@@ -350,7 +351,7 @@ fn provenance(record: &LogicalRecord) -> Option<&[u8]> {
         .source_fields
         .iter()
         .find(|field| field.path == "1pux.provenance")
-        .map(|field| field.value.as_slice())
+        .map(|field| field.value.as_ref())
 }
 
 fn open_source(source: &Source) -> Result<(File, SourceIdentity), HumanCommitError> {
@@ -631,11 +632,8 @@ fn map_item(
     let item_id = required_string(object, "uuid")?;
     let overview = required_object(object, "overview")?;
     let details = required_object(object, "details")?;
-    let title = overview
-        .get("title")
-        .and_then(Json::string)
-        .unwrap_or("")
-        .to_owned();
+    let title = overview.get("title").and_then(Json::string).unwrap_or("");
+    let title = title.to_owned();
     let mut destinations = Vec::new();
     if let Some(url) = overview.get("url").and_then(Json::string) {
         push_destination(&mut destinations, "primary", url);
@@ -673,39 +671,44 @@ fn map_item(
     let notes = details
         .get("notesPlain")
         .and_then(Json::string)
-        .unwrap_or("")
-        .to_owned();
+        .unwrap_or("");
+    let notes = ProtectedText::copy_from_str(notes)?;
     let mut source_fields = vec![SourceField {
         path: "1pux.raw_item".into(),
         encoding: SourceEncoding::Json,
-        value: item.canonical(),
+        value: item.canonical()?,
     }];
+    let account_value = Json::String(ProtectedText::copy_from_str(account)?);
+    let vault_value = Json::String(ProtectedText::copy_from_str(vault)?);
+    let item_value = Json::String(ProtectedText::copy_from_str(item_id)?);
     let mut provenance = BTreeMap::new();
-    provenance.insert("account".to_owned(), Json::String(account.to_owned()));
-    provenance.insert("vault".to_owned(), Json::String(vault.to_owned()));
-    provenance.insert("item".to_owned(), Json::String(item_id.to_owned()));
+    provenance.insert("account", &account_value);
+    provenance.insert("vault", &vault_value);
+    provenance.insert("item", &item_value);
     for key in ["createdAt", "updatedAt", "categoryUuid", "state"] {
         if let Some(value) = object.get(key) {
-            provenance.insert(key.to_owned(), value.clone());
+            provenance.insert(key, value);
         }
     }
     source_fields.push(SourceField {
         path: "1pux.provenance".into(),
         encoding: SourceEncoding::Json,
-        value: Json::Object(provenance).canonical(),
+        value: crate::plaintext::encode(usize::MAX, |output| {
+            write_json_object(output, provenance.iter().map(|(k, v)| (*k, *v)))
+        })?,
     });
     if let Some(history) = details.get("passwordHistory") {
         source_fields.push(SourceField {
             path: "1pux.passwordHistory".into(),
             encoding: SourceEncoding::Json,
-            value: history.canonical(),
+            value: history.canonical()?,
         });
     }
     if object.get("state").and_then(Json::string) == Some("archived") {
         source_fields.push(SourceField {
             path: "1pux.state".into(),
             encoding: SourceEncoding::Utf8,
-            value: b"archived".to_vec(),
+            value: ProtectedBytes::copy_from_slice(b"archived")?,
         });
     }
     let refs = (0..destinations.len())
@@ -797,7 +800,7 @@ fn map_item(
 fn login_auth(
     details: &BTreeMap<String, Json>,
     refs: &[u16],
-) -> Result<(Option<AuthRecord>, Option<Vec<u8>>), HumanCommitError> {
+) -> Result<(Option<AuthRecord>, Option<ProtectedBytes>), HumanCommitError> {
     let Some(fields) = details.get("loginFields") else {
         return Ok((None, None));
     };
@@ -809,13 +812,15 @@ fn login_auth(
         match field.get("designation").and_then(Json::string) {
             Some("username") => usernames.push(required_string(field, "value")?.to_owned()),
             Some("password") => {
-                passwords.push(required_string(field, "value")?.as_bytes().to_vec());
+                passwords.push(ProtectedBytes::copy_from_slice(
+                    required_string(field, "value")?.as_bytes(),
+                )?);
             }
             _ => {}
         }
     }
     if usernames.len() > 1 || passwords.len() > 1 {
-        return Ok((None, Some(fields.canonical())));
+        return Ok((None, Some(fields.canonical()?)));
     }
     let Some(password) = passwords.pop() else {
         return Ok((None, None));
@@ -863,7 +868,7 @@ fn section_fields(
                     sources.push(SourceField {
                         path: format!("1pux.sections.{section_name}.ambiguous_totp"),
                         encoding: SourceEncoding::Json,
-                        value: value.canonical(),
+                        value: value.canonical()?,
                     });
                 } else if let Ok(parsed) = parse_totp(uri, refs) {
                     totp = Some(parsed);
@@ -871,21 +876,27 @@ fn section_fields(
                     sources.push(SourceField {
                         path: format!("1pux.sections.{section_name}.invalid_totp"),
                         encoding: SourceEncoding::Json,
-                        value: value.canonical(),
+                        value: value.canonical()?,
                     });
                 }
                 continue;
             }
             let (logical, concealed) = match value {
-                Json::String(text) => (LogicalValue::Text(text.clone()), false),
+                Json::String(text) => (
+                    LogicalValue::Text(ProtectedText::copy_from_str(text)?),
+                    false,
+                ),
                 Json::Object(object) if object.len() == 1 => {
                     if let Some(text) = object.get("concealed").and_then(Json::string) {
-                        (LogicalValue::Text(text.to_owned()), true)
+                        (
+                            LogicalValue::Text(ProtectedText::copy_from_str(text)?),
+                            true,
+                        )
                     } else {
                         sources.push(SourceField {
                             path: format!("1pux.sections.{section_name}.{label}"),
                             encoding: SourceEncoding::Json,
-                            value: value.canonical(),
+                            value: value.canonical()?,
                         });
                         continue;
                     }
@@ -894,7 +905,7 @@ fn section_fields(
                     sources.push(SourceField {
                         path: format!("1pux.sections.{section_name}.{label}"),
                         encoding: SourceEncoding::Json,
-                        value: value.canonical(),
+                        value: value.canonical()?,
                     });
                     continue;
                 }
@@ -952,12 +963,11 @@ fn invalid<T>(_: T) -> HumanCommitError {
     HumanCommitError::InvalidInput
 }
 
-#[derive(Clone, Debug)]
 enum Json {
     Null,
     Bool(bool),
-    Number(String),
-    String(String),
+    Number(ProtectedText),
+    String(ProtectedText),
     Array(Vec<Self>),
     Object(BTreeMap<String, Self>),
 }
@@ -976,9 +986,9 @@ impl Json {
             Err(HumanCommitError::InvalidInput)
         }
     }
-    const fn string(&self) -> Option<&str> {
+    fn string(&self) -> Option<&str> {
         if let Self::String(value) = self {
-            Some(value.as_str())
+            Some(value)
         } else {
             None
         }
@@ -990,40 +1000,33 @@ impl Json {
             None
         }
     }
-    fn canonical(&self) -> Vec<u8> {
-        let mut output = Vec::new();
-        self.write(&mut output);
-        output
+    fn canonical(&self) -> Result<ProtectedBytes, HumanCommitError> {
+        crate::plaintext::encode(usize::MAX, |output| self.write(output))
     }
-    fn write(&self, output: &mut Vec<u8>) {
+    fn write(
+        &self,
+        output: &mut dyn minicbor::encode::Write<Error = pm_crypto::CryptoError>,
+    ) -> Result<(), HumanCommitError> {
         match self {
-            Self::Null => output.extend_from_slice(b"null"),
-            Self::Bool(value) => output.extend_from_slice(if *value { b"true" } else { b"false" }),
-            Self::Number(value) => output.extend_from_slice(value.as_bytes()),
-            Self::String(value) => write_json_string(output, value),
+            Self::Null => output.write_all(b"null")?,
+            Self::Bool(value) => output.write_all(if *value { b"true" } else { b"false" })?,
+            Self::Number(value) => output.write_all(value.as_bytes())?,
+            Self::String(value) => write_json_string(output, value)?,
             Self::Array(values) => {
-                output.push(b'[');
+                output.write_all(b"[")?;
                 for (index, value) in values.iter().enumerate() {
                     if index > 0 {
-                        output.push(b',');
+                        output.write_all(b",")?;
                     }
-                    value.write(output);
+                    value.write(output)?;
                 }
-                output.push(b']');
+                output.write_all(b"]")?;
             }
             Self::Object(values) => {
-                output.push(b'{');
-                for (index, (key, value)) in values.iter().enumerate() {
-                    if index > 0 {
-                        output.push(b',');
-                    }
-                    write_json_string(output, key);
-                    output.push(b':');
-                    value.write(output);
-                }
-                output.push(b'}');
+                write_json_object(output, values.iter().map(|(k, v)| (k.as_str(), v)))?;
             }
         }
+        Ok(())
     }
 }
 
@@ -1101,7 +1104,7 @@ impl<'a> JsonParser<'a> {
         }
         loop {
             self.whitespace();
-            let key = self.string()?;
+            let key = self.string()?.to_string();
             self.whitespace();
             self.expect(b':')?;
             let value = self.value(depth)?;
@@ -1116,9 +1119,27 @@ impl<'a> JsonParser<'a> {
         }
         Ok(Json::Object(values))
     }
-    fn string(&mut self) -> Result<String, HumanCommitError> {
+    fn string(&mut self) -> Result<ProtectedText, HumanCommitError> {
+        let start = self.position;
+        let end = std::cell::Cell::new(start);
+        let bytes = crate::plaintext::encode(MAX_JSON_STRING, |output| {
+            let mut parser = Self {
+                bytes: self.bytes,
+                position: start,
+                values: 0,
+            };
+            parser.write_string(output)?;
+            end.set(parser.position);
+            Ok(())
+        })?;
+        self.position = end.get();
+        Ok(ProtectedText::from_bytes(bytes)?)
+    }
+    fn write_string(
+        &mut self,
+        output: &mut dyn minicbor::encode::Write<Error = pm_crypto::CryptoError>,
+    ) -> Result<(), HumanCommitError> {
         self.expect(b'"')?;
-        let mut output = Vec::new();
         loop {
             let byte = *self
                 .bytes
@@ -1135,12 +1156,12 @@ impl<'a> JsonParser<'a> {
                         .ok_or(HumanCommitError::InvalidInput)?;
                     self.position += 1;
                     match escaped {
-                        b'"' | b'\\' | b'/' => output.push(escaped),
-                        b'b' => output.push(8),
-                        b'f' => output.push(12),
-                        b'n' => output.push(b'\n'),
-                        b'r' => output.push(b'\r'),
-                        b't' => output.push(b'\t'),
+                        b'"' | b'\\' | b'/' => output.write_all(&[escaped])?,
+                        b'b' => output.write_all(&[8])?,
+                        b'f' => output.write_all(&[12])?,
+                        b'n' => output.write_all(b"\n")?,
+                        b'r' => output.write_all(b"\r")?,
+                        b't' => output.write_all(b"\t")?,
                         b'u' => {
                             let first = self.hex4()?;
                             let scalar = if (0xd800..=0xdbff).contains(&first) {
@@ -1161,18 +1182,15 @@ impl<'a> JsonParser<'a> {
                             let character =
                                 char::from_u32(scalar).ok_or(HumanCommitError::InvalidInput)?;
                             let mut bytes = [0; 4];
-                            output.extend_from_slice(character.encode_utf8(&mut bytes).as_bytes());
+                            output.write_all(character.encode_utf8(&mut bytes).as_bytes())?;
                         }
                         _ => return Err(HumanCommitError::InvalidInput),
                     }
                 }
-                _ => output.push(byte),
-            }
-            if output.len() > MAX_JSON_STRING {
-                return Err(HumanCommitError::InvalidInput);
+                _ => output.write_all(&[byte])?,
             }
         }
-        String::from_utf8(output).map_err(|_| HumanCommitError::InvalidInput)
+        Ok(())
     }
     fn hex4(&mut self) -> Result<u16, HumanCommitError> {
         let bytes = self
@@ -1194,7 +1212,7 @@ impl<'a> JsonParser<'a> {
         }
         Ok(value)
     }
-    fn number(&mut self) -> Result<String, HumanCommitError> {
+    fn number(&mut self) -> Result<ProtectedText, HumanCommitError> {
         let start = self.position;
         self.take(b'-');
         match self.peek() {
@@ -1248,7 +1266,7 @@ impl<'a> JsonParser<'a> {
         if !in_range {
             return Err(HumanCommitError::InvalidInput);
         }
-        Ok(number.to_owned())
+        Ok(ProtectedText::copy_from_str(number)?)
     }
     fn whitespace(&mut self) {
         while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
@@ -1283,20 +1301,51 @@ impl<'a> JsonParser<'a> {
     }
 }
 
-fn write_json_string(output: &mut Vec<u8>, value: &str) {
-    output.push(b'"');
+fn write_json_object<'a>(
+    output: &mut dyn minicbor::encode::Write<Error = pm_crypto::CryptoError>,
+    values: impl Iterator<Item = (&'a str, &'a Json)>,
+) -> Result<(), HumanCommitError> {
+    output.write_all(b"{")?;
+    for (index, (key, value)) in values.enumerate() {
+        if index > 0 {
+            output.write_all(b",")?;
+        }
+        write_json_string(output, key)?;
+        output.write_all(b":")?;
+        value.write(output)?;
+    }
+    output.write_all(b"}")?;
+    Ok(())
+}
+
+fn write_json_string(
+    output: &mut dyn minicbor::encode::Write<Error = pm_crypto::CryptoError>,
+    value: &str,
+) -> Result<(), HumanCommitError> {
+    output.write_all(b"\"")?;
     for byte in value.bytes() {
         match byte {
-            b'"' => output.extend_from_slice(br#"\""#),
-            b'\\' => output.extend_from_slice(br"\\"),
-            b'\n' => output.extend_from_slice(br"\n"),
-            b'\r' => output.extend_from_slice(br"\r"),
-            b'\t' => output.extend_from_slice(br"\t"),
-            0..=0x1f => output.extend_from_slice(format!("\\u{byte:04x}").as_bytes()),
-            _ => output.push(byte),
+            b'"' => output.write_all(br#"\""#)?,
+            b'\\' => output.write_all(br"\\")?,
+            b'\n' => output.write_all(br"\n")?,
+            b'\r' => output.write_all(br"\r")?,
+            b'\t' => output.write_all(br"\t")?,
+            0..=0x1f => {
+                let hex = b"0123456789abcdef";
+                output.write_all(&[
+                    b'\\',
+                    b'u',
+                    b'0',
+                    b'0',
+                    hex[usize::from(byte >> 4)],
+                    hex[usize::from(byte & 15)],
+                ])?;
+            }
+            _ => output.write_all(&[byte])?,
         }
     }
-    output.push(b'"');
+    output.write_all(b"\"")?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1326,5 +1375,75 @@ mod tests {
         assert!(JsonParser::parse(beyond.as_bytes()).is_err());
         assert!(JsonParser::parse(b"9223372036854775807").is_ok());
         assert!(JsonParser::parse(b"9223372036854775808").is_err());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod protected_json_tests {
+    use super::*;
+    use pm_crypto::CryptoError;
+    use std::process::Command;
+    // Only used by the static initializer; no large runtime stack allocation.
+    #[allow(clippy::large_stack_arrays)]
+    const fn json_canary() -> [u8; 512 * 1024 + 2] {
+        let mut v = [b'Z'; 512 * 1024 + 2];
+        v[0] = b'"';
+        v[512 * 1024 + 1] = b'"';
+        v
+    }
+    static CANARY: [u8; 512 * 1024 + 2] = json_canary();
+    #[test]
+    fn parser_requires_locked_destination() {
+        if std::env::var_os("PM28_JSON_CHILD").is_some() {
+            let limit = libc::rlimit {
+                rlim_cur: 128 * 1024,
+                rlim_max: 128 * 1024,
+            };
+            // SAFETY: isolated child's own limit only.
+            assert_eq!(
+                unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const limit) },
+                0
+            );
+            let control = JsonParser::parse(b"\"PM28_SMALL\"").expect("small JSON control");
+            drop(control);
+            println!("PM28_PARSER_CONTROL_READY");
+            assert!(
+                matches!(
+                    JsonParser::parse(&CANARY),
+                    Err(HumanCommitError::Crypto(CryptoError::ResourceUnavailable))
+                ),
+                "ordinary parser destination accepted"
+            );
+            println!("PM28_PARSER_LOCK_DENIED");
+            return;
+        }
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "onepux::protected_json_tests::parser_requires_locked_destination",
+                "--nocapture",
+            ])
+            .env("PM28_JSON_CHILD", "1")
+            .output()
+            .expect("isolated parser child");
+        assert!(
+            output
+                .stdout
+                .windows(b"PM28_PARSER_CONTROL_READY".len())
+                .any(|v| v == b"PM28_PARSER_CONTROL_READY"),
+            "parser control marker missing"
+        );
+        println!("PM28_PARSER_CONTROL_READY");
+        assert!(
+            output.status.success(),
+            "ordinary parser destination accepted after control"
+        );
+        assert!(
+            output
+                .stdout
+                .windows(b"PM28_PARSER_LOCK_DENIED".len())
+                .any(|v| v == b"PM28_PARSER_LOCK_DENIED"),
+            "parser denial marker missing"
+        );
     }
 }

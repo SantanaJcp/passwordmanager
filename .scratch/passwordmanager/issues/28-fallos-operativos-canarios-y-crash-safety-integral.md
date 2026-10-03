@@ -184,3 +184,56 @@ terminó `SUMMARY count=25 failures=0`, con evidencia individual en
 artefactos Keycloak/CFT fueron los paths absolutos aprobados. Esta evidencia
 solo acredita Linux x86_64: el ticket sigue parcial/claimed y no se cierran
 puertos nativos ni verticales restantes.
+
+2026-10-02 — Implementador 28, fase 2 desde `e3fb352` en `codex/pm-28`:
+REDs discriminantes adicionales para records/password/notas/attachment,
+decoder AuthRecord, parsers CSV/JSON, serializers y descifrado inline PMF1;
+GREEN de esos seams con tamaños exactos y destino bloqueado antes de escribir.
+El contador agregado pasó con 64 KiB sólo en test; 32 MiB físicos siguen no
+demostrados en host de memlock soft/hard 8 MiB. Inventario integral sigue FAIL:
+metadata/copias de búsqueda, backup/import ZIP, requests de proveedor y
+presentación TUI conservan memoria ordinaria. Check completo y build limpio
+locked/offline pasaron; barrida Linux se registra en el método.
+
+Pérdida de bootstrap con intento completado pasó, con conteos/claves exactos y
+una llamada al proveedor. Nuevo RED válido de vault perdido: devuelve rc4
+`CUSTODY_UNAVAILABLE` pero `Connection::open` recrea un SQLite vacío; no se
+corrige ese fallback heredado sin autorización. Audit-loss sigue rojo aparte:
+regenera custodia y acepta CRUD rc0; `load_or_create_audit_custody` permanece
+intacto. No se declara evidencia en vuelo/ambigua, matriz completa de
+fsync/WAL/staging/commit/outbox/audit ni canarios en todos los canales.
+La inspección locked de ZIP/DEFLATE y renderer exige resolver memoria interna
+sin inventar excepciones; otros fallbacks de 1PUX/agent_attempt se reportan
+sin corregir. Cronología, comandos/logs, inventario y tabla vigente están en
+[`docs/verification/ticket-28.md`](../../../docs/verification/ticket-28.md#fase-2--2026-10-02).
+Entrega parcial para el orquestador: permanece `claimed`, sin integrar ni
+fusionar PR #1 y sin tocar los worktrees 26/27.
+
+2026-10-02 — Gate final de fase 2: RED/GREEN adicional corrige una regresión
+del candidato al trasladar la invariancia privada passkey `[u8;32]` al owner
+variable. Después, check completo rc0, clean offline rc0 en 36.56 s y barrida
+uniforme final 26/26 rc0 en 622.12 s. Bootstrap rc0; vault-loss y audit-loss
+rc1 separados, ambos con control/restauración/cleanup válidos y sus fallbacks
+sin corregir. Enlaces/sintaxis/estado y función audit custody intacta comprobados;
+el método conserva todos los logs intermedios y el inventario de criterios
+no cumplidos. Este checkpoint sigue parcial y no resuelve 28/G7.
+
+
+2026-10-03 — Fase 3 desde d4550ce: corrección acotada autorizada de
+load_or_create_audit_custody. Consulta audit_keys read-only para el dispositivo
+antes de generar; pérdida/ilegibilidad rechaza CUSTODY_UNAVAILABLE sin claves
+sustitutas. RED público rc1 → GREEN rc0 y cinco tests de función pasan,
+incluida primera creación y restitución exacta con autoridad conservada.
+El ajuste necesario del fixture observa rechazo antes de sockets, sin cambiar
+las aserciones finales. Se protege además el serializer final de respuestas
+web-auth con RED válido → GREEN; fuentes HTTP/JSON/CDP y requests aún pendientes.
+Nuevo GREEN existente de fsync real de SQLite WAL: EIO único, rc4, DB/conteos
+intactos e integridad/restart. Check completo, clean offline (36.73 s), audit-loss,
+SQLite-sync y 26/26 labs Linux secuenciales pasan; vault-loss conserva RED por
+SQLite sustituto, sin corrección no autorizada. Inventario integral sigue FAIL;
+matriz completa de fronteras, límites/canarios y nativos siguen pendientes.
+Nuevos silenciamientos heredados de provider/Browser se documentan y conservan.
+Cronología, comandos/logs y tabla vigente en
+[la fase 3 del método](../../../docs/verification/ticket-28.md#fase-3--2026-10-03-custodia-audit-autorizada).
+Entrega parcial en codex/pm-28; claimed, sin integrar principal,
+sin fusionar PR #1 ni tocar worktrees/zonas concurrentes 26/27.

@@ -7,7 +7,7 @@ fn pmf1_frames_chunks_with_final_even_for_empty_files() {
     for plaintext in [Vec::new(), vec![0x41; 1_048_577]] {
         let vector = Pmf1Vector::seal([1; 16], [2; 16], [3; 16], &plaintext).unwrap();
         assert_eq!(&vector.bytes()[..4], b"PMF1");
-        assert_eq!(vector.open().unwrap(), plaintext);
+        assert!(vector.open().unwrap().as_ref().eq(plaintext.as_slice()));
     }
 }
 

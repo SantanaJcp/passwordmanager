@@ -54,7 +54,7 @@ fn attachment_above_16_mib_streams_atomically_in_bounded_chunks() {
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: vec![],
             source_fields: vec![],
         },
@@ -121,7 +121,7 @@ fn attachment_above_16_mib_streams_atomically_in_bounded_chunks() {
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: vec![],
             source_fields: vec![],
         },
@@ -164,7 +164,7 @@ fn attachment_above_16_mib_streams_atomically_in_bounded_chunks() {
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: vec![],
             source_fields: vec![],
         },
@@ -270,7 +270,7 @@ fn all_logical_types_unknown_fields_and_unicode_attachments_roundtrip_exactly() 
             )
             .unwrap();
         let actual = vault.read_record(*prepared.item_id()).unwrap();
-        assert_eq!(actual, expected);
+        assert!(actual.eq(&expected));
     }
 
     drop(vault);
@@ -338,7 +338,8 @@ fn staging_and_rejected_limits_never_truncate_or_persist_canaries() {
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: "ticket05-staging-note-canary".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("ticket05-staging-note-canary")
+                .expect("synthetic protected notes"),
             fields: vec![],
             source_fields: vec![],
         },
@@ -370,7 +371,8 @@ fn staging_and_rejected_limits_never_truncate_or_persist_canaries() {
                 destinations: vec![],
                 tags: vec![],
                 favorite: false,
-                notes: String::new(),
+                notes: pm_crypto::ProtectedText::copy_from_str("")
+                    .expect("synthetic protected notes"),
                 fields: vec![],
                 source_fields: vec![]
             },
@@ -415,7 +417,8 @@ fn human_search_tag_and_favorite_use_complete_encrypted_records() {
             destinations: vec![],
             tags: vec!["inicial".to_owned()],
             favorite: false,
-            notes: "hallazgo humano".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("hallazgo humano")
+                .expect("synthetic protected notes"),
             fields: vec![],
             source_fields: vec![],
         },
@@ -473,17 +476,22 @@ fn all_records() -> Vec<LogicalRecord> {
         }],
         tags: vec!["equipo-☃".to_owned()],
         favorite: true,
-        notes: "nota sintética".to_owned(),
+        notes: pm_crypto::ProtectedText::copy_from_str("nota sintética")
+            .expect("synthetic protected notes"),
         fields: vec![CustomField {
             id: [0x31; 16],
             label: "campo".to_owned(),
-            value: LogicalValue::Text("valor exacto".to_owned()),
+            value: LogicalValue::Text(
+                pm_crypto::ProtectedText::copy_from_str("valor exacto")
+                    .expect("synthetic custom value"),
+            ),
             concealed: false,
         }],
         source_fields: vec![SourceField {
             path: "legacy.extra".to_owned(),
             encoding: SourceEncoding::Bytes,
-            value: b"ticket05-source-canary".to_vec(),
+            value: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-source-canary")
+                .expect("synthetic source value"),
         }],
     };
     let attachment = || {
@@ -502,7 +510,8 @@ fn all_records() -> Vec<LogicalRecord> {
             metadata("Contraseña"),
             vec![AuthRecord::Password {
                 username: "usuario".to_owned(),
-                password: b"ticket05-password-canary".to_vec(),
+                password: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-password-canary")
+                    .expect("synthetic protected field"),
                 destination_refs: vec![0],
             }],
             vec![attachment()],
@@ -512,7 +521,8 @@ fn all_records() -> Vec<LogicalRecord> {
             RecordKind::Totp,
             metadata("TOTP"),
             vec![AuthRecord::Totp {
-                secret: b"ticket05-totp-seed-01".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-totp-seed-01")
+                    .expect("synthetic protected field"),
                 algorithm: TotpAlgorithm::Sha256,
                 digits: 8,
                 period: 45,
@@ -532,7 +542,8 @@ fn all_records() -> Vec<LogicalRecord> {
                 user_handle: b"ticket05-user-handle".to_vec(),
                 credential_id: b"ticket05-credential-id".to_vec(),
                 cose_alg: -8,
-                private_key: [0x53; 32],
+                private_key: pm_crypto::ProtectedBytes::copy_from_slice(&([0x53; 32]))
+                    .expect("synthetic protected field"),
                 public_key: [0x54; 32],
                 user_name: "synthetic-user".to_owned(),
                 display_name: "Synthetic User".to_owned(),
@@ -548,11 +559,17 @@ fn all_records() -> Vec<LogicalRecord> {
             metadata("SSH"),
             vec![AuthRecord::Ssh {
                 private_format: PrivateKeyFormat::OpenSsh,
-                private_key: b"ticket05-ssh-private-canary".to_vec(),
+                private_key: pm_crypto::ProtectedBytes::copy_from_slice(
+                    b"ticket05-ssh-private-canary",
+                )
+                .expect("synthetic protected field"),
                 public_key: b"ssh-ed25519 synthetic-public".to_vec(),
                 username: "synthetic".to_owned(),
                 destination_refs: vec![0],
-                passphrase: Some(b"ticket05-ssh-passphrase-canary".to_vec()),
+                passphrase: Some(
+                    pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-ssh-passphrase-canary")
+                        .expect("synthetic passphrase"),
+                ),
             }],
             vec![],
         )
@@ -561,7 +578,8 @@ fn all_records() -> Vec<LogicalRecord> {
             RecordKind::Token,
             metadata("Token"),
             vec![AuthRecord::Token {
-                secret: b"ticket05-token-canary".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-token-canary")
+                    .expect("synthetic protected field"),
                 provider: "synthetic-provider".to_owned(),
                 profile_id: "synthetic-profile".to_owned(),
                 destination_refs: vec![0],

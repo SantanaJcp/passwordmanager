@@ -27,14 +27,14 @@ use crate::{HttpsUrl, Profile, oidc};
 const FLOW_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_CDP_MESSAGE: usize = 256 * 1024;
 
-pub(crate) struct Credentials {
-    pub username: String,
-    pub password: Zeroizing<Vec<u8>>,
+pub(crate) struct Credentials<'a> {
+    pub username: &'a str,
+    pub password: pm_crypto::ProtectedBytes,
     pub totp: Option<Totp>,
 }
 
 pub(crate) struct Totp {
-    pub secret: Zeroizing<Vec<u8>>,
+    pub secret: pm_crypto::ProtectedBytes,
     pub algorithm: String,
     pub digits: u8,
     pub period: u16,
@@ -59,7 +59,7 @@ pub(crate) struct PasskeySession {
 
 pub(crate) fn authenticate(
     profile: &Profile,
-    credentials: &Credentials,
+    credentials: &Credentials<'_>,
 ) -> Result<BrowserOutcome, ()> {
     if verify_browser(profile).is_err() {
         eprintln!("WEB_AUTH_FAIL stage=browser-artifact");
@@ -286,7 +286,7 @@ fn passkey_username(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_flow(
     profile: &Profile,
-    credentials: &Credentials,
+    credentials: &Credentials<'_>,
     authorize: &str,
     state: &str,
     nonce: &str,
@@ -342,7 +342,7 @@ fn run_flow(
     if login != "login" {
         return Ok(BrowserOutcome::Waiting);
     }
-    let username = Zeroizing::new(js_string(&credentials.username));
+    let username = Zeroizing::new(js_string(credentials.username));
     let password_text = std::str::from_utf8(&credentials.password).map_err(|_| ())?;
     let password = Zeroizing::new(js_string(password_text));
     let script = Zeroizing::new(format!(

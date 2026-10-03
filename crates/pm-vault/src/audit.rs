@@ -268,7 +268,7 @@ impl AuditDeviceCustody {
         device: [u8; 16],
         generation: u64,
         attempt: [u8; 16],
-    ) -> Result<Vec<u8>, HumanCommitError> {
+    ) -> Result<pm_crypto::ProtectedBytes, HumanCommitError> {
         Ok(self
             .keys
             .open_attempt_state(package, vault, device, generation, attempt)?)
@@ -283,7 +283,7 @@ impl AuditDeviceCustody {
         generation: u64,
         object: [u8; 16],
         revision: [u8; 16],
-    ) -> Result<Vec<u8>, HumanCommitError> {
+    ) -> Result<pm_crypto::ProtectedBytes, HumanCommitError> {
         Ok(self
             .keys
             .open_control_package(bytes, vault, device, generation, object, revision)?)
@@ -1025,7 +1025,7 @@ fn load_and_verify_manifest(
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let plaintext = key.open_manifest(fixed(&id)?, &envelope)?;
-    if plaintext != encode_manifest(connection, device, generation)? {
+    if *plaintext != encode_manifest(connection, device, generation)? {
         return Err(HumanCommitError::Integrity);
     }
     let purges = decode_manifest_purges(&plaintext, device, generation)?;
