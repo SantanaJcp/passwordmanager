@@ -2958,3 +2958,40 @@ Check local previo: `flock /tmp/pm-cargo-window.lock ./scripts/check.sh`
 rc0, `/tmp/pmw1b-check1.log`; fmt bajo el mismo flock y diff-check PASS.
 Los bloques cfg Windows se verificarán nativamente, sin afirmar build Windows
 por el check Linux.
+
+### Corrida 1 fase 2: discriminante RED
+
+[Windows 37127631606](https://github.com/SantanaJcp/passwordmanager/actions/runs/37127631606),
+SHA `4e6ca0c11cebdcca04f4fd3f3000964a6d9e1ebd`, terminó FAIL.
+Primitives13, pipe1, observer17, sync-lib1 y escenario de salida natural de
+encoding PASS. El fallo aparece ahora **en la negativa hardlink**, antes del
+probe de token humano y del positivo: `source-open → request31-sent →
+ack31-received → child-lease-installed → handle-sent → lease-restored`;
+servicio `transfer-ack31 → transfer-token → transfer-duplicate-failed`.
+Sampler: `local source rejection unexpectedly granted a process lease`.
+Log `/tmp/pmw1b-windows1.log`. Restauración CP y cleanup estricto sin errores
+adicionales. No se publicaron secretos/handles/PIDs ni artifacts.
+
+Discriminante causal: `open_regular_file` comprueba regular/reparse pero no
+número de links; `windows::open_1pux_source` sólo añadía tamaño. El servicio
+valida single-link después de duplicar, aborta esa conexión ante el rechazo,
+y la TUI presenta un error de operación. El sampler1ms anterior pudo perder
+una lease breve: sus supuestos PASS locales no prueban ausencia de lease.
+El positivo posterior utilizaba la conexión ya abortada, explicando rc4 y
+ninguna lease **en ese positivo**. La corrida opt-in localiza la cadena;
+la atribución completa exige aún GREEN del mismo negativo seguido del positivo.
+No se modifica el handler/listener ignorado de W4 ni ningún fallback heredado.
+
+Corrección candidata: extraer la misma validación Win32 de regular/reparse,
+links=1, fileID no nulo y tamaño en un único helper del handle. Aplicarla al
+handle cliente abierto antes de enviar31; conservarla sobre el duplicado del
+servicio. Ninguna reapertura, derecho nuevo, ampliación de plazo ni rechazo
+nuevo de contenido que el servicio aceptaba. Repetir negativa original con
+cero lease y DACL exacta; después positivo 1PUX con preview exacto y la lease
+real antes/durante/después en el mismo proceso/conexión. No saltar la negativa
+ni rebajar el sampler para forzar aceptación.
+
+Preflight local de la corrección: fmt y `check.sh` rc0 bajo un bloque flock,
+`/tmp/pmw1b-check2.log`; `git diff --check` PASS. Sólo cambia cfg Windows;
+la barrida Linux ya iniciada sigue con propagación explícita por caso. No
+atribuir una GREEN Windows hasta la corrida siguiente.

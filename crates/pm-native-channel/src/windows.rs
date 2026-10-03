@@ -488,25 +488,47 @@ impl WindowsServerPipe {
             }
             return Err(ChannelAuthenticationError);
         }
-        let mut information = BY_HANDLE_FILE_INFORMATION::default();
-        let queried = unsafe { GetFileInformationByHandle(local, &raw mut information) } != 0;
-        let size =
-            (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
-        let valid = queried
-            && information.dwFileAttributes
-                & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
-                == 0
-            && information.nNumberOfLinks == 1
-            && ((u64::from(information.nFileIndexHigh) << 32)
-                | u64::from(information.nFileIndexLow))
-                != 0
-            && size != 0
-            && size <= maximum;
-        if !valid {
+        if validate_transfer_handle(local, maximum).is_err() {
             close_handle(local)?;
             return Err(ChannelAuthenticationError);
         }
         Ok(unsafe { std::fs::File::from_raw_handle(local) })
+    }
+}
+
+/// Validates the exact open import handle before negotiating its transfer.
+/// The service repeats the same validation on the duplicated handle.
+///
+/// # Errors
+/// Rejects a non-regular/reparse/multilink source, missing identity, empty or
+/// oversized file, and native query failures.
+pub fn validate_transfer_file(
+    file: &std::fs::File,
+    maximum: u64,
+) -> Result<(), ChannelAuthenticationError> {
+    use std::os::windows::io::AsRawHandle;
+    validate_transfer_handle(file.as_raw_handle(), maximum)
+}
+
+fn validate_transfer_handle(
+    handle: HANDLE,
+    maximum: u64,
+) -> Result<(), ChannelAuthenticationError> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let queried = unsafe { GetFileInformationByHandle(handle, &raw mut information) } != 0;
+    let size = (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
+    if queried
+        && information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            == 0
+        && information.nNumberOfLinks == 1
+        && ((u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow))
+            != 0
+        && size != 0
+        && size <= maximum
+    {
+        Ok(())
+    } else {
+        Err(ChannelAuthenticationError)
     }
 }
 

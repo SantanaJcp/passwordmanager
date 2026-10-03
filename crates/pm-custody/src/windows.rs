@@ -1369,10 +1369,8 @@ pub(super) fn read_import_source(path: &Path) -> Result<Zeroizing<Vec<u8>>, Fail
 
 pub(super) fn open_1pux_source(path: &Path) -> Result<File, Failure> {
     let file = pm_native_channel::open_regular_file(path).map_err(|_| Failure::Unavailable)?;
-    let metadata = file.metadata().map_err(|_| Failure::Unavailable)?;
-    if metadata.len() == 0 || metadata.len() > 1024_u64.pow(4) + 256 * 1024 * 1024 {
-        return Err(Failure::Unavailable);
-    }
+    pm_native_channel::validate_transfer_file(&file, 1024_u64.pow(4) + 256 * 1024 * 1024)
+        .map_err(|_| Failure::Unavailable)?;
     Ok(file)
 }
 
