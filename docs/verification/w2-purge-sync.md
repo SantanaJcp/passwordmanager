@@ -4,16 +4,15 @@
 `codex/pm-w2-purge-sync`, base `ee3c1fd31cad59060e4120f3e2518b1196a90c1a`.
 Sin integración, cambios de tickets, merge de PR ni cambios ajenos.
 
-**Estado: candidato parcial; W2 NO terminado.** El checkpoint publicado
-`eae7d84abaccad9d3c01a9e62c57616fd41fbd3b` pasa 27 pruebas E2EE, el probe
-integrado y Clippy. La aceptación posterior encontró un replay de payload que
-el método legado debe rechazar y un segundo defecto de digest en restauración
-PMB1. La corrección de replay está en el checkpoint posterior que contiene este
-informe, verificada por los casos legados, la carrera TLS y Clippy.
-La corrección del productor PMB1 requiere ampliar la zona explícita hacia
-`pm-vault/src/backup.rs`; no se aplicó. La única corrida macOS autorizada
-terminó fallida sobre el checkpoint anterior. No se presenta como evidencia
-nativa del código posterior ni como GREEN de happy sync.
+**Estado de fase 3: candidato en verificación; W2 NO terminado.** Se retoma
+`1aff66ee0834d473438d8c269fae63b7c65fee6e`, limpio y publicado, con replay
+legado corregido y RED de backup/restore. El encargo del 2026-10-03 amplía la
+zona exclusivamente a `backup.rs::restore_graph_digest` y autoriza hasta
+cuatro corridas adicionales de macOS sobre SHAs exactos, cada una con cambio
+o hipótesis distinta. El fix mínimo y las dos comparaciones unitarias contra
+el reductor pasan, junto con el RED PMB1/purge ahora GREEN. Gates completos y
+aceptación nativa pendientes en este checkpoint; no se integra ni se cambian
+tickets.
 
 ## Decisiones y formato exacto
 
@@ -200,12 +199,12 @@ CBOR(attachments)_bytes]`. El header restaurado queda firmado contra otro
 digest: su rechazo de integridad es correcto. No se cambian firmas/digests
 históricos ni se prueba otro algoritmo tras un mismatch.
 
-Propuesta no aplicada: `/tmp/pmw2b-backup-digest-proposal.patch`, 8 líneas en
-el productor que seleccionan el esquema inline cuando la topología staged no
-tiene streams, antes de hashing/firma. `backup.rs` está fuera de la zona
-explícita del encargo; se solicitó ampliar ese límite y permitir otra corrida
-macOS sobre el SHA corregido. La solicitud de autorización sigue pendiente; se conserva el RED en la suite.
-La parte funcional propuesta, todavía sin aplicar, es:
+Fase 3: se revisó `/tmp/pmw2b-backup-digest-proposal.patch` contra los dos
+productores y la topología PMB1. PMB1 restaura todos los adjuntos como streams;
+cero filas staged significa lista vacía de adjuntos inline. Se aplica la
+selección aprobada y además se mueve la inicialización streaming después de
+ella, para seleccionar antes de hashear/firmar. El único cambio productivo en
+`backup.rs` está dentro de `restore_graph_digest`:
 
 ```rust
 if rows.is_empty() {
@@ -218,6 +217,24 @@ if rows.is_empty() {
 `0x80` representa CBOR de la lista vacía de adjuntos, no un payload sustituto.
 Las restauraciones ya firmadas contra el digest incorrecto siguen fallando
 explícitamente; no se reescriben ni se les da un acuse falso.
+
+Tests unitarios en `reducer.rs::restore_digest_tests`: sin streams y con dos
+streams/dos chunks por stream, orden de fuentes diferente al de targets. Ambos
+comparan directamente contra `reducer.rs::graph_digest`, sin duplicar su
+algoritmo. Fixture SQLite en memoria y archivos privados sintéticos propios;
+cleanup estricto. El RED unitario conserva 1 PASS streaming y 1 FAIL inline
+por digest diferente, no por compilación o prerrequisitos:
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-vault \
+  --lib restore_graph_digest --locked --offline -- --nocapture
+# /tmp/pmw2c-digest-red.log; rc 101 antes del fix
+flock /tmp/pm-cargo-window.lock bash -c './scripts/cargo-local.sh fmt --all && ./scripts/cargo-local.sh test -p pm-vault --lib restore_graph_digest --locked --offline -- --nocapture && ./scripts/cargo-local.sh test -p pm-sync --test e2ee_replication backup_restored_streams_remain_bound_and_publish_with_offline_purge --locked --offline -- --nocapture'
+# /tmp/pmw2c-digest-green.log; rc 0, dos unitarios y PMB1/purge GREEN
+```
+
+El caso PMB1 sigue exigiendo 7 eventos push/pull, 3 elementos y 1 marcador de
+purge con exportación íntegra de cada grafo. No se relajó ninguna aserción.
 
 ## Gates Linux frente al baseline
 
@@ -296,6 +313,7 @@ otro valor sustitutivo: `kind` ausente/corrupto se rechaza.
 | `decode_event` | Falla decoder primario: intenta `decode_legacy_body` heredado |
 | `CausalReducer::open` / SQLite | Archivo ausente: apertura puede crearlo; frontera W3 sin cambio |
 | TestDir y labs heredados | Limpieza best-effort puede ocultar residuos; no hubo sweep de `/tmp/pm-*` |
+| `backup.rs::RestoreStager::finish` | Un error SQL al comprobar la revisión visible se convierte en `false` por `.unwrap_or(false)` y después en `Integrity`; oculta la categoría de almacenamiento |
 
 `from_utf8_lossy` y fallbacks de provider/listener siguen en
 [integración](integration-26-28.md#fallbacks-y-limitaciones-heredadas-conservadas),

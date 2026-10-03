@@ -2488,3 +2488,126 @@ fn encode_ids32_value(values: &[[u8; 32]]) -> Vec<u8> {
     encode_ids32(&mut e, values);
     e.into_writer()
 }
+
+#[cfg(test)]
+mod restore_digest_tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new(name: &str) -> Self {
+            let directory = std::env::temp_dir().join(format!(
+                "pmw2c-restore-digest-{}-{name}",
+                std::process::id()
+            ));
+            fs::create_dir(&directory).expect("exclusive synthetic fixture");
+            Self(directory)
+        }
+
+        fn stage(&self, name: &str, bytes: &[u8]) -> PathBuf {
+            write_stage(&self.0, name, bytes).expect("stage synthetic ciphertext")
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).expect("remove only owned digest fixture");
+            assert!(!self.0.exists());
+        }
+    }
+
+    fn restore_connection() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE backup_restore_streams (
+                   transaction_id BLOB, source_revision BLOB, source_attachment BLOB,
+                   target_attachment BLOB, header BLOB, chunk_count INTEGER
+                 );
+                 CREATE TABLE backup_restore_stream_chunks (
+                   transaction_id BLOB, source_revision BLOB, source_attachment BLOB,
+                   chunk_index INTEGER, ciphertext BLOB
+                 );",
+            )
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn restore_graph_digest_without_streams_matches_reducer_inline_graph() {
+        let fixture = Fixture::new("inline");
+        let package = b"PMW2_SYNTHETIC_RESTORED_REVISION";
+        let graph = ReceivedCiphertextGraph {
+            item: [1; 16],
+            revision: [2; 16],
+            kind: "note".into(),
+            package: fixture.stage("revision", package),
+            attachments: Vec::new(),
+            streams: Vec::new(),
+        };
+        let mut connection = restore_connection();
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            crate::backup::restore_graph_digest(&tx, [3; 16], [4; 16], package).unwrap(),
+            graph_digest(&graph).unwrap()
+        );
+    }
+
+    #[test]
+    fn restore_graph_digest_with_streams_matches_reducer_sorted_graph() {
+        let fixture = Fixture::new("streams");
+        let package = b"PMW2_SYNTHETIC_RESTORED_FILE_REVISION";
+        let mut graph = ReceivedCiphertextGraph {
+            item: [1; 16],
+            revision: [2; 16],
+            kind: "file".into(),
+            package: fixture.stage("revision", package),
+            attachments: Vec::new(),
+            streams: Vec::new(),
+        };
+        let mut connection = restore_connection();
+        let tx = connection.transaction().unwrap();
+        // Source and target orders differ; SQL staging and wire graphs must
+        // both hash target IDs, headers and all chunks in target-ID order.
+        for (source, target) in [(5_u8, 9_u8), (6, 8)] {
+            let header = vec![target; 24];
+            tx.execute(
+                "INSERT INTO backup_restore_streams VALUES(?1,?2,?3,?4,?5,2)",
+                params![
+                    [3_u8; 16].as_slice(),
+                    [4_u8; 16].as_slice(),
+                    [source; 16].as_slice(),
+                    [target; 16].as_slice(),
+                    &header
+                ],
+            )
+            .unwrap();
+            let mut chunks = Vec::new();
+            for index in 0..2_i64 {
+                let bytes = format!("PMW2_SYNTHETIC_CHUNK_{target}_{index}").into_bytes();
+                tx.execute(
+                    "INSERT INTO backup_restore_stream_chunks VALUES(?1,?2,?3,?4,?5)",
+                    params![
+                        [3_u8; 16].as_slice(),
+                        [4_u8; 16].as_slice(),
+                        [source; 16].as_slice(),
+                        index,
+                        &bytes
+                    ],
+                )
+                .unwrap();
+                chunks.push(fixture.stage(&format!("chunk-{target}-{index}"), &bytes));
+            }
+            graph.streams.push(ReceivedCiphertextStream {
+                id: [target; 16],
+                header,
+                chunks,
+            });
+        }
+        assert_eq!(
+            crate::backup::restore_graph_digest(&tx, [3; 16], [4; 16], package).unwrap(),
+            graph_digest(&graph).unwrap()
+        );
+    }
+}
