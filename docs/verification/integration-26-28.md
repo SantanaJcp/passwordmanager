@@ -1,13 +1,14 @@
 # Integración 26–28 — composición y evidencia
 
-Fecha: 2026-10-03. Rol: merger; composición de candidatas publicadas, sin corrección de defectos abiertos ni cierre de tickets.
+Fecha: 2026-10-03. Rol original: merger de candidatas publicadas. La remediación posterior autorizada cierra únicamente dos regresiones de composición; no corrige los demás defectos abiertos ni cambia estados de tickets.
 
 ## Identidad y alcance
 
 Worktree: `.worktrees/integration-26-28`; rama `codex/pm-integration-26-28`.
 Base: `b3577d2f7a563df3e777380adf5cc120d1f7f9e0`.
-SHA final de código integrado: `6afa77c3090a87d296d8e676ccb4840ba6008f6f`.
-El informe se publica en un commit documental posterior: los runs nativos y los gates prueban ese SHA de código, no el SHA documental que contiene sus resultados.
+SHA de código tras los cuatro merges (corte inicial): `6afa77c3090a87d296d8e676ccb4840ba6008f6f`.
+SHA de código corregido: `3b1ec02e4bc085702aaa0e23d873d266fa77eae9`.
+Los commits documentales posteriores no cambian el código probado. Cada corrida se atribuye abajo a su SHA exacto; Windows se verificó en `9c9ab96`, con la misma corrección Windows conservada en `3b1ec02`.
 
 Las cuatro referencias locales y `origin` coincidían después de fetch y antes del primer merge. Se conservan esas ramas publicadas; cuatro merges, sin rebase/squash/force. No se movió `codex/implement-passwordmanager`, no se tocó la raíz sucia (`.gitignore`, `.pi/`, `odd/`), PR #1 ni sus reglas/base, ni se editaron estados de tickets.
 
@@ -271,3 +272,73 @@ baseline**, mismo único mismatch de TUI y ambos REDs conservados. Sync y las
 tres publicaciones PASS; cero raíces residuales nuevas en el inventario
 acotado. Resumen `/tmp/pmint2-20261003-fixed-local-summary.log` y detalle
 `/tmp/pmint2-20261003-fixed-local-results.json`. Diff y enlaces comprobados.
+
+### Resultado nativo del código corregido
+
+[macOS 37102206965](https://github.com/SantanaJcp/passwordmanager/actions/runs/37102206965),
+SHA exacto `3b1ec02e4bc085702aaa0e23d873d266fa77eae9`, **FAIL global terminado**.
+Jobs [Intel 111143806165](https://github.com/SantanaJcp/passwordmanager/actions/runs/37102206965/job/111143806165)
+y [Apple Silicon 111143806326](https://github.com/SantanaJcp/passwordmanager/actions/runs/37102206965/job/111143806326)
+terminaron FAIL, sin nueva regresión distinta de los FAIL conocidos.
+Input `pasteboard_diagnostic=true`, idéntico al run inicial de integración;
+binarios normales, sin el diagnóstico temporal de sync ni cambio del fixture.
+Logs `/tmp/pmint2-20261003-native-macos-fixed.log`, `-failed.log`, `-arm.log`
+y metadata `/tmp/pmint2-20261003-native-macos-fixed.json`.
+
+Ambos completan build/tests/Mach-O, control con conexión humana abierta,
+discovery concurrente, Ticket23, partial Ticket24, Full25-import,
+**readiness del proceso real de sync**, offline/wrong-pin y Full25-local.
+Superan el punto alcanzado por la candidata 26: también completan las
+negativas de destino existente de backup y plaintext. No se deduce ese PASS
+solo de la ausencia de una línea de error: la traza llega al wait de happy
+sync (`macos_tui_migration_lab.py:534`), posterior a ambas llamadas secuenciales
+de `expect_output_collision`, cuyo oráculo intacto exige rechazo explícito y
+digest original inalterado. La publicación exclusiva no se relajó.
+
+Después falla el wait original de 20 s de happy sync, con TUI viva y
+`durable=integrity screen=integrity process=same`. Ambos ya habían observado
+`items=1 pending-revisions=5 missing-items=5`; roots=0 en ambos, opaque blocks=1
+en ARM y 65 en Intel. Es la clase de fallo preexistente de sync/purge-outbox
+documentada en 26 y reproducida por el RED shared local, no una nueva pérdida
+de readiness. El número de bloques no es un oráculo de aceptación; no se
+declara una causa nueva por su variación. La atribución interna completa del
+fallo de exportación sigue fuera de esta remediación. No se alcanzan los
+grupos posteriores de mismo-job/status, closing endpoint, restart/idle/backoff,
+offline final y suspensión/restart finales. Cleanup estricto termina sin
+error adicional reportado; no acredita los Drops heredados ni cleanup integral.
+
+Entornos observados: macOS 15.7.9/kernel24.6.0, Rust1.98.1 nativo,
+`macos-15-intel` x86_64 (imagen `20260824.0482.1`) y `macos-15` arm64
+(`20260907.0337.1`). Windows: Windows11 Enterprise10.0.26200/build26200,
+`windows-11-vs2026-arm`, imagen `win11-vs2026-arm64 20260924.168.1`,
+host Rust1.98.1 ARM64 MSVC, libsodium1.0.22 autenticada/ARM64/MT. Preflight
+sigue siendo evidencia de entorno, no soporte ni aceptación de todo el producto.
+
+### Clasificación final y siguiente acción
+
+| Frontera | Resultado de esta remediación | Clasificación / límite |
+| --- | --- | --- |
+| Windows E0004 / cleanup de colisión | Match exhaustivo explícito; primary DestinationExists y lista de cleanup preservados; compila y llega al mismo preview que 27. | **Regresión de composición corregida.** Colisiones Windows no se ejecutan en la TUI porque el resumen bloquea antes; la seam exclusiva sí está conectada y compila. |
+| macOS rc4 anterior a readiness | Categoría nativa confirma guard del stream aceptado fatal al listener; una sola guarda por conexión y cliente. Ambos CPUs pasan readiness y más allá de 26. | **Regresión de composición corregida.** Rechazo de guard conserva cierre de esa conexión antes de TLS. |
+| Backup/plaintext destino existente macOS | Ambas negativas concluyen con digest original conservado en ambos CPUs. | **Fix shared preservado y ahora revalidado nativamente** en esos dos casos; no extensión de alcance ni validación Windows. |
+| Resumen de importación | Linux sigue fallando exact-duplicates=1; Windows exact-duplicates=0 en el preview, igual a 27. | **FAIL conocido; requiere decisión del usuario** sobre la presentación completa. Sin IMPORT ni grupos posteriores Windows. |
+| Purge/outbox y happy sync | RED local intacto; ambos Mac con cinco revisiones purgadas sin payload, integrity y cero roots. | **FAIL conocido; requiere decisión/autorización del workstream dueño.** Sin borrar headers/outbox ni modificar reducer/export. |
+| Segundo agente / proveedor | single-bootstrap sigue bloqueando segunda identidad y daemon ordinario sigue sin provider. | **Brechas conocidas, fuera de alcance**, sin engine ni proveedor sustituto. |
+| Clipboard Intel -1700 | No se reproduce en estas corridas con diagnóstico=true; control humano pre/post positivo, probe aislado nonzero sin canario. | **Pendiente conocido, no cerrado** por ausencia puntual ni por inputs distintos a la candidata 26. |
+| Vault-loss | RED local rc1 conservado, fuera del gate. | **FAIL conocido, fuera de alcance**; fallback SQLite intacto. |
+| Otros FAIL de composición | Ninguno observado tras comparar los puntos alcanzados, firmas de fallo y oráculos intactos. | Verificación acotada; no aceptación global ni cierre de tickets. |
+
+El diff final de producto frente a `15b83e7` toca únicamente `failure.rs` y
+`pm-sync/src/main.rs`; el fixture y workflows quedan idénticos a la base.
+Las dos barridas de 36 casos no empeoran el baseline. Se usaron dos corridas
+macOS (discriminante y corrección) y una Windows; las tres terminaron, sin
+repetición idéntica ni run propio activo. Pushes normales únicamente a la rama
+de integración, con el override de helper ya autorizado y bypass de permisos
+existentes; sin force, cambio de reglas, merge del PR ni avance de tickets.
+La rama unificada permanece en `b3577d2`; trabajo ajeno de la raíz preservado.
+
+Siguiente acción del orquestador: revisar/integrar esta remediación acotada sin
+fusionar el PR borrador #1. Resolver con el usuario las decisiones del resumen
+y purge/outbox antes de ampliar las matrices; los gates humanos/reboot/FDE,
+firma y targets no acreditados siguen pendientes. La aceptación global nativa
+continúa FAIL; las dos fronteras de regresión solicitadas sí están restauradas.
