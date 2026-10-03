@@ -2592,7 +2592,7 @@ Esta tabla sustituye la tabla de fase 5 y sólo actualiza evidencia; conserva
 | Bootstrap/audit ausentes con restart/ilegibilidad/restauración | PASS acotado heredado y regresión de función | audit, bootstrap completed, inflight, 7/7 función |
 | (2) Vault perdido completado/en vuelo/con custodio vivo e ilegibilidad | **PASS acotado Linux**, rechazo sin SQLite sustituto; primera creación conserva su camino | Tres RED/GREEN frescos de vault y función; incluido en gates |
 | (7) Retirada de bootstrap/audit con custodio vivo | **PASS acotado Linux**, nuevas admisiones cerradas, calls=1 | RED/GREEN inflight-live y gates |
-| (5) Categorías/propagación SSH y agente | **Pendiente**, sin RED/GREEN nuevo ni implementación | Inventario de fase 4; orden solicitado después de (6) |
+| (5) Categorías/propagación SSH y agente | **PASS enfocado Linux**; gates del candidato en ejecución | RED/GREEN y método W3 (5) al final; autorización posterior independiente de (6) |
 | Canarios/canales propios, activos/históricos y UID agente | PASS acotado de controles/scanner; cobertura global **no demostrada** | canaries/matrix/inflight frescos |
 | Purge/outbox de revisión purgada | **Pendiente de W2**, RED heredado no reejecutado ni corregido por W3 | Fase 5/integración; fuera de este workstream |
 | macOS/Windows, VirtualLock/WER, reboot/FDE, firma y aceptación humana | **Diferido/no acreditado**; seams del engine común preparadas | No CI nativa ejecutada por W3 |
@@ -2614,3 +2614,108 @@ Siguiente acción: resolver la composición durable de (6) conservando G4,
 observar su GREEN sin tocar el oráculo, continuar (5), repetir gates tras
 producto nuevo y entregar al merger/revisor independiente. W3 y G7 siguen
 **incompletos**.
+
+## W3 (5) — método acotado de errores SSH/agente, 2026-10-03
+
+El despacho posterior autoriza únicamente (5); (6) sigue pendiente de decisión.
+Se conservan el discovery inicial `[1]`, listener/dispatcher/admisión W4,
+TUI W1 y purge/sync W2. No hay categorías públicas nuevas del protocolo agente.
+`RESOURCE_UNAVAILABLE` ya está previsto por G7 §2.1; la frontera pública de
+custodia conserva `CUSTODY_UNAVAILABLE` y sus frames existentes.
+
+Método para (a): controles de frame y copia protegida pequeños antes de bajar
+RLIMIT_MEMLOCK sólo en un hijo de test; con límite cero, header completo sin
+body y copia de password deben conservar `RESOURCE_UNAVAILABLE`, separada de
+I/O. Método para (b): servidor SSH real, peer UID admitido y control de referencia
+inexistente `[1]`; luego errores de header o parseo deben retornar error en vez
+de desaparecer en el loop. Método para (c): se extrae sin cambiar comportamiento
+el loop de requests de `serve_agent`, después del discovery; errores de lectura,
+frame truncado/malformado y memoria deben terminar con error, nunca `Ok`.
+La clasificación interna debe conservar origen/fase sin imprimir mensajes del
+SO, payloads, rutas, destinos ni identificadores privados. Se comprueban también
+lecturas válidas, códigos públicos fijos y ausencia de canarios en diagnósticos.
+
+REDs sobre los seams heredados → GREENs enfocados → check/build limpio → los
+48 comandos de `/tmp/pmw3-resume-gate-results.json`, en secuencia y cada uno
+bajo `flock /tmp/pm-cargo-window.lock`, desde este worktree. Logs propios
+`/tmp/pmw3c-*.log`; artefactos Keycloak/CFT absolutos del despacho. Comparación
+por rc y causa, conservando los cuatro rc1 conocidos y cleanup errors=0.
+No se altera el oráculo de staging, el estado de tickets ni ningún otro fallback.
+
+### Inventario y cambio de (5)
+
+| Punto | Seam exacto heredado | Resultado del candidato |
+| --- | --- | --- |
+| (a) | `crates/pm-ssh-client/src/lib.rs::read_frame`, `authenticate` (copia de password), `serve` (brazo del proveedor) | `Error::Memory(CryptoError)` conserva la causa; `Display/Debug=RESOURCE_UNAVAILABLE`. El fallo sale tipado de `serve`, sin emitir frame3 que lo confundía con I/O/SSH. No lee body cuando falla el owner. |
+| (a), cadena del firmante | mismo archivo, `CustodySigner::auth_sign` → `authenticate_publickey_with` en `authenticate` | El `SignError` vacío y su conversión final a Protocol también perdían el fallo de `read_frame`. El firmante usa el mismo `Error` y conserva memoria/I/O/SendError hasta la frontera SSH. |
+| (b) | mismo archivo, `serve`, brazo consumer: `let Ok(read_frame) else continue` y parser `.ok()` | Lectura y `parse_consumer_reference` retornan error tipado desde `serve`; diagnóstico interno de causa y ninguna respuesta de éxito. Referencia inexistente conserva `[1]`. |
+| (c) | `crates/pm-custody/src/agent_wire.rs::serve_agent`, loop de lectura posterior al discovery | Loop extraído `serve_agent_requests`; `read_agent_frame` conserva I/O original y fase header/body, memoria y frame inválido. En la frontera existente registra sólo clasificación segura y retorna `Failure::Unavailable`, nunca `Ok` tras error. |
+
+`Error::Io`/`Ssh` conservan sus fuentes originales por `std::error::Error::source`.
+Los mensajes públicos/Debug contienen sólo códigos; logs internos tienen fase,
+ErrorKind, errno, categoría criptográfica o discriminante de russh de la versión
+fijada, nunca `Display/Debug` del I/O/SSH upstream. No se serializa una fuente
+upstream. `main.rs` sólo adapta la construcción del runtime al nuevo error I/O.
+La lectura agente conserva exactamente el límite heredado 18 MiB; SSH conserva
+128 KiB, IO_TIMEOUT, host-key pinning, métodos, checks y sus frames existentes.
+La propagación terminal en `serve` hace que el proceso SSH informe rc4/código
+fijo ante estos fallos; no añade reintentos ni reparación de conexiones.
+
+El discovery inicial de `serve_agent` sigue convirtiendo **cualquier** error de
+`DelegatedVault::discover` (storage/integridad/memoria incluidos) en `[1]`.
+Es separable: se preservó íntegramente su código previo al loop, sin corregirlo.
+Listener, dispatcher, admisión, handlers de intentos/proveedor, W1/W2/W4 y (6)
+no se modificaron. El clasificador `human_wire::FrameReadFailure` queda intacto.
+
+### RED/GREEN de (5)
+
+Desde este worktree, comandos completos (sin instalar ni usar red):
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-ssh-client --lib error_propagation_tests --locked --offline -- --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody --lib agent_wire::error_propagation_tests --locked --offline -- --nocapture
+```
+
+| Punto | RED conductual previo al cambio de producto | GREEN enfocado |
+| --- | --- | --- |
+| (a) | `/tmp/pmw3c-red-ssh.log`, rc101: controles válidos; frame y copia password con memlock=0 observan SSH_UNAVAILABLE | `/tmp/pmw3c-green-ssh-final.log`, rc0: ambos RESOURCE_UNAVAILABLE; control adicional del servidor retorna el mismo tipo antes de body |
+| (b) | mismo RED SSH, rc101: control `[1]` del servidor vivo, después header mayor al máximo descartado (`returned=false`) | mismo GREEN SSH, rc0: header, parseo y EOF parcial retornan error (`returned=true`), referencia desconocida mantiene `[1]` |
+| (c) | `/tmp/pmw3c-red-agent.log`, rc101: timeout del reader produce `success=true` en el loop real posterior al discovery | `/tmp/pmw3c-green-agent-final.log`, rc0: timeout/I/O/EOF/header/body truncados/frame inválido `success=false`; memoria tipada y lectura válida cubiertas adicionalmente |
+
+La extracción de `copy_password` y del loop conservó literalmente la semántica
+heredada para ejecutar los RED: no era una corrección previa ni fallo de setup.
+Los GREEN iniciales `green-ssh.log`/`green-agent.log` también se conservan; el
+segundo tenía un warning corregido sin cambiar comportamiento. El check inicial
+`/tmp/pmw3c-gate-final-check.log` pasó tests y falló únicamente en Clippy
+(semicolon/let-else/single-match); **no es RED conductual**. Las correcciones son
+de estilo, sin cambiar límites ni aserciones. Dos entradas `ignored` nuevas son
+hijos memlock ejecutados obligatoriamente por sus padres, no casos omitidos.
+Los controles adicionales de servidor, fuentes tipadas y canarios no se atribuyen
+como REDs separados. Los logs GREEN no contienen el password sintético ni el
+canario de path/payload del I/O; fixtures sockets propios restantes=0.
+
+### Fallbacks heredados adicionales inspeccionados
+
+- `pm-ssh-client::serve`, `channel_open_session`: ante error SSH devuelve `[1]`,
+  igual que referencia inexistente. Conserva ese contrato; ahora registra sólo
+  clasificación interna segura de la causa SSH. No se convierte en éxito.
+- `pm-ssh-client::consume`: cualquier respuesta diferente de `[0]` se convierte
+  en `AUTH_REJECTED`, incluidos frames inválidos. Conservado sin corrección.
+- `pm-ssh-client::Profile::read_installed`: errores de metadata/read se agrupan
+  en `INVALID_PROFILE`; el getter `Profile::value` devuelve `""` si falta la
+  clave. Conservados; parser cerrado y validaciones previas no cambian.
+- `CustodySigner` perdía fuentes en `SignError` y Protocol; se corrigió sólo la
+  cadena necesaria de (a). Sus owners Vec propios de firma no se migran aquí.
+
+Los demás fallbacks excluidos expresamente por el despacho siguen intactos.
+No se detecta necesidad de otra categoría pública del protocolo del agente.
+
+### Checkpoint publicado antes del barrido completo
+
+Tras las correcciones de estilo, `/tmp/pmw3c-gate2-final-check.log` termina rc0
+(38.290 s, incluye lock), fmt/check/test/clippy locked/offline.
+`/tmp/pmw3c-gate2-final-clean.log` termina rc0 (45.465 s, incluye lock), clean y
+build workspace/all-targets locked/offline. Producto y pruebas enfocados quedan
+verificados; el runner `/tmp/pmw3c-run-gates2.py` está ejecutando los otros 46
+comandos y conserva resultados por invocación, sin reutilizar logs.
+Este checkpoint no declara el barrido aceptado ni el cierre de W3/G7.

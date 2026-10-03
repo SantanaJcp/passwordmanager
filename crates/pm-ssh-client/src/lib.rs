@@ -180,12 +180,14 @@ fn hex_sha256(v: &str) -> bool {
             .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
 
-#[derive(Debug)]
 pub enum Error {
     Profile,
-    Io,
+    Io(std::io::Error),
     Protocol,
-    Ssh,
+    Ssh(russh::Error),
+    Memory(pm_crypto::CryptoError),
+    Random(aws_lc_rs::error::Unspecified),
+    SignerSend(russh::SendError),
     Unauthorized,
     Rejected,
     Challenge,
@@ -194,7 +196,8 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Profile => "INVALID_PROFILE",
-            Self::Io | Self::Ssh => "SSH_UNAVAILABLE",
+            Self::Io(_) | Self::Ssh(_) | Self::Random(_) | Self::SignerSend(_) => "SSH_UNAVAILABLE",
+            Self::Memory(_) => "RESOURCE_UNAVAILABLE",
             Self::Protocol => "PROTOCOL_ERROR",
             Self::Unauthorized => "UNAUTHORIZED",
             Self::Rejected => "AUTH_REJECTED",
@@ -202,15 +205,63 @@ impl fmt::Display for Error {
         })
     }
 }
-impl std::error::Error for Error {}
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Ssh(error) => Some(error),
+            Self::Memory(error) => Some(error),
+            Self::Random(error) => Some(error),
+            Self::SignerSend(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+impl Error {
+    fn log_internal(&self, boundary: &'static str) {
+        match self {
+            Self::Io(error) => eprintln!(
+                "PM_SSH_FAILURE boundary={boundary} category={self} cause=io kind={:?} os_code={:?}",
+                error.kind(),
+                error.raw_os_error()
+            ),
+            Self::Ssh(source) => {
+                eprintln!(
+                    "PM_SSH_FAILURE boundary={boundary} category={self} cause=ssh variant={:?}",
+                    std::mem::discriminant(source)
+                );
+            }
+            Self::Memory(source) => eprintln!(
+                "PM_SSH_FAILURE boundary={boundary} category={self} cause=protected-memory source={source:?}"
+            ),
+            Self::Random(_) => {
+                eprintln!("PM_SSH_FAILURE boundary={boundary} category={self} cause=random");
+            }
+            Self::SignerSend(_) => {
+                eprintln!("PM_SSH_FAILURE boundary={boundary} category={self} cause=signer-send");
+            }
+            _ => eprintln!("PM_SSH_FAILURE boundary={boundary} category={self}"),
+        }
+    }
+}
+impl From<russh::SendError> for Error {
+    fn from(error: russh::SendError) -> Self {
+        Self::SignerSend(error)
+    }
+}
 impl From<std::io::Error> for Error {
-    fn from(_: std::io::Error) -> Self {
-        Self::Io
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
     }
 }
 impl From<russh::Error> for Error {
-    fn from(_: russh::Error) -> Self {
-        Self::Ssh
+    fn from(error: russh::Error) -> Self {
+        Self::Ssh(error)
     }
 }
 impl From<ProfileError> for Error {
@@ -242,15 +293,8 @@ impl client::Handler for Verifier {
 struct CustodySigner<'a> {
     stream: &'a mut UnixStream,
 }
-#[derive(Debug)]
-struct SignError;
-impl From<russh::SendError> for SignError {
-    fn from(_: russh::SendError) -> Self {
-        Self
-    }
-}
 impl Signer for CustodySigner<'_> {
-    type Error = SignError;
+    type Error = Error;
     async fn auth_sign(
         &mut self,
         _key: &russh::keys::agent::AgentIdentity,
@@ -259,24 +303,22 @@ impl Signer for CustodySigner<'_> {
     ) -> Result<Vec<u8>, Self::Error> {
         if hash_alg.is_some() || to_sign.len() > MAX_FRAME - 5 {
             to_sign.zeroize();
-            return Err(SignError);
+            return Err(Error::Protocol);
         }
         let mut request = vec![6];
-        put_bytes(&mut request, &to_sign).map_err(|_| SignError)?;
-        write_frame(self.stream, &request)
-            .await
-            .map_err(|_| SignError)?;
+        put_bytes(&mut request, &to_sign)?;
+        write_frame(self.stream, &request).await?;
         request.zeroize();
-        let response = read_frame(self.stream).await.map_err(|_| SignError)?;
+        let response = read_frame(self.stream).await?;
         let mut cursor = Cursor::new(&response);
-        if cursor.byte().map_err(|_| SignError)? != 7 {
-            return Err(SignError);
+        if cursor.byte()? != 7 {
+            return Err(Error::Protocol);
         }
-        let signature = cursor.bytes().map_err(|_| SignError)?.to_vec();
-        cursor.finish().map_err(|_| SignError)?;
+        let signature = cursor.bytes()?.to_vec();
+        cursor.finish()?;
         to_sign.extend_from_slice(
             &u32::try_from(signature.len())
-                .map_err(|_| SignError)?
+                .map_err(|_| Error::Protocol)?
                 .to_be_bytes(),
         );
         to_sign.extend_from_slice(&signature);
@@ -312,15 +354,15 @@ pub async fn serve(
                     Err(Error::Challenge)=>{let mut r=vec![1];put_bytes(&mut r,b"additional_factor_required")?;write_frame(&mut stream,&r).await?;}
                     Err(Error::Rejected)=>write_frame(&mut stream,&[2,0,0,0,0]).await?,
                     Err(Error::Unauthorized|Error::Protocol|Error::Profile)=>write_frame(&mut stream,&[4,0,0,0,0]).await?,
-                    Err(Error::Io|Error::Ssh)=>write_frame(&mut stream,&[3,0,0,0,0]).await?,
+                    Err(error @ (Error::Io(_)|Error::Ssh(_)|Error::Random(_)|Error::SignerSend(_)))=>{error.log_internal("authentication");write_frame(&mut stream,&[3,0,0,0,0]).await?;}
+                    Err(error @ Error::Memory(_))=>{error.log_internal("authentication");return Err(error);},
                 }
             }
             accepted=consumer.accept()=>{
                 let(mut stream,_)=accepted?;if peer_uid(&stream)?!=profile.consumer_uid(){continue}
-                let Ok(request)=read_frame(&mut stream).await else{continue};let mut cursor=Cursor::new(&request);
-                let parsed=cursor.byte().ok().filter(|v|*v==1).and_then(|_|cursor.bytes().ok()).and_then(|v|std::str::from_utf8(v).ok()).filter(|_|cursor.finish().is_ok()).map(str::to_owned);
-                let Some(reference)=parsed else{continue};let Some(connection)=retained.get(&reference) else{write_frame(&mut stream,&[1]).await?;continue};
-                match connection.handle.channel_open_session().await{Ok(channel)=>{channel.close().await.map_err(|_|Error::Ssh)?;write_frame(&mut stream,&[0]).await?;}Err(_)=>write_frame(&mut stream,&[1]).await?,}
+                let request=read_frame(&mut stream).await.inspect_err(|error|error.log_internal("consumer-read"))?;
+                let reference=parse_consumer_reference(&request).inspect_err(|error|error.log_internal("consumer-parse"))?;let Some(connection)=retained.get(&reference) else{write_frame(&mut stream,&[1]).await?;continue};
+                match connection.handle.channel_open_session().await{Ok(channel)=>{channel.close().await.map_err(Error::from)?;write_frame(&mut stream,&[0]).await?;}Err(error)=>{Error::from(error).log_internal("consumer-channel");write_frame(&mut stream,&[1]).await?;}}
             }
         }
     }
@@ -387,7 +429,7 @@ async fn authenticate(
             {
                 Error::Rejected
             } else {
-                Error::Ssh
+                Error::Ssh(error)
             }
         })?;
     write_frame(stream, &[5, 0, 0, 0, 0]).await?;
@@ -397,8 +439,7 @@ async fn authenticate(
         if cursor.byte()? != 5 {
             return Err(Error::Protocol);
         }
-        let password =
-            pm_crypto::ProtectedBytes::copy_from_slice(cursor.bytes()?).map_err(|_| Error::Io)?;
+        let password = copy_password(cursor.bytes()?)?;
         cursor.finish()?;
         let text = std::str::from_utf8(&password)
             .map_err(|_| Error::Protocol)?
@@ -415,8 +456,7 @@ async fn authenticate(
                 None,
                 &mut signer,
             )
-            .await
-            .map_err(|_| Error::Protocol)?
+            .await?
     };
     match auth {
         client::AuthResult::Success => {
@@ -458,11 +498,20 @@ pub async fn consume(socket: &Path, reference: &str) -> Result<(), Error> {
         _ => Err(Error::Rejected),
     }
 }
+fn parse_consumer_reference(request: &[u8]) -> Result<String, Error> {
+    let mut cursor = Cursor::new(request);
+    if cursor.byte()? != 1 {
+        return Err(Error::Protocol);
+    }
+    let reference = cursor.text()?.to_owned();
+    cursor.finish()?;
+    Ok(reference)
+}
 fn random_reference() -> Result<String, Error> {
     let mut bytes = [0; 32];
     SystemRandom::new()
         .fill(&mut bytes)
-        .map_err(|_| Error::Io)?;
+        .map_err(Error::Random)?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 fn prepare_socket(path: &Path) -> Result<(), Error> {
@@ -481,7 +530,9 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, Error> {
     {
         let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
         let mut len =
-            libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).map_err(|_| Error::Io)?;
+            libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).map_err(|error| {
+                Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            })?;
         let rc = unsafe {
             libc::getsockopt(
                 stream.as_raw_fd(),
@@ -491,8 +542,14 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, Error> {
                 &raw mut len,
             )
         };
-        if rc != 0 || len as usize != std::mem::size_of::<libc::ucred>() {
-            return Err(Error::Io);
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        if len as usize != std::mem::size_of::<libc::ucred>() {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid native peer width",
+            )));
         }
         Ok(cred.uid)
     }
@@ -504,12 +561,18 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, Error> {
             // SAFETY: outputs are valid and stream is a connected Unix socket.
             libc::getpeereid(stream.as_raw_fd(), &raw mut uid, &raw mut gid)
         };
-        (rc == 0).then_some(uid).ok_or(Error::Io)
+        if rc == 0 {
+            Ok(uid)
+        } else {
+            Err(std::io::Error::last_os_error().into())
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = stream;
-        Err(Error::Io)
+        Err(Error::Io(std::io::Error::from(
+            std::io::ErrorKind::Unsupported,
+        )))
     }
 }
 async fn read_frame(stream: &mut UnixStream) -> Result<pm_crypto::ProtectedBytes, Error> {
@@ -517,9 +580,12 @@ async fn read_frame(stream: &mut UnixStream) -> Result<pm_crypto::ProtectedBytes
     if len == 0 || len > MAX_FRAME {
         return Err(Error::Protocol);
     }
-    let mut value = pm_crypto::ProtectedBytes::zeroed(len).map_err(|_| Error::Io)?;
+    let mut value = pm_crypto::ProtectedBytes::zeroed(len).map_err(Error::Memory)?;
     stream.read_exact(&mut value).await?;
     Ok(value)
+}
+fn copy_password(value: &[u8]) -> Result<pm_crypto::ProtectedBytes, Error> {
+    pm_crypto::ProtectedBytes::copy_from_slice(value).map_err(Error::Memory)
 }
 async fn write_frame(stream: &mut UnixStream, value: &[u8]) -> Result<(), Error> {
     if value.is_empty() || value.len() > MAX_FRAME {
@@ -583,3 +649,6 @@ impl<'a> Cursor<'a> {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod error_propagation_tests;
