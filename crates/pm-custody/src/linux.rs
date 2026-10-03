@@ -1737,7 +1737,14 @@ fn rpc_download_atomic(
             .map_err(|error: Failure| error.after_owned_path_cleanup(fs::remove_file(&temporary)));
     }
     drop(output);
-    fs::rename(&temporary, destination).map_err(|_| Failure::Unavailable)?;
+    if let Err(error) = pm_vault::publish_new_file(&temporary, destination) {
+        let failure = if error.kind() == std::io::ErrorKind::AlreadyExists {
+            Failure::DestinationExists
+        } else {
+            Failure::Unavailable
+        };
+        return Err(failure.after_owned_path_cleanup(fs::remove_file(&temporary)));
+    }
     File::open(destination.parent().ok_or(Failure::Unavailable)?)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| Failure::Unavailable)?;

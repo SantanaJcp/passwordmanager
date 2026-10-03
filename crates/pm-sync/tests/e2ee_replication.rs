@@ -435,6 +435,42 @@ const ITEM: [u8; 16] = [0x17; 16];
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn paged_download_never_replaces_an_existing_destination() {
+    let dir = TestDir::new();
+    let vault = dir.path("publication-vault.sqlite3");
+    persist(&vault);
+    let (human, _peer) = human(&vault, [0x64; 16], &test_audit_custody());
+    let pin = [0x65; 44];
+    let pairing = human.create_sync_pairing(pin).unwrap();
+    let namespace = *pairing.namespace();
+    let rpk = [0x66; 44];
+    let store = OpaqueSyncStore::create(&dir.path("publication-server.sqlite3")).unwrap();
+    store.authorize(namespace, &rpk).unwrap();
+    let replica = SyncReplica::new(&vault, pairing, rpk, pin).unwrap();
+    let transport = (&store, &rpk[..]);
+    let source = dir.path("source.bin");
+    fs::write(&source, b"synthetic pmshared incoming ciphertext").unwrap();
+    let root = replica.upload_paged_file(&transport, &source).unwrap();
+    let destination = dir.path("existing.bin");
+    let original = b"synthetic pmshared pre-existing valid ciphertext";
+    fs::write(&destination, original).unwrap();
+    let result = replica.download_paged_file(&transport, root, &destination);
+    assert!(
+        matches!(result, Err(SyncError::InvalidRequest)),
+        "collision must return a typed error: {result:?}"
+    );
+    assert_eq!(
+        pm_crypto::digest(&fs::read(&destination).unwrap()),
+        pm_crypto::digest(original)
+    );
+    assert!(
+        !destination
+            .with_extension(format!("sync-part-{}", process::id()))
+            .exists()
+    );
+}
+
+#[test]
 fn human_retirement_commits_every_observed_prefix_for_the_exact_device() {
     let owner_custody = test_audit_custody();
     let remote_custody = test_audit_custody();

@@ -778,7 +778,13 @@ impl SyncReplica {
             }
             file.sync_all().map_err(|_| SyncError::Unavailable)?;
             drop(file);
-            std::fs::rename(&temporary, output).map_err(|_| SyncError::Unavailable)
+            pm_vault::publish_new_file(&temporary, output).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    SyncError::InvalidRequest
+                } else {
+                    SyncError::Unavailable
+                }
+            })
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temporary);

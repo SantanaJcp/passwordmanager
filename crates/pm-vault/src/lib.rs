@@ -12,6 +12,7 @@ mod human;
 mod migration;
 mod onepux;
 mod passkey;
+mod publication;
 
 mod reducer;
 
@@ -49,6 +50,8 @@ pub use passkey::{
     PasskeyProvider, PasskeyPublicCredential, PasskeyRequest, PasskeyStatus,
     PreparedPasskeyRegistration, UserVerificationRequirement,
 };
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub use publication::publish_new_file;
 
 pub use reducer::{
     AcceptedPrefix, CausalEventBody, CausalEventDraft, CausalEventKind, CausalReducer,
