@@ -60,6 +60,7 @@ fn attempt_lease_memlock_helper() {
     keycloak_lease_fixture(true);
 }
 
+#[allow(clippy::too_many_lines)]
 fn keycloak_lease_fixture(deny_locked_output: bool) {
     use pm_vault::{AuthRecord, Destination, HumanMetadata, TotpAlgorithm};
 
@@ -83,18 +84,20 @@ fn keycloak_lease_fixture(deny_locked_output: bool) {
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![
             AuthRecord::Password {
                 username: "alice".to_owned(),
-                password,
+                password: pm_crypto::ProtectedBytes::copy_from_slice(&password)
+                    .expect("synthetic password"),
                 destination_refs: vec![0],
             },
             AuthRecord::Totp {
-                secret: b"12345678901234567890".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"12345678901234567890")
+                    .expect("synthetic protected field"),
                 algorithm: TotpAlgorithm::Sha1,
                 digits: 6,
                 period: 30,
@@ -1153,13 +1156,14 @@ fn password_record() -> LogicalRecord {
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![AuthRecord::Password {
             username: "synthetic-ticket-07-user".to_owned(),
-            password: SECRET.to_vec(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(SECRET)
+                .expect("synthetic protected field"),
             destination_refs: vec![0],
         }],
         Vec::new(),
@@ -1179,13 +1183,14 @@ fn system_password_record() -> LogicalRecord {
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![AuthRecord::Password {
             username: "pmssh".to_owned(),
-            password: b"synthetic-system-password".to_vec(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(b"synthetic-system-password")
+                .expect("synthetic protected field"),
             destination_refs: vec![0],
         }],
         Vec::new(),
@@ -1205,17 +1210,21 @@ fn ssh_record() -> LogicalRecord {
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![AuthRecord::Ssh {
             private_format: PrivateKeyFormat::OpenSsh,
-            private_key: b"synthetic-openssh-private".to_vec(),
+            private_key: pm_crypto::ProtectedBytes::copy_from_slice(b"synthetic-openssh-private")
+                .expect("synthetic protected field"),
             public_key: b"ssh-ed25519 synthetic-public".to_vec(),
             username: "pmssh".to_owned(),
             destination_refs: vec![0],
-            passphrase: Some(b"synthetic-passphrase".to_vec()),
+            passphrase: Some(
+                pm_crypto::ProtectedBytes::copy_from_slice(b"synthetic-passphrase")
+                    .expect("synthetic passphrase"),
+            ),
         }],
         Vec::new(),
     )
@@ -1234,14 +1243,20 @@ fn exchange_record() -> LogicalRecord {
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![AuthRecord::TokenExchange {
-            subject_token: b"synthetic-subject-token-A-canary".to_vec(),
+            subject_token: pm_crypto::ProtectedBytes::copy_from_slice(
+                b"synthetic-subject-token-A-canary",
+            )
+            .expect("synthetic protected field"),
             requester_client_id: "pm-exchanger".to_owned(),
-            requester_client_secret: b"synthetic-requester-secret-canary".to_vec(),
+            requester_client_secret: pm_crypto::ProtectedBytes::copy_from_slice(
+                b"synthetic-requester-secret-canary",
+            )
+            .expect("synthetic protected field"),
             provider: "keycloak".to_owned(),
             profile_id: "keycloak-exchange-lab".to_owned(),
             destination_refs: vec![0],
@@ -1264,12 +1279,13 @@ fn github_token_record() -> LogicalRecord {
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![AuthRecord::Token {
-            secret: b"synthetic-github-pat-canary".to_vec(),
+            secret: pm_crypto::ProtectedBytes::copy_from_slice(b"synthetic-github-pat-canary")
+                .expect("synthetic protected field"),
             provider: "github".to_owned(),
             profile_id: "github-assigned-issues/1".to_owned(),
             destination_refs: vec![0],
@@ -1289,7 +1305,8 @@ fn note_record() -> LogicalRecord {
             destinations: Vec::new(),
             tags: Vec::new(),
             favorite: false,
-            notes: "not delegated".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("not delegated")
+                .expect("synthetic protected notes"),
             fields: Vec::new(),
             source_fields: Vec::new(),
         },

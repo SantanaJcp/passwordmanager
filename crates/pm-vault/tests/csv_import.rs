@@ -55,9 +55,12 @@ fn chrome_apple_and_mappable_csv_preserve_unicode_unknowns_and_require_signed_co
     commit(&mut vault, staged.prepared());
     let record = vault.read_record(item).unwrap();
     assert_eq!(record.human().title, "Cuenta, 🔐");
-    assert_eq!(record.human().notes, "linea 1\nlinea 2");
+    assert_eq!(&*record.human().notes, "linea 1\nlinea 2");
     assert_eq!(record.human().source_fields[0].path, "Future Column");
-    assert_eq!(record.human().source_fields[0].value, b"future-value");
+    assert_eq!(
+        record.human().source_fields[0].value.as_ref(),
+        b"future-value"
+    );
     let apple_map = CsvMapping::new(
         CsvDelimiter::Comma,
         CsvEncoding::Utf8,

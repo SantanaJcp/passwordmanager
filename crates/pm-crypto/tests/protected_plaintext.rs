@@ -29,6 +29,15 @@ fn run_helper(name: &str) {
         .env_clear()
         .output()
         .expect("start isolated memlock helper");
+    if name == "inline_file_memlock_helper" {
+        assert!(
+            output
+                .stdout
+                .windows(b"PM28_INLINE_FILE_CONTROL_READY".len())
+                .any(|v| v == b"PM28_INLINE_FILE_CONTROL_READY"),
+            "inline file control missing"
+        );
+    }
     if !output.status.success() {
         let marker = format!("PM28_RED:{name}:UNLOCKED_OUTPUT_ACCEPTED");
         if output
@@ -147,4 +156,41 @@ fn reserve_all_but_one_mebibyte() -> Vec<ProtectedBytes> {
     );
     drop(owners.pop());
     owners
+}
+
+#[test]
+fn inline_file_plaintext_requires_locked_output() {
+    run_helper("inline_file_memlock_helper");
+}
+
+#[test]
+#[ignore = "executed by inline_file_plaintext_requires_locked_output"]
+fn inline_file_memlock_helper() {
+    static CANARY: [u8; 4 * 1024 * 1024] = [0x5a; 4 * 1024 * 1024];
+    let created = create_human_root(PASSWORD, KdfProfile::confirmed(64, 3).unwrap()).unwrap();
+    let unlocked = open_human_root(created.bundle(), PASSWORD).unwrap();
+    let small = unlocked
+        .seal_file([28; 16], [29; 16], HUMAN)
+        .unwrap()
+        .to_bytes();
+    let large = unlocked
+        .seal_file([30; 16], [31; 16], &CANARY)
+        .unwrap()
+        .to_bytes();
+    let pressure = reserve_all_but_one_mebibyte();
+    let control = unlocked
+        .open_file([28; 16], [29; 16], &small)
+        .expect("small inline file control");
+    assert_eq!(&control[..], HUMAN);
+    drop(control);
+    println!("PM28_INLINE_FILE_CONTROL_READY");
+    match unlocked.open_file([30; 16], [31; 16], &large) {
+        Err(CryptoError::ResourceUnavailable) => {}
+        Ok(_) => {
+            eprintln!("PM28_RED:inline_file_memlock_helper:UNLOCKED_OUTPUT_ACCEPTED");
+            panic!("ordinary inline file destination accepted");
+        }
+        Err(error) => panic!("unexpected inline file error: {error}"),
+    }
+    drop(pressure);
 }

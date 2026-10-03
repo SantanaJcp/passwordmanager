@@ -5,10 +5,11 @@
 use std::collections::BTreeMap;
 
 use minicbor::{Decoder, Encoder, data::Type};
-use pm_crypto::{ItemKind, ProtectedBytes, digest};
-use zeroize::Zeroize;
+use pm_crypto::{CryptoError, ItemKind, ProtectedBytes, ProtectedText, digest};
 
 use crate::human::HumanCommitError;
+use zeroize::Zeroize;
+type PlainEncoder<'a> = Encoder<&'a mut dyn minicbor::encode::Write<Error = CryptoError>>;
 
 pub(crate) const MAX_LOGICAL_RECORD: usize = 16 * 1024 * 1024;
 const MAX_TITLE: usize = 1024;
@@ -79,13 +80,13 @@ pub struct Destination {
     pub value: String,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub enum LogicalValue {
-    Text(String),
-    Bytes(Vec<u8>),
+    Text(ProtectedText),
+    Bytes(ProtectedBytes),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct CustomField {
     pub id: [u8; 16],
     pub label: String,
@@ -119,20 +120,20 @@ impl SourceEncoding {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct SourceField {
     pub path: String,
     pub encoding: SourceEncoding,
-    pub value: Vec<u8>,
+    pub value: ProtectedBytes,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct HumanMetadata {
     pub title: String,
     pub destinations: Vec<Destination>,
     pub tags: Vec<String>,
     pub favorite: bool,
-    pub notes: String,
+    pub notes: ProtectedText,
     pub fields: Vec<CustomField>,
     pub source_fields: Vec<SourceField>,
 }
@@ -186,15 +187,15 @@ impl PrivateKeyFormat {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub enum AuthRecord {
     Password {
         username: String,
-        password: Vec<u8>,
+        password: ProtectedBytes,
         destination_refs: Vec<u16>,
     },
     Totp {
-        secret: Vec<u8>,
+        secret: ProtectedBytes,
         algorithm: TotpAlgorithm,
         digits: u8,
         period: u16,
@@ -208,7 +209,7 @@ pub enum AuthRecord {
         user_handle: Vec<u8>,
         credential_id: Vec<u8>,
         cose_alg: i64,
-        private_key: [u8; 32],
+        private_key: ProtectedBytes,
         public_key: [u8; 32],
         user_name: String,
         display_name: String,
@@ -218,14 +219,14 @@ pub enum AuthRecord {
     },
     Ssh {
         private_format: PrivateKeyFormat,
-        private_key: Vec<u8>,
+        private_key: ProtectedBytes,
         public_key: Vec<u8>,
         username: String,
         destination_refs: Vec<u16>,
-        passphrase: Option<Vec<u8>>,
+        passphrase: Option<ProtectedBytes>,
     },
     Token {
-        secret: Vec<u8>,
+        secret: ProtectedBytes,
         provider: String,
         profile_id: String,
         destination_refs: Vec<u16>,
@@ -236,9 +237,9 @@ pub enum AuthRecord {
     /// human-created authorization object prevents agent-selected auxiliary
     /// credentials or an ambient client secret.
     TokenExchange {
-        subject_token: Vec<u8>,
+        subject_token: ProtectedBytes,
         requester_client_id: String,
-        requester_client_secret: Vec<u8>,
+        requester_client_secret: ProtectedBytes,
         provider: String,
         profile_id: String,
         destination_refs: Vec<u16>,
@@ -246,14 +247,14 @@ pub enum AuthRecord {
     },
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Attachment {
     id: [u8; 16],
     name: String,
     mime: String,
     size: u64,
     sha256: [u8; 32],
-    content: Vec<u8>,
+    content: ProtectedBytes,
 }
 
 impl Attachment {
@@ -297,7 +298,7 @@ impl Attachment {
             mime: mime.to_owned(),
             size,
             sha256,
-            content: content.to_vec(),
+            content: ProtectedBytes::copy_from_slice(content)?,
         })
     }
 
@@ -321,7 +322,7 @@ impl Attachment {
             mime: mime.to_owned(),
             size,
             sha256,
-            content: Vec::new(),
+            content: ProtectedBytes::zeroed(0)?,
         })
     }
 
@@ -351,7 +352,7 @@ impl Attachment {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct LogicalRecord {
     kind: RecordKind,
     human: HumanMetadata,
@@ -540,33 +541,33 @@ impl LogicalRecord {
 
     /// Encodes the complete human-channel representation, including file bytes.
     ///
-    /// # Panics
-    /// Only if the in-memory `Vec` encoder cannot write, which is uninhabited;
-    /// allocation failure follows Rust's process-level behavior.
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let human = self.encode_human();
-        let auth = self.encode_auth();
-        let mut encoder = Encoder::new(Vec::new());
-        encoder.map(4).unwrap();
-        key(&mut encoder, "v");
-        encoder.u8(1).unwrap();
-        key(&mut encoder, "human");
-        encoder.bytes(&human).unwrap();
-        key(&mut encoder, "auth");
-        encode_optional_bytes(&mut encoder, auth.as_deref());
-        key(&mut encoder, "attachments");
-        encoder
-            .array(u64::try_from(self.attachments.len()).unwrap())
-            .unwrap();
-        for attachment in &self.attachments {
-            encoder.map(2).unwrap();
-            key(&mut encoder, "id");
-            encoder.bytes(&attachment.id).unwrap();
-            key(&mut encoder, "content");
-            encoder.bytes(&attachment.content).unwrap();
-        }
-        encoder.into_writer()
+    /// # Errors
+    /// Propagates unavailable protected storage or inconsistent encoding size.
+    pub fn to_bytes(&self) -> Result<ProtectedBytes, HumanCommitError> {
+        let human = self.encode_human()?;
+        let auth = self.encode_auth()?;
+        crate::plaintext::encode(MAX_LOGICAL_RECORD * 2, |writer| {
+            let mut encoder = Encoder::new(writer);
+            encoder.map(4).map_err(invalid)?;
+            key(&mut encoder, "v")?;
+            encoder.u8(1).map_err(invalid)?;
+            key(&mut encoder, "human")?;
+            encoder.bytes(&human).map_err(invalid)?;
+            key(&mut encoder, "auth")?;
+            encode_optional_bytes(&mut encoder, auth.as_deref())?;
+            key(&mut encoder, "attachments")?;
+            encoder
+                .array(u64::try_from(self.attachments.len()).map_err(invalid)?)
+                .map_err(invalid)?;
+            for attachment in &self.attachments {
+                encoder.map(2).map_err(invalid)?;
+                key(&mut encoder, "id")?;
+                encoder.bytes(&attachment.id).map_err(invalid)?;
+                key(&mut encoder, "content")?;
+                encoder.bytes(&attachment.content).map_err(invalid)?;
+            }
+            Ok(())
+        })
     }
 
     /// Strictly decodes a complete human-channel record.
@@ -584,7 +585,7 @@ impl LogicalRecord {
             return Err(HumanCommitError::InvalidInput);
         }
         expect_key(&mut decoder, "human")?;
-        let human = decoder.bytes().map_err(invalid)?.to_vec();
+        let human = decoder.bytes().map_err(invalid)?;
         expect_key(&mut decoder, "auth")?;
         let auth = decode_optional_bytes(&mut decoder)?;
         expect_key(&mut decoder, "attachments")?;
@@ -595,18 +596,18 @@ impl LogicalRecord {
             expect_key(&mut decoder, "id")?;
             let id = fixed(&mut decoder)?;
             expect_key(&mut decoder, "content")?;
-            let content = decoder.bytes().map_err(invalid)?.to_vec();
+            let content = ProtectedBytes::copy_from_slice(decoder.bytes().map_err(invalid)?)?;
             contents.push((id, content));
         }
         if decoder.position() != bytes.len() {
             return Err(HumanCommitError::InvalidInput);
         }
-        let mut record = Self::decode_parts(&human, auth.as_deref())?;
+        let mut record = Self::decode_parts(human, auth)?;
         for (id, content) in contents {
             record.restore_attachment(id, content)?;
         }
         record.validate()?;
-        if record.to_bytes() != bytes {
+        if record.to_bytes()?.as_ref() != bytes {
             return Err(HumanCommitError::InvalidInput);
         }
         Ok(record)
@@ -614,22 +615,22 @@ impl LogicalRecord {
 
     /// Encodes metadata/auth only for the chunked human transport.
     ///
-    /// # Panics
-    /// The in-memory CBOR writer has an uninhabited encoder error; allocation failure
-    /// follows Rust's process-level behavior.
-    #[must_use]
-    pub fn to_descriptor_bytes(&self) -> Vec<u8> {
-        let human = self.encode_human();
-        let auth = self.encode_auth();
-        let mut encoder = Encoder::new(Vec::new());
-        encoder.map(3).unwrap();
-        key(&mut encoder, "v");
-        encoder.u8(1).unwrap();
-        key(&mut encoder, "human");
-        encoder.bytes(&human).unwrap();
-        key(&mut encoder, "auth");
-        encode_optional_bytes(&mut encoder, auth.as_deref());
-        encoder.into_writer()
+    /// # Errors
+    /// Propagates unavailable protected storage or inconsistent encoding size.
+    pub fn to_descriptor_bytes(&self) -> Result<ProtectedBytes, HumanCommitError> {
+        let human = self.encode_human()?;
+        let auth = self.encode_auth()?;
+        crate::plaintext::encode(MAX_LOGICAL_RECORD, |writer| {
+            let mut encoder = Encoder::new(writer);
+            encoder.map(3).map_err(invalid)?;
+            key(&mut encoder, "v")?;
+            encoder.u8(1).map_err(invalid)?;
+            key(&mut encoder, "human")?;
+            encoder.bytes(&human).map_err(invalid)?;
+            key(&mut encoder, "auth")?;
+            encode_optional_bytes(&mut encoder, auth.as_deref())?;
+            Ok(())
+        })
     }
 
     /// Decodes metadata/auth only for the chunked human transport.
@@ -644,18 +645,18 @@ impl LogicalRecord {
             return Err(HumanCommitError::InvalidInput);
         }
         expect_key(&mut d, "human")?;
-        let human = d.bytes().map_err(invalid)?.to_vec();
+        let human = d.bytes().map_err(invalid)?;
         expect_key(&mut d, "auth")?;
         let auth = decode_optional_bytes(&mut d)?;
         if d.position() != bytes.len() {
             return Err(HumanCommitError::InvalidInput);
         }
-        let record = Self::decode_parts(&human, auth.as_deref())?;
+        let record = Self::decode_parts(human, auth)?;
         if record
             .attachments
             .iter()
             .any(|value| !value.content.is_empty())
-            || record.to_descriptor_bytes() != bytes
+            || record.to_descriptor_bytes()?.as_ref() != bytes
         {
             return Err(HumanCommitError::InvalidInput);
         }
@@ -700,13 +701,13 @@ impl LogicalRecord {
     pub(crate) fn attachment_inputs(&self) -> impl Iterator<Item = ([u8; 16], &[u8])> {
         self.attachments
             .iter()
-            .map(|value| (value.id, value.content.as_slice()))
+            .map(|value| (value.id, value.content.as_ref()))
     }
 
     pub(crate) fn restore_attachment(
         &mut self,
         id: [u8; 16],
-        content: Vec<u8>,
+        content: ProtectedBytes,
     ) -> Result<(), HumanCommitError> {
         let attachment = self
             .attachments
@@ -749,44 +750,51 @@ impl LogicalRecord {
         self.validate_shape(false)
     }
 
-    pub(crate) fn encode_human(&self) -> Vec<u8> {
-        let mut encoder = Encoder::new(Vec::new());
-        encoder.map(10).unwrap();
-        key(&mut encoder, "v");
-        encoder.u8(1).unwrap();
-        key(&mut encoder, "kind");
-        encoder.str(self.kind.name()).unwrap();
-        key(&mut encoder, "title");
-        encoder.str(&self.human.title).unwrap();
-        key(&mut encoder, "destinations");
-        encode_destinations(&mut encoder, &self.human.destinations);
-        key(&mut encoder, "tags");
-        encode_strings(&mut encoder, &self.human.tags);
-        key(&mut encoder, "favorite");
-        encoder.bool(self.human.favorite).unwrap();
-        key(&mut encoder, "notes");
-        encoder.str(&self.human.notes).unwrap();
-        key(&mut encoder, "fields");
-        encode_fields(&mut encoder, &self.human.fields);
-        key(&mut encoder, "source_fields");
-        encode_source_fields(&mut encoder, &self.human.source_fields);
-        key(&mut encoder, "attachments");
-        encode_attachment_metadata(&mut encoder, &self.attachments);
-        encoder.into_writer()
+    pub(crate) fn encode_human(&self) -> Result<ProtectedBytes, HumanCommitError> {
+        crate::plaintext::encode(MAX_LOGICAL_RECORD, |writer| {
+            let mut encoder = Encoder::new(writer);
+            encoder.map(10).map_err(invalid)?;
+            key(&mut encoder, "v")?;
+            encoder.u8(1).map_err(invalid)?;
+            key(&mut encoder, "kind")?;
+            encoder.str(self.kind.name()).map_err(invalid)?;
+            key(&mut encoder, "title")?;
+            encoder.str(&self.human.title).map_err(invalid)?;
+            key(&mut encoder, "destinations")?;
+            encode_destinations(&mut encoder, &self.human.destinations)?;
+            key(&mut encoder, "tags")?;
+            encode_strings(&mut encoder, &self.human.tags)?;
+            key(&mut encoder, "favorite")?;
+            encoder.bool(self.human.favorite).map_err(invalid)?;
+            key(&mut encoder, "notes")?;
+            encoder.str(&self.human.notes).map_err(invalid)?;
+            key(&mut encoder, "fields")?;
+            encode_fields(&mut encoder, &self.human.fields)?;
+            key(&mut encoder, "source_fields")?;
+            encode_source_fields(&mut encoder, &self.human.source_fields)?;
+            key(&mut encoder, "attachments")?;
+            encode_attachment_metadata(&mut encoder, &self.attachments)?;
+            Ok(())
+        })
     }
 
-    pub(crate) fn encode_auth(&self) -> Option<Vec<u8>> {
+    pub(crate) fn encode_auth(&self) -> Result<Option<ProtectedBytes>, HumanCommitError> {
         if self.auth.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let mut encoder = Encoder::new(Vec::new());
-        encoder
-            .array(u64::try_from(self.auth.len()).unwrap())
-            .unwrap();
-        for auth in &self.auth {
-            encode_auth(&mut encoder, auth);
-        }
-        Some(encoder.into_writer())
+        Ok(Some(crate::plaintext::encode(
+            MAX_LOGICAL_RECORD,
+            |writer| {
+                let mut encoder = Encoder::new(writer);
+                encoder
+                    .array(u64::try_from(self.auth.len()).map_err(invalid)?)
+                    .map_err(invalid)?;
+                for auth in &self.auth {
+                    encode_auth(&mut encoder, auth)?;
+                }
+                Ok(())
+            },
+        )?))
     }
 
     pub(crate) fn decode_parts(
@@ -802,8 +810,8 @@ impl LogicalRecord {
             attachments,
         };
         record.validate_shape(false)?;
-        if record.encode_human().as_slice() != human_bytes
-            || record.encode_auth().as_deref() != auth_bytes
+        if record.encode_human()?.as_ref() != human_bytes
+            || record.encode_auth()?.as_deref() != auth_bytes
         {
             return Err(HumanCommitError::InvalidInput);
         }
@@ -868,59 +876,15 @@ impl LogicalRecord {
         {
             return Err(HumanCommitError::InvalidInput);
         }
-        let logical_size = self.encode_human().len() + self.encode_auth().map_or(0, |v| v.len());
+        let logical_size = self
+            .encode_human()?
+            .len()
+            .checked_add(self.encode_auth()?.map_or(0, |v| v.len()))
+            .ok_or(HumanCommitError::InvalidInput)?;
         if logical_size > MAX_LOGICAL_RECORD {
             return Err(HumanCommitError::InvalidInput);
         }
         Ok(())
-    }
-}
-
-impl Drop for LogicalRecord {
-    fn drop(&mut self) {
-        self.human.notes.zeroize();
-        for field in &mut self.human.fields {
-            match &mut field.value {
-                LogicalValue::Text(v) => v.zeroize(),
-                LogicalValue::Bytes(v) => v.zeroize(),
-            }
-        }
-        for field in &mut self.human.source_fields {
-            field.value.zeroize();
-        }
-        for auth in &mut self.auth {
-            match auth {
-                AuthRecord::Password { password, .. }
-                | AuthRecord::Totp {
-                    secret: password, ..
-                }
-                | AuthRecord::Token {
-                    secret: password, ..
-                } => password.zeroize(),
-                AuthRecord::TokenExchange {
-                    subject_token,
-                    requester_client_secret,
-                    ..
-                } => {
-                    subject_token.zeroize();
-                    requester_client_secret.zeroize();
-                }
-                AuthRecord::Passkey { private_key, .. } => private_key.zeroize(),
-                AuthRecord::Ssh {
-                    private_key,
-                    passphrase,
-                    ..
-                } => {
-                    private_key.zeroize();
-                    if let Some(value) = passphrase {
-                        value.zeroize();
-                    }
-                }
-            }
-        }
-        for attachment in &mut self.attachments {
-            attachment.content.zeroize();
-        }
     }
 }
 
@@ -985,6 +949,7 @@ fn valid_auth(auth: &AuthRecord, destinations: usize) -> bool {
             user_handle,
             credential_id,
             cose_alg,
+            private_key,
             user_name,
             display_name,
             ..
@@ -993,6 +958,7 @@ fn valid_auth(auth: &AuthRecord, destinations: usize) -> bool {
                 && user_handle.len() <= 64
                 && (1..=1024).contains(&credential_id.len())
                 && *cose_alg == -8
+                && private_key.len() == 32
                 && user_name.len() <= MAX_FIELD
                 && display_name.len() <= MAX_FIELD
         }
@@ -1051,111 +1017,152 @@ fn is_closed_identifier(value: &str, max: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn key(encoder: &mut Encoder<Vec<u8>>, value: &str) {
-    encoder.str(value).unwrap();
+fn key(encoder: &mut PlainEncoder<'_>, value: &str) -> Result<(), HumanCommitError> {
+    encoder.str(value).map_err(invalid)?;
+
+    Ok(())
 }
 
-fn encode_strings(encoder: &mut Encoder<Vec<u8>>, values: &[String]) {
-    encoder.array(u64::try_from(values.len()).unwrap()).unwrap();
+fn encode_strings(
+    encoder: &mut PlainEncoder<'_>,
+    values: &[String],
+) -> Result<(), HumanCommitError> {
+    encoder
+        .array(u64::try_from(values.len()).map_err(invalid)?)
+        .map_err(invalid)?;
     for value in values {
-        encoder.str(value).unwrap();
+        encoder.str(value).map_err(invalid)?;
     }
+
+    Ok(())
 }
 
-fn encode_destinations(encoder: &mut Encoder<Vec<u8>>, values: &[Destination]) {
-    encoder.array(u64::try_from(values.len()).unwrap()).unwrap();
+fn encode_destinations(
+    encoder: &mut PlainEncoder<'_>,
+    values: &[Destination],
+) -> Result<(), HumanCommitError> {
+    encoder
+        .array(u64::try_from(values.len()).map_err(invalid)?)
+        .map_err(invalid)?;
     for value in values {
-        encoder.map(2).unwrap();
-        key(encoder, "label");
-        encoder.str(&value.label).unwrap();
-        key(encoder, "value");
-        encoder.str(&value.value).unwrap();
+        encoder.map(2).map_err(invalid)?;
+        key(encoder, "label")?;
+        encoder.str(&value.label).map_err(invalid)?;
+        key(encoder, "value")?;
+        encoder.str(&value.value).map_err(invalid)?;
     }
+
+    Ok(())
 }
 
-fn encode_fields(encoder: &mut Encoder<Vec<u8>>, values: &[CustomField]) {
-    encoder.array(u64::try_from(values.len()).unwrap()).unwrap();
+fn encode_fields(
+    encoder: &mut PlainEncoder<'_>,
+    values: &[CustomField],
+) -> Result<(), HumanCommitError> {
+    encoder
+        .array(u64::try_from(values.len()).map_err(invalid)?)
+        .map_err(invalid)?;
     for value in values {
-        encoder.map(5).unwrap();
-        key(encoder, "id");
-        encoder.bytes(&value.id).unwrap();
-        key(encoder, "label");
-        encoder.str(&value.label).unwrap();
-        key(encoder, "encoding");
+        encoder.map(5).map_err(invalid)?;
+        key(encoder, "id")?;
+        encoder.bytes(&value.id).map_err(invalid)?;
+        key(encoder, "label")?;
+        encoder.str(&value.label).map_err(invalid)?;
+        key(encoder, "encoding")?;
         encoder
             .str(match value.value {
                 LogicalValue::Text(_) => "utf8",
                 LogicalValue::Bytes(_) => "bytes",
             })
-            .unwrap();
-        key(encoder, "value");
+            .map_err(invalid)?;
+        key(encoder, "value")?;
         match &value.value {
             LogicalValue::Text(v) => {
-                encoder.str(v).unwrap();
+                encoder.str(v).map_err(invalid)?;
             }
             LogicalValue::Bytes(v) => {
-                encoder.bytes(v).unwrap();
+                encoder.bytes(v).map_err(invalid)?;
             }
         }
-        key(encoder, "concealed");
-        encoder.bool(value.concealed).unwrap();
+        key(encoder, "concealed")?;
+        encoder.bool(value.concealed).map_err(invalid)?;
     }
+
+    Ok(())
 }
 
-fn encode_source_fields(encoder: &mut Encoder<Vec<u8>>, values: &[SourceField]) {
-    encoder.array(u64::try_from(values.len()).unwrap()).unwrap();
+fn encode_source_fields(
+    encoder: &mut PlainEncoder<'_>,
+    values: &[SourceField],
+) -> Result<(), HumanCommitError> {
+    encoder
+        .array(u64::try_from(values.len()).map_err(invalid)?)
+        .map_err(invalid)?;
     for value in values {
-        encoder.map(3).unwrap();
-        key(encoder, "path");
-        encoder.str(&value.path).unwrap();
-        key(encoder, "encoding");
-        encoder.str(value.encoding.name()).unwrap();
-        key(encoder, "value");
-        encoder.bytes(&value.value).unwrap();
+        encoder.map(3).map_err(invalid)?;
+        key(encoder, "path")?;
+        encoder.str(&value.path).map_err(invalid)?;
+        key(encoder, "encoding")?;
+        encoder.str(value.encoding.name()).map_err(invalid)?;
+        key(encoder, "value")?;
+        encoder.bytes(&value.value).map_err(invalid)?;
     }
+
+    Ok(())
 }
 
-fn encode_attachment_metadata(encoder: &mut Encoder<Vec<u8>>, values: &[Attachment]) {
-    encoder.array(u64::try_from(values.len()).unwrap()).unwrap();
+fn encode_attachment_metadata(
+    encoder: &mut PlainEncoder<'_>,
+    values: &[Attachment],
+) -> Result<(), HumanCommitError> {
+    encoder
+        .array(u64::try_from(values.len()).map_err(invalid)?)
+        .map_err(invalid)?;
     for value in values {
-        encoder.map(5).unwrap();
-        key(encoder, "id");
-        encoder.bytes(&value.id).unwrap();
-        key(encoder, "name");
-        encoder.str(&value.name).unwrap();
-        key(encoder, "mime");
-        encoder.str(&value.mime).unwrap();
-        key(encoder, "size");
-        encoder.u64(value.size).unwrap();
-        key(encoder, "sha256");
-        encoder.bytes(&value.sha256).unwrap();
+        encoder.map(5).map_err(invalid)?;
+        key(encoder, "id")?;
+        encoder.bytes(&value.id).map_err(invalid)?;
+        key(encoder, "name")?;
+        encoder.str(&value.name).map_err(invalid)?;
+        key(encoder, "mime")?;
+        encoder.str(&value.mime).map_err(invalid)?;
+        key(encoder, "size")?;
+        encoder.u64(value.size).map_err(invalid)?;
+        key(encoder, "sha256")?;
+        encoder.bytes(&value.sha256).map_err(invalid)?;
     }
+
+    Ok(())
 }
 
-fn encode_refs(encoder: &mut Encoder<Vec<u8>>, refs: &[u16]) {
-    encoder.array(u64::try_from(refs.len()).unwrap()).unwrap();
+fn encode_refs(encoder: &mut PlainEncoder<'_>, refs: &[u16]) -> Result<(), HumanCommitError> {
+    encoder
+        .array(u64::try_from(refs.len()).map_err(invalid)?)
+        .map_err(invalid)?;
     for value in refs {
-        encoder.u16(*value).unwrap();
+        encoder.u16(*value).map_err(invalid)?;
     }
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
-fn encode_auth(encoder: &mut Encoder<Vec<u8>>, auth: &AuthRecord) {
+fn encode_auth(encoder: &mut PlainEncoder<'_>, auth: &AuthRecord) -> Result<(), HumanCommitError> {
     match auth {
         AuthRecord::Password {
             username,
             password,
             destination_refs,
         } => {
-            encoder.map(4).unwrap();
-            key(encoder, "method");
-            encoder.str("password").unwrap();
-            key(encoder, "username");
-            encoder.str(username).unwrap();
-            key(encoder, "password");
-            encoder.bytes(password).unwrap();
-            key(encoder, "destination_refs");
-            encode_refs(encoder, destination_refs);
+            encoder.map(4).map_err(invalid)?;
+            key(encoder, "method")?;
+            encoder.str("password").map_err(invalid)?;
+            key(encoder, "username")?;
+            encoder.str(username).map_err(invalid)?;
+            key(encoder, "password")?;
+            encoder.bytes(password).map_err(invalid)?;
+            key(encoder, "destination_refs")?;
+            encode_refs(encoder, destination_refs)?;
         }
         AuthRecord::Totp {
             secret,
@@ -1167,25 +1174,25 @@ fn encode_auth(encoder: &mut Encoder<Vec<u8>>, auth: &AuthRecord) {
             account,
             destination_refs,
         } => {
-            encoder.map(9).unwrap();
-            key(encoder, "method");
-            encoder.str("totp").unwrap();
-            key(encoder, "secret");
-            encoder.bytes(secret).unwrap();
-            key(encoder, "algorithm");
-            encoder.str(algorithm.name()).unwrap();
-            key(encoder, "digits");
-            encoder.u8(*digits).unwrap();
-            key(encoder, "period");
-            encoder.u16(*period).unwrap();
-            key(encoder, "t0");
-            encoder.u64(*t0).unwrap();
-            key(encoder, "issuer");
-            encoder.str(issuer).unwrap();
-            key(encoder, "account");
-            encoder.str(account).unwrap();
-            key(encoder, "destination_refs");
-            encode_refs(encoder, destination_refs);
+            encoder.map(9).map_err(invalid)?;
+            key(encoder, "method")?;
+            encoder.str("totp").map_err(invalid)?;
+            key(encoder, "secret")?;
+            encoder.bytes(secret).map_err(invalid)?;
+            key(encoder, "algorithm")?;
+            encoder.str(algorithm.name()).map_err(invalid)?;
+            key(encoder, "digits")?;
+            encoder.u8(*digits).map_err(invalid)?;
+            key(encoder, "period")?;
+            encoder.u16(*period).map_err(invalid)?;
+            key(encoder, "t0")?;
+            encoder.u64(*t0).map_err(invalid)?;
+            key(encoder, "issuer")?;
+            encoder.str(issuer).map_err(invalid)?;
+            key(encoder, "account")?;
+            encoder.str(account).map_err(invalid)?;
+            key(encoder, "destination_refs")?;
+            encode_refs(encoder, destination_refs)?;
         }
         AuthRecord::Passkey {
             rp_id,
@@ -1200,31 +1207,31 @@ fn encode_auth(encoder: &mut Encoder<Vec<u8>>, auth: &AuthRecord) {
             backup_eligible,
             backup_state,
         } => {
-            encoder.map(12).unwrap();
-            key(encoder, "method");
-            encoder.str("passkey").unwrap();
-            key(encoder, "rp_id");
-            encoder.str(rp_id).unwrap();
-            key(encoder, "user_handle");
-            encoder.bytes(user_handle).unwrap();
-            key(encoder, "credential_id");
-            encoder.bytes(credential_id).unwrap();
-            key(encoder, "cose_alg");
-            encoder.i64(*cose_alg).unwrap();
-            key(encoder, "private_key");
-            encoder.bytes(private_key).unwrap();
-            key(encoder, "public_key");
-            encoder.bytes(public_key).unwrap();
-            key(encoder, "user_name");
-            encoder.str(user_name).unwrap();
-            key(encoder, "display_name");
-            encoder.str(display_name).unwrap();
-            key(encoder, "sign_count");
-            encoder.u32(*sign_count).unwrap();
-            key(encoder, "backup_eligible");
-            encoder.bool(*backup_eligible).unwrap();
-            key(encoder, "backup_state");
-            encoder.bool(*backup_state).unwrap();
+            encoder.map(12).map_err(invalid)?;
+            key(encoder, "method")?;
+            encoder.str("passkey").map_err(invalid)?;
+            key(encoder, "rp_id")?;
+            encoder.str(rp_id).map_err(invalid)?;
+            key(encoder, "user_handle")?;
+            encoder.bytes(user_handle).map_err(invalid)?;
+            key(encoder, "credential_id")?;
+            encoder.bytes(credential_id).map_err(invalid)?;
+            key(encoder, "cose_alg")?;
+            encoder.i64(*cose_alg).map_err(invalid)?;
+            key(encoder, "private_key")?;
+            encoder.bytes(private_key).map_err(invalid)?;
+            key(encoder, "public_key")?;
+            encoder.bytes(public_key).map_err(invalid)?;
+            key(encoder, "user_name")?;
+            encoder.str(user_name).map_err(invalid)?;
+            key(encoder, "display_name")?;
+            encoder.str(display_name).map_err(invalid)?;
+            key(encoder, "sign_count")?;
+            encoder.u32(*sign_count).map_err(invalid)?;
+            key(encoder, "backup_eligible")?;
+            encoder.bool(*backup_eligible).map_err(invalid)?;
+            key(encoder, "backup_state")?;
+            encoder.bool(*backup_state).map_err(invalid)?;
         }
         AuthRecord::Ssh {
             private_format,
@@ -1234,21 +1241,21 @@ fn encode_auth(encoder: &mut Encoder<Vec<u8>>, auth: &AuthRecord) {
             destination_refs,
             passphrase,
         } => {
-            encoder.map(7).unwrap();
-            key(encoder, "method");
-            encoder.str("ssh").unwrap();
-            key(encoder, "private_format");
-            encoder.str(private_format.name()).unwrap();
-            key(encoder, "private_key");
-            encoder.bytes(private_key).unwrap();
-            key(encoder, "public_key");
-            encoder.bytes(public_key).unwrap();
-            key(encoder, "username");
-            encoder.str(username).unwrap();
-            key(encoder, "destination_refs");
-            encode_refs(encoder, destination_refs);
-            key(encoder, "passphrase");
-            encode_optional_bytes(encoder, passphrase.as_deref());
+            encoder.map(7).map_err(invalid)?;
+            key(encoder, "method")?;
+            encoder.str("ssh").map_err(invalid)?;
+            key(encoder, "private_format")?;
+            encoder.str(private_format.name()).map_err(invalid)?;
+            key(encoder, "private_key")?;
+            encoder.bytes(private_key).map_err(invalid)?;
+            key(encoder, "public_key")?;
+            encoder.bytes(public_key).map_err(invalid)?;
+            key(encoder, "username")?;
+            encoder.str(username).map_err(invalid)?;
+            key(encoder, "destination_refs")?;
+            encode_refs(encoder, destination_refs)?;
+            key(encoder, "passphrase")?;
+            encode_optional_bytes(encoder, passphrase.as_deref())?;
         }
         AuthRecord::Token {
             secret,
@@ -1257,22 +1264,22 @@ fn encode_auth(encoder: &mut Encoder<Vec<u8>>, auth: &AuthRecord) {
             destination_refs,
             expires_at,
         } => {
-            encoder.map(6).unwrap();
-            key(encoder, "method");
-            encoder.str("token").unwrap();
-            key(encoder, "secret");
-            encoder.bytes(secret).unwrap();
-            key(encoder, "provider");
-            encoder.str(provider).unwrap();
-            key(encoder, "profile_id");
-            encoder.str(profile_id).unwrap();
-            key(encoder, "destination_refs");
-            encode_refs(encoder, destination_refs);
-            key(encoder, "expires_at");
+            encoder.map(6).map_err(invalid)?;
+            key(encoder, "method")?;
+            encoder.str("token").map_err(invalid)?;
+            key(encoder, "secret")?;
+            encoder.bytes(secret).map_err(invalid)?;
+            key(encoder, "provider")?;
+            encoder.str(provider).map_err(invalid)?;
+            key(encoder, "profile_id")?;
+            encoder.str(profile_id).map_err(invalid)?;
+            key(encoder, "destination_refs")?;
+            encode_refs(encoder, destination_refs)?;
+            key(encoder, "expires_at")?;
             if let Some(value) = expires_at {
-                encoder.i64(*value).unwrap();
+                encoder.i64(*value).map_err(invalid)?;
             } else {
-                encoder.null().unwrap();
+                encoder.null().map_err(invalid)?;
             }
         }
         AuthRecord::TokenExchange {
@@ -1284,29 +1291,31 @@ fn encode_auth(encoder: &mut Encoder<Vec<u8>>, auth: &AuthRecord) {
             destination_refs,
             expires_at,
         } => {
-            encoder.map(8).unwrap();
-            key(encoder, "method");
-            encoder.str("token_exchange").unwrap();
-            key(encoder, "subject_token");
-            encoder.bytes(subject_token).unwrap();
-            key(encoder, "requester_client_id");
-            encoder.str(requester_client_id).unwrap();
-            key(encoder, "requester_client_secret");
-            encoder.bytes(requester_client_secret).unwrap();
-            key(encoder, "provider");
-            encoder.str(provider).unwrap();
-            key(encoder, "profile_id");
-            encoder.str(profile_id).unwrap();
-            key(encoder, "destination_refs");
-            encode_refs(encoder, destination_refs);
-            key(encoder, "expires_at");
+            encoder.map(8).map_err(invalid)?;
+            key(encoder, "method")?;
+            encoder.str("token_exchange").map_err(invalid)?;
+            key(encoder, "subject_token")?;
+            encoder.bytes(subject_token).map_err(invalid)?;
+            key(encoder, "requester_client_id")?;
+            encoder.str(requester_client_id).map_err(invalid)?;
+            key(encoder, "requester_client_secret")?;
+            encoder.bytes(requester_client_secret).map_err(invalid)?;
+            key(encoder, "provider")?;
+            encoder.str(provider).map_err(invalid)?;
+            key(encoder, "profile_id")?;
+            encoder.str(profile_id).map_err(invalid)?;
+            key(encoder, "destination_refs")?;
+            encode_refs(encoder, destination_refs)?;
+            key(encoder, "expires_at")?;
             if let Some(value) = expires_at {
-                encoder.i64(*value).unwrap();
+                encoder.i64(*value).map_err(invalid)?;
             } else {
-                encoder.null().unwrap();
+                encoder.null().map_err(invalid)?;
             }
         }
     }
+
+    Ok(())
 }
 
 fn decode_human(
@@ -1329,7 +1338,7 @@ fn decode_human(
     expect_key(&mut d, "favorite")?;
     let favorite = d.bool().map_err(invalid)?;
     expect_key(&mut d, "notes")?;
-    let notes = d.str().map_err(invalid)?.to_owned();
+    let notes = ProtectedText::copy_from_str(d.str().map_err(invalid)?)?;
     expect_key(&mut d, "fields")?;
     let fields = decode_fields(&mut d)?;
     expect_key(&mut d, "source_fields")?;
@@ -1386,7 +1395,7 @@ fn decode_auth(d: &mut Decoder<'_>) -> Result<AuthRecord, HumanCommitError> {
             expect_key(d, "username")?;
             let username = d.str().map_err(invalid)?.to_owned();
             expect_key(d, "password")?;
-            let password = d.bytes().map_err(invalid)?.to_vec();
+            let password = ProtectedBytes::copy_from_slice(d.bytes().map_err(invalid)?)?;
             expect_key(d, "destination_refs")?;
             Ok(AuthRecord::Password {
                 username,
@@ -1396,7 +1405,7 @@ fn decode_auth(d: &mut Decoder<'_>) -> Result<AuthRecord, HumanCommitError> {
         }
         "totp" if fields == 9 => {
             expect_key(d, "secret")?;
-            let secret = d.bytes().map_err(invalid)?.to_vec();
+            let secret = ProtectedBytes::copy_from_slice(d.bytes().map_err(invalid)?)?;
             expect_key(d, "algorithm")?;
             let algorithm = TotpAlgorithm::parse(d.str().map_err(invalid)?)?;
             expect_key(d, "digits")?;
@@ -1431,7 +1440,11 @@ fn decode_auth(d: &mut Decoder<'_>) -> Result<AuthRecord, HumanCommitError> {
             expect_key(d, "cose_alg")?;
             let cose_alg = d.i64().map_err(invalid)?;
             expect_key(d, "private_key")?;
-            let private_key = fixed(d)?;
+            let private_key_bytes = d.bytes().map_err(invalid)?;
+            if private_key_bytes.len() != 32 {
+                return Err(HumanCommitError::InvalidInput);
+            }
+            let private_key = ProtectedBytes::copy_from_slice(private_key_bytes)?;
             expect_key(d, "public_key")?;
             let public_key = fixed(d)?;
             expect_key(d, "user_name")?;
@@ -1462,7 +1475,7 @@ fn decode_auth(d: &mut Decoder<'_>) -> Result<AuthRecord, HumanCommitError> {
             expect_key(d, "private_format")?;
             let private_format = PrivateKeyFormat::parse(d.str().map_err(invalid)?)?;
             expect_key(d, "private_key")?;
-            let private_key = d.bytes().map_err(invalid)?.to_vec();
+            let private_key = ProtectedBytes::copy_from_slice(d.bytes().map_err(invalid)?)?;
             expect_key(d, "public_key")?;
             let public_key = d.bytes().map_err(invalid)?.to_vec();
             expect_key(d, "username")?;
@@ -1470,7 +1483,9 @@ fn decode_auth(d: &mut Decoder<'_>) -> Result<AuthRecord, HumanCommitError> {
             expect_key(d, "destination_refs")?;
             let destination_refs = decode_refs(d)?;
             expect_key(d, "passphrase")?;
-            let passphrase = decode_optional_bytes(d)?;
+            let passphrase = decode_optional_bytes(d)?
+                .map(ProtectedBytes::copy_from_slice)
+                .transpose()?;
             Ok(AuthRecord::Ssh {
                 private_format,
                 private_key,
@@ -1482,7 +1497,7 @@ fn decode_auth(d: &mut Decoder<'_>) -> Result<AuthRecord, HumanCommitError> {
         }
         "token" if fields == 6 => {
             expect_key(d, "secret")?;
-            let secret = d.bytes().map_err(invalid)?.to_vec();
+            let secret = ProtectedBytes::copy_from_slice(d.bytes().map_err(invalid)?)?;
             expect_key(d, "provider")?;
             let provider = d.str().map_err(invalid)?.to_owned();
             expect_key(d, "profile_id")?;
@@ -1506,11 +1521,12 @@ fn decode_auth(d: &mut Decoder<'_>) -> Result<AuthRecord, HumanCommitError> {
         }
         "token_exchange" if fields == 8 => {
             expect_key(d, "subject_token")?;
-            let subject_token = d.bytes().map_err(invalid)?.to_vec();
+            let subject_token = ProtectedBytes::copy_from_slice(d.bytes().map_err(invalid)?)?;
             expect_key(d, "requester_client_id")?;
             let requester_client_id = d.str().map_err(invalid)?.to_owned();
             expect_key(d, "requester_client_secret")?;
-            let requester_client_secret = d.bytes().map_err(invalid)?.to_vec();
+            let requester_client_secret =
+                ProtectedBytes::copy_from_slice(d.bytes().map_err(invalid)?)?;
             expect_key(d, "provider")?;
             let provider = d.str().map_err(invalid)?.to_owned();
             expect_key(d, "profile_id")?;
@@ -1570,8 +1586,10 @@ fn decode_fields(d: &mut Decoder<'_>) -> Result<Vec<CustomField>, HumanCommitErr
         let encoding = d.str().map_err(invalid)?;
         expect_key(d, "value")?;
         let value = match encoding {
-            "utf8" => LogicalValue::Text(d.str().map_err(invalid)?.to_owned()),
-            "bytes" => LogicalValue::Bytes(d.bytes().map_err(invalid)?.to_vec()),
+            "utf8" => LogicalValue::Text(ProtectedText::copy_from_str(d.str().map_err(invalid)?)?),
+            "bytes" => LogicalValue::Bytes(ProtectedBytes::copy_from_slice(
+                d.bytes().map_err(invalid)?,
+            )?),
             _ => return Err(HumanCommitError::InvalidInput),
         };
         expect_key(d, "concealed")?;
@@ -1595,7 +1613,7 @@ fn decode_source_fields(d: &mut Decoder<'_>) -> Result<Vec<SourceField>, HumanCo
         expect_key(d, "encoding")?;
         let encoding = SourceEncoding::parse(d.str().map_err(invalid)?)?;
         expect_key(d, "value")?;
-        let value = d.bytes().map_err(invalid)?.to_vec();
+        let value = ProtectedBytes::copy_from_slice(d.bytes().map_err(invalid)?)?;
         values.push(SourceField {
             path,
             encoding,
@@ -1625,7 +1643,7 @@ fn decode_attachment_metadata(d: &mut Decoder<'_>) -> Result<Vec<Attachment>, Hu
             mime,
             size,
             sha256,
-            content: Vec::new(),
+            content: ProtectedBytes::zeroed(0)?,
         });
     }
     Ok(values)
@@ -1634,20 +1652,25 @@ fn decode_refs(d: &mut Decoder<'_>) -> Result<Vec<u16>, HumanCommitError> {
     let len = array_len(d)?;
     (0..len).map(|_| d.u16().map_err(invalid)).collect()
 }
-fn decode_optional_bytes(d: &mut Decoder<'_>) -> Result<Option<Vec<u8>>, HumanCommitError> {
+fn decode_optional_bytes<'a>(d: &mut Decoder<'a>) -> Result<Option<&'a [u8]>, HumanCommitError> {
     if d.datatype().map_err(invalid)? == Type::Null {
         d.null().map_err(invalid)?;
         Ok(None)
     } else {
-        Ok(Some(d.bytes().map_err(invalid)?.to_vec()))
+        Ok(Some(d.bytes().map_err(invalid)?))
     }
 }
-fn encode_optional_bytes(e: &mut Encoder<Vec<u8>>, value: Option<&[u8]>) {
+fn encode_optional_bytes(
+    e: &mut PlainEncoder<'_>,
+    value: Option<&[u8]>,
+) -> Result<(), HumanCommitError> {
     if let Some(v) = value {
-        e.bytes(v).unwrap();
+        e.bytes(v).map_err(invalid)?;
     } else {
-        e.null().unwrap();
+        e.null().map_err(invalid)?;
     }
+
+    Ok(())
 }
 fn array_len(d: &mut Decoder<'_>) -> Result<usize, HumanCommitError> {
     usize::try_from(
@@ -1679,4 +1702,84 @@ fn fixed<const N: usize>(d: &mut Decoder<'_>) -> Result<[u8; N], HumanCommitErro
 }
 fn invalid<T>(_: T) -> HumanCommitError {
     HumanCommitError::InvalidInput
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod protected_record_tests {
+    use super::*;
+    use pm_crypto::CryptoError;
+    use std::process::Command;
+
+    static CANARY: [u8; 512 * 1024] = [b'Z'; 512 * 1024];
+
+    fn auth_bytes(secret: &[u8]) -> Vec<u8> {
+        let mut e = Encoder::new(Vec::new());
+        e.map(4).unwrap();
+        e.str("method").unwrap().str("password").unwrap();
+        e.str("username").unwrap().str("PM28 synthetic").unwrap();
+        e.str("password").unwrap().bytes(secret).unwrap();
+        e.str("destination_refs").unwrap().array(0).unwrap();
+        e.into_writer()
+    }
+
+    #[test]
+    fn decoded_auth_requires_locked_destination() {
+        if std::env::var_os("PM28_AUTH_RECORD_CHILD").is_some() {
+            // Wire fixture is prepared before pressure; the destination is the subject.
+            let small = auth_bytes(b"PM28_SMALL");
+            let large = auth_bytes(&CANARY);
+            let limit = libc::rlimit {
+                rlim_cur: 128 * 1024,
+                rlim_max: 128 * 1024,
+            };
+            // SAFETY: this isolated child changes only its own process limit.
+            assert_eq!(
+                unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const limit) },
+                0
+            );
+            let control = decode_auth(&mut Decoder::new(&small)).expect("small auth control");
+            assert!(
+                matches!(&control, AuthRecord::Password { password, .. } if &password[..] == b"PM28_SMALL")
+            );
+            drop(control);
+            println!("PM28_AUTH_RECORD_CONTROL_READY");
+            assert!(
+                matches!(
+                    decode_auth(&mut Decoder::new(&large)),
+                    Err(HumanCommitError::Crypto(CryptoError::ResourceUnavailable))
+                ),
+                "ordinary decoded auth accepted under denied memlock"
+            );
+            println!("PM28_AUTH_RECORD_LOCK_DENIED");
+            return;
+        }
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "content::protected_record_tests::decoded_auth_requires_locked_destination",
+                "--nocapture",
+            ])
+            .env("PM28_AUTH_RECORD_CHILD", "1")
+            .output()
+            .expect("isolated auth child");
+        assert!(
+            output
+                .stdout
+                .windows(b"PM28_AUTH_RECORD_CONTROL_READY".len())
+                .any(|v| v == b"PM28_AUTH_RECORD_CONTROL_READY"),
+            "auth control marker missing"
+        );
+        println!("PM28_AUTH_RECORD_CONTROL_READY");
+        assert!(
+            output.status.success(),
+            "ordinary decoded auth accepted after control"
+        );
+        assert!(
+            output
+                .stdout
+                .windows(b"PM28_AUTH_RECORD_LOCK_DENIED".len())
+                .any(|v| v == b"PM28_AUTH_RECORD_LOCK_DENIED"),
+            "auth denial marker missing"
+        );
+    }
 }

@@ -727,22 +727,54 @@ pub(crate) fn encode_g5_event(input: &G5EventInput<'_>) -> Vec<u8> {
     e.into_writer()
 }
 
-pub(crate) fn encode_credential(value: &DelegatedCredential, auth: &[u8]) -> Vec<u8> {
-    let mut e = Encoder::new(Vec::new());
-    e.map(7).unwrap();
-    e.str("item_id").unwrap().bytes(&value.item_id).unwrap();
-    e.str("revision_id")
-        .unwrap()
-        .bytes(&value.revision_id)
-        .unwrap();
-    e.str("kind").unwrap().str(value.kind.name()).unwrap();
-    e.str("title").unwrap().str(&value.title).unwrap();
-    e.str("destination").unwrap();
-    optional_string(&mut e, value.destination.as_deref());
-    e.str("account").unwrap();
-    optional_string(&mut e, value.account.as_deref());
-    e.str("auth").unwrap().bytes(auth).unwrap();
-    e.into_writer()
+pub(crate) fn encode_credential(
+    value: &DelegatedCredential,
+    auth: &[u8],
+) -> Result<ProtectedBytes, crate::HumanCommitError> {
+    crate::plaintext::encode(16 * 1024 * 1024, |writer| {
+        let mut e = Encoder::new(writer);
+        e.map(7)
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        e.str("item_id")
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?
+            .bytes(&value.item_id)
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        e.str("revision_id")
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?
+            .bytes(&value.revision_id)
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        e.str("kind")
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?
+            .str(value.kind.name())
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        e.str("title")
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?
+            .str(&value.title)
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        e.str("destination")
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        if let Some(text) = value.destination.as_deref() {
+            e.str(text)
+                .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        } else {
+            e.null()
+                .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        }
+        e.str("account")
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        if let Some(text) = value.account.as_deref() {
+            e.str(text)
+                .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        } else {
+            e.null()
+                .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        }
+        e.str("auth")
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?
+            .bytes(auth)
+            .map_err(|_| crate::HumanCommitError::InvalidInput)?;
+        Ok(())
+    })
 }
 
 pub(crate) fn new_credential(
@@ -797,7 +829,16 @@ fn decode_operational_credential(
         destination,
         account,
     };
-    if encode_credential(&descriptor, auth) != bytes {
+    if encode_credential(&descriptor, auth)
+        .map_err(|error| match error {
+            crate::HumanCommitError::Crypto(error) => {
+                AuthorizationError::Vault(VaultError::Crypto(error))
+            }
+            _ => AuthorizationError::Integrity,
+        })?
+        .as_ref()
+        != bytes
+    {
         return Err(AuthorizationError::Integrity);
     }
     let auth = ProtectedBytes::copy_from_slice(auth)
@@ -907,13 +948,6 @@ fn expect_key(d: &mut Decoder<'_>, key: &str) -> Result<(), AuthorizationError> 
 fn optional_bytes(e: &mut Encoder<Vec<u8>>, v: Option<&[u8]>) {
     if let Some(v) = v {
         e.bytes(v).unwrap();
-    } else {
-        e.null().unwrap();
-    }
-}
-fn optional_string(e: &mut Encoder<Vec<u8>>, v: Option<&str>) {
-    if let Some(v) = v {
-        e.str(v).unwrap();
     } else {
         e.null().unwrap();
     }

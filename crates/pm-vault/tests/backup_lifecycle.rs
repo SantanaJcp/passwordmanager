@@ -448,8 +448,8 @@ fn native_restore_preserves_every_logical_record_type_and_private_field() {
     expected.sort_by(|left, right| left.human().title.cmp(&right.human().title));
     for (restored, source) in observed.iter().zip(&expected) {
         assert_eq!(restored.kind(), source.kind());
-        assert_eq!(restored.human(), source.human());
-        assert_eq!(restored.auth(), source.auth());
+        assert!(restored.human().eq(source.human()));
+        assert!(restored.auth().eq(source.auth()));
         assert_eq!(restored.attachments().len(), source.attachments().len());
         for (restored, source) in restored.attachments().iter().zip(source.attachments()) {
             assert_ne!(restored.id(), source.id());
@@ -508,7 +508,8 @@ fn password_record(title: &str, password: &[u8]) -> LogicalRecord {
         metadata(title),
         vec![AuthRecord::Password {
             username: "backup-user".to_owned(),
-            password: password.to_vec(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(password)
+                .expect("synthetic protected field"),
             destination_refs: vec![0],
         }],
         vec![],
@@ -516,13 +517,17 @@ fn password_record(title: &str, password: &[u8]) -> LogicalRecord {
     .unwrap()
 }
 
+#[allow(clippy::too_many_lines)]
 fn all_type_records() -> Vec<LogicalRecord> {
     let human = |title: &str| {
         let mut value = metadata(title);
         value.source_fields.push(SourceField {
             path: "synthetic.private.unknown".to_owned(),
             encoding: SourceEncoding::Bytes,
-            value: format!("ticket21-source-{title}").into_bytes(),
+            value: pm_crypto::ProtectedBytes::copy_from_slice(
+                format!("ticket21-source-{title}").as_bytes(),
+            )
+            .expect("synthetic source"),
         });
         value
     };
@@ -532,7 +537,8 @@ fn all_type_records() -> Vec<LogicalRecord> {
             human("1-password"),
             vec![AuthRecord::Password {
                 username: "backup-user".to_owned(),
-                password: b"ticket21-password".to_vec(),
+                password: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket21-password")
+                    .expect("synthetic protected field"),
                 destination_refs: vec![0],
             }],
             vec![],
@@ -542,7 +548,8 @@ fn all_type_records() -> Vec<LogicalRecord> {
             RecordKind::Totp,
             human("2-totp"),
             vec![AuthRecord::Totp {
-                secret: b"ticket21-totp".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket21-totp")
+                    .expect("synthetic protected field"),
                 algorithm: TotpAlgorithm::Sha512,
                 digits: 8,
                 period: 45,
@@ -562,7 +569,8 @@ fn all_type_records() -> Vec<LogicalRecord> {
                 user_handle: b"ticket21-user".to_vec(),
                 credential_id: b"ticket21-credential".to_vec(),
                 cose_alg: -8,
-                private_key: [0x21; 32],
+                private_key: pm_crypto::ProtectedBytes::copy_from_slice(&([0x21; 32]))
+                    .expect("synthetic protected field"),
                 public_key: [0x22; 32],
                 user_name: "backup".to_owned(),
                 display_name: "Backup Fixture".to_owned(),
@@ -578,11 +586,17 @@ fn all_type_records() -> Vec<LogicalRecord> {
             human("4-ssh"),
             vec![AuthRecord::Ssh {
                 private_format: PrivateKeyFormat::OpenSsh,
-                private_key: b"ticket21-synthetic-ssh-private".to_vec(),
+                private_key: pm_crypto::ProtectedBytes::copy_from_slice(
+                    b"ticket21-synthetic-ssh-private",
+                )
+                .expect("synthetic protected field"),
                 public_key: b"ssh-ed25519 ticket21-synthetic".to_vec(),
                 username: "backup".to_owned(),
                 destination_refs: vec![0],
-                passphrase: Some(b"ticket21-passphrase".to_vec()),
+                passphrase: Some(
+                    pm_crypto::ProtectedBytes::copy_from_slice(b"ticket21-passphrase")
+                        .expect("synthetic passphrase"),
+                ),
             }],
             vec![],
         )
@@ -591,7 +605,8 @@ fn all_type_records() -> Vec<LogicalRecord> {
             RecordKind::Token,
             human("5-token"),
             vec![AuthRecord::Token {
-                secret: b"ticket21-token".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket21-token")
+                    .expect("synthetic protected field"),
                 provider: "synthetic".to_owned(),
                 profile_id: "ticket21-profile".to_owned(),
                 destination_refs: vec![0],
@@ -628,7 +643,8 @@ fn metadata(title: &str) -> HumanMetadata {
         }],
         tags: vec!["respaldo".to_owned()],
         favorite: true,
-        notes: "ticket21-private-note-canary".to_owned(),
+        notes: pm_crypto::ProtectedText::copy_from_str("ticket21-private-note-canary")
+            .expect("synthetic protected notes"),
         fields: vec![],
         source_fields: vec![],
     }

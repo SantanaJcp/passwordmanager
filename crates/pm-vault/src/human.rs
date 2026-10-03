@@ -140,9 +140,9 @@ impl From<pm_native_channel::ChannelAuthenticationError> for HumanCommitError {
 pub struct PasswordRecord {
     title: String,
     username: String,
-    password: Vec<u8>,
+    password: pm_crypto::ProtectedBytes,
     destination: String,
-    notes: String,
+    notes: pm_crypto::ProtectedText,
 }
 
 impl PasswordRecord {
@@ -169,9 +169,9 @@ impl PasswordRecord {
         Ok(Self {
             title: title.to_owned(),
             username: username.to_owned(),
-            password: password.to_vec(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(password)?,
             destination: destination.to_owned(),
-            notes: notes.to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str(notes)?,
         })
     }
 
@@ -198,12 +198,6 @@ impl PasswordRecord {
     #[must_use]
     pub fn notes(&self) -> &str {
         &self.notes
-    }
-}
-
-impl Drop for PasswordRecord {
-    fn drop(&mut self) {
-        self.password.zeroize();
     }
 }
 
@@ -1419,12 +1413,10 @@ impl HumanVault {
                 .map(|value| value.value.clone()),
             Some(account),
         );
-        let auth = Zeroizing::new(
-            record
-                .encode_auth()
-                .ok_or(AuthorizationError::CredentialUnavailable)?,
-        );
-        let plaintext = Zeroizing::new(encode_credential(&descriptor, &auth));
+        let auth = record
+            .encode_auth()?
+            .ok_or(AuthorizationError::CredentialUnavailable)?;
+        let plaintext = encode_credential(&descriptor, &auth)?;
         let control_package = self
             .root
             .seal_control_package(
@@ -1965,7 +1957,8 @@ impl HumanVault {
                 }],
                 tags: Vec::new(),
                 favorite: false,
-                notes: String::new(),
+                notes: pm_crypto::ProtectedText::copy_from_str("")
+                    .map_err(HumanCommitError::from)?,
                 fields: Vec::new(),
                 source_fields: Vec::new(),
             },
@@ -1974,7 +1967,8 @@ impl HumanVault {
                 user_handle: request.user_handle().to_vec(),
                 credential_id,
                 cose_alg: -8,
-                private_key: key.seed(),
+                private_key: pm_crypto::ProtectedBytes::copy_from_slice(&key.seed())
+                    .map_err(HumanCommitError::from)?,
                 public_key: *key.public_key(),
                 user_name: request.user_name().to_owned(),
                 display_name: request.display_name().to_owned(),
@@ -2047,7 +2041,13 @@ impl HumanVault {
         {
             return Err(PasskeyError::InvalidRequest);
         }
-        let key = PasskeyKeyPair::from_seed(*private_key).map_err(HumanCommitError::from)?;
+        let key = PasskeyKeyPair::from_seed(
+            private_key
+                .as_ref()
+                .try_into()
+                .map_err(|_| PasskeyError::Integrity)?,
+        )
+        .map_err(HumanCommitError::from)?;
         if key.public_key() != public_key {
             return Err(PasskeyError::Integrity);
         }
@@ -2223,8 +2223,8 @@ impl HumanVault {
                 _ => return Err(HumanCommitError::InvalidInput),
             };
             let revision = random_id()?;
-            let human = record.encode_human();
-            let auth = record.encode_auth();
+            let human = record.encode_human()?;
+            let auth = record.encode_auth()?;
             let package = self
                 .root
                 .seal_revision_package(RevisionPackageInput {
@@ -2423,8 +2423,8 @@ impl HumanVault {
                 return Err(HumanCommitError::InvalidInput);
             }
             let revision = random_id()?;
-            let human = record.encode_human();
-            let auth = record.encode_auth();
+            let human = record.encode_human()?;
+            let auth = record.encode_auth()?;
             let package = self
                 .root
                 .seal_revision_package(RevisionPackageInput {
@@ -2570,8 +2570,8 @@ impl HumanVault {
         let revision = random_id()?;
         let transaction_id = random_id()?;
         let challenge = random_challenge()?;
-        let human = record.encode_human();
-        let auth = record.encode_auth();
+        let human = record.encode_human()?;
+        let auth = record.encode_auth()?;
         let package = self
             .root
             .seal_revision_package(RevisionPackageInput {
@@ -2807,8 +2807,8 @@ impl HumanVault {
                 issuer_device: self.device,
                 modified_at: now_us()?,
                 kind: record.kind().crypto(),
-                human_plaintext: &record.encode_human(),
-                auth_plaintext: record.encode_auth().as_deref(),
+                human_plaintext: &record.encode_human()?,
+                auth_plaintext: record.encode_auth()?.as_deref(),
             })?
             .to_bytes();
         let connection = open_connection(&self.path)?;
@@ -3278,8 +3278,8 @@ impl HumanVault {
         record: &LogicalRecord,
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
         let revision = random_id()?;
-        let human = record.encode_human();
-        let auth = record.encode_auth();
+        let human = record.encode_human()?;
+        let auth = record.encode_auth()?;
         let package = self.root.seal_revision_package(RevisionPackageInput {
             item,
             revision,
@@ -5491,13 +5491,13 @@ fn logical_from_password(record: &PasswordRecord) -> Result<LogicalRecord, Human
             }],
             tags: Vec::new(),
             favorite: false,
-            notes: record.notes.clone(),
+            notes: pm_crypto::ProtectedText::copy_from_str(&record.notes)?,
             fields: Vec::new(),
             source_fields: Vec::new(),
         },
         vec![AuthRecord::Password {
             username: record.username.clone(),
-            password: record.password.clone(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(&record.password)?,
             destination_refs: vec![0],
         }],
         Vec::new(),

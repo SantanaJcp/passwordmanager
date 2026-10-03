@@ -810,7 +810,7 @@ Python por `audit_custody_loss_lab.py target/debug/pm-custody target/debug/pm`,
 desde el worktree, manteniendo el `flock`, los mapas UID/GID y el mount-proc.
 Este fixture necesita el build actual, no instala dependencias ni toca host.
 
-### Estado exacto de aceptación G7 al entregar
+### Estado exacto de aceptación G7 al entregar la fase 1
 
 | Criterio | Estado y alcance | Evidencia nueva |
 |---|---|---|
@@ -914,3 +914,316 @@ el error de `run_provider_once` y vuelve al loop cada 5 ms. Se conserva ese
 comportamiento. El lab audit-loss no usa proveedor, por lo que no demuestra
 las consecuencias de esos caminos ni ausencia de duplicación bajo esa pérdida.
 No quedan incluidos en la autorización específica solicitada para audit custody.
+
+## Fase 2 — 2026-10-02
+
+Continuación desde `e3fb352` limpio en `codex/pm-28`. Cada ejecución local usa
+`flock /tmp/pm-cargo-window.lock`, un check/test/lab por bloque; los logs de esta
+fase llevan `/tmp/pm28-20261002b-`. No se modifica la regeneración de audit
+custody ni los demás fallbacks heredados, ni se integra la rama principal.
+
+El primer seam adicional concreta §1 para los constructores públicos de
+`PasswordRecord` (password y notas) y `Attachment`. Tres hijos independientes
+fijan memlock soft/hard a 128 KiB; cada uno construye/verifica/libera un record
+y un attachment pequeños bajo el mismo límite antes del marcador fijo. Sólo
+después intenta copiar un canario ASCII estático de 512 KiB y exige
+`HumanCommitError::Crypto(ResourceUnavailable)`. El parent registra únicamente
+la clase pública, control y status, sin renderizar stdout/stderr del hijo.
+Es RED si un constructor acepta el destino ordinario después del control;
+compilación/precondición/marker ausente no son RED. El GREEN reservará y
+bloqueará el owner antes de copiar, conservando getters, límites y formato.
+
+Seams adicionales concretados antes de los labs de pérdida: bootstrap y vault
+usan cada uno un vault nuevo, cinco UIDs y proveedor controlado. Un login ambiguo
+inicial debe dejar el mismo `attempt_id` en `INDETERMINATE` con journal de una
+sola llamada antes del control. Se para el daemon, se retiene por rename el
+bootstrap o el vault y sus sidecars exactos y se arranca una sola vez. El
+arranque debe rechazar rc4 o la API debe denegar con su código 1 contractual;
+no se permite recrear el archivo perdido. Se restituyen únicamente los archivos
+originales, se reinicia y se consulta ese mismo ID sin reautenticar. Conteos de
+intentos/audit/autoridad/outbox/receipts y claves deben conservarse; el journal
+sigue en una llamada. Un error de fixture/control/cleanup no acredita RED.
+`scripts/verify-ticket28-custody-loss.sh` ejecuta un caso y admite `audit` para
+el negativo heredado, siempre bajo `flock`; queda fuera de la barrida existente
+porque un negativo bloqueado no puede contarse como gate verde.
+
+El presupuesto agregado se prueba además en un subprocess de pm-crypto con un
+límite de contador test-only de 64 KiB, manteniendo 32 MiB en producto. Dos
+owners de 32 KiB deben estar realmente bloqueados; truncar uno a un byte no
+libera su capacidad, una tercera asignación de un byte se deniega y Drop libera
+exactamente la capacidad cobrada. No modifica rlimits ni acredita que este host
+pueda bloquear físicamente los 32 MiB completos con su hard memlock de 8 MiB.
+
+Los primeros intentos de pérdida no acreditan RED de producto: bootstrap-loss
+rc1 por nombre de tabla incorrecto; bootstrap-loss2 por tratar un arranque rc4
+ya observado como daemon aún vivo durante cleanup. Ambos fixtures retiraron sus
+procesos/raíces; los logs se conservan. Bootstrap-loss3 y vault-loss observaron
+el control ambiguo pero fallaron en conteos, antes del diagnóstico completo.
+El motor reclama `INDETERMINATE` para reconciliación cada 100 ms
+(`attempts.rs::claim_reconciliation`) y registra `AuthState` al asentarla: exigir
+cero registros adicionales de audit a través de ese restart no discrimina
+sustitución de custodia. Esos logs no se presentan como RED/GREEN de pérdida.
+Se mantiene el modo ambiguo y su aserción exacta para investigar por separado.
+
+Antes del caso adicional se define un control **completado** explícito
+(`verify-ticket28-custody-loss.sh <bootstrap|vault> completed`): una llamada real
+terminada en `SUCCEEDED`, seguida de pérdida/restauración y consulta del mismo
+ID. Conserva todos los conteos exactos, claves, denegación y prohibición de
+reemplazo; no debilita ninguna aserción del modo ambiguo. Acreditará únicamente
+pérdida con intento completado; no el caso en vuelo ni una intención ambigua.
+
+### Cronología TDD y composición de memoria de la fase 2
+
+Los siguientes RED son conductuales, con control pequeño bajo el mismo límite
+antes del caso grande. El baseline es `e3fb352`, en el worktree original para
+records/auth y en la copia propia `/tmp/pm28-20261002b-baseline` para parsers,
+archivo inline y serializers. La copia sólo añade fixtures test-only compatibles
+con la API previa; no altera comportamiento de producto. Adaptar en el fixture
+baseline el retorno infalible anterior a `Ok` no protege sus bytes ni cambia la
+aserción de denegación; el candidato usa su API fallible real.
+
+| Seam y fallo discriminado | RED rc101 | GREEN rc0 |
+|---|---|---|
+| PasswordRecord/password, notas y Attachment: acepta 512 KiB en heap ordinario tras control de 128 KiB | red-records.log | green-records.log; check2.log |
+| Decoder AuthRecord: acepta password de 512 KiB tras control | red-auth-record.log | green-records-lib.log; check2.log |
+| Parsers CSV y JSON: aceptan campo ASCII de 512 KiB bajo 128 KiB | red-import-parsers.log | green-records-lib.log; check2.log |
+| Descifrado inline PMF1: publica 4 MiB tras control pequeño con sólo ~1 MiB de memlock disponible | red-inline-file.log | green-crypto.log; check2.log |
+| Serializer de descriptor y record completo: publica 512 KiB de notas bajo presión de owners protegidos, con control pequeño | red-record-serializers.log | green-records.log; check2.log |
+
+Todos los nombres abreviados de esta fase llevan `/tmp/pm28-20261002b-`.
+Los comandos exactos, ejecutados con cwd del baseline para RED o del candidato
+para GREEN, son:
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-vault --test protected_records records_require_locked_destinations_before_copying --locked --offline -- --exact --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-vault --lib content::protected_record_tests::decoded_auth_requires_locked_destination --locked --offline -- --exact --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-vault --lib parser_requires_locked_destination --locked --offline -- --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-crypto --test protected_plaintext inline_file_plaintext_requires_locked_output --locked --offline -- --exact --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-vault --test protected_record_serializers --locked --offline -- --nocapture
+# GREEN agrupados (sin modificar los criterios de cada fixture):
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-vault --lib --locked --offline
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-vault --test protected_records --test protected_record_serializers --locked --offline -- --nocapture
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-crypto --all-targets --locked --offline
+```
+
+El cambio añade `ProtectedText` sin Clone/Debug y `ProtectedWriter` exacto. Un
+write fallido deja el writer inválido; `finish_exact` rechaza sobrelongitud,
+subllenado o fallo nativo aunque haya bytes escritos. El encoder CBOR mide
+sin retener plaintext, comprueba el límite previo y bloquea el destino exacto
+antes del segundo recorrido. PMF1 valida framing/tamaño antes de reservar y
+descifra directamente hacia ese destino; cada tag/longitud debe ser válido
+antes de publicar. Se preservan los bytes y orden canónicos del esquema.
+
+Se migran notas/custom/source values, secretos de AuthRecord, contenido inline
+de Attachment y PasswordRecord; serializers human/auth/descriptor/completo y
+credential, parsers CSV/JSON/UTF-16/percent/base32 y canonical JSON. Los callers
+propagan fallos tipados; no se agrega adapter que convierta owners secretos a
+Vec. Los cambios en backup y linux.rs son composición obligatoria de esos tipos,
+no cierre de sus buffers internos. Las comparaciones de regresión retornan
+booleanos para no introducir Debug del secreto por una aserción fallida.
+
+La revisión posterior encontró una regresión del candidato: el array privado
+passkey `[u8;32]` se convirtió en owner variable sin trasladar su invariancia al
+constructor. `red-passkey-seed-invariant.log` rc101 compiló, pasó control de
+32 bytes y aceptó una longitud inválida. Sólo después se agregó la comprobación
+32 en `valid_auth` y se verificó esa longitud antes de copiar en el decoder.
+El GREEN enfocado se conserva en `green-passkey-seed-invariant.log`. No es un
+RED retrospectivo del baseline: es el RED de un defecto introducido en esta
+fase, reconocido y corregido antes de publicar.
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-vault --test protected_records protected_passkey_seed_preserves_exact_32_byte_invariant --locked --offline -- --exact --nocapture
+```
+
+La primera barrida Linux ya estaba en curso al detectar esa regresión. Su
+summary rc0, 26/26 en 676.99 s, se conserva como ejecución intermedia; no se usa como la barrida final
+uniforme del candidato corregido. Tras el GREEN se repiten check, clean offline
+y una barrida completa en ese orden, con logs final-* y sin retry oculto de
+ningún caso dentro de un fixture.
+
+`green-crypto.log` incluye la prueba aislada del presupuesto agregado de 64 KiB
+test-only: capacidad truncada sigue cobrada, asignación adicional denegada y
+Drop libera exactamente lo cobrado. Producto conserva 32 MiB. También incluye
+rechazo del writer después de un write fallido/sobrelongitud y de un encoding
+corto. El error del writer se inyecta en la closure del unit test; prueba que
+no publica bytes tras error, **no** es fault injection real de fsync/storage.
+Esas regresiones del owner no se presentan como RED contra una
+API inexistente. Soft/hard reales del host se observaron en 8 MiB; no se cambiaron.
+
+Los logs `records-compose*` e `inventory-compose*` anteriores son errores de
+composición/compilación y **no RED**. `inventory-compose7.log` termina rc0 para
+`check --workspace --all-targets`. El primer `check.log` pasó todos los tests y
+falló en Clippy; `clippy2.log`–`clippy6.log` conservan errores de préstamos,
+aserciones o fixtures. `clippy7.log` termina rc0. No se añadieron Debug/Clone,
+dependencias, cambios de KDF/deadlines o límites de producto para satisfacerlos.
+
+### Pérdida de bootstrap y vault: evidencia y nuevo bloqueo
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh bootstrap completed
+flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh vault completed
+flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh audit
+```
+
+`bootstrap-completed-loss.log` rc0 demuestra el caso completado: denegación,
+ningún archivo sustituto, una llamada al proveedor, claves originales y los
+cinco conteos exactos después de restitución. No acredita pérdida en vivo ni
+intento en vuelo/ambiguo.
+
+`vault-completed-loss.log` rc1 midió sustitución, pero clasificó como abierta
+una admisión que devolvió rc4 con stdout vacío. Esa expectativa limitada a
+`DENIED code=1` del fixture no se usa como fallo de categoría del producto.
+Antes de la siguiente ejecución se añadió diagnóstico por booleanos/código,
+sin imprimir bytes públicos potencialmente secretos: rc4,
+`CUSTODY_UNAVAILABLE` exacto y ninguna respuesta de éxito son rechazo cerrado,
+tanto si sale al arrancar como al atender el cliente.
+
+`vault-completed-loss2.log` es el **RED válido rc1**: control `SUCCEEDED`, una
+llamada, rechazo rc4/`CUSTODY_UNAVAILABLE`, **main-vault=1**, claves originales,
+conteos `(1,1,1,1,1)` conservados tras restitución, cleanup errors=0. La única
+aserción final fallida es `lost custody was replaced automatically`.
+
+Fallback heredado descubierto: `authorization.rs::open_connection` usa
+`Connection::open` con creación implícita; ante ruta ausente crea un SQLite vacío
+antes de fallar validación. `human.rs::open_connection` usa el mismo patrón.
+La comprobación de arranque `serve_loop` ya documentada omite el error de
+DelegatedVault::open; continúa atendiendo/ejecutando el worker. La causalidad
+estática coincide con la recreación observada, sin afirmar que el nuevo archivo
+tenga claves, autoridad o datos válidos. **No se modifica ninguno de esos caminos**:
+corregir la creación implícita de un vault perdido exige autorización específica.
+El bloqueo audit-loss anterior también se conserva sin tocar
+`load_or_create_audit_custody` ni su comportamiento. Un negativo esperado no es
+un gate verde ni se oculta del estado de aceptación.
+
+### Inventario restante y fallbacks encontrados en la fase 2
+
+La migración integral permanece **FAIL de inventario**, aunque los grupos
+anteriores pasan los controles acotados. Siguen, entre otros:
+
+- Metadata plaintext de records (`String` de título, destinos, tags, usernames,
+  paths/labels) y `content.rs::matches_search`: `to_lowercase` de notas/custom
+  vuelve a crear Strings ordinarias. No se declara esa metadata una excepción.
+- `PreparedHumanCommand` y serializers/chunks propios de backup; buffer de
+  `backup.rs::BackupWriter` sigue `Zeroizing<Vec>`. Otros envelopes/serializers
+  propios de crypto/vault requieren clasificación caso por caso.
+- `onepux.rs::ArchiveInventory`, captura de export.attributes/export.data y
+  readers/chunks de ZIP siguen ordinarios. Proteger el parser JSON no protege
+  la descompresión previa ni todos los streams de importación.
+- Requests/responses/snapshot de proveedor, copias de rpc_prepare_record,
+  read_regular/read_import_source/read_tty_password y otros callers de linux.rs.
+- Requests/split_exact/display_secret y buffers de presentación de TUI;
+  Ratatui retiene símbolos ordinarios. No se ha reescrito el renderer ni se
+  ha reducido reveal/copy/search ni ninguna capacidad existente.
+- Bodies/scripts/JSON/HTTP/outputs propios de pm-web-auth, y los tramos propios
+  pendientes de los demás adaptadores. TLS/russh/Chromium/Argon conservan sólo
+  sus excepciones explícitas; no amparan automáticamente esas copias propias.
+
+La inspección del backend locked de 1PUX encuentra otro punto de diseño de
+ingeniería que impide afirmar todo el heap protegido: Cargo selecciona
+zip 8.6.0 `deflate-flate2-zlib-rs`; flate2 1.1.10 `ffi/zlib_rs.rs::make` llama
+zlib-rs 0.6.7 `Inflate::new`; `inflate.rs::init` instala el allocator Rust por
+defecto y reserva estado/window juntos. `inflate/window.rs::extend` copia bytes
+descomprimidos a ese window ordinario. Evidencia **estática** de fuentes locked,
+no extracción de canario en runtime. Esa memoria no figura entre las excepciones
+G7 autorizadas. No se cambia dependencia/backend, no se introduce excepción ni
+se cierra el punto por inferencia. Resolverlo requiere seleccionar una solución
+que conserve ZIP/DEFLATE y comprobarla antes de completar el inventario.
+
+Otros fallbacks heredados observados y conservados:
+
+- `onepux.rs::map_item`: si `notesPlain` existe con tipo distinto de string,
+  sustituye notas por vacío; favIndex ausente/no entero pasa a 0. El raw_item
+  canónico conserva el origen, por lo que no se afirma pérdida de ese origen.
+- `onepux.rs::section_fields`: cualquier error de `parse_totp`, incluido el
+  nuevo error de memoria protegida, deriva a `invalid_totp` de source_fields.
+  No se cambia esa captura heredada ni se usa como evidencia de denegación
+  integral de recursos. Separar input inválido de ResourceUnavailable necesita
+  autorización para ese fallback, no un GREEN del fixture por reclasificación.
+- `linux.rs::agent_attempt`: una respuesta vacía cae en
+  `response.first().copied().unwrap_or(1)`, imprimiendo DENIED code=1. Rechaza
+  públicamente pero sustituye la categoría ausente; se conserva.
+
+Las zonas tocadas para composición con 26/27 en **esta fase** se limitan a
+linux.rs (constructores/propagación de serializers), sin editar linux/tui.rs ni
+cfg nativo. Al integrar, trasladar esos cambios al único engine extraído por
+26/27 en tui.rs/human_wire.rs/agent_wire.rs/sync_job.rs. No se tocó ningún otro
+worktree ni se integró la rama principal o PR #1.
+
+Archivos de producto tocados en esta fase, sin Cargo.toml/Cargo.lock nuevos:
+`crates/pm-crypto/src/{lib,root,protected_text,protected_writer}.rs`,
+`crates/pm-vault/src/{lib,authorization,backup,content,human,migration,onepux,plaintext}.rs`
+y `crates/pm-custody/src/linux.rs`. Los cambios en pm-sync son únicamente
+fixtures de tests. Los fixtures y documentación nuevos no constituyen otra
+implementación del engine.
+
+### Estado vigente de criterios 28/G7 — fase 2
+
+Esta tabla actualiza el checkpoint de fase 1; las tablas anteriores son
+históricas. Ticket sigue `claimed`; ninguna casilla integral queda resuelta.
+
+| Criterio | Estado y alcance vigente | Evidencia |
+|---|---|---|
+| PasswordRecord/password/notas, Attachment y decoder AuthRecord | PASS acotado: control pequeño y rechazo de 512 KiB antes de copiar | RED/GREEN anteriores |
+| Parsers CSV/JSON y serializers descriptor/completo | PASS acotado; no demuestra todos los paths de import/backup/auth por separado | RED/GREEN anteriores |
+| Descifrado inline PMF1 hacia owner exacto | PASS del control de 4 MiB, framing y regresiones de crypto | red-inline-file; green-crypto; check2 |
+| Invariancia passkey de 32 bytes tras migrar el owner | PASS del constructor: control válido, rechazo 0/31/33; decoder verifica antes de copiar | red/green-passkey-seed-invariant; final-check |
+| Memoria propia integral: records/imports/serializers/providers/presentación | FAIL de inventario; lista concreta arriba | No convertir GREEN acotado en cierre |
+| Presupuesto agregado | PASS del contador con 64 KiB configurados sólo en test; 32 MiB físicos y overhead de páginas no demostrados en host de 8 MiB | green-crypto; rlimit observado |
+| Guardas Linux/core/dumpable/stdin | PASS acotado heredado y regresión Linux final | final-test-linux-fault-safety-lab.log; final-test-linux-custody-protected-input-lab.log |
+| 17.º RATE_LIMITED / CLOCK_UNTRUSTED | PASS acotado de fase 1 y regresión workspace | delegated_authorization; check2 |
+| Resto de límites, incluido techo custodial 128 | No demostrado integralmente | No extrapolar suites |
+| ENOSPC en WAL + atomicidad/restart | PASS acotado de fase 1 y regresión Linux final | final-test-linux-storage-fault-lab.log |
+| Matriz fsync/WAL/staging/commit/outbox/audit y ENOSPC por frontera | No demostrado integralmente; no se añadió una matriz completa en esta entrega | Los casos acotados no la sustituyen |
+| Crash/intención sin resultado → INDETERMINATE, no doble login | PASS acotado de attempts con proveedor controlado y regresión final | final-test-linux-attempts-lab.log |
+| Bootstrap perdido, intento completado | PASS: sin sustituto, conteos/claves exactos y proveedor=1 | final-bootstrap-completed-loss.log |
+| Vault perdido, intento completado | FAIL bloqueado por autorización: crea SQLite sustituto aunque rechaza rc4; proveedor=1 y restitución exacta pasan | final-vault-completed-loss.log |
+| Audit-custody perdido | FAIL bloqueado por autorización: regeneración/CRUD aceptado; no corregido | final-audit-custody-loss.log separado |
+| Otras variantes de pérdida en vivo/en vuelo/ambigua | No demostrado; pruebas ambiguas actuales no discriminan audit repetido de reconciliación | bootstrap-loss3/vault-loss no son RED válido |
+| Todos los canales de canarios activos/históricos y core/crash | No demostrado integralmente; inventario y lecturas completas faltan | No aceptar lectura truncada como ausencia |
+| Windows VirtualLock/WER y macOS nativo | Diferido; sin cierre ni cfg nuevo por inferencia | 26/27 y futura evidencia 30–32 |
+| Gates finales Linux | PASS: check completo, clean offline y 26/26 labs uniformes | Logs finales debajo |
+| Integración y revisión independiente | Pendiente; no autorizada a este implementador | PR #1 no fusionado |
+
+### Gates finales de esta fase y límite de la entrega
+
+Después de la corrección passkey y sin cambios posteriores de producto:
+
+- `final-check.log` rc0: fmt/check/test/clippy completos, locked/offline.
+- `final-clean.log` rc0: build limpio de todos los targets, 36.56 s.
+- `final-bootstrap-completed-loss.log` rc0: cierre rc4, sustituto=0,
+  cinco conteos y claves originales, proveedor=1, cleanup errors=0.
+- `final-vault-completed-loss.log` rc1: cierre rc4 correcto pero main-vault=1;
+  cinco conteos/claves y proveedor=1 al restituir, cleanup errors=0. RED bloqueado.
+- `final-audit-custody-loss.log` rc1: CRUD rc0/closed=0 y replacement-created=1,
+  restitución original y cleanup errors=0. RED bloqueado; no tiene proveedor.
+- Barrida final uniforme rc0, **26/26** en **622.12 s**:
+  `final-labs-summary.log`, un `flock` y log
+  `final-test-linux-<nombre>-lab.log` por cada uno de los 26 scripts.
+  Los rc0 son regresiones acotadas; no acreditan el criterio integral de
+  canarios ni corrigen los cleanups heredados ya reportados.
+
+Se comprobaron enlaces locales/anchors, AST Python, shell syntax,
+`git diff --check`, estado `claimed` y conservación byte a byte de
+`load_or_create_audit_custody` respecto a `e3fb352`; el fixture audit-loss
+original tampoco cambió. Se retiraron sólo los dos `__pycache__` creados por
+estas corridas, por inventario exacto de sus cinco archivos. Logs y baseline
+test-only se retienen como artefactos de revisión; no se barró `/tmp/pm-*`.
+
+```sh
+flock /tmp/pm-cargo-window.lock ./scripts/check.sh
+flock /tmp/pm-cargo-window.lock ./scripts/clean-offline-build.sh
+flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh bootstrap completed
+flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh vault completed
+flock /tmp/pm-cargo-window.lock ./scripts/verify-ticket28-custody-loss.sh audit
+# Repetir una vez por cada script enumerado, secuencialmente y con log propio:
+PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3 PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64 flock /tmp/pm-cargo-window.lock ./scripts/test-linux-storage-fault-lab.sh
+```
+
+La entrega es un checkpoint **parcial**, no la finalización del objetivo de
+fase 2 ni de G7. La regla de conservar fallbacks heredados detiene la corrección
+del vault perdido, audit custody y captura TOTP; no se usa ese bloqueo para
+declarar cumplidos los demás criterios. Quedan trabajo y evidencia pendientes
+en memoria, matriz de fallos y canarios enumerados arriba. Siguiente acción del
+orquestador: resolver las autorizaciones acotadas, componer los tipos con 26/27
+y continuar esos verticales sobre el engine único. No integrar este checkpoint
+como cierre de seguridad ni marcar 28 resolved.

@@ -144,7 +144,12 @@ fn losing_history_restores_as_a_new_revision_without_implicit_enable() {
     assert_eq!(history.lifecycle(), ItemLifecycle::Active);
     assert_eq!(history.entries().len(), 2);
     assert_eq!(history.entries().iter().filter(|e| e.visible()).count(), 1);
-    assert_eq!(vault.read_revision(item, first_revision).unwrap(), first);
+    assert!(
+        vault
+            .read_revision(item, first_revision)
+            .unwrap()
+            .eq(&first)
+    );
 
     let deleted = vault.prepare_delete(item).unwrap();
     commit(&mut vault, &deleted);
@@ -157,7 +162,7 @@ fn losing_history_restores_as_a_new_revision_without_implicit_enable() {
     assert_eq!(restored_id, item);
     let receipt = commit(&mut vault, &restored);
     assert_eq!(vault.receipt(*restored.transaction_id()).unwrap(), receipt);
-    assert_eq!(vault.read_record(item).unwrap(), first);
+    assert!(vault.read_record(item).unwrap().eq(&first));
     let after = vault.history(item).unwrap();
     assert_eq!(after.lifecycle(), ItemLifecycle::Active);
     assert_eq!(after.entries().len(), 3);
@@ -269,7 +274,12 @@ fn revision_and_item_purge_are_scoped_atomic_and_leave_only_replay_markers() {
         Err(HumanCommitError::Storage(_))
     ));
     assert_eq!(database_counts(&path), before);
-    assert_eq!(vault.read_revision(item, first_revision).unwrap(), first);
+    assert!(
+        vault
+            .read_revision(item, first_revision)
+            .unwrap()
+            .eq(&first)
+    );
     Connection::open(&path)
         .unwrap()
         .execute_batch("DROP TRIGGER ticket18_fail_audit")
@@ -338,7 +348,10 @@ fn record(title: &str, attachment: &[u8]) -> LogicalRecord {
         metadata(title),
         vec![AuthRecord::Password {
             username: "synthetic".to_owned(),
-            password: format!("ticket18-{title}-secret").into_bytes(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(
+                &(format!("ticket18-{title}-secret").into_bytes()),
+            )
+            .expect("synthetic protected field"),
             destination_refs: vec![0],
         }],
         vec![
@@ -363,7 +376,7 @@ fn metadata(title: &str) -> HumanMetadata {
         }],
         tags: vec![],
         favorite: false,
-        notes: String::new(),
+        notes: pm_crypto::ProtectedText::copy_from_str("").expect("synthetic protected notes"),
         fields: vec![],
         source_fields: vec![],
     }

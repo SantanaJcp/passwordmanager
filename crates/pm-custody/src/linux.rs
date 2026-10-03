@@ -257,12 +257,13 @@ fn human_github_lab_setup(arguments: &mut impl Iterator<Item = OsString>) -> Res
             }],
             tags: vec!["synthetic".to_owned()],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
         vec![AuthRecord::Token {
-            secret: token.to_vec(),
+            secret: pm_crypto::ProtectedBytes::copy_from_slice(&(token))
+                .map_err(|_| Failure::Unavailable)?,
             provider: "github".to_owned(),
             profile_id: "github-assigned-issues/1".to_owned(),
             destination_refs: vec![0],
@@ -1300,7 +1301,7 @@ fn human_history_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Res
             destinations: vec![],
             tags: vec!["synthetic".to_owned()],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -1318,7 +1319,12 @@ fn human_history_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Res
     )
     .map_err(|_| Failure::Unavailable)?;
     let mut start = vec![17];
-    push_bytes(&mut start, &stream_record.to_descriptor_bytes())?;
+    push_bytes(
+        &mut start,
+        &stream_record
+            .to_descriptor_bytes()
+            .map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(&mut tls, &start)?;
     send_pattern(&mut tls, STREAM_SIZE)?;
     write_frame(&mut tls, &[0])?;
@@ -1336,7 +1342,8 @@ fn human_history_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Res
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: "synthetic".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("synthetic")
+                .map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -1365,7 +1372,8 @@ fn human_history_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Res
             destinations: vec![],
             tags: vec!["synthetic".to_owned()],
             favorite: false,
-            notes: "ticket18-trash-canary".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("ticket18-trash-canary")
+                .map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -1480,7 +1488,8 @@ fn human_backup_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Resu
             destinations: vec![],
             tags: vec!["synthetic".to_owned()],
             favorite: false,
-            notes: "ticket21-stream-note-canary".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("ticket21-stream-note-canary")
+                .map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -1498,7 +1507,12 @@ fn human_backup_exercise(arguments: &mut impl Iterator<Item = OsString>) -> Resu
     )
     .map_err(|_| Failure::Unavailable)?;
     let mut start = vec![17];
-    push_bytes(&mut start, &stream_record.to_descriptor_bytes())?;
+    push_bytes(
+        &mut start,
+        &stream_record
+            .to_descriptor_bytes()
+            .map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(&mut tls, &start)?;
     send_pattern(&mut tls, STREAM_SIZE)?;
     write_frame(&mut tls, &[0])?;
@@ -1777,7 +1791,10 @@ fn rpc_prepare_record(
     if let Some(item) = item {
         request.extend_from_slice(&item);
     }
-    push_bytes(&mut request, &record.to_bytes())?;
+    push_bytes(
+        &mut request,
+        &record.to_bytes().map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(tls, &request)?;
     decode_prepared_response(&read_frame(tls)?)
 }
@@ -2080,7 +2097,10 @@ fn human_content_flow(arguments: &mut impl Iterator<Item = OsString>) -> Result<
     let fixture_records = content_fixture_records()?;
     for expected in fixture_records {
         let mut request = vec![9];
-        push_bytes(&mut request, &expected.to_bytes())?;
+        push_bytes(
+            &mut request,
+            &expected.to_bytes().map_err(|_| Failure::Unavailable)?,
+        )?;
         write_frame(&mut tls, &request)?;
         let prepared = decode_prepared_response(&read_frame(&mut tls)?)?;
         rpc_commit(&mut tls, &prepared)?;
@@ -2254,7 +2274,7 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -2267,7 +2287,12 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
         .map_err(|_| Failure::Unavailable)?;
     rpc_unlock(&mut tls, &password)?;
     let mut start = vec![17];
-    push_bytes(&mut start, &record.to_descriptor_bytes())?;
+    push_bytes(
+        &mut start,
+        &record
+            .to_descriptor_bytes()
+            .map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(&mut tls, &start)?;
     send_pattern(&mut tls, SIZE)?;
     write_frame(&mut tls, &[0])?;
@@ -2327,7 +2352,7 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -2341,7 +2366,12 @@ fn human_streaming_file(arguments: &mut impl Iterator<Item = OsString>) -> Resul
         .map_err(|_| Failure::Unavailable)?;
     rpc_unlock(&mut short, &password)?;
     let mut start = vec![17];
-    push_bytes(&mut start, &short_record.to_descriptor_bytes())?;
+    push_bytes(
+        &mut start,
+        &short_record
+            .to_descriptor_bytes()
+            .map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(&mut short, &start)?;
     send_pattern(&mut short, 1024 * 1024)?;
     drop(short);
@@ -2382,7 +2412,7 @@ fn human_streaming_stall(arguments: &mut impl Iterator<Item = OsString>) -> Resu
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -2395,7 +2425,12 @@ fn human_streaming_stall(arguments: &mut impl Iterator<Item = OsString>) -> Resu
         .map_err(|_| Failure::Unavailable)?;
     rpc_unlock(&mut tls, &password)?;
     let mut start = vec![17];
-    push_bytes(&mut start, &record.to_descriptor_bytes())?;
+    push_bytes(
+        &mut start,
+        &record
+            .to_descriptor_bytes()
+            .map_err(|_| Failure::Unavailable)?,
+    )?;
     write_frame(&mut tls, &start)?;
     send_pattern(&mut tls, 1024 * 1024)?;
     println!("READY streaming-upload-transaction=open");
@@ -2442,26 +2477,33 @@ fn pattern_digest(size: u64) -> Result<[u8; 32], Failure> {
 
 #[allow(clippy::too_many_lines)]
 fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
-    let metadata = |title: &str, notes: &str| HumanMetadata {
-        title: title.to_owned(),
-        destinations: vec![Destination {
-            label: "Portal 🌎".to_owned(),
-            value: "https://e2e.invalid/雪".to_owned(),
-        }],
-        tags: vec!["synthetic".to_owned()],
-        favorite: false,
-        notes: notes.to_owned(),
-        fields: vec![CustomField {
-            id: [0x61; 16],
-            label: "extra".to_owned(),
-            value: LogicalValue::Text("exact".to_owned()),
-            concealed: false,
-        }],
-        source_fields: vec![SourceField {
-            path: "legacy.unknown".to_owned(),
-            encoding: SourceEncoding::Bytes,
-            value: b"ticket05-e2e-source-canary".to_vec(),
-        }],
+    let metadata = |title: &str, notes: &str| -> Result<HumanMetadata, Failure> {
+        Ok(HumanMetadata {
+            title: title.to_owned(),
+            destinations: vec![Destination {
+                label: "Portal 🌎".to_owned(),
+                value: "https://e2e.invalid/雪".to_owned(),
+            }],
+            tags: vec!["synthetic".to_owned()],
+            favorite: false,
+            notes: pm_crypto::ProtectedText::copy_from_str(notes)
+                .map_err(|_| Failure::Unavailable)?,
+            fields: vec![CustomField {
+                id: [0x61; 16],
+                label: "extra".to_owned(),
+                value: LogicalValue::Text(
+                    pm_crypto::ProtectedText::copy_from_str("exact")
+                        .map_err(|_| Failure::Unavailable)?,
+                ),
+                concealed: false,
+            }],
+            source_fields: vec![SourceField {
+                path: "legacy.unknown".to_owned(),
+                encoding: SourceEncoding::Bytes,
+                value: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-e2e-source-canary")
+                    .map_err(|_| Failure::Unavailable)?,
+            }],
+        })
     };
     let attachment = || {
         Attachment::new(
@@ -2478,19 +2520,23 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
     Ok(vec![
         make(
             RecordKind::Password,
-            metadata("Password", "password"),
+            metadata("Password", "password")?,
             vec![AuthRecord::Password {
                 username: "e2e".to_owned(),
-                password: b"ticket05-e2e-password-canary".to_vec(),
+                password: pm_crypto::ProtectedBytes::copy_from_slice(
+                    b"ticket05-e2e-password-canary",
+                )
+                .map_err(|_| Failure::Unavailable)?,
                 destination_refs: vec![0],
             }],
             vec![attachment()?],
         )?,
         make(
             RecordKind::Totp,
-            metadata("TOTP", "totp"),
+            metadata("TOTP", "totp")?,
             vec![AuthRecord::Totp {
-                secret: b"ticket05-e2e-totp-canary".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-e2e-totp-canary")
+                    .map_err(|_| Failure::Unavailable)?,
                 algorithm: TotpAlgorithm::Sha1,
                 digits: 6,
                 period: 30,
@@ -2503,13 +2549,14 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
         )?,
         make(
             RecordKind::Passkey,
-            metadata("Passkey", "stored only"),
+            metadata("Passkey", "stored only")?,
             vec![AuthRecord::Passkey {
                 rp_id: "e2e.invalid".to_owned(),
                 user_handle: b"e2e-user".to_vec(),
                 credential_id: b"e2e-credential".to_vec(),
                 cose_alg: -8,
-                private_key: [0x73; 32],
+                private_key: pm_crypto::ProtectedBytes::copy_from_slice(&([0x73; 32]))
+                    .map_err(|_| Failure::Unavailable)?,
                 public_key: [0x74; 32],
                 user_name: "e2e".to_owned(),
                 display_name: "E2E".to_owned(),
@@ -2521,10 +2568,11 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
         )?,
         make(
             RecordKind::Ssh,
-            metadata("SSH", "ssh"),
+            metadata("SSH", "ssh")?,
             vec![AuthRecord::Ssh {
                 private_format: PrivateKeyFormat::OpenSsh,
-                private_key: b"ticket05-e2e-ssh-canary".to_vec(),
+                private_key: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-e2e-ssh-canary")
+                    .map_err(|_| Failure::Unavailable)?,
                 public_key: b"ssh-ed25519 e2e".to_vec(),
                 username: "e2e".to_owned(),
                 destination_refs: vec![0],
@@ -2534,9 +2582,10 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
         )?,
         make(
             RecordKind::Token,
-            metadata("Token", "token"),
+            metadata("Token", "token")?,
             vec![AuthRecord::Token {
-                secret: b"ticket05-e2e-token-canary".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket05-e2e-token-canary")
+                    .map_err(|_| Failure::Unavailable)?,
                 provider: "synthetic".to_owned(),
                 profile_id: "e2e".to_owned(),
                 destination_refs: vec![0],
@@ -2549,13 +2598,13 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
             metadata(
                 "ticket05-e2e-search-canary 雪\u{1b}]52;c;dGlja2V0MjM=\u{7}",
                 "note",
-            ),
+            )?,
             vec![],
             vec![],
         )?,
         make(
             RecordKind::File,
-            metadata("File", "file"),
+            metadata("File", "file")?,
             vec![],
             vec![attachment()?],
         )?,
@@ -2569,14 +2618,21 @@ fn content_fixture_records() -> Result<Vec<LogicalRecord>, Failure> {
                 }],
                 tags: vec!["synthetic".to_owned()],
                 favorite: false,
-                notes: "exchange".to_owned(),
+                notes: pm_crypto::ProtectedText::copy_from_str("exchange")
+                    .map_err(|_| Failure::Unavailable)?,
                 fields: vec![],
                 source_fields: vec![],
             },
             vec![AuthRecord::TokenExchange {
-                subject_token: b"ticket11-e2e-subject-token-canary".to_vec(),
+                subject_token: pm_crypto::ProtectedBytes::copy_from_slice(
+                    b"ticket11-e2e-subject-token-canary",
+                )
+                .map_err(|_| Failure::Unavailable)?,
                 requester_client_id: "pm-exchanger".to_owned(),
-                requester_client_secret: b"ticket11-e2e-requester-secret-canary".to_vec(),
+                requester_client_secret: pm_crypto::ProtectedBytes::copy_from_slice(
+                    b"ticket11-e2e-requester-secret-canary",
+                )
+                .map_err(|_| Failure::Unavailable)?,
                 provider: "keycloak".to_owned(),
                 profile_id: "exchange".to_owned(),
                 destination_refs: vec![0],
@@ -3545,7 +3601,8 @@ fn authorization_setup(vault: &mut HumanVault, first: &[u8], second: &[u8]) -> R
             destinations: vec![],
             tags: vec![],
             favorite: false,
-            notes: "not authorized".to_owned(),
+            notes: pm_crypto::ProtectedText::copy_from_str("not authorized")
+                .map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
@@ -3625,18 +3682,20 @@ fn authorization_add_keycloak(vault: &mut HumanVault) -> Result<(), Failure> {
             }],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
         vec![
             AuthRecord::Password {
                 username: "alice".to_owned(),
-                password: b"ticket10-password-canary".to_vec(),
+                password: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket10-password-canary")
+                    .map_err(|_| Failure::Unavailable)?,
                 destination_refs: vec![0],
             },
             AuthRecord::Totp {
-                secret: b"12345678901234567890".to_vec(),
+                secret: pm_crypto::ProtectedBytes::copy_from_slice(b"12345678901234567890")
+                    .map_err(|_| Failure::Unavailable)?,
                 algorithm: TotpAlgorithm::Sha1,
                 digits: 6,
                 period: 30,
@@ -3660,13 +3719,14 @@ fn authorization_add_keycloak(vault: &mut HumanVault) -> Result<(), Failure> {
             }],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
         vec![AuthRecord::Password {
             username: "charlie".to_owned(),
-            password: b"ticket10-challenge-password".to_vec(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(b"ticket10-challenge-password")
+                .map_err(|_| Failure::Unavailable)?,
             destination_refs: vec![0],
         }],
         vec![],
@@ -3690,14 +3750,16 @@ fn authorization_add_keycloak_exchange(
             }],
             tags: vec![],
             favorite: false,
-            notes: String::new(),
+            notes: pm_crypto::ProtectedText::copy_from_str("").map_err(|_| Failure::Unavailable)?,
             fields: vec![],
             source_fields: vec![],
         },
         vec![AuthRecord::TokenExchange {
-            subject_token: subject_token.to_vec(),
+            subject_token: pm_crypto::ProtectedBytes::copy_from_slice(subject_token)
+                .map_err(|_| Failure::Unavailable)?,
             requester_client_id: "pm-exchanger".to_owned(),
-            requester_client_secret: requester_secret.to_vec(),
+            requester_client_secret: pm_crypto::ProtectedBytes::copy_from_slice(requester_secret)
+                .map_err(|_| Failure::Unavailable)?,
             provider: "keycloak".to_owned(),
             profile_id: "keycloak-exchange-lab".to_owned(),
             destination_refs: vec![0],
@@ -4097,7 +4159,7 @@ fn handle_human_request(
             let item = rest.try_into().map_err(|_| Failure::Unavailable)?;
             match vault.read_record(item) {
                 Ok(record) => {
-                    let encoded = record.to_bytes();
+                    let encoded = record.to_bytes().map_err(|_| Failure::Unavailable)?;
                     protected_payload_response(&encoded)
                 }
                 Err(HumanCommitError::ItemNotFound) => Ok(HumanResponse::Public(vec![3])),
@@ -4590,7 +4652,7 @@ fn handle_human_request(
             let record = vault
                 .read_revision(item, revision)
                 .map_err(|_| Failure::Unavailable)?;
-            let encoded = record.to_bytes();
+            let encoded = record.to_bytes().map_err(|_| Failure::Unavailable)?;
             protected_payload_response(&encoded)
         }
         33 => {
@@ -4633,13 +4695,15 @@ fn handle_human_request(
                     }],
                     tags: vec!["synthetic".into()],
                     favorite: false,
-                    notes: String::new(),
+                    notes: pm_crypto::ProtectedText::copy_from_str("")
+                        .map_err(|_| Failure::Unavailable)?,
                     fields: Vec::new(),
                     source_fields: Vec::new(),
                 },
                 vec![AuthRecord::Ssh {
                     private_format: PrivateKeyFormat::OpenSsh,
-                    private_key: ssh_private.to_vec(),
+                    private_key: pm_crypto::ProtectedBytes::copy_from_slice(ssh_private)
+                        .map_err(|_| Failure::Unavailable)?,
                     public_key: ssh_public.to_vec(),
                     username: "pmssh".into(),
                     destination_refs: vec![0],
