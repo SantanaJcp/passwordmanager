@@ -2392,10 +2392,6 @@ pub(crate) fn restore_graph_digest(
     source_revision: [u8; 16],
     package: &[u8],
 ) -> Result<[u8; 32], HumanCommitError> {
-    let mut state = DigestState::new()?;
-    state.update(b"pm/staged-stream/v1");
-    state.update(&u64::try_from(package.len()).map_err(invalid)?.to_be_bytes());
-    state.update(package);
     let mut streams = tx.prepare(
         "SELECT source_attachment,target_attachment,header,chunk_count FROM backup_restore_streams WHERE transaction_id=?1 AND source_revision=?2 ORDER BY target_attachment",
     )?;
@@ -2412,6 +2408,23 @@ pub(crate) fn restore_graph_digest(
             },
         )?
         .collect::<Result<Vec<_>, _>>()?;
+    // Select the schema from staged topology before hashing/signing, never
+    // after a digest mismatch. PMB1 restores attachments as streams only.
+    if rows.is_empty() {
+        let mut encoder = Encoder::new(Vec::new());
+        encoder
+            .array(2)
+            .unwrap()
+            .bytes(package)
+            .unwrap()
+            .bytes(&[0x80])
+            .unwrap();
+        return Ok(digest(&encoder.into_writer()));
+    }
+    let mut state = DigestState::new()?;
+    state.update(b"pm/staged-stream/v1");
+    state.update(&u64::try_from(package.len()).map_err(invalid)?.to_be_bytes());
+    state.update(package);
     for (_, target, header, count) in &rows {
         state.update(target);
         state.update(&u64::try_from(header.len()).map_err(invalid)?.to_be_bytes());

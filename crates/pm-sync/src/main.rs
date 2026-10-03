@@ -7,7 +7,7 @@ use pm_crypto::{ProtectedBytes, digest};
 use pm_native_channel::{
     WindowsClientPipe, WindowsServerPipe, WindowsStopEvent, WindowsSyncPipeInstance,
 };
-use pm_sync::{OpaqueSyncStore, SyncError};
+use pm_sync::{OpaqueSyncStore, SyncError, timing};
 use rustls::{
     CertificateError, DigitallySignedStruct, DistinguishedName, Error as TlsError, SignatureScheme,
     client::{
@@ -99,6 +99,8 @@ fn run() -> Result<(), ()> {
                 )
             }
         }
+        #[cfg(unix)]
+        Some("session") => client_session(&mut a),
         Some(method @ ("put" | "get" | "publish" | "list" | "delete")) => client(method, &mut a),
         _ => Err(()),
     }
@@ -326,7 +328,8 @@ fn serve_one_unix(stream: UnixStream, db: &Path, config: Arc<ServerConfig>) -> R
 fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) -> Result<(), ()> {
     let conn = ServerConnection::new(config).map_err(|_| ())?;
     let mut tls = rustls::StreamOwned::new(conn, stream);
-    let request = read_frame(&mut tls)?;
+    #[allow(unused_mut)]
+    let mut request = read_frame(&mut tls)?;
     let peer = tls
         .conn
         .peer_certificates()
@@ -337,14 +340,48 @@ fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) ->
     if tls.conn.alpn_protocol() != Some(ALPN) {
         return Err(());
     }
+    let opening = timing::Span::new("server_sqlite_open");
     let store = OpaqueSyncStore::create(db).map_err(|_| ())?;
-    let response = dispatch(
-        &store,
-        &peer,
-        std::str::from_utf8(&request).map_err(|_| ())?,
-    )
-    .unwrap_or_else(|()| "{\"ok\":false}".to_owned());
-    write_frame(&mut tls, response.as_bytes())
+    #[cfg(unix)]
+    let database = {
+        // Keep the WAL attached between RPCs. Each store mutation still commits
+        // durably; closing its short-lived connection is no longer the last
+        // close/checkpoint. No read transaction or altered PRAGMA is retained.
+        let connection = rusqlite::Connection::open(db).map_err(|_| ())?;
+        connection
+            .execute_batch("PRAGMA trusted_schema=OFF")
+            .map_err(|_| ())?;
+        connection
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))
+            .map_err(|_| ())?;
+        connection
+    };
+    drop(opening);
+    let result = (|| loop {
+        let dispatching = timing::Span::new("server_dispatch");
+        let response = dispatch(
+            &store,
+            &peer,
+            std::str::from_utf8(&request).map_err(|_| ())?,
+        )
+        .unwrap_or_else(|()| "{\"ok\":false}".to_owned());
+        drop(dispatching);
+        write_frame(&mut tls, response.as_bytes())?;
+        if cfg!(windows) {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            request = read_frame(&mut tls)?;
+        }
+    })();
+    #[cfg(unix)]
+    {
+        let closed = database.close().map_err(|_| ());
+        result.and(closed)
+    }
+    #[cfg(windows)]
+    result
 }
 
 fn dispatch(store: &OpaqueSyncStore, rpk: &[u8], json: &str) -> Result<String, ()> {
@@ -473,6 +510,7 @@ fn string_array_field(json: &str, name: &str) -> Result<Vec<String>, ()> {
 #[allow(clippy::too_many_lines)]
 fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Result<(), ()> {
     let socket = take(a, "--socket")?;
+    let preparing = timing::Span::new("client_prepare");
     let key = read_key(&take(a, "--client-key")?)?;
     let server = read_public(&take(a, "--server-pub")?)?;
     let namespace = hex32(&take(a, "--namespace")?)?;
@@ -554,6 +592,7 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
         _ => return Err(()),
     };
     let config = client_config(&key, &server)?;
+    drop(preparing);
     let response = client_exchange(&socket, config, json.as_bytes())?;
     let response = String::from_utf8(response).map_err(|_| ())?;
     if !response.starts_with("{\"ok\":true") {
@@ -572,6 +611,63 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
     Ok(())
 }
 
+#[cfg(unix)]
+fn client_session(a: &mut impl Iterator<Item = std::ffi::OsString>) -> Result<(), ()> {
+    let preparing = timing::Span::new("client_prepare");
+    let socket = take(a, "--socket")?;
+    let key = read_key(&take(a, "--client-key")?)?;
+    let server = read_public(&take(a, "--server-pub")?)?;
+    if a.next().is_some() {
+        return Err(());
+    }
+    let config = client_config(&key, &server)?;
+    drop(preparing);
+    let stream = UnixStream::connect(socket).map_err(|_| ())?;
+    pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|_| ())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(30)))
+        .map_err(|_| ())?;
+    let conn = ClientConnection::new(
+        Arc::new(config),
+        ServerName::try_from("passwordmanager.invalid").map_err(|_| ())?,
+    )
+    .map_err(|_| ())?;
+    let mut tls = rustls::StreamOwned::new(conn, stream);
+    {
+        let _handshake = timing::Span::new("tls_handshake");
+        while tls.conn.is_handshaking() {
+            tls.conn.complete_io(&mut tls.sock).map_err(|_| ())?;
+        }
+    }
+    if tls.conn.alpn_protocol() != Some(ALPN) {
+        return Err(());
+    }
+    let mut input = std::io::stdin().lock();
+    let mut output = std::io::stdout().lock();
+    loop {
+        // EOF at a frame boundary closes an owned session; truncated frames fail.
+        let mut length = [0; 4];
+        if input.read(&mut length[..1]).map_err(|_| ())? == 0 {
+            return Ok(());
+        }
+        input.read_exact(&mut length[1..]).map_err(|_| ())?;
+        let n = u32::from_be_bytes(length) as usize;
+        if n > MAX_FRAME {
+            return Err(());
+        }
+        let mut request = vec![0; n];
+        input.read_exact(&mut request).map_err(|_| ())?;
+        let exchange = timing::Span::new("tls_exchange");
+        write_frame(&mut tls, &request)?;
+        let response = read_frame(&mut tls)?;
+        drop(exchange);
+        write_frame(&mut output, &response)?;
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Result<Vec<u8>, ()> {
     let stream = UnixStream::connect(socket).map_err(|_| ())?;
@@ -582,6 +678,13 @@ fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Resul
     )
     .map_err(|_| ())?;
     let mut tls = rustls::StreamOwned::new(conn, stream);
+    if timing::enabled() {
+        let _handshake = timing::Span::new("tls_handshake");
+        while tls.conn.is_handshaking() {
+            tls.conn.complete_io(&mut tls.sock).map_err(|_| ())?;
+        }
+    }
+    let _exchange = timing::Span::new("tls_exchange");
     write_frame(&mut tls, request)?;
     read_frame(&mut tls)
 }

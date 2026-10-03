@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Deliberately failing reproducer of pending purged revision publication.
+//! Regression probe of pending purged revision publication over real TLS/RPK.
 
 #[cfg(target_os = "linux")]
-mod probe {
+pub mod probe {
     use std::{
         fmt::Write as _,
         fs,
@@ -99,6 +99,11 @@ mod probe {
         .unwrap()
     }
 
+    /// Runs the synthetic regression against the supplied server executable.
+    ///
+    /// # Panics
+    /// Panics if fixture prerequisites, invariants, or owned cleanup fail.
+    #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn run(program: &Path) -> bool {
         let root = std::env::temp_dir().join(format!("pmshared-purge-{}", std::process::id()));

@@ -519,78 +519,125 @@ impl CausalReducer {
         if events.len() > 256 || graphs.len() > 256 {
             return Err(ReductionError::ResourceLimit);
         }
+        self.apply_received_group(events, graphs, None, &[events.len()])
+    }
+
+    /// Verifies a complete paginated sync commit and activates it atomically.
+    /// Individual insertion batches retain the 256-event limit.
+    ///
+    /// # Errors
+    /// Rejects incomplete causal proof, invalid purge membership or ciphertext.
+    pub fn apply_received_group(
+        &mut self,
+        events: &[SignedCausalEvent],
+        graphs: &[ReceivedCiphertextGraph],
+        root: Option<[u8; 32]>,
+        page_lengths: &[usize],
+    ) -> Result<ReducedView, ReductionError> {
         let mut connection = open_connection(&self.path)?;
         let transaction = connection.transaction()?;
-        for event in events {
-            let parsed = decode_event(&event.event)?;
-            if parsed.bound_graph {
-                let CausalEventBody::Revision {
-                    revision_id: revision,
-                    ..
-                } = parsed.body
-                else {
-                    return Err(ReductionError::Integrity);
-                };
-                if graphs
-                    .iter()
-                    .filter(|g| g.item == parsed.subject && g.revision == revision)
-                    .count()
-                    != 1
-                {
+        let known_purged_revisions = local_purged_revisions(&transaction, &self.trusted)?;
+        let mut unique = BTreeSet::new();
+        for batch in events.chunks(256) {
+            for event in batch {
+                if !unique.insert(event.digest()) {
                     return Err(ReductionError::Integrity);
                 }
             }
+            Self::insert_events(&transaction, &self.trusted, batch, false)?;
         }
-        for graph in graphs {
-            insert_graph(&transaction, graph)?;
+        let view = view_connection(&transaction, &self.trusted)?;
+        let all = parsed_events(&transaction)?;
+        let structural = structural_events(&all);
+        let mut ranks = BTreeMap::new();
+        let mut offset = 0_usize;
+        for (rank, length) in page_lengths.iter().enumerate() {
+            if *length > 256
+                || offset
+                    .checked_add(*length)
+                    .is_none_or(|end| end > events.len())
+            {
+                return Err(ReductionError::Integrity);
+            }
+            for event in &events[offset..offset + length] {
+                ranks.insert(event.digest(), rank);
+            }
+            offset += length;
         }
-        Self::insert_events(&transaction, &self.trusted, events, false)?;
+        if offset != events.len()
+            || ranks.iter().any(|(id, rank)| {
+                all[id]
+                    .parents
+                    .iter()
+                    .any(|p| ranks.get(p).is_some_and(|parent| parent > rank))
+            })
+        {
+            return Err(ReductionError::Integrity);
+        }
+        if events.iter().any(|e| !structural.contains(&e.digest())) {
+            return Err(ReductionError::Integrity);
+        }
+        let purges = verified_purges(&all, &view, &structural)?;
+        let mut graph_keys = BTreeSet::new();
         for graph in graphs {
+            // Standalone legacy packages reject a known purged payload. A
+            // verified sync root may replay its signed headers; its graph is
+            // still verified below and its purged contents are never inserted.
+            if graph.kind.is_empty()
+                || (root.is_none()
+                    && known_purged_revisions.contains(&(graph.item, graph.revision)))
+                || !graph_keys.insert((graph.item, graph.revision))
+            {
+                return Err(ReductionError::Integrity);
+            }
             let expected = events
                 .iter()
-                .filter_map(|event| decode_event(&event.event).ok())
-                .find_map(|parsed| match parsed.body {
-                    CausalEventBody::Revision {
-                        revision_id,
-                        manifest_digest,
-                        ..
-                    } if parsed.subject == graph.item && revision_id == graph.revision => {
-                        Some(manifest_digest)
+                .find_map(|event| {
+                    let parsed = &all[&event.digest()];
+                    match parsed.body {
+                        CausalEventBody::Revision {
+                            revision_id,
+                            manifest_digest,
+                            ..
+                        } if parsed.subject == graph.item && revision_id == graph.revision => {
+                            Some(manifest_digest)
+                        }
+                        _ => None,
                     }
-                    _ => None,
                 })
                 .ok_or(ReductionError::Integrity)?;
             if graph_digest(graph)? != expected {
                 return Err(ReductionError::Integrity);
             }
         }
-        let view = view_connection(&transaction, &self.trusted)?;
-        let items: BTreeSet<_> = graphs.iter().map(|g| g.item).collect();
-        for item in items {
-            let reduced = view.item(&item).ok_or(ReductionError::Integrity)?;
-            let revision = *reduced
-                .visible_revision()
-                .ok_or(ReductionError::Integrity)?;
-            let kind = graphs
-                .iter()
-                .find(|g| g.item == item && g.revision == revision)
-                .map(|g| g.kind.as_str())
-                .or_else(|| {
-                    graphs
-                        .iter()
-                        .find(|g| g.item == item)
-                        .map(|g| g.kind.as_str())
-                })
-                .ok_or(ReductionError::Integrity)?;
-            let status = if reduced.lifecycle() == ItemLifecycle::Trash {
-                "trash"
-            } else {
-                "active"
-            };
-            transaction.execute("INSERT INTO vault_items(item_id,visible_revision,kind,status)VALUES(?1,?2,?3,?4) ON CONFLICT(item_id) DO UPDATE SET visible_revision=excluded.visible_revision,kind=excluded.kind,status=excluded.status",params![item.as_slice(),revision.as_slice(),kind,status])?;
+        for event in events {
+            let parsed = &all[&event.digest()];
+            if let CausalEventBody::Revision { revision_id, .. } = parsed.body
+                && parsed.bound_graph
+                && !graph_keys.contains(&(parsed.subject, revision_id))
+                && !purges.covers(parsed.subject, revision_id)
+            {
+                return Err(ReductionError::Integrity);
+            }
+        }
+        // Check ciphertext even on a replay, but never reinsert a purged payload.
+        for batch in graphs.chunks(256) {
+            for graph in batch {
+                if !purges.covers(graph.item, graph.revision) {
+                    insert_graph(&transaction, graph)?;
+                }
+            }
+        }
+        persist_purges(&transaction, &purges, &all)?;
+        activate_received_items(&transaction, &view, &all, graphs)?;
+        if let Some(root) = root {
+            transaction.execute(
+                "INSERT OR IGNORE INTO sync_received_roots(root_hash)VALUES(?1)",
+                [root.as_slice()],
+            )?;
         }
         transaction.commit()?;
-        self.view()
+        Ok(view)
     }
 
     fn apply_internal(
@@ -670,6 +717,70 @@ impl CausalReducer {
         Ok(out)
     }
 
+    /// Selects pending events together with the retained causal proof for any
+    /// payload they omit. Returns the number of actual pending events separately.
+    ///
+    /// # Errors
+    /// Rejects corrupt or incomplete local proof without acknowledging anything.
+    pub fn pending_sync_group(&self) -> Result<(Vec<SignedCausalEvent>, usize), ReductionError> {
+        let c = open_connection(&self.path)?;
+        let all = parsed_events(&c)?;
+        let view = self.view()?;
+        let structural = structural_events(&all);
+        let purges = verified_purges(&all, &view, &structural)?;
+        let mut statement = c.prepare("SELECT event_digest FROM outbox ORDER BY event_digest")?;
+        let mut selected: BTreeSet<[u8; 32]> = statement
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))?
+            .map(|r| fixed(&r?))
+            .collect::<Result<_, ReductionError>>()?;
+        let pending = selected.len();
+        let mut proof = Vec::new();
+        for id in &selected {
+            let parsed = all.get(id).ok_or(ReductionError::Integrity)?;
+            if matches!(
+                parsed.kind,
+                CausalEventKind::PurgeItem | CausalEventKind::PurgeRevisions
+            ) {
+                proof.push(*id);
+            }
+            if let CausalEventBody::Revision { revision_id, .. } = parsed.body
+                && let Some(purge) = purges.proof(parsed.subject, revision_id)
+            {
+                proof.push(purge);
+            }
+        }
+        let mut visited = BTreeSet::new();
+        while let Some(id) = proof.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let parsed = all.get(&id).ok_or(ReductionError::Integrity)?;
+            selected.insert(id);
+            proof.extend(parsed.parents.iter().copied());
+        }
+        let mut ordered = Vec::with_capacity(selected.len());
+        while !selected.is_empty() {
+            let ready: Vec<_> = selected
+                .iter()
+                .copied()
+                .filter(|id| all[id].parents.iter().all(|p| !selected.contains(p)))
+                .collect();
+            if ready.is_empty() {
+                return Err(ReductionError::Integrity);
+            }
+            for id in ready {
+                selected.remove(&id);
+                let (event,device,human):(Vec<u8>,Vec<u8>,Option<Vec<u8>>) = c.query_row("SELECT event,device_signature,human_signature FROM authority_events WHERE event_digest=?1",[id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+                ordered.push(SignedCausalEvent {
+                    event,
+                    device_signature: fixed(&device)?,
+                    human_signature: human.map(|v| fixed(&v)).transpose()?,
+                });
+            }
+        }
+        Ok((ordered, pending))
+    }
+
     /// Exports the ciphertext graph cryptographically bound by one local revision event.
     ///
     /// # Errors
@@ -691,8 +802,14 @@ impl CausalReducer {
         else {
             return Err(ReductionError::InvalidEvent);
         };
-        fs::create_dir_all(directory).map_err(|_| ReductionError::Integrity)?;
         let c = open_connection(&self.path)?;
+        let all = parsed_events(&c)?;
+        let view = self.view()?;
+        let structural = structural_events(&all);
+        if verified_purges(&all, &view, &structural)?.covers(parsed.subject, revision) {
+            return Ok(None);
+        }
+        fs::create_dir_all(directory).map_err(|_| ReductionError::Integrity)?;
         let (kind,package):(String,Vec<u8>)=c.query_row("SELECT i.kind,r.package FROM revision_parts r JOIN vault_items i ON i.item_id=r.item_id WHERE r.item_id=?1 AND r.revision_id=?2",params![parsed.subject.as_slice(),revision.as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
         let package_path = write_stage(directory, "revision", &package)?;
         let mut attachments = Vec::new();
@@ -840,6 +957,81 @@ fn hex_id(id: &[u8; 16]) -> String {
         out.push(char::from(D[usize::from(b & 15)]));
     }
     out
+}
+type RevisionKey = ([u8; 16], [u8; 16]);
+fn local_purged_revisions(
+    connection: &rusqlite::Connection,
+    trusted: &TrustedRoot,
+) -> Result<BTreeSet<RevisionKey>, ReductionError> {
+    let known = parsed_events(connection)?;
+    let local_view = view_connection(connection, trusted)?;
+    let local_purges = verified_purges(&known, &local_view, &structural_events(&known))?;
+    Ok(known
+        .values()
+        .filter_map(|parsed| match parsed.body {
+            CausalEventBody::Revision { revision_id, .. }
+                if local_purges.covers(parsed.subject, revision_id) =>
+            {
+                Some((parsed.subject, revision_id))
+            }
+            _ => None,
+        })
+        .collect())
+}
+fn activate_received_items(
+    transaction: &rusqlite::Transaction<'_>,
+    view: &ReducedView,
+    all: &BTreeMap<[u8; 32], ParsedEvent>,
+    graphs: &[ReceivedCiphertextGraph],
+) -> Result<(), ReductionError> {
+    let items: BTreeSet<_> = all
+        .values()
+        .filter(|p| is_item_kind(p.kind))
+        .map(|p| p.subject)
+        .collect();
+    for item in items {
+        let reduced = view.item(&item).ok_or(ReductionError::Integrity)?;
+        if reduced.lifecycle() == ItemLifecycle::Purged {
+            continue;
+        }
+        let Some(revision) = reduced.visible_revision() else {
+            continue;
+        };
+        let bound = all.values().any(|p| p.subject==item && p.bound_graph && matches!(p.body,CausalEventBody::Revision { revision_id,.. } if &revision_id==revision));
+        if !bound {
+            continue;
+        }
+        // The exact existing winner is valid local evidence. Never borrow
+        // kind from a losing revision when a new winner has no graph.
+        let kind = match graphs
+            .iter()
+            .find(|g| g.item == item && &g.revision == revision)
+        {
+            Some(graph) => graph.kind.clone(),
+            None => transaction
+                .query_row(
+                    "SELECT kind FROM vault_items WHERE item_id=?1 AND visible_revision=?2",
+                    params![item.as_slice(), revision.as_slice()],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or(ReductionError::Integrity)?,
+        };
+        if kind.is_empty() {
+            return Err(ReductionError::Integrity);
+        }
+        let status = if reduced.lifecycle() == ItemLifecycle::Trash {
+            "trash"
+        } else {
+            "active"
+        };
+        // Synthetic unbound reducer revisions have no persisted ciphertext
+        // and do not materialize a human item.
+        {
+            transaction.execute("INSERT INTO vault_items(item_id,visible_revision,kind,status)VALUES(?1,?2,?3,?4) ON CONFLICT(item_id) DO UPDATE SET visible_revision=excluded.visible_revision,kind=excluded.kind,status=excluded.status",params![item.as_slice(),revision.as_slice(),kind,status])?;
+        }
+    }
+    Ok(())
 }
 fn insert_graph(
     tx: &rusqlite::Transaction<'_>,
@@ -1548,8 +1740,7 @@ fn load_key_package(
         .map_err(ReductionError::from)
 }
 
-#[allow(clippy::too_many_lines)]
-fn reduce(events: &BTreeMap<[u8; 32], ParsedEvent>) -> Result<ReducedView, ReductionError> {
+fn structural_events(events: &BTreeMap<[u8; 32], ParsedEvent>) -> BTreeSet<[u8; 32]> {
     let mut structural = BTreeSet::new();
     loop {
         let before = structural.len();
@@ -1573,6 +1764,145 @@ fn reduce(events: &BTreeMap<[u8; 32], ParsedEvent>) -> Result<ReducedView, Reduc
             break;
         }
     }
+    structural
+}
+fn parsed_events(
+    c: &rusqlite::Connection,
+) -> Result<BTreeMap<[u8; 32], ParsedEvent>, ReductionError> {
+    let mut statement = c.prepare("SELECT event FROM authority_events ORDER BY event_digest")?;
+    let mut map = BTreeMap::new();
+    for row in statement.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
+        let bytes = row?;
+        map.insert(digest(&bytes), decode_event(&bytes)?);
+    }
+    Ok(map)
+}
+#[derive(Default)]
+struct PurgeProof {
+    items: BTreeMap<[u8; 16], [u8; 32]>,
+    revisions: BTreeMap<([u8; 16], [u8; 16]), [u8; 32]>,
+}
+impl PurgeProof {
+    fn proof(&self, item: [u8; 16], revision: [u8; 16]) -> Option<[u8; 32]> {
+        match self.items.get(&item) {
+            Some(id) => Some(*id),
+            None => self.revisions.get(&(item, revision)).copied(),
+        }
+    }
+    fn covers(&self, item: [u8; 16], revision: [u8; 16]) -> bool {
+        self.proof(item, revision).is_some()
+    }
+}
+fn verified_purges(
+    all: &BTreeMap<[u8; 32], ParsedEvent>,
+    view: &ReducedView,
+    structural: &BTreeSet<[u8; 32]>,
+) -> Result<PurgeProof, ReductionError> {
+    let ancestors = Ancestors::new(all, structural);
+    let mut proof = PurgeProof::default();
+    for (id, event) in all {
+        if !matches!(
+            event.kind,
+            CausalEventKind::PurgeItem | CausalEventKind::PurgeRevisions
+        ) {
+            continue;
+        }
+        // Pending or semantically invalid purge is never an omission proof.
+        if !structural.contains(id) || !view.event_active(id) {
+            return Err(ReductionError::Integrity);
+        }
+        let revisions = purge_revision_ids(&event.body).ok_or(ReductionError::Integrity)?;
+        let causal_revisions: Vec<_> = all
+            .iter()
+            .filter_map(|(rid, e)| {
+                if e.subject != event.subject || !ancestors.is_ancestor(*rid, *id) {
+                    return None;
+                }
+                match e.body {
+                    CausalEventBody::Revision { revision_id, .. } => Some(revision_id),
+                    _ => None,
+                }
+            })
+            .collect();
+        if causal_revisions.is_empty() || revisions.iter().any(|r| !causal_revisions.contains(r)) {
+            return Err(ReductionError::Integrity);
+        }
+        if event.kind == CausalEventKind::PurgeItem {
+            proof.items.insert(event.subject, *id);
+        } else {
+            for revision in revisions {
+                proof.revisions.insert((event.subject, *revision), *id);
+            }
+        }
+    }
+    Ok(proof)
+}
+fn delete_sync_payload(
+    tx: &rusqlite::Transaction<'_>,
+    item: [u8; 16],
+    revision: [u8; 16],
+) -> Result<(), ReductionError> {
+    let existing: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT item_id FROM revision_parts WHERE revision_id=?1",
+            [revision.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if existing.is_some_and(|id| id != item) {
+        return Err(ReductionError::Integrity);
+    }
+    for table in [
+        "attachment_stream_chunks",
+        "attachment_streams",
+        "attachment_parts",
+        "revision_parts",
+    ] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE revision_id=?1"),
+            [revision.as_slice()],
+        )?;
+    }
+    Ok(())
+}
+fn persist_purges(
+    tx: &rusqlite::Transaction<'_>,
+    proof: &PurgeProof,
+    all: &BTreeMap<[u8; 32], ParsedEvent>,
+) -> Result<(), ReductionError> {
+    for (item, purge) in &proof.items {
+        let revisions: BTreeSet<_> = all
+            .values()
+            .filter_map(|e| match e.body {
+                CausalEventBody::Revision { revision_id, .. } if &e.subject == item => {
+                    Some(revision_id)
+                }
+                _ => None,
+            })
+            .collect();
+        for revision in &revisions {
+            delete_sync_payload(tx, *item, *revision)?;
+        }
+        tx.execute(
+            "DELETE FROM credential_authorizations WHERE item_id=?1",
+            [item.as_slice()],
+        )?;
+        tx.execute(
+            "DELETE FROM vault_items WHERE item_id=?1",
+            [item.as_slice()],
+        )?;
+        tx.execute("INSERT OR IGNORE INTO purged_items(item_id,purge_event_digest,revision_count,attachment_count,encrypted_bytes)VALUES(?1,?2,?3,0,0)",params![item.as_slice(),purge.as_slice(),i64::try_from(revisions.len()).map_err(|_|ReductionError::ResourceLimit)?])?;
+    }
+    for ((item, revision), purge) in &proof.revisions {
+        delete_sync_payload(tx, *item, *revision)?;
+        tx.execute("INSERT OR IGNORE INTO purged_revisions(revision_id,item_id,purge_event_digest)VALUES(?1,?2,?3)",params![revision.as_slice(),item.as_slice(),purge.as_slice()])?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn reduce(events: &BTreeMap<[u8; 32], ParsedEvent>) -> Result<ReducedView, ReductionError> {
+    let structural = structural_events(events);
     let pending = events.len() - structural.len();
     let pending_bytes: usize = events
         .iter()
@@ -2163,4 +2493,127 @@ fn encode_ids32_value(values: &[[u8; 32]]) -> Vec<u8> {
     let mut e = Encoder::new(Vec::new());
     encode_ids32(&mut e, values);
     e.into_writer()
+}
+
+#[cfg(test)]
+mod restore_digest_tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new(name: &str) -> Self {
+            let directory = std::env::temp_dir().join(format!(
+                "pmw2c-restore-digest-{}-{name}",
+                std::process::id()
+            ));
+            fs::create_dir(&directory).expect("exclusive synthetic fixture");
+            Self(directory)
+        }
+
+        fn stage(&self, name: &str, bytes: &[u8]) -> PathBuf {
+            write_stage(&self.0, name, bytes).expect("stage synthetic ciphertext")
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).expect("remove only owned digest fixture");
+            assert!(!self.0.exists());
+        }
+    }
+
+    fn restore_connection() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE backup_restore_streams (
+                   transaction_id BLOB, source_revision BLOB, source_attachment BLOB,
+                   target_attachment BLOB, header BLOB, chunk_count INTEGER
+                 );
+                 CREATE TABLE backup_restore_stream_chunks (
+                   transaction_id BLOB, source_revision BLOB, source_attachment BLOB,
+                   chunk_index INTEGER, ciphertext BLOB
+                 );",
+            )
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn restore_graph_digest_without_streams_matches_reducer_inline_graph() {
+        let fixture = Fixture::new("inline");
+        let package = b"PMW2_SYNTHETIC_RESTORED_REVISION";
+        let graph = ReceivedCiphertextGraph {
+            item: [1; 16],
+            revision: [2; 16],
+            kind: "note".into(),
+            package: fixture.stage("revision", package),
+            attachments: Vec::new(),
+            streams: Vec::new(),
+        };
+        let mut connection = restore_connection();
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            crate::backup::restore_graph_digest(&tx, [3; 16], [4; 16], package).unwrap(),
+            graph_digest(&graph).unwrap()
+        );
+    }
+
+    #[test]
+    fn restore_graph_digest_with_streams_matches_reducer_sorted_graph() {
+        let fixture = Fixture::new("streams");
+        let package = b"PMW2_SYNTHETIC_RESTORED_FILE_REVISION";
+        let mut graph = ReceivedCiphertextGraph {
+            item: [1; 16],
+            revision: [2; 16],
+            kind: "file".into(),
+            package: fixture.stage("revision", package),
+            attachments: Vec::new(),
+            streams: Vec::new(),
+        };
+        let mut connection = restore_connection();
+        let tx = connection.transaction().unwrap();
+        // Source and target orders differ; SQL staging and wire graphs must
+        // both hash target IDs, headers and all chunks in target-ID order.
+        for (source, target) in [(5_u8, 9_u8), (6, 8)] {
+            let header = vec![target; 24];
+            tx.execute(
+                "INSERT INTO backup_restore_streams VALUES(?1,?2,?3,?4,?5,2)",
+                params![
+                    [3_u8; 16].as_slice(),
+                    [4_u8; 16].as_slice(),
+                    [source; 16].as_slice(),
+                    [target; 16].as_slice(),
+                    &header
+                ],
+            )
+            .unwrap();
+            let mut chunks = Vec::new();
+            for index in 0..2_i64 {
+                let bytes = format!("PMW2_SYNTHETIC_CHUNK_{target}_{index}").into_bytes();
+                tx.execute(
+                    "INSERT INTO backup_restore_stream_chunks VALUES(?1,?2,?3,?4,?5)",
+                    params![
+                        [3_u8; 16].as_slice(),
+                        [4_u8; 16].as_slice(),
+                        [source; 16].as_slice(),
+                        index,
+                        &bytes
+                    ],
+                )
+                .unwrap();
+                chunks.push(fixture.stage(&format!("chunk-{target}-{index}"), &bytes));
+            }
+            graph.streams.push(ReceivedCiphertextStream {
+                id: [target; 16],
+                header,
+                chunks,
+            });
+        }
+        assert_eq!(
+            crate::backup::restore_graph_digest(&tx, [3; 16], [4; 16], package).unwrap(),
+            graph_digest(&graph).unwrap()
+        );
+    }
 }

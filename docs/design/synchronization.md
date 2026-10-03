@@ -165,6 +165,43 @@ Para evitar una referencia circular, `grant_commitments` es SHA-256 de CBOR del 
 
 Arrays de IDs/digests van ordenados binariamente sin duplicados; razones son enums `owner_request`, `replacement`, `suspected_compromise`. No usar `reason` como política externa. Transacciones con muchas revisiones usan manifiesto paginado con partes autenticadas ≤256 KiB y commit de digest raíz; ningún fragmento activa una mitad de importación.
 
+**Concreción del manifiesto de transferencia — decisión del orquestador del
+2026-10-03 conforme a G5 (opción A).** El plaintext CBOR determinista del root
+de transferencia es exactamente `[3, event_count, pages]`: versión uint `3`,
+`event_count` uint64 no cero y `pages = [[index, page_ciphertext_sha256], ...]`.
+Cada índice es uint64 contiguo desde cero; cada hash tiene 32 bytes y referencia
+el ciphertext autenticado de una página. No se repiten hashes. El root y cada
+página se cifran/autentican con el pairing existente; `sync.publish.root_hash`
+es SHA-256 del ciphertext completo del root y se publica solo después de todos
+los eventos, grafos y páginas referidos. El root agrupa transporte: la autoridad
+sigue exigiendo los sobres firmados bajo claves previamente confiables.
+
+Cada página conserva el descriptor v2 exacto
+`[2, event_ciphertext_hashes[], graph_ciphertext_hashes[]]`, con 1–256 eventos
+y 0–256 grafos. Los hashes de eventos de 32 bytes van estrictamente ordenados
+sin duplicados. Las referencias de grafos no se repiten; su orden no es causal
+y no se exige orden binario a roots v2 históricos (el emisor actual las ordena).
+Root y páginas tienen como máximo 256 KiB de plaintext.
+`event_count` debe coincidir con la suma de eventos de todas las páginas; no
+admitir eventos/grafos repetidos entre páginas ni un mismo evento firmado
+reencriptado dos veces en el grupo. Las páginas respetan el orden causal:
+ningún parent incluido en el grupo puede estar en una página posterior al hijo;
+el orden por hash dentro de una página no es causal. Mantener bloques ≤512 KiB,
+recepción no verificada ≤256 MiB y aplicación en lotes ≤256 eventos dentro de
+una sola transacción de activación del grupo. Índices, cantidades, AEAD, hashes,
+firmas, cierre causal y pertenencia de purga se verifican antes del commit del
+grupo y de su marcador de recepción, escritos atómicamente.
+
+La selección del outbox incluye el purge firmado y su cierre causal cuando
+omite payloads, incluso si sus antecedentes ya tienen acuse. Purge offline
+no espera al servidor. Se conservan permanentemente todos los headers firmados;
+la omisión solo se admite con prueba de purga válida en el grupo o en evidencia
+local posterior conservada. Un replay auténtico no retrocede esa evidencia ni
+reintroduce payload purgado. Solo una publicación real permite reconocer el
+outbox. Un cliente que desconozca v3 la rechaza explícitamente, sin negociación
+alternativa ni fallback a paquetes independientes. El receptor actual conserva
+el decoder v2 para roots históricos; todos los nuevos pushes emiten v3.
+
 ### 9.2 Reductor determinista y disponibilidad
 
 Para un conjunto de paquetes recibidos, en este orden lógico (aplicación local en una transacción):

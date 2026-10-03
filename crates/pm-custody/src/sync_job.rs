@@ -15,7 +15,7 @@ use std::{
 };
 
 use pm_crypto::{SyncPairing, random_id};
-use pm_sync::{ProcessTlsTransport, SyncError, SyncReplica};
+use pm_sync::{ProcessTlsTransport, SyncError, SyncReplica, timing};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::Failure;
@@ -167,6 +167,7 @@ impl Manager {
             server_public,
             pin,
         };
+        let _start = timing::Span::new("job_start");
         let bytes = Zeroizing::new(encode_config(&config)?);
         write_private(&self.config_path, &bytes)?;
         let id = config.id;
@@ -205,11 +206,21 @@ impl Manager {
             runtime.active = true;
         }
         let manager = Arc::clone(self);
-        std::thread::spawn(move || manager.run(config));
+        let queued_at = std::time::Instant::now();
+        std::thread::spawn(move || {
+            if timing::enabled() {
+                eprintln!(
+                    "PMW2_TIMING category=job_spawn_wait count=1 us={}",
+                    queued_at.elapsed().as_micros()
+                );
+            }
+            manager.run(config);
+        });
         Ok(())
     }
 
     fn run(self: Arc<Self>, mut config: Config) {
+        let _job = timing::Span::new("job_total");
         let result = self.run_inner(&config);
         config.protected.zeroize();
         let status = match result {
@@ -247,6 +258,7 @@ impl Manager {
     }
 
     fn run_inner(&self, config: &Config) -> Result<(u64, u64), WorkerError> {
+        let preparing = timing::Span::new("job_prepare");
         validate_program(&config.program).map_err(WorkerError::Sync)?;
         let trusted = pm_vault::open_vault_identity(&self.vault)
             .map_err(|_| WorkerError::Sync(SyncError::Integrity))?;
@@ -255,7 +267,15 @@ impl Manager {
         if pairing.server_pin() != &config.pin {
             return Err(WorkerError::Sync(SyncError::Unauthorized));
         }
+        #[cfg(windows)]
         let transport = ProcessTlsTransport::new(
+            &config.program,
+            &config.socket,
+            &config.client_key,
+            &config.server_public,
+        );
+        #[cfg(unix)]
+        let transport = ProcessTlsTransport::authenticated_session(
             &config.program,
             &config.socket,
             &config.client_key,
@@ -263,21 +283,38 @@ impl Manager {
         );
         let mut replica = SyncReplica::new(&self.vault, pairing, [0; 44], config.pin)
             .map_err(WorkerError::Sync)?;
+        drop(preparing);
         self.advance(config.id, Phase::Pushing, 0, 0)
             .map_err(|()| WorkerError::Journal)?;
-        let pushed = replica.push(&transport).map_err(WorkerError::Sync)?;
-        self.advance(
-            config.id,
-            Phase::Pulling,
-            u64::try_from(pushed).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
-            0,
-        )
-        .map_err(|()| WorkerError::Journal)?;
-        let pulled = replica.pull(&transport).map_err(WorkerError::Sync)?;
-        Ok((
-            u64::try_from(pushed).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
-            u64::try_from(pulled).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
-        ))
+        let result = (|| {
+            let pushed = replica.push(&transport).map_err(WorkerError::Sync)?;
+            self.advance(
+                config.id,
+                Phase::Pulling,
+                u64::try_from(pushed).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
+                0,
+            )
+            .map_err(|()| WorkerError::Journal)?;
+            let pulled = replica.pull(&transport).map_err(WorkerError::Sync)?;
+            Ok((
+                u64::try_from(pushed).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
+                u64::try_from(pulled).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
+            ))
+        })();
+        #[cfg(unix)]
+        {
+            let closed = transport.finish().map_err(WorkerError::Sync);
+            match (result, closed) {
+                (Ok(value), Ok(())) => Ok(value),
+                (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+                (Err(error), Err(_)) => {
+                    eprintln!("SYNC_SESSION_CLEANUP_FAILED");
+                    Err(error)
+                }
+            }
+        }
+        #[cfg(windows)]
+        result
     }
 
     fn advance(&self, id: [u8; 16], phase: Phase, pushed: u64, pulled: u64) -> Result<(), ()> {
@@ -430,6 +467,7 @@ fn decode_status(bytes: &[u8]) -> Result<Status, Failure> {
 }
 
 fn persist_status(path: &Path, status: Status) -> Result<(), Failure> {
+    let _persist = timing::Span::new("job_status_fsync");
     let suffix = random_id().map_err(|_| Failure::Unavailable)?;
     let temporary = path.with_extension(format!("sync-status-{}", hex(&suffix)));
     write_private(&temporary, &encode_status(status))?;
