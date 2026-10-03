@@ -2206,3 +2206,27 @@ operación fallida ni se usa este caso como sustituto de la matriz: son dos
 escenarios independientes (restauración de terminal y operaciones 23–25).
 No modifica el layout ni depende de su decisión; registra el criterio de
 restauración incluso si la matriz sigue bloqueada por el siguiente defecto.
+
+[Run43](https://github.com/SantanaJcp/passwordmanager/actions/runs/37090653923),
+SHA `a0f1dcf72dde1ade8cd5a7d4731a437eaaf27a63`, job `111110091625`: build y
+13 nativos + 1 pipe + 15 observer + 1 sync PASS, incluida la negativa nativa de
+DACL nulo y liberación de reserva. Prompt/input oculto/unlock PASS; matriz FAIL
+en el mismo oráculo CSV. Medición discriminante: frame 80×24,
+`model-suffix=true input-columns=107 status-columns=82 input-visible=true
+suffix-visible=false`. La TUI recibe el input completo y el propio frame ya
+carece del sufijo: no es pérdida de teclado ni observer. El footer común tiene
+seis filas externas/cuatro internas y Paragraph wrap; status e input largos
+consumen más filas que las disponibles. No se envió Enter ni se importó CSV.
+
+Se detiene el avance de la matriz por la regla explícita del usuario de no
+decidir diseño. Hace falta acordar la presentación de inputs largos y su
+prioridad frente a status/exposure/controles en geometría 80×24; no ampliar
+pantalla/plazos ni acortar rutas para esconder el defecto. No se modifica el
+footer compartido con 26/28. Sólo se termina la prueba independiente ya
+definida de restauración CP; no desbloquea ni sustituye import/23–25.
+
+Fallback adicional observado al inspeccionar el wrapper fijado de Ratatui
+(`ratatui-widgets 0.3.2`, `reflow.rs`, `process_input`): si un glyph es más ancho
+que el límite de una línea, lo omite. No activa a 78 columnas internas, no
+explica este recorte y no se cambia la dependencia. Permanece además el fallback
+TERM de Crossterm y los cleanups heredados sin autorización del handoff.
