@@ -868,6 +868,8 @@ class MacPtySession:
         rendered = self.screen.application_text()
         render = "other"
         for category, marker in (
+            ("operation-failure", "Operation failed explicitly; no success was recorded"),
+            ("information-panel", "┌Information"),
             ("password-prompt", "Password required"),
             ("unlocked-catalog", "Unlocked: selection never reveals secrets"),
             ("search-prompt", "Search (engine-decrypted):"),
@@ -904,6 +906,21 @@ class MacPtySession:
                     "TUI PTY screen observation timed out "
                     + self._screen_diagnostic(since)
                 )
+            self._read_once(min(0.1, remaining))
+
+    def wait_information(self, expected, *, timeout=8, since=0):
+        from tui_migration_fixtures import information_text
+        deadline = time.monotonic() + timeout
+        while True:
+            rendered = self._current_text_after(since)
+            value = "" if rendered is None else information_text(rendered)
+            if expected in value:
+                return value
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                panel = information_text(self.screen.application_text())
+                shape = "valid" if panel else "absent-or-invalid"
+                raise AssertionError("mandatory TUI panel observation timed out panel=" + shape + " " + self._screen_diagnostic(since))
             self._read_once(min(0.1, remaining))
 
     def wait_selected(self, label, *, timeout=8, since=0):
@@ -1374,8 +1391,56 @@ def assert_screen_observer_regression():
     assert wait_stable_reveal_expiry(
         split_expiry, forbidden="note", forbidden_in_exposure=True, timeout=0,
     ).find("Exposure: <hidden>") >= 0
+    assert_information_panel_regression()
     assert_pasteboard_diagnostic_regression()
     assert_pty_helper_drain_regression()
+
+
+def assert_information_panel_regression():
+    """Mandatory values must come from the current panel, never the footer."""
+    from types import SimpleNamespace
+    from tui_migration_fixtures import recovery_code
+    from macos_tui_migration_lab import start, wait_recovery_code
+    boundary = object.__new__(MacPtySession)
+    boundary.screen = VtScreen(80, 24)
+    boundary.eof = False
+    boundary._screen_events = [(1, "post-unlock")]
+    boundary.screen.feed(b"\x1b[20;2Hexact-duplicates=1", final=True)
+    try:
+        boundary.wait_information("exact-duplicates=1", timeout=0)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("footer counterfeit satisfied the mandatory panel oracle")
+    boundary.screen.feed("\x1b[4;1H┌Information┐".encode(), final=True)
+    code = "PMR1-" + "ab" * 16 + "-1" + "-abcd1234" * 9
+    rows = ["exact-duplicates=1", "Recovery code:", code[:78], code[78:]] + [""] * 9
+    for y, row in enumerate(rows, 5):
+        boundary.screen.feed(f"\x1b[{y};1H│{row:<78}│".encode(), final=True)
+    assert "exact-duplicates=1" in boundary.wait_information("exact-duplicates=1", timeout=0)
+    assert recovery_code(boundary.screen.application_text()) == code
+    boundary.screen.feed(b"\x1b[5;2H\x1b[Krejected its fixed authority/request context;\x1b[6;2H\x1b[Kno success recorded", final=True)
+    for y in (5, 6):
+        boundary.screen.feed(f"\x1b[{y};80H│".encode(), final=True)
+    assert "rejected its fixed authority/request context; no success recorded" in boundary.wait_information(
+        "rejected its fixed authority/request context; no success recorded", timeout=0,
+    )
+    import textwrap
+    warning = "Recovery code shown temporarily; store externally, then re-enter it exactly to commit: old backups and exposed copies retain historical recovery paths."
+    rows = textwrap.wrap(warning, width=78) + ["Recovery code:", code[:78], code[78:]]
+    rows += [""] * (13 - len(rows))
+    for y, row in enumerate(rows, 5):
+        boundary.screen.feed(f"\x1b[{y};1H│{row:<78}│".encode(), final=True)
+    assert wait_recovery_code(SimpleNamespace(time=time), boundary, since=0) == code
+
+    class AlreadyUnlocked:
+        screen = SimpleNamespace(columns=80, rows=24)
+        def wait_text(self, text, **options):
+            assert text == "Items (selection is metadata only)" and options == {}
+            return text
+    session = AlreadyUnlocked()
+    fixture = SimpleNamespace(PASSWORD=b"synthetic-start-fixture", start_macos_tui=lambda *args, **kwargs: session)
+    assert start(fixture, "binary", "profile", "key", "endpoint") is session
 
 
 def assert_pty_helper_drain_regression():
@@ -2709,7 +2774,7 @@ def start_macos_tui(binary, profile, private, endpoint, *, idle, reveal, copy, p
 def tui_search(session, value):
     start = session.mark()
     session.send_key("/")
-    session.wait_text("Search (engine-decrypted):", since=start)
+    session.wait_information("Search (engine-decrypted):", since=start)
     search_start = session.mark()
     session.send_text(value, enter=True)
     return session.wait_text("Search returned 1 active items", since=search_start)

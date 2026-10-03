@@ -2522,3 +2522,725 @@ aprobación. Tras esa decisión, ejecutar GREEN del lab operations conservando
 el contador, verificar el nuevo render y continuar matriz nativa46 desde el
 nuevo commit, incluidas lease/negativas/sync. No repetir e536 sin cambio o
 experimento ni resolver27. No queda Cargo/lab/CI propio activo al entregar.
+
+## W1: información obligatoria en panel — 2026-10-03
+
+Decisión vinculante del usuario: resumen completo de importación, avisos de
+recuperación/rotación y toda información contractual previa a confirmar en el
+panel principal, nunca únicamente en el status recortable. Se conserva el
+footer horizontal del 2026-10-02. El código de recuperación es la exposición
+temporal explícitamente solicitada por ese flujo; no se trasladan secretos
+del input, contenido de elementos ni valores del preview al panel.
+
+Método autorizado para W1: extracción mecánica de draw a un render común y
+TestBackend real 80×24; RED de contadores completos y avisos, GREEN con panel,
+bordes exactos, u64 máximos, grafemas anchos/combinantes, scroll dentro del
+panel y resize. PgUp/PgDn desplazan el panel sin insertar input ni confirmar;
+no se añade un paso de confirmación ni se cambia el protocolo. Los fixtures
+leen la región principal actual y conservan contadores/confirmaciones exactos,
+con el mismo timeout. Código recovery se observa sin imprimirlo, con la misma
+lease; warning completo antes y después de reentrada. Cargo/check/clean/labs
+bajo `flock /tmp/pm-cargo-window.lock`, cwd `.worktrees/w1-tui-panel`.
+Barrido contra `/tmp/pmrs-gate-results.json` (40 casos, 38 rc0); los defectos
+G7 y purge/sync ajenos se conservan como evidencia pendiente. CI manual Windows
+normal y macOS completo sobre commits exactos, método native-ci, esperando
+conclusión; cada fallo nuevo requiere discriminante antes de corregir.
+
+Inventario de `tui.rs` inspeccionado:
+
+| Información | Clase y tratamiento W1 |
+| --- | --- |
+| CSV/1PUX mapping, keep/replace, total/new/replaced/exact-duplicates/excluded/preserved-fields/pages, IMPORT | Obligatoria previa al commit; panel completo. Los siete contadores son los existentes en el wire; W1 no inventa valores ni cambia schemas. G6/V19 siguen requiriendo validación integral de categorías del importador. |
+| Recovery: guardar externamente, reentrada exacta, código temporal, copias históricas | Obligatoria; contexto público y código temporal explícito en panel; sin copia persistente del código. |
+| Master: ROTATE y copias/backups históricos antes/después | Obligatoria; panel. Input sigue enmascarado. |
+| Plaintext: alcance/riesgo de copia persistente y EXPORT; aviso posterior de proteger/eliminar | Obligatoria; panel. |
+| Restore: RESTORE, IDs/keys nuevas, autoridad actual conservada y grants importados inactivos | Obligatoria; panel previo y resultado completo. |
+| Purge item/revisions y rango de audit/gap | Obligatoria previa a confirmar; panel. Resultado audit con discontinuidad completo. |
+| Passkey: RP/account/origin/document/request antes de APPROVE; reautenticación fresca | Obligatoria previa a confirmar; panel público, input secreto separado. |
+| Pair/pin/custodia humana; sync/job/fase/contadores/fallo explícito; retire/prefijos/offline | Contexto de confirmación y resultados observables exigidos por fixtures; panel completo, sin cambiar motor. |
+| Backup/download bytes y colisión; audit records/discontinuities/segments; history | Resultados completos observables; panel. |
+| Menús y sintaxis de prompts | Ayuda completa en panel; no se convierte en requisito nuevo de autorización. |
+| Password required, unlock/lock, selección/reveal/copy/expiry, CRUD breve, cancel/mismatch, error explícito | Status breve; se conserva su semántica y recorte. Descriptores/listas conservan su vista. |
+
+Fallbacks heredados observados y sin cambio: `WindowsServerPipe`/`LocalFree`
+y `WindowsClipboardWindow::drop`/DestroyWindow omiten errores de liberación;
+Crossterm TERM puede declarar soporte tras fallo VT; Ratatui reflow omite un
+glyph mayor que su ancho (el nuevo panel usa wrapping explícito por grafema);
+`tui_content_lab.py::screen` reemplaza UTF-8 inválido. El `unwrap_or(0)` de
+selección de catálogo conserva selección inicial si falta el ID, sin cambio.
+
+
+W1 RED conductual: `ef820a2`, extracción sin cambio de comportamiento;
+`flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody
+--lib information_ --locked --offline` → rc101, 0/3, log
+`/tmp/pmw1-render-red.log`. GREEN inicial: 6/6 panel + 7/7 footer, biblioteca y
+binario, dentro de 38+38 tests y bootstrap1/1, `/tmp/pmw1-render-green3.log`.
+Las dos iteraciones de oráculo corrigieron sólo normalización de líneas
+físicas/etiqueta recovery; un fallo `Debug` fue de compilación de test y no
+RED conductual. Checks intermedios detectaron fmt y tamaño de render; se
+extrajeron helpers de render del catálogo, sin relajar lint.
+
+PTY Linux operations pasó todo el recorrido original, además de avisos completos
+recovery/master desde el panel a 80×24, `/tmp/pmw1-tui-operations-green1.log`.
+Los plazos/leases permanecen iguales. Extensión nativa preparada: Windows
+exige los siete contadores exactos CSV (1/1/0/0/0/0/1) y 1PUX (2/2/0/0/0/4/1,
+raw+provenance por cada item), warning plaintext completo, restore y ambas
+rotaciones por teclado con código PMR1 completo en panel y máscara conservada.
+La lease reveal/copy nativa permanece1s. Se exige unlock posterior con la nueva
+maestra sintética. Mac Full25 observa los mismos avisos a 80×24 con las
+aserciones históricas completas y el timeout original.
+
+Discriminante estático posterior al primer dispatch W1: la nueva regresión del
+observer referencia `ScreenObserver`, pero el tipo real del fixture es
+`TerminalObserver` (declaración y todos los tests previos). Linux no compila
+ese bloque `cfg(windows)`. Corregir sólo el nombre preservando la aserción;
+la corrida ya aceptada conserva su SHA y se espera su conclusión. Un eventual
+fallo de compilación es defecto de fixture, no RED de producto ni aceptación
+TUI. Una siguiente corrida se justificará por este cambio verificado, no por
+repetir el commit idéntico.
+
+Extensión de lease real TUI antes de la segunda candidata: sampler de sólo
+lectura del HANDLE del proceso ConPTY, SID resuelto para el servicio instalado,
+DACL no nulo, ausencia del ACE antes, exactamente un ACE no heredable de sólo
+PROCESS_DUP_HANDLE|PROCESS_QUERY_LIMITED_INFORMATION durante la transferencia,
+y bytes exactos originales/ausencia de ACE tras el preview. Se muestrea cada1ms
+sin pausa del custodio, inyección, cambio de producto o ampliación de plazo;
+no observar la ventana es FAIL/no demostrado. El sampler se une siempre antes
+de cerrar el HANDLE; errores de consulta/cleanup fallan. Tests nativos previos
+conservan matriz de segundo lease/DACL nulo/cambio externo; esos tests no se
+confunden con la lease del proceso TUI. La matriz de fracaso TUI/source se
+extenderá sobre el resultado observado, sin declarar PASS por ausencia de datos.
+
+Negativa fuente preparada antes de candidata2: crear un único hardlink propio
+al 1PUX sintético (colisión falla), pedir import del origen por teclado y exigir
+error explícito antes de preview/IMPORT. Sampler exige DACL original exacta y
+cero lease durante ese rechazo local; retirar sólo el alias propio y propagar
+su cleanup. La posterior importación del origen ya de nuevo single-link es un
+caso positivo independiente, nunca un camino alternativo para aceptar la
+negativa. No se relajan owner/reparse/multilink ni controles peer del producto.
+
+Mac run1 W1: ambos CPU fallan en `Full25.start`, antes de los importadores:
+`event=none`, parser ground, catálogo desbloqueado y proceso vivo. Causa
+comprobable en fixture: `MacPtySession.start` fija80×24; W1 cambió el posterior
+resize240×30 por80×24, por tanto solicita un resize sin cambio de dimensiones y
+exige un repaint posterior al mark que nunca tiene por qué existir. Método
+antes del arreglo: mantener la sesión inicial80×24 y exigir su catálogo actual
+ya observado tras unlock, sin un nuevo mark/resize ficticio. No se altera
+producto, timeout ni freshness de las acciones posteriores (mantienen sus
+marks previos a teclas reales). Añadir regresión sintética del start que rechaza
+cualquier resize extra y exige catálogo en el tamaño fijado. Ejecutar los
+helpers existentes y repetir macOS sólo sobre el fixture corregido.
+
+### Reanudación W1 — checkpoint de fixtures
+
+Estado reconstruido con status/log/diff sobre `ee3c1fd`: `ef820a2` y
+`c0d6485` conservados, sin revertir cambios pendientes ni tocar otros worktrees.
+Corridas iniciales terminadas, SHA `c0d6485dc8e73f28ce7dcc390f3d528c150cc6dc`:
+[Windows 37122500286](https://github.com/SantanaJcp/passwordmanager/actions/runs/37122500286)
+FAIL de compilación `ScreenObserver`, no RED conductual;
+[macOS 37122500281](https://github.com/SantanaJcp/passwordmanager/actions/runs/37122500281)
+FAIL en ambos CPU por el repaint ficticio descrito arriba, antes de Full25.
+Logs `/tmp/pmw1-native-{windows,macos}1.log`.
+
+El sampler pendiente se encapsuló en `Sampling::observe`: siempre termina y
+une el thread antes de retornar, combina error de operación y observación/
+cleanup, y exige el resultado DACL aunque el oráculo de teclado falle. La
+guarda Drop sólo protege unwinding de panic (que ya falla el fixture); no
+convierte un error ordinario de sampling en diagnóstico con éxito.
+
+Verificación fresca tras reanudar:
+`flock /tmp/pm-cargo-window.lock ./scripts/check.sh` rc0, incluido fmt,
+build/tests/clippy y los seis casos de panel más siete de footer en lib/bin;
+log `/tmp/pmw1-resume-check.log`. Helpers macOS por import local, bajo el mismo
+flock y `PYTHONDONTWRITEBYTECODE=1`: observer, panel, start y PTY helpers PASS,
+`/tmp/pmw1-resume-macos-helpers.log`. Esto verifica el fixture; no acredita
+ejecución macOS o Windows. Los bloques Windows necesitan la próxima CI nativa.
+
+Barrido anterior de W1 revisado caso por caso y contra sus logs:
+`/tmp/pmw1-gate-results.json`, 40 casos, 39 rc0; baseline
+`/tmp/pmrs-gate-results.json`, 40 casos, 38 rc0. Único cambio de rc:
+operations1→0; g7-matrix conserva1. Check/clean y los 26 wrappers Linux,
+publicación y los nueve modos G7 conservan sus aserciones. No se convierte
+el RED de G7 ni purge/outbox pendiente en aceptación. La próxima CI usa
+el checkpoint corregido, no repite el SHA inicial.
+
+### Candidata W1 50fff66: frontera nativa observada
+
+SHA exacto `50fff66d2c75664cb4e9bff15483590c0dd2aae3`, HEAD remoto comprobado
+antes de dispatch. Inputs normales, sin diagnóstico de storage ni modo Mac
+final-only. Ambas corridas terminaron:
+
+- [Windows 37123518728](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123518728),
+  FAIL. Build ARM64; primitives13, pipe1, observer17, sync-lib1 PASS.
+  ConPTY prompt/hidden/unlock/footer/CSV confirmado con siete contadores
+  completos PASS. Hardlink propio de 1PUX rechazado con error explícito, cero
+  lease observada y DACL exacta antes/después PASS. Después el 1PUX positivo no
+  llega a preview: `CUSTODY_UNAVAILABLE`; no se observa la lease real. El
+  sampler propaga ambos errores, no rebaja la aserción. Log
+  `/tmp/pmw1-native-windows2.log`. Esto no determina todavía si el rechazo
+  precede al grant o si existe otra falla del canal; no parchear producto sin
+  discriminante.
+- [macOS 37123520473](https://github.com/SantanaJcp/passwordmanager/actions/runs/37123520473),
+  FAIL Intel y Apple silicon. Ambos llegan a `full25-import=observed` y luego
+  fallan en el mismo `wait_text` del rechazo de pin/contexto. Producto vivo,
+  parser ground, repaint real posterior al mark. Log
+  `/tmp/pmw1-native-macos2.log`. Discriminante: `decode_sync_status(phase9)`
+  envía el literal completo al panel; `wait_text` busca una subcadena que cruza
+  líneas físicas a80×24. Cambiar exclusivamente al `wait_information` conserva
+  literal/plazo/freshness. Audit records y estado de job consultado también
+  deben venir del panel; el polling final aplica la misma normalización.
+
+Método antes de la siguiente candidata: regresión sintética de aviso de rechazo
+partido en dos filas dentro del panel y rechazo del footer falso; helpers
+macOS existentes. Windows: probar `ProcessHandleTransferLease` con el token
+humano real del fixture (los unit tests anteriores usan el installer elevado),
+capturar DACL propia antes/durante/después sin pausa y exigir ACE exacto/restauración.
+Este caso cambia sólo el proceso fixture efímero, nunca la DACL de la TUI ni
+permisos de producto. Conservar después el caso real TUI y su sampler; emitir
+diagnóstico categórico de proceso/parser si falla. Un PASS del discriminante
+no es PASS de la transferencia TUI. No cambiar deadlines ni repetir50fff66.
+
+La matriz de Windows aún no alcanza tipos completos/resize, restore/rotaciones
+ni pair-sync-retire. El fixture actual ni siquiera contiene los dos primeros
+grupos completos ni el último; no declarar cobertura por menús, Linux o tests
+de primitives. Primero discriminar el bloqueo1PUX real; extender fixtures
+posteriores sin sustituir esa operación. Sync tiene además el bloqueo conocido
+purge/outbox de W2 y pendientes nativos de firma/DACL ya inventariados.
+
+Linux tras reanudar: clean offline rc0, `/tmp/pmw1-resume-clean.log`;
+operations completo rc0, `/tmp/pmw1-resume-operations.log`, con restore,
+rotaciones desde panel y todo el recorrido de sync histórico. Mismo comando
+del barrido, flock, artefactos existentes y oráculos/plazos originales.
+
+Fallback heredado adicional observado durante la relectura, sin cambio:
+`tui.rs::display_secret`, ante bytes que no forman UTF-8, sustituye su
+presentación por `<binary secret: N bytes>`. El panel de recovery recibe un
+código textual, pero la función también sirve a otras exposiciones existentes.
+No se usa este descriptor como evidencia de un valor binario revelado completo.
+
+### Discriminante W1 abf9e58 y omisión del menú Audit
+
+SHA `abf9e58a42f2b3a1b37d18290aa608107c5bcb57`, publicado normalmente y
+comprobado por API. Runs terminados:
+[Windows 37124375821](https://github.com/SantanaJcp/passwordmanager/actions/runs/37124375821)
+y [macOS 37124377389](https://github.com/SantanaJcp/passwordmanager/actions/runs/37124377389).
+Check previo rc0, `/tmp/pmw1-resume-check3.log`; helpers de rechazo partido en
+panel PASS, `/tmp/pmw1-resume-macos-helpers3.log`.
+
+Windows mantiene los PASS anteriores y añade `human-token-lease-discriminant`:
+la API real instala un ACE exacto y restaura bytes originales también con el
+humano no elevado del fixture. Por tanto los privilegios genéricos de ese token
+no explican por sí solos la falla. La TUI positiva1PUX sigue sin preview/lease
+observada y sale rc4: `child=exited:4`, parser ground, pantalla limpia tras
+teardown, sin marker de cleanup. Log `/tmp/pmw1-native-windows3.log`. Aún no
+se ha localizado la falla entre ack31, begin lease de la TUI y transferencia;
+no inferir un problema de render ni conceder derechos extra. El siguiente
+discriminante requiere observar esas fronteras de transporte/custodia, fuera
+de la zona W1 render/panel. No repetir este caso idéntico ni saltarlo para
+declarar verdes las operaciones dependientes.
+
+Mac Intel y ARM pasan importadores y offline+wrong-pin desde panel. ARM falla
+esperando el resultado completo del backup inicial; falta todavía discriminar
+error de operación, publicación o representación. Intel completa backup,
+plaintext y attachment grande, pero no reabre Audit tras su query. Causa estática
+concreta: query deja `Mode::Operations(Audit)`; la tecla `z` cae en la rama
+histórica de ayuda para tecla no reconocida, que actualiza sólo `app.status`,
+mientras el panel conserva el resultado de query. Método: misma ayuda y mismas
+teclas, actualizarla también mediante `show_information`, sin cambiar mode,
+input, operaciones ni confirmaciones. El FAIL nativo Intel en la reapertura es
+RED conductual de esa omisión; siguiente GREEN debe superar el mismo punto.
+Logs `/tmp/pmw1-native-macos3.log` y `...macos3-arm.log`.
+
+Antes del siguiente dispatch Mac: check y los tres PTY Linux; helpers y
+diagnóstico categórico del panel (válido/ausente, operación fallida) y del
+destino backup (ausente/vacío/no vacío y modo privado), nunca contenido/rutas
+secretas. Se conserva el wait8s. No se cambia el backup ni sus oráculos. El
+fixture Windows ya discrimina su frontera y no se relanza por una modificación
+del menú que no interviene en su falla1PUX.
+
+GREEN Linux previo al dispatch Mac siguiente: check rc0
+`/tmp/pmw1-resume-check4.log`; helpers rc0
+`/tmp/pmw1-resume-macos-helpers4.log`; los tres labs TUI rc0 en la barrida
+fresca `/tmp/pmw1-resume-gate-results.json`, logs
+`/tmp/pmw1-resume-gate-lab-tui-{content,access,operations}.log`. Mantienen
+types7/resize/Unicode/máscara y el recorrido completo de operations,
+rotaciones/pair/sync/retire incluidos. El resto de los40 casos todavía está
+en curso al publicar este checkpoint; no declarar la barrida concluida aquí.
+
+### Candidata W1 cae2a4a: barrido Linux completo y avisos macOS
+
+SHA `cae2a4af901e194715a5fe487d8ddf54b590da0c`. La barrida fresca ya terminó:
+`/tmp/pmw1-resume-gate-results.json`, 40 casos, 39 rc0, cero mismatches nuevos
+frente a `/tmp/pmrs-gate-results.json` (40 casos, 38 rc0). Único cambio de rc:
+operations1→0. G7 matrix conserva rc1 por staging superviviente a fallos de
+commit/outbox/audit EIO/ENOSPC; corresponde a W3 y no se convierte en PASS.
+Check, clean-offline-build y los 26 wrappers Linux pasan; los otros casos de
+publicación/G7 conservan su resultado. Comandos exactos por caso y logs en el
+JSON; driver `/tmp/pmw1-resume-gate-run.py`, resumen
+`/tmp/pmw1-resume-gate-summary.log`. Cada invocación se ejecutó bajo flock,
+con los artefactos Keycloak26.7.3 y Chrome autorizados y sin modificar sus
+asserts/plazos. Logs principales:
+`/tmp/pmw1-resume-gate-final-{check,clean}.log` y
+`/tmp/pmw1-resume-gate-lab-tui-{content,access,operations}.log`.
+
+[macOS 37125454851](https://github.com/SantanaJcp/passwordmanager/actions/runs/37125454851)
+terminó FAIL sobre ese SHA, con alcance distinto por CPU:
+
+- Intel supera la reapertura Audit que antes fallaba y emite
+  `PM26_MATRIX full25-local=observed`: backup/plaintext, adjunto grande,
+  query/purge de audit, restore con autoridad preservada, recuperación con
+  reentrada exacta y avisos históricos, rotación maestra y rechazo de la
+  maestra anterior/desbloqueo de la nueva observados desde el panel a80×24.
+  Falla después en sync feliz: `durable=integrity screen=integrity process=same`,
+  `blocks=1 roots=0`, panel válido/proceso vivo. El outbox retenía referencias
+  purgadas (`missing-items=5`); es el bloqueo conocido de W2. No se altera el
+  timeout20s ni se interpreta el FAIL global como ausencia de los PASS previos.
+- Apple silicon falla antes de Full25, en `diagnose_agent_accept_lane` al
+  esperar unlock: password-prompt, evento posterior al mark, parser ground,
+  hijo vivo. No se ha discriminado su causa; no se atribuye al panel ni se
+  parchea/repite un SHA idéntico. El FAIL previo de backup ARM tampoco queda
+  resuelto por esta corrida que no lo alcanza.
+
+Logs `/tmp/pmw1-native-macos4.log` y `...macos4-arm.log`. Entorno observado:
+macOS15.7.9/kernel24.6.0, Rust1.98.1; Intel x86_64 imagen
+`20260824.0482.1`, Apple silicon aarch64 imagen `20260907.0337.1`. Windows
+run37124375821: Windows11 Enterprise build26200 ARM64, imagen
+`20260924.168.1`, Rust1.98.1, `UAC_ENABLE_LUA=1`; el privilegio real se
+comprueba por el fixture, no se deduce de la descripción histórica del runner.
+Estas VMs no acreditan Terminal.app/Windows Terminal humano, x64, reboot/FDE
+ni firma real. Todas las corridas propias anteriores ya concluyeron.
+
+### Oráculos completos antes de confirmar — siguiente checkpoint W1
+
+Relectura posterior al barrido: los resultados históricos completos ya se
+exigían, pero algunos prompts previos a confirmar sólo se verificaban por
+prefijo. No bastan para acreditar toda la información contractual antes de
+EXPORT/RESTORE/ROTATE/reentrada. Método extendido sin cambiar producto:
+Linux operations y Mac Full25 deben observar el literal completo de copia
+plaintext persistente, IDs/keys y autoridad actual de restore, copias históricas
+de maestra, y guardar/reentrar recovery con todo su aviso histórico antes de
+enviar cada confirmación. Conservar tamaño80×24, marcas, plazos y código
+completo; añadir regresión sintética del warning recovery partido en filas.
+
+Helpers macOS PASS bajo flock, `/tmp/pmw1-resume-macos-helpers5.log`.
+Operations reforzado rc0 bajo el mismo flock y artefactos, comando
+`env PYTHONDONTWRITEBYTECODE=1 PM_KEYCLOAK_DIST=<artefacto autorizado>
+PM_CFT_DIR=<artefacto autorizado> ./scripts/test-linux-tui-operations-lab.sh`,
+log `/tmp/pmw1-resume-operations5.log`: todo el recorrido original y los
+cuatro avisos completos previos a confirmar PASS. No repetir Windows: este
+cambio de asserts Mac/Linux no
+interviene en su frontera de transferencia1PUX. El barrido40 anterior queda
+ligado a cae2a4a; el fixture reforzado recibe evidencia nueva separada, sin
+atribuirle una barrida que no se ejecutó.
+
+### Matriz 27 al checkpoint W1 de reanudación
+
+Esta tabla sustituye el estado de las tablas históricas del footer anterior;
+no modifica el ticket `claimed` ni declara aceptación integral.
+
+| Criterio de aceptación de 27 | Estado actual | Evidencia y pendiente |
+| --- | --- | --- |
+| Servicio virtual/DACL/DPAPI y peer bilateral G1 por proceso real | PASS parcial | Windows ARM64 real compone servicio/RPK/unlock y primitives; falta defensa integral G1. |
+| Rechazos de sustitución/impersonación/dump/lectura/fallos de custodia | no demostrado integral | Hardlink source rechazado y tests nativos de permisos pasan; no sustituyen toda la matriz de ataques/transferencia real. |
+| ConPTY/clipboard/persistencia sin admin del agente; ambos CPU/reboot en32 | PASS parcial | Prompt/input oculto/unlock/CSV por teclado ARM64 y token humano real; clipboard/persistencia integrales posteriores no alcanzados en esta corrida; x64/reboot/FDE/Windows Terminal humano pendientes. |
+| TDD RED/GREEN, comandos exactos, sin skip/stubs | PASS del cambio W1 | RED ef820a2/render y omisión Audit nativa; GREEN render/Linux y Audit Intel. No equivale a TDD integral de27. |
+| Revisión contractual e integración por merger antes de resolver | pendiente | Decisión del usuario aplicada; sólo checkpoint W1, no integración ni merge PR#1. |
+
+| Matriz Windows solicitada a W1 | Estado y frontera observada |
+| --- | --- |
+| CSV largo por teclado, preview completo antes de IMPORT y commit | PASS nativo ARM64; los siete contadores exactos vienen del panel80×24. |
+| 1PUX grande positivo por teclado | FAIL antes del preview, hijo rc4/CUSTODY_UNAVAILABLE; no atribuirlo al render. |
+| Fuente hardlink negativa1PUX | PASS explícito; cero lease observada y DACL exacta antes/después; alias propio retirado. |
+| Lease real de la TUI y ACL antes/durante/después | no demostrado; sampler1ms no observa la lease y falla. Discriminante de lease API con token humano real PASS; no se toma como lease TUI. |
+| Segundo lease/DACL nulo/cambio externo | PASS de tests nativos; falta composición con transferencia TUI fallida y toda la matriz de errores Win32. |
+| Peer/PID/source/reparse/multilink/fallo transferencia completos | no demostrado integral; negativa hardlink no acredita el resto. |
+| Tipos completos y resize Windows | no alcanzados; fixture aún necesita ese grupo. Siete tipos/Unicode/resize sólo acreditados por Linux. |
+| Restore/recovery/master y avisos completos Windows | no alcanzados; oráculos preparados, no ejecutados tras la frontera1PUX. |
+| Pair-sync-retire y sync E2E/restart/offline Windows | no alcanzados; fixture necesita el grupo completo. Además hay bloqueo conocido purge/outbox W2 y límites de firma/DACL. |
+
+Siguiente paso del coordinador: asignar el discriminante Windows
+ack31→begin lease del hijo→transferencia en la zona transporte/custodia; W1
+no altera esa zona ni permisos para forzar un GREEN. Después extender y
+ejecutar los grupos nativos restantes sin omitir1PUX. Componer W2 para el
+purge/outbox y W3 para G7, preservando el panel y las guardas. La reanudación
+no toca listener/dispatcher/admisión/`provider: None` de W4. Conflictos
+previsibles: `tui.rs` App/render/begin_prompt con cambios de protección W3;
+fixtures de operations/migración y este documento con W2; coordinar fixture
+Windows/ACL si W4 modifica su harness. No hay segundo engine ni dependencias
+nuevas. Los fallbacks heredados inventariados permanecen sin autorización de
+cambio.
+
+### Cierre del checkpoint W1 — oráculos reforzados ejecutados
+
+Candidata exacta `7d8ba007729bd637add676a6a34429b176ef7d11`, HEAD remoto
+comprobado antes del dispatch. Inputs `pasteboard_diagnostic=false` y
+`final_phase_only=false`:
+[macOS 37126535485](https://github.com/SantanaJcp/passwordmanager/actions/runs/37126535485)
+concluyó FAIL; ambos jobs terminaron. No se repitió Windows por estos asserts
+que no afectan su frontera1PUX. Logs completos
+`/tmp/pmw1-native-macos5.log`, y por CPU
+`/tmp/pmw1-native-macos5-{intel,arm}.log`.
+
+Ambos CPU emiten `full25-import=observed`,
+`full25-offline+wrong-pin=observed` y `full25-local=observed`. Quedan observados
+por teclado/panel real80×24 los cuatro avisos completos antes de confirmar,
+incluido todo el warning histórico junto al código recovery exacto, y los
+resultados completos después de ambas rotaciones. Maestra anterior rechazada,
+nueva maestra desbloquea; restore preserva el estado de autoridad. Este PASS
+acotado satisface el objetivo W1 de avisos macOS, no la aceptación integral26.
+Mismos OS/CPU/Rust e imágenes registrados para la candidata anterior.
+
+- Intel: ambas negativas de colisión de salida pasan; después el sync feliz
+  vuelve a `durable=integrity screen=integrity process=same`, ahora
+  `blocks=6 roots=0`. Conserva `PM26_OUTBOX_PURGED ... missing-items=5`.
+  Bloqueo conocido W2, panel válido y proceso vivo; wait20s intacto.
+- Apple silicon: después de Full25 local falla la negativa de colisión de
+  backup en el wait8s. Diagnóstico `result=unclassified destination=same`,
+  panel de información actual, repaint posterior al mark, parser ground,
+  proceso vivo. No se observó ni éxito ni rechazo explícito; no declarar
+  superada esa negativa porque el destino no cambió. Lectura estática del
+  camino compartido Unix `rpc_download_atomic`: solicita y descarga todo el
+  backup, sincroniza el temporal y sólo entonces `publish_new_file` detecta
+  la colisión y propaga DestinationExists. Por tanto un backup todavía en
+  curso es una hipótesis compatible con el panel pendiente, no una causa
+  acreditada por este log. Discriminar operación/fin de stream/publicación
+  antes de cualquier parche; no ampliar el wait, anticipar el rechazo ni
+  modificar persistencia desde W1. El PASS del backup inicial aquí no explica
+  retrospectivamente los fallos ARM previos de unlock/backup.
+
+Verificación documental al entregar: AST de todos los fixtures Python
+modificados, enlaces locales de isolation/ticket27 y `git diff --check` PASS.
+Comparación por nombre y comando exacto de los40 casos confirma único delta
+operations1→0. La única modificación de producto tras c0d6485 es la ayuda del
+menú Audit en cae2a4a; la barrida40 incluye ese cambio. 7d8ba00 sólo fortalece
+fixtures y añade evidencia: helpers y operations reforzados PASS separados.
+No queda Cargo/lab/CI propio activo; worktree entregado con checkpoint normal,
+sin integración ni cambio de estado de tickets. La documentación posterior
+de resultados no altera el SHA de código ejecutado por las corridas.
+
+## W1 fase 2 — discriminante de transferencia (2026-10-03)
+
+Autorización explícita: worktree `w1-tui-panel`, hasta seis corridas nativas
+Windows/macOS totales, sin integración ni cambio de estado. Baseline Windows
+[37124375821](https://github.com/SantanaJcp/passwordmanager/actions/runs/37124375821),
+`abf9e58a42f2b3a1b37d18290aa608107c5bcb57`, conservado en
+`/tmp/pmw1b-windows-baseline.log`: CSV y lease API con token humano PASS,
+1PUX positivo hijo rc4 y lease TUI no observada.
+
+Método previo a corrida 1: usar el opt-in existente `service_diagnostics` y
+`--matrix-probe`; conservar binario normal, oráculos, sampler 1ms y deadlines.
+El reporte privado de métricas de consola añade sólo categorías fijas de
+source-open/request31/ack31, error de begin por etapa, lease instalada en el
+proceso que ejecuta la TUI, handle enviado, preview recibido y restauración.
+El servicio registra ack31, token recibido y resultado de duplicación. No
+registrar paths, SID/PID numéricos, handles, contenido ni secretos. La lectura
+del reporte se conserva incluso tras fallo; los errores de diagnóstico siguen
+siendo errores. No cambiar listener/dispatcher/admisión, vault/staging,
+purge/sync/backup ni derechos de la lease. El diagnóstico no es aceptación.
+
+Mac baseline [37126535485](https://github.com/SantanaJcp/passwordmanager/actions/runs/37126535485),
+`7d8ba007729bd637add676a6a34429b176ef7d11`, guardado en
+`/tmp/pmw1b-macos-baseline.log`. Hipótesis panel/status descartada por código:
+`expect_output_collision` busca el literal breve de fallo; `run_app` borra el
+panel y publica ese mismo literal en status para DestinationExists. El destino
+intacto no prueba rechazo. Si Windows queda discriminado, observar a 8s el
+estado actual, status/panel por booleanos, temporal propio y proceso humano;
+no anticipar rechazo ni cambiar publicación de W2.
+
+Fallback heredado adicional inspeccionado sin modificar:
+`pm-native-channel/src/windows.rs::impersonated_client_sid` ignora el resultado
+de `CloseHandle(token)` antes de `RevertToSelf`; una liberación fallida no
+cambia el resultado SID. El servidor también omite el resultado del handler en
+`serve_role` y acepta otra conexión; zona W4, sin cambio. No hay evidencia de
+que sean la causa del fallo de transferencia.
+
+Check local previo: `flock /tmp/pm-cargo-window.lock ./scripts/check.sh`
+rc0, `/tmp/pmw1b-check1.log`; fmt bajo el mismo flock y diff-check PASS.
+Los bloques cfg Windows se verificarán nativamente, sin afirmar build Windows
+por el check Linux.
+
+### Corrida 1 fase 2: discriminante RED
+
+[Windows 37127631606](https://github.com/SantanaJcp/passwordmanager/actions/runs/37127631606),
+SHA `4e6ca0c11cebdcca04f4fd3f3000964a6d9e1ebd`, terminó FAIL.
+Primitives13, pipe1, observer17, sync-lib1 y escenario de salida natural de
+encoding PASS. El fallo aparece ahora **en la negativa hardlink**, antes del
+probe de token humano y del positivo: `source-open → request31-sent →
+ack31-received → child-lease-installed → handle-sent → lease-restored`;
+servicio `transfer-ack31 → transfer-token → transfer-duplicate-failed`.
+Sampler: `local source rejection unexpectedly granted a process lease`.
+Log `/tmp/pmw1b-windows1.log`. Restauración CP y cleanup estricto sin errores
+adicionales. No se publicaron secretos/handles/PIDs ni artifacts.
+
+Discriminante causal: `open_regular_file` comprueba regular/reparse pero no
+número de links; `windows::open_1pux_source` sólo añadía tamaño. El servicio
+valida single-link después de duplicar, aborta esa conexión ante el rechazo,
+y la TUI presenta un error de operación. El sampler1ms anterior pudo perder
+una lease breve: sus supuestos PASS locales no prueban ausencia de lease.
+El positivo posterior utilizaba la conexión ya abortada, explicando rc4 y
+ninguna lease **en ese positivo**. La corrida opt-in localiza la cadena;
+la atribución completa exige aún GREEN del mismo negativo seguido del positivo.
+No se modifica el handler/listener ignorado de W4 ni ningún fallback heredado.
+
+Corrección candidata: extraer la misma validación Win32 de regular/reparse,
+links=1, fileID no nulo y tamaño en un único helper del handle. Aplicarla al
+handle cliente abierto antes de enviar31; conservarla sobre el duplicado del
+servicio. Ninguna reapertura, derecho nuevo, ampliación de plazo ni rechazo
+nuevo de contenido que el servicio aceptaba. Repetir negativa original con
+cero lease y DACL exacta; después positivo 1PUX con preview exacto y la lease
+real antes/durante/después en el mismo proceso/conexión. No saltar la negativa
+ni rebajar el sampler para forzar aceptación.
+
+Preflight local de la corrección: fmt y `check.sh` rc0 bajo un bloque flock,
+`/tmp/pmw1b-check2.log`; `git diff --check` PASS. Sólo cambia cfg Windows;
+la barrida Linux ya iniciada sigue con propagación explícita por caso. No
+atribuir una GREEN Windows hasta la corrida siguiente.
+
+Barrido Linux fresco terminado, `/tmp/pmw1b-gate-results.json`:40 casos,
+39 rc0, comandos y rc idénticos por nombre a
+`/tmp/pmw1-resume-gate-results.json`; sólo `g7-matrix` conserva rc1 conocido.
+Driver `/tmp/pmw1b-gate-run.py`, resumen `/tmp/pmw1b-gate-summary.log`, logs
+`/tmp/pmw1b-gate-*.log`. Incluye check, clean offline y todos los labs; comenzó
+sobre4e6ca0c y durante su ejecución se añadió únicamente el helper cfg Windows
+7e5febb, sin cambiar los cuerpos ejecutados en Linux. Check2 fresco también
+cubre7e5febb. No existe evidencia Windows GREEN todavía.
+
+Mac: método discriminante posterior al FAIL8s documentado en
+[ticket26](ticket-26.md#w1-fase-2--discriminante-arm-de-colisión-2026-10-03).
+Sólo cambia observación del fixture; nunca prolonga la aserción de colisión
+ni modifica el backup de W2.
+
+### Corrida 2 fase 2: GREEN de 1PUX, siguiente frontera clipboard
+
+[Windows 37128434031](https://github.com/SantanaJcp/passwordmanager/actions/runs/37128434031),
+SHA `7e5febb8586c1f3d897abb9896be79e01996a811`, terminó FAIL global, con
+**GREEN acotado de la causa1**. Negativa hardlink local: error explícito,
+cero lease, DACL original exacta. Probe API token humano PASS. Positivo siguiente
+en la misma TUI: sampler real antes/durante/después PASS; ack31, lease del hijo,
+handle enviado, `preview-received`, restauración y commit1PUX PASS. Servicio
+`transfer-duplicated`; preview2/2/0/0/0/4/1 completo antes de IMPORT.
+Esto confirma la atribución del fallo previo a la negativa que abortaba el
+canal, no a SID/PID equivocado ni a falta de derechos/plazo en la lease.
+Primitives13/pipe1/observer17/sync-lib1 y salida encoding también PASS.
+Log `/tmp/pmw1b-windows2.log`.
+
+Nueva frontera: después de organización, history, selección de password,
+reveal y lectura exacta del clipboard copiado, el fixture publica un nuevo
+owner y falla esperando `Clipboard custody expired`15s. No emite PASS del
+grupo organization-history-copy; preservación del reemplazo tras expiry no
+queda demostrada. No atribuir aún el fallo a producto, deadline o repaint.
+Método siguiente: categoría del status actual/child/parser, más muestreo nativo
+sólo de booleanos owner/sequence/cleanup si resulta necesario; conservar lease1s,
+SCREEN_WAIT15s, sustitución y comparación exacta. No modificar DestroyWindow
+Drop ni ninguna omisión heredada sin autorización.
+
+Consumo nativo propio fase2: dos corridas Windows terminadas, de máximo6.
+
+### Corrida 3 fase2: colisión Mac no reproducida
+
+[macOS 37129005704](https://github.com/SantanaJcp/passwordmanager/actions/runs/37129005704),
+SHA `c4038653314a8adeef1e75f16d3828106894d5aa`, terminó FAIL Intel/ARM por
+purge/outbox W2, después de Full25 local y ambas negativas de colisión PASS8s,
+destino intacto. [Detalle en26](ticket-26.md#w1-fase-2--discriminante-arm-de-colisión-2026-10-03).
+La hipótesis de status/panel está descartada por código; la causa del timeout
+histórico ARM sigue desconocida. Instrumentación posterior al fallo no
+alcanzada. No se confunde no reproducción con reparación. Tres corridas
+propias terminadas de máximo6.
+
+### Método siguiente: tipos, resize y discriminante clipboard Windows
+
+Fixture autónomo `windows_human_tui_seed` prepara los ocho registros sintéticos
+ya usados por el lab Linux (siete tipos y token-exchange) por el canal humano
+RPK normal, opcodes1/9/5/10/14. Exige igualdad exacta del LogicalRecord leído;
+no añade entrypoints de producto ni engine alternativo. Se ejecuta como humano
+no elevado y se inspecciona su PE ARM64/static MSVC antes de lanzarlo.
+La TUI real debe mostrar los siete tipos, selección metadata sin canarios,
+selector de campo sin valor, reveal exacto de cada tipo y expiración1s.
+Passkey es contenido almacenado, no evidencia WebAuthn/UP/UV. Resize real
+100×30→42×12→80×24 exige salida nativa fresca en la geometría actual; observer
+no inventa reflow ni sustituye glifos. Negativas adicionales empty/directory
+antes de31 deben producir error explícito, cero lease y DACL original exacta;
+se conserva hardlink y el positivo en la misma conexión.
+
+Clipboard conserva copia exacta, interloper, lease1s y wait15s. Añadir sólo
+categorías del status actual (expired/cleanup-not-confirmed/reveal-expired/
+copied), proceso/parser y booleano de si la publicación interloper duró al
+menos la lease. Hipótesis a discriminar: EmptyClipboard entrega un mensaje al
+owner anterior mientras el nuevo owner mantiene abierto el clipboard; la TUI
+sin pump de mensajes Windows puede llegar al expiry con ese recurso ocupado.
+No se adopta como causa ni se modifica producto antes de evidencia nativa.
+No cambiar DestroyWindow Drop, plazos ni resultado esperado.
+
+Fallback heredado adicional: WindowsClientPipe::Drop omite CloseHandle. El
+fixture seed consume su pipe y comprueba CloseHandle explícitamente; no altera
+el Drop del producto ni lo usa para convertir un fallo en éxito. El checker
+textual PE selecciona ahora la línea exacta del build de ambos productos,
+para distinguir el nuevo build del fixture sin omitir ninguna inspección.
+
+Preflight local: `check.sh` rc0 bajo flock,
+`/tmp/pmw1b-check4.log` (check3 falló en el selector textual PE al añadir el
+segundo build, antes de producto; corregido seleccionando ambos productos).
+Fmt y diff-check PASS. Linux no compila los cuerpos cfg Windows; la aceptación
+nativa del fixture nuevo y del resize sigue pendiente de la próxima corrida.
+
+### Corrida 4 fase2: fallo del oráculo de nota, sin fuga demostrada
+
+[Windows 37130523874](https://github.com/SantanaJcp/passwordmanager/actions/runs/37130523874),
+SHA `da2ace3bdb97a2b6342c7ab81c61892c3328eb02`, terminó FAIL.
+Build fixture seed/PE ARM64 static, preparación types7 por humano con igualdad
+LogicalRecord exacta, primitives13/pipe1/observer17/sync-lib1 y salida natural
+encoding PASS. Matriz falla en el grupo nuevo de tipos con
+`ConPTY screen exposed the synthetic password`, antes de emitir su PASS;
+no alcanza resize ni clipboard. Log `/tmp/pmw1b-windows3.log`.
+
+Defecto concreto del fixture encontrado: notes del registro Note era `note`;
+el oráculo buscaba esa subcadena en toda la pantalla después de expiry,
+donde está también el tipo público `[note]`. Esto garantiza falso positivo,
+no demuestra una fuga de contenido. Corregir el dato a
+`ticket27-native-note-canary` y conservar rechazo integral antes/tras selección
+más reveal exacto/expiry; todos los valores quedan distintos de labels públicos.
+Regresión nativa del observer exige rechazo del viejo `note` público,
+aceptación del canario oculto y rechazo si se dibuja en Exposure. GREEN real
+de los siete tipos queda todavía pendiente. Resize se mueve después de
+clipboard para discriminar primero la frontera conocida; ningún grupo ni
+aserción se elimina. Fixture seed cambia sólo la nota sintética respecto de
+los constructores Linux; readback sigue exacto. Cuatro corridas propias
+terminadas de máximo6, no una RED conductual del producto en esta corrida.
+
+Preflight de la corrección: check5 rc0 bajo flock,
+`/tmp/pmw1b-check5.log`; check6 incluye fmt/check/tests/clippy después de añadir
+la regresión cfgWindows, resultado en `/tmp/pmw1b-check6.log`. Native cfg
+Windows todavía requiere la corrida siguiente; no atribuirle ejecución Linux.
+
+### Corrida 5 fase2: tipos GREEN; nueva frontera posterior a duplicación
+
+[Windows 37131169505](https://github.com/SantanaJcp/passwordmanager/actions/runs/37131169505),
+SHA `f49bec2dd1f1db693a22727c80bc4bf287f18273`, terminó FAIL global.
+Primitives13/pipe1/observer18/sync-lib1, seed con readback exacto, salida natural
+encoding, **siete tipos con selección/reveal/expiry**, CSV, empty/directory y
+hardlink negativos con cero lease/DACL exacta PASS. Corrige el falso positivo
+de la nota del run4. Log `/tmp/pmw1b-windows4.log`.
+
+El positivo1PUX ahora llega a ack31, lease del hijo y handle enviado; servicio
+`transfer-duplicated`. Falla leyendo preview, restaura DACL, luego hijo rc4.
+No hay `preview-received`. Esto **no reproduce el fallo previo al grant** de
+la negativa hardlink del run1. No puede atribuirse a SID/PID, derechos o
+restauración. La nueva composición con ocho registros previos requiere
+localizar si el handler común falla o si el receptor rechaza/no puede leer el
+frame. No atribuir causa a memoria, staging o contenido sin ese discriminante;
+ningún producto de W3 se modifica. Resize y clipboard aún no alcanzados.
+
+Método de la última corrida autorizada: categorías cerradas adicionales sólo
+en la rama Windows31: handler-preview-sent/handler-preview-failed. La TUI usa
+el **mismo reader clasificado existente** con el mismo límite18MiB y convierte
+su error a la misma Failure pública; registra sólo timeout/eof/other-io/
+malformed antes del checked restore. Conserva errors/cleanup y todos los
+oráculos. Resize se ejecuta tras tipos para dar evidencia independiente antes
+de la frontera de import; ninguna acción de import ni de clipboard se omite.
+No implementar la hipótesis de pump del clipboard porque run5 no la discrimina.
+Cinco corridas propias terminadas, queda1 de máximo6.
+
+Fallbacks adicionales inspeccionados, sin cambio: `onepux::preview_source`
+selecciona el nombre de adjunto del sufijo tras `___` y, cuando falta ese
+separador en una entrada files/, usa el nombre tras files/; el último valor
+sustituto es `unreferenced`. `Source::Descriptor` usa try_clone del descriptor,
+no una alternativa por path. Ninguno está demostrado como causa de esta nueva
+frontera. No cambiar parser, vault/staging, listener/admisión ni purge/sync.
+
+Preflight último candidato: check7 rc0 bajo flock,
+`/tmp/pmw1b-check7.log`, fmt/diff-check PASS. Repetir barrido40 y clean mediante
+los mismos comandos del baseline, con logs distintos final-gate para preservar
+la evidencia anterior; no declarar sus resultados mientras estén en curso.
+
+### Corrida 6 fase2 y checkpoint de entrega W1
+
+[Windows 37132151922](https://github.com/SantanaJcp/passwordmanager/actions/runs/37132151922),
+SHA `99b40aefac0852b7d4799f9e37a1fe2023da4901`, terminó FAIL.
+Build ARM64/static y primitives13/pipe1/observer18/sync-lib1 PASS; seed con
+lectura exacta y salida encoding natural PASS. Los siete tipos vuelven a pasar.
+Resize100×30 produce CSI final `t` (0x74), que el observer rechaza; hijo vivo,
+parser ground, error también propagado por cleanup del observer. No hay
+PASS resize. Como este grupo se adelantó, no se ejecutó la clasificación nueva
+del preview ni los grupos siguientes. Log `/tmp/pmw1b-windows5.log`.
+
+Causa demostrada de esta frontera: el observer sólo implementaba movimientos,
+erase/modos y no window manipulation `t`; no es evidencia de fracaso del
+resize del producto. Candidata del fixture: admitir exclusivamente
+`CSI 8;<rows>;<columns>t` que coincide exactamente con las dimensiones ya
+solicitadas por ResizePseudoConsole, contar el evento y **además** exigir
+posicionamiento/repaint nuevo y el literal actual. No inferir texto por reflow,
+ignorar otros window ops o reinterpretar geometría distinta. El significado
+estándar del comando8 consta en [XTerm, XTWINOPS](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html).
+El log nativo capturó el final0x74, no sus tres parámetros: esta candidata
+necesita comprobar esa forma exacta y GREEN real en una ventana CI posterior.
+Dos regresiones cfgWindows cubren reporte coincidente sin inventar repaint y
+rechazo de geometría/op/formato distintos; **no ejecutadas en este Linux**.
+No relajar SCREEN_WAIT15s, copy1s, límites, DACL ni asserts existentes.
+
+Consumo propio fase2: **6/6 corridas**, cinco Windows y una Mac, todas
+terminadas. Ninguna séptima corrida autorizada. Se conserva PR#1 borrador;
+no integración, merge, cambios de reglas o de estados de tickets.
+Entorno último Windows: Windows11 Enterprise10.0.26200/build26200,
+ARM64, `win11-vs2026-arm64`/`20260924.168.1`, Rust1.98.1
+`aarch64-pc-windows-msvc`, UAC_ENABLE_LUA=1. Mac propio3:15.7.9/kernel24.6.0,
+Intel imagen20260824.0482.1 y ARM imagen20260907.0337.1, Rust1.98.1 nativo.
+El fixture discrimina identidad/privilegio humano; no inferir elevación o
+soporte desde el preflight. x64/reboot/FDE/Terminal humano/firma siguen pendientes.
+
+Verificación local final: barrido terminado sobre99b40ae,
+`/tmp/pmw1b-final-gate-results.json`, **40 casos,39 rc0,0 diferencias** con
+`/tmp/pmw1-resume-gate-results.json` por nombre, comando exacto y rc.
+Driver `/tmp/pmw1b-final-gate-run.py`, resumen
+`/tmp/pmw1b-final-gate-summary.log`. Check y clean-offline-build rc0 en
+`/tmp/pmw1b-final-gate-final-{check,clean}.log`; tres labs TUI y restantes
+wrappers sin regresión. Sólo g7-matrix conserva rc1 de staging, conocido W3.
+Cada comando conserva flock y los artefactos Keycloak/Chrome autorizados.
+Después se añadió exclusivamente el reconocimiento/test cfgWindows de CSI t;
+check8 fresco rc0 bajo flock, `/tmp/pmw1b-check8.log`. No atribuir al check Linux
+compilación ni GREEN de esas ramas Windows. Fmt/diff-check y enlaces locales
+(ticket26:6, ticket27:3, ninguno ausente) PASS. No secrets, caches, artifacts,
+certificados, instalaciones adicionales o fallback nuevo.
+
+Esta tabla sustituye el estado vigente de la tabla del checkpoint de reanudación;
+no cambia el ticket `claimed` ni borra los resultados históricos:
+
+| Criterio27 | Estado de fase2 | Evidencia/límite |
+| --- | --- | --- |
+| Servicio virtual/DACL/DPAPI y peer bilateral G1 por proceso real | PASS parcial | ARM64 SCM/RPK/humano real y primitives; falta matriz integral G1 y segundo CPU. |
+| Rechazos sustitución/impersonación/dump/lectura/fallos | PASS parcial | Empty/directory/hardlink locales con cero lease y DACL exacta; negativas peer/PID/source/reparse/transferencia fallida integrales pendientes. |
+| ConPTY/clipboard/persistencia sin admin del agente | PASS parcial | Tipos7 por teclado, reveal/expiry, imports del run2 y copia exacta anterior; resize GREEN, nuevo-owner tras expiry y operaciones posteriores Windows pendientes. x64/reboot en32. |
+| Evidencia TDD RED/GREEN; comandos exactos sin skip/stub | PASS de cambios acotados | Hardlink→positivo run1/run2, nota run4/run5; barrido40 sin regresión. CSI t sólo RED nativo+candidata, falta GREEN. |
+| Revisión contractual e integración por merger antes de resolver | pendiente | Handoff W1; sin integración y sin cierre de27. |
+
+| Matriz Windows W1 | Estado observado máximo |
+| --- | --- |
+| Siete tipos/Unicode/selección sin valor/reveal exacto/expiry | PASS run5 y run6; passkey almacenamiento, no UP/UV. |
+| CSV largo, siete contadores en panel antes de IMPORT | PASS runs2/5; commit transaccional. |
+| 1PUX2MiB+ positivo | PASS run2 con CSV previo; FAIL run5 con tipos8 previos, después de duplicación y antes de preview. Nueva frontera desconocida. |
+| ACL real antes/durante/después | PASS run2; run5 instala y restaura incluso tras error de preview. No sustituye matriz completa de fallo. |
+| Empty/directory/hardlink negativos | PASS run5; error explícito/cero lease/DACL exacta. |
+| Segundo lease/DACL nulo/cambio externo | PASS de primitives previas; negativas completas de transferencia real no demostradas. |
+| Peer/PID impostor, pseudohandle, reparse y todo fracaso1PUX | pendiente; ninguna equivalencia con tests unitarios o el hardlink. |
+| Resize100×30→42×12→80×24 | RED del observer al primer t; candidata estricta publicada, GREEN nativo pendiente. |
+| Organización/history/copia | Alcanzado hasta lectura exacta de clipboard run2; preservación del nuevo owner tras expiry falla/no demostrada. Hipótesis de pump sin confirmar. |
+| Backup/export/trash/restore/recovery/master y avisos completos | Oráculos preparados, no alcanzados Windows; Linux operations PASS. |
+| Pair-sync-retire/E2E/restart/offline y attachment grande | No alcanzados y fixture incompleto. Falta segundo dispositivo con prefijos verificables; sync integral también conserva bloqueo purge/outbox W2. |
+
+Archivos fase2: `pm-custody/src/tui.rs`, `pm-custody/src/windows.rs`,
+`pm-native-channel/src/{lib,windows}.rs`, dos examples Windows (seed nuevo y
+ConPTY), `test-windows-custody-lab.ps1`, `verify-windows-libsodium-build.sh`,
+`macos_tui_migration_lab.py`, docs ticket26/27. No human_wire, vault/staging,
+crypto, listener/dispatcher/admisión ni engine purge/sync/backup modificados.
+Conflictos previsibles: W3 App/tui y windows.rs (errores/protección), W4
+windows.rs/diagnósticos/fixture PS/ConPTY, W2 fixtures de migración/operaciones
+y docs26/27. El checker PE sigue inspeccionando ambos productos y el seed;
+no se añade otro protocolo de producto ni dependencia.
+
+Siguiente acción del coordinador: revisar esta rama sin integrar automáticamente;
+autorizar otra ventana nativa para validar CSI t y obtener el discriminante
+post-duplicación que quedó preparado. Si handler común falla, delegar diagnóstico
+de preview/classify/prepare a su dueño antes de modificar custodia/vault/staging.
+Después continuar clipboard y operaciones restantes; preparar segundo dispositivo
+por el método normal antes de acreditar retiro y componer W2 para sync integral.
+Mac ARM histórico necesita nueva hipótesis/evidencia si vuelve a fallar8s; no
+repetirlo idéntico ni afirmar reparación por una sola no reproducción.

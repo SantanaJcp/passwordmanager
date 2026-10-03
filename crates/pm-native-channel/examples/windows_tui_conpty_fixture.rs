@@ -7,6 +7,10 @@ fn main() {
 }
 
 #[cfg(target_os = "windows")]
+#[path = "windows_tui_fixture/acl.rs"]
+mod acl;
+
+#[cfg(target_os = "windows")]
 mod windows_fixture {
     use std::{
         ffi::c_void,
@@ -32,7 +36,7 @@ mod windows_fixture {
             SECURITY_ATTRIBUTES,
         },
         System::{
-            Console::{COORD, ClosePseudoConsole, CreatePseudoConsole},
+            Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole},
             DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
             Memory::{GlobalLock, GlobalSize, GlobalUnlock},
             Pipes::CreatePipe,
@@ -108,6 +112,8 @@ mod windows_fixture {
     }
 
     struct ScreenState {
+        columns: usize,
+        rows: usize,
         cells: Vec<ScreenCell>,
         row: usize,
         column: usize,
@@ -118,6 +124,7 @@ mod windows_fixture {
         focus_reporting: bool,
         window_title_updates: u64,
         cursor_positions: u64,
+        resize_reports: u64,
         line_feeds: u64,
         delayed_wraps: u64,
         bottom_scrolls: u64,
@@ -151,6 +158,8 @@ mod windows_fixture {
     impl ScreenState {
         fn new() -> Self {
             Self {
+                columns: SCREEN_COLUMNS,
+                rows: SCREEN_ROWS,
                 cells: vec![ScreenCell::Empty; SCREEN_COLUMNS * SCREEN_ROWS],
                 row: 0,
                 column: 0,
@@ -161,6 +170,7 @@ mod windows_fixture {
                 focus_reporting: false,
                 window_title_updates: 0,
                 cursor_positions: 0,
+                resize_reports: 0,
                 line_feeds: 0,
                 delayed_wraps: 0,
                 bottom_scrolls: 0,
@@ -184,7 +194,7 @@ mod windows_fixture {
         }
 
         fn contains(&self, expected: &str) -> bool {
-            self.cells.chunks(SCREEN_COLUMNS).any(|row| {
+            self.cells.chunks(self.columns).any(|row| {
                 let mut rendered = String::new();
                 for cell in row {
                     match cell {
@@ -195,6 +205,36 @@ mod windows_fixture {
                 }
                 rendered.contains(expected)
             })
+        }
+
+        fn information_rows(&self) -> Option<Vec<String>> {
+            let row_text = |y: usize| {
+                let mut row = String::new();
+                for cell in &self.cells[y * self.columns..(y + 1) * self.columns] {
+                    match cell {
+                        ScreenCell::Empty => row.push(' '),
+                        ScreenCell::Glyph(value) => row.push_str(value),
+                        ScreenCell::WideContinuation => {}
+                    }
+                }
+                row
+            };
+            if self.rows <= 7 || !row_text(3).contains("Information") {
+                return None;
+            }
+            (4..self.rows - 7)
+                .map(|y| {
+                    let row = row_text(y);
+                    row.strip_prefix('│')
+                        .and_then(|r| r.strip_suffix('│'))
+                        .map(|r| r.trim_end().to_owned())
+                })
+                .collect()
+        }
+
+        fn information_contains(&self, expected: &str) -> bool {
+            self.information_rows()
+                .is_some_and(|rows| rows.join(" ").contains(expected))
         }
 
         fn contains_flat(&self, expected: &str) -> bool {
@@ -415,19 +455,19 @@ mod windows_fixture {
                 self.advance_row();
                 self.wrap_pending = false;
             }
-            if width == 2 && self.column == SCREEN_COLUMNS - 1 {
+            if width == 2 && self.column == self.columns - 1 {
                 self.column = 0;
                 self.advance_row();
             }
-            let index = self.row * SCREEN_COLUMNS + self.column;
+            let index = self.row * self.columns + self.column;
             self.erase_cell_footprint(index);
             self.cells[index] = ScreenCell::Glyph(character.to_string());
             if width == 2 {
                 self.erase_cell_footprint(index + 1);
                 self.cells[index + 1] = ScreenCell::WideContinuation;
             }
-            if self.column + width == SCREEN_COLUMNS {
-                self.column = SCREEN_COLUMNS - 1;
+            if self.column + width == self.columns {
+                self.column = self.columns - 1;
                 self.wrap_pending = true;
             } else {
                 self.column += width;
@@ -435,7 +475,7 @@ mod windows_fixture {
         }
 
         fn combine(&mut self, character: char) {
-            let row_start = self.row * SCREEN_COLUMNS;
+            let row_start = self.row * self.columns;
             let mut index = row_start + self.column;
             if self.wrap_pending {
                 index = row_start + self.column;
@@ -473,14 +513,14 @@ mod windows_fixture {
         }
 
         fn advance_row(&mut self) {
-            if self.row == SCREEN_ROWS - 1 {
+            if self.row == self.rows - 1 {
                 let Some(next) = self.bottom_scrolls.checked_add(1) else {
                     self.fail("ConPTY bottom-scroll counter overflow");
                     return;
                 };
                 self.bottom_scrolls = next;
-                self.cells.rotate_left(SCREEN_COLUMNS);
-                self.cells[(SCREEN_ROWS - 1) * SCREEN_COLUMNS..].fill(ScreenCell::Empty);
+                self.cells.rotate_left(self.columns);
+                self.cells[(self.rows - 1) * self.columns..].fill(ScreenCell::Empty);
             } else {
                 self.row += 1;
             }
@@ -548,10 +588,17 @@ mod windows_fixture {
             let distance = || if first == 0 { 1 } else { first };
             match command {
                 b'm' => {}
+                b't' if parameters.as_slice() == [8, self.rows, self.columns] => {
+                    let Some(next) = self.resize_reports.checked_add(1) else {
+                        self.fail("ConPTY resize-report counter overflow");
+                        return;
+                    };
+                    self.resize_reports = next;
+                }
                 b'H' | b'f' if parameters.len() <= 2 => {
                     let row = parameters.first().copied().unwrap_or(1).max(1) - 1;
                     let column = parameters.get(1).copied().unwrap_or(1).max(1) - 1;
-                    if row >= SCREEN_ROWS || column >= SCREEN_COLUMNS {
+                    if row >= self.rows || column >= self.columns {
                         self.fail("ConPTY absolute cursor position outside screen");
                     } else {
                         let Some(next) = self.cursor_positions.checked_add(1) else {
@@ -569,11 +616,11 @@ mod windows_fixture {
                     self.wrap_pending = false;
                 }
                 b'B' if parameters.len() <= 1 => {
-                    self.row = (self.row + distance()).min(SCREEN_ROWS - 1);
+                    self.row = (self.row + distance()).min(self.rows - 1);
                     self.wrap_pending = false;
                 }
                 b'C' if parameters.len() <= 1 => {
-                    self.column = (self.column + distance()).min(SCREEN_COLUMNS - 1);
+                    self.column = (self.column + distance()).min(self.columns - 1);
                     self.wrap_pending = false;
                 }
                 b'D' if parameters.len() <= 1 => {
@@ -582,7 +629,7 @@ mod windows_fixture {
                 }
                 b'G' if parameters.len() <= 1 => {
                     let column = distance() - 1;
-                    if column >= SCREEN_COLUMNS {
+                    if column >= self.columns {
                         self.fail("ConPTY horizontal cursor position outside screen");
                     } else {
                         self.column = column;
@@ -591,7 +638,7 @@ mod windows_fixture {
                 }
                 b'd' if parameters.len() <= 1 => {
                     let row = distance() - 1;
-                    if row >= SCREEN_ROWS {
+                    if row >= self.rows {
                         self.fail("ConPTY vertical cursor position outside screen");
                     } else {
                         self.row = row;
@@ -603,26 +650,26 @@ mod windows_fixture {
                     if first == 2 || first == 3 {
                         self.cells.fill(ScreenCell::Empty);
                     } else {
-                        for cell in &mut self.cells[self.row * SCREEN_COLUMNS + self.column..] {
+                        for cell in &mut self.cells[self.row * self.columns + self.column..] {
                             *cell = ScreenCell::Empty;
                         }
                     }
                 }
                 b'K' if parameters.len() <= 1 && matches!(first, 0 | 1 | 2) => {
                     self.wrap_pending = false;
-                    let start = self.row * SCREEN_COLUMNS;
+                    let start = self.row * self.columns;
                     let (from, through) = match first {
-                        0 => (start + self.column, start + SCREEN_COLUMNS),
+                        0 => (start + self.column, start + self.columns),
                         1 => (start, start + self.column + 1),
-                        2 => (start, start + SCREEN_COLUMNS),
+                        2 => (start, start + self.columns),
                         _ => unreachable!(),
                     };
                     self.cells[from..through].fill(ScreenCell::Empty);
                 }
                 b'X' if parameters.len() <= 1 => {
                     self.wrap_pending = false;
-                    let from = self.row * SCREEN_COLUMNS + self.column;
-                    let count = distance().min(SCREEN_COLUMNS - self.column);
+                    let from = self.row * self.columns + self.column;
+                    let count = distance().min(self.columns - self.column);
                     for index in from..from + count {
                         self.erase_cell_footprint(index);
                     }
@@ -687,10 +734,59 @@ mod windows_fixture {
             self.wait_for_matching(expected, |state| state.contains(expected))
         }
 
+        fn wait_for_information(&self, expected: &str) -> Result<(), String> {
+            self.wait_for_matching(expected, |state| state.information_contains(expected))
+        }
+
+        fn wait_for_import_review(
+            &self,
+            total: u64,
+            new: u64,
+            preserved: u64,
+        ) -> Result<(), String> {
+            self.wait_for_matching("complete import counters in main panel", |state| {
+                let Some(rows) = state.information_rows() else {
+                    return false;
+                };
+                let text = rows.join(" ");
+                let expected = [
+                    format!("total={total}"),
+                    format!("new={new}"),
+                    "replaced=0".into(),
+                    "exact-duplicates=0".into(),
+                    "excluded=0".into(),
+                    format!("preserved-fields={preserved}"),
+                    "pages=1;".into(),
+                ];
+                expected
+                    .iter()
+                    .all(|token| text.split_whitespace().any(|part| part == token))
+                    && text.contains("type IMPORT to commit")
+            })
+        }
+
+        fn wait_for_recovery_code(&self) -> Result<zeroize::Zeroizing<String>, String> {
+            self.wait_for_matching(
+                "complete temporary recovery code and historical warning in panel",
+                |state| {
+                    state.information_contains("historical recovery paths")
+                        && recovery_code(state).is_some()
+                },
+            )?;
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "ConPTY observer lock poisoned".to_owned())?;
+            recovery_code(&state)
+                .ok_or_else(|| "temporary recovery code expired before observation".to_owned())
+        }
+
         fn wait_for_footer_suffix(&self, expected: &str) -> Result<(), String> {
             self.wait_for_matching("footer suffix and insertion cursor", |state| {
                 let mut row = String::new();
-                for cell in &state.cells[20 * SCREEN_COLUMNS..21 * SCREEN_COLUMNS] {
+                for cell in
+                    &state.cells[(state.rows - 4) * state.columns..(state.rows - 3) * state.columns]
+                {
                     match cell {
                         ScreenCell::Empty => row.push(' '),
                         ScreenCell::Glyph(value) => row.push_str(value),
@@ -699,8 +795,8 @@ mod windows_fixture {
                 }
                 row.starts_with("│Input: ‹")
                     && row.trim_end_matches('│').trim_end().ends_with(expected)
-                    && state.row == 20
-                    && state.column == 78
+                    && state.row == state.rows - 4
+                    && state.column == state.columns - 2
             })
         }
 
@@ -772,7 +868,7 @@ mod windows_fixture {
                 .count();
             let row_counts = state
                 .cells
-                .chunks(SCREEN_COLUMNS)
+                .chunks(state.columns)
                 .map(|row| {
                     row.iter()
                         .filter(|cell| matches!(cell, ScreenCell::Glyph(_)))
@@ -1502,7 +1598,7 @@ mod windows_fixture {
         press(fixture, key)?;
         fixture
             .observer
-            .wait_for(expected)
+            .wait_for_information(expected)
             .map_err(io::Error::other)
     }
 
@@ -1584,6 +1680,8 @@ mod windows_fixture {
             eprintln!("TUI_STAGE stage=encoding-natural-exit result=pass");
             return Ok(());
         }
+        exercise_types(fixture)?;
+        exercise_resize(fixture)?;
         // Ticket 25 migration is driven through the real keyboard and common
         // human handler. The service result is awaited before the next input;
         // no operation is retried by the fixture.
@@ -1599,12 +1697,16 @@ mod windows_fixture {
         press(fixture, "\r")?;
         fixture
             .observer
-            .wait_for("Preview values hidden")
+            .wait_for_information("Preview values hidden")
             .map_err(io::Error::other)?;
         // Required review data must be visible before the fixture confirms.
         fixture
             .observer
-            .wait_for("exact-duplicates=0")
+            .wait_for_information("exact-duplicates=0")
+            .map_err(io::Error::other)?;
+        fixture
+            .observer
+            .wait_for_import_review(1, 1, 0)
             .map_err(io::Error::other)?;
         type_visible_and_submit(fixture, "IMPORT", "IMPORT")?;
         fixture
@@ -1613,14 +1715,32 @@ mod windows_fixture {
             .map_err(io::Error::other)?;
 
         eprintln!("TUI_STAGE stage=csv-import result=pass");
+        reject_invalid_local_sources(fixture, paths.onepux)?;
+        reject_multilink_source(fixture, paths.onepux)?;
+        crate::acl::probe_human_token_lease()?;
+        eprintln!("TUI_STAGE stage=human-token-lease-discriminant result=pass");
         open_menu(fixture, "m", "Migration:")?;
         open_menu(fixture, "2", "1PUX source")?;
         let onepux_request = format!("{}|keep", encode_operation_field(paths.onepux));
-        type_visible_and_submit(fixture, &onepux_request, "|keep")?;
-        fixture
-            .observer
-            .wait_for("Preview values hidden")
-            .map_err(io::Error::other)?;
+        crate::acl::Sampling::observe(fixture.process, true, || {
+            type_visible_and_submit(fixture, &onepux_request, "|keep")?;
+            fixture
+                .observer
+                .wait_for_information("Preview values hidden")
+                .map_err(io::Error::other)?;
+            fixture
+                .observer
+                .wait_for_import_review(2, 2, 4)
+                .map_err(io::Error::other)
+        })
+        .map_err(|primary| {
+            let child = child_diagnostic(fixture.process);
+            let screen = fixture.observer.diagnostic();
+            io::Error::other(format!(
+                "{primary}; 1PUX child={child:?}; observer={screen:?}"
+            ))
+        })?;
+        eprintln!("TUI_STAGE stage=real-transfer-dacl-before-during-after result=pass");
         type_visible_and_submit(fixture, "IMPORT", "IMPORT")?;
         fixture
             .observer
@@ -1648,7 +1768,7 @@ mod windows_fixture {
         press(fixture, "h")?;
         fixture
             .observer
-            .wait_for("History:")
+            .wait_for_information("History:")
             .map_err(io::Error::other)?;
 
         // Exact-field reveal/copy always crosses the selection screen; merely
@@ -1693,13 +1813,29 @@ mod windows_fixture {
                 "TUI clipboard did not contain the exact selected synthetic field",
             ));
         }
+        let replacement_started = Instant::now();
         let replacement = pm_native_channel::OwnedClipboard::copy(b"synthetic-ticket27-new-owner")
             .map_err(|_| io::Error::other("fixture interloper could not own private clipboard"))?;
+        eprintln!(
+            "TUI_CLIPBOARD replacement-crossed-lease={}",
+            replacement_started.elapsed() >= Duration::from_secs(1)
+        );
         thread::sleep(Duration::from_millis(1_200));
         fixture
             .observer
             .wait_for("Clipboard custody expired")
-            .map_err(io::Error::other)?;
+            .map_err(|primary| {
+                let categories = fixture.observer.state.lock().map(|state| format!(
+                    "expired={} cleanup-not-confirmed={} reveal-expired={} copied={}",
+                    state.contains("Clipboard custody expired"),
+                    state.contains("Clipboard cleanup not confirmed"),
+                    state.contains("Reveal expired"),
+                    state.contains("Copied explicitly"),
+                ));
+                let observer = fixture.observer.diagnostic();
+                let child = child_diagnostic(fixture.process);
+                io::Error::other(format!("{primary}; clipboard-status={categories:?}; child={child:?}; observer={observer:?}"))
+            })?;
         let expected_replacement = zeroize::Zeroizing::new(
             "synthetic-ticket27-new-owner"
                 .encode_utf16()
@@ -1762,7 +1898,7 @@ mod windows_fixture {
         press(fixture, "1")?;
         fixture
             .observer
-            .wait_for("Audit metadata:")
+            .wait_for_information("Audit metadata:")
             .map_err(io::Error::other)?;
 
         eprintln!("TUI_STAGE stage=generator-access-pending-audit result=pass");
@@ -1773,7 +1909,7 @@ mod windows_fixture {
         type_visible_and_submit(fixture, paths.backup, visible_path_name(paths.backup)?)?;
         fixture
             .observer
-            .wait_for("Native encrypted backup complete")
+            .wait_for_information("Native encrypted backup complete")
             .map_err(io::Error::other)?;
         open_menu(fixture, "b", "Backup/recovery:")?;
         open_menu(fixture, "2", "New plaintext export path")?;
@@ -1784,12 +1920,14 @@ mod windows_fixture {
         )?;
         fixture
             .observer
-            .wait_for("PLAINTEXT WARNING")
+            .wait_for_information(
+                "PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:",
+            )
             .map_err(io::Error::other)?;
         type_visible_and_submit(fixture, "EXPORT", "EXPORT")?;
         fixture
             .observer
-            .wait_for("Plaintext export complete")
+            .wait_for_information("Plaintext export complete")
             .map_err(io::Error::other)?;
 
         press(fixture, "d")?;
@@ -1809,8 +1947,302 @@ mod windows_fixture {
             .wait_for("Purged ")
             .map_err(io::Error::other)?;
         eprintln!("TUI_STAGE stage=backup-export-trash result=pass");
+        exercise_restore_rotations(fixture, &paths)?;
         write_keyboard_input(fixture, b"q")?;
         require_tui_exit(fixture.process)
+    }
+
+    fn exercise_types(fixture: &Fixture) -> io::Result<()> {
+        for kind in [
+            "Password", "TOTP", "Passkey", "SSH", "Token", "Note", "File",
+        ] {
+            fixture
+                .observer
+                .wait_for(&format!("[{}]", kind.to_lowercase()))
+                .map_err(io::Error::other)?;
+        }
+        for (title, field, index, value) in [
+            (
+                "Password",
+                "auth[0].password",
+                14,
+                "ticket05-e2e-password-canary",
+            ),
+            ("TOTP", "auth[0].secret", 13, "ticket05-e2e-totp-canary"),
+            (
+                "Passkey",
+                "auth[0].private_key",
+                17,
+                "ssssssssssssssssssssssssssssssss",
+            ),
+            ("SSH", "auth[0].private_key", 14, "ticket05-e2e-ssh-canary"),
+            ("Token", "auth[0].secret", 13, "ticket05-e2e-token-canary"),
+            (
+                "ticket05-e2e-search-canary",
+                "notes",
+                5,
+                "ticket27-native-note-canary",
+            ),
+            (
+                "File",
+                "attachment[0].content",
+                18,
+                "ticket05-e2e-attachment-canary 🌎",
+            ),
+        ] {
+            search(fixture, title)?;
+            fixture
+                .observer
+                .wait_for("Search returned 1 active items")
+                .map_err(io::Error::other)?;
+            // Catalogue and explicit field labels expose no selected field value.
+            fixture
+                .observer
+                .rejects(value.as_bytes())
+                .map_err(io::Error::other)?;
+            press(fixture, "r")?;
+            fixture
+                .observer
+                .wait_for("Fields (explicit selection; values hidden)")
+                .map_err(io::Error::other)?;
+            press(fixture, &"j".repeat(index))?;
+            fixture
+                .observer
+                .wait_for(&format!("› {field}"))
+                .map_err(io::Error::other)?;
+            fixture
+                .observer
+                .rejects(value.as_bytes())
+                .map_err(io::Error::other)?;
+            press(fixture, "\r")?;
+            fixture.observer.wait_for(value).map_err(io::Error::other)?;
+            fixture
+                .observer
+                .wait_for("Reveal expired")
+                .map_err(io::Error::other)?;
+            fixture
+                .observer
+                .rejects(value.as_bytes())
+                .map_err(io::Error::other)?;
+        }
+        eprintln!("TUI_STAGE stage=seven-types-explicit-fields result=pass");
+        Ok(())
+    }
+
+    fn exercise_resize(fixture: &Fixture) -> io::Result<()> {
+        for (columns, rows, expected) in [
+            (100, 30, "Items (selection is metadata only)"),
+            (42, 12, "Password Manager"),
+            (80, 24, "Items (selection is metadata only)"),
+        ] {
+            let (previous_positions, previous_reports) = {
+                let mut state = fixture
+                    .observer
+                    .state
+                    .lock()
+                    .map_err(|_| io::Error::other("resize observer poisoned"))?;
+                let previous_positions = state.cursor_positions;
+                let previous_reports = state.resize_reports;
+                if unsafe {
+                    ResizePseudoConsole(
+                        fixture.pseudo_console,
+                        COORD {
+                            X: columns,
+                            Y: rows,
+                        },
+                    )
+                } != 0
+                {
+                    return Err(io::Error::other("native ConPTY resize rejected"));
+                }
+                state.columns = columns as usize;
+                state.rows = rows as usize;
+                // No inferred reflow content: demand new native output at this geometry.
+                state.cells = vec![ScreenCell::Empty; state.columns * state.rows];
+                state.row = 0;
+                state.column = 0;
+                state.saved_row = 0;
+                state.saved_column = 0;
+                state.wrap_pending = false;
+                (previous_positions, previous_reports)
+            };
+            fixture
+                .observer
+                .wait_for_matching("fresh native resize repaint", |state| {
+                    state.cursor_positions > previous_positions
+                        && state.resize_reports > previous_reports
+                        && state.contains(expected)
+                })
+                .map_err(|primary| {
+                    io::Error::other(format!(
+                        "{primary}; resize={columns}x{rows}; child={:?}; observer={:?}",
+                        child_diagnostic(fixture.process),
+                        fixture.observer.diagnostic(),
+                    ))
+                })?;
+        }
+        eprintln!("TUI_STAGE stage=resize-native-100x30-42x12-80x24 result=pass");
+        Ok(())
+    }
+
+    fn reject_invalid_local_sources(fixture: &Fixture, source: &str) -> io::Result<()> {
+        let empty = std::path::Path::new(source).with_extension("negative-empty.1pux");
+        let directory = std::path::Path::new(source).with_extension("negative-directory.1pux");
+        if empty.try_exists()? || directory.try_exists()? {
+            return Err(io::Error::other("owned 1PUX negative source collision"));
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&empty)?;
+        use std::os::windows::io::IntoRawHandle;
+        let mut handle = file.into_raw_handle();
+        let mut close_errors = Vec::new();
+        close_handle(
+            &mut handle,
+            "CloseHandle(owned empty source)",
+            &mut close_errors,
+        );
+        if !close_errors.is_empty() {
+            return Err(io::Error::other(close_errors.join("; ")));
+        }
+        if let Err(error) = std::fs::create_dir(&directory) {
+            return match std::fs::remove_file(&empty) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(io::Error::other(format!(
+                    "{error}; empty-source cleanup: {cleanup}"
+                ))),
+            };
+        }
+        let operation = (|| {
+            for path in [&empty, &directory] {
+                crate::acl::Sampling::observe(fixture.process, false, || {
+                    open_menu(fixture, "m", "Migration:")?;
+                    open_menu(fixture, "2", "1PUX source")?;
+                    let path = path
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("synthetic source not UTF-8"))?;
+                    let request = format!("{}|keep", encode_operation_field(path));
+                    type_visible_and_submit(fixture, &request, "|keep")?;
+                    fixture
+                        .observer
+                        .wait_for("Operation failed explicitly; no success was recorded")
+                        .map_err(io::Error::other)
+                })?;
+            }
+            eprintln!("TUI_STAGE stage=source-empty-directory-rejected-dacl-unchanged result=pass");
+            Ok(())
+        })();
+        let empty_cleanup = std::fs::remove_file(&empty);
+        let directory_cleanup = std::fs::remove_dir(&directory);
+        let errors = [operation, empty_cleanup, directory_cleanup]
+            .into_iter()
+            .filter_map(Result::err)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(errors.join("; ")))
+        }
+    }
+
+    fn reject_multilink_source(fixture: &Fixture, source: &str) -> io::Result<()> {
+        let alias = std::path::Path::new(source).with_extension("negative-hardlink.1pux");
+        if alias.try_exists()? {
+            return Err(io::Error::other("owned 1PUX negative alias collision"));
+        }
+        std::fs::hard_link(source, &alias)?;
+        let operation = (|| {
+            crate::acl::Sampling::observe(fixture.process, false, || {
+                open_menu(fixture, "m", "Migration:")?;
+                open_menu(fixture, "2", "1PUX source")?;
+                let request = format!("{}|keep", encode_operation_field(source));
+                type_visible_and_submit(fixture, &request, "|keep")?;
+                fixture
+                    .observer
+                    .wait_for("Operation failed explicitly; no success was recorded")
+                    .map_err(io::Error::other)
+            })?;
+            eprintln!("TUI_STAGE stage=source-multilink-rejected-dacl-unchanged result=pass");
+            Ok(())
+        })();
+        let cleanup = std::fs::remove_file(&alias);
+        match (operation, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(io::Error::other(format!(
+                "{error}; negative-source cleanup: {cleanup}"
+            ))),
+        }
+    }
+
+    fn recovery_code(state: &ScreenState) -> Option<zeroize::Zeroizing<String>> {
+        let rows = state.information_rows()?;
+        let index = rows.iter().position(|row| row == "Recovery code:")?;
+        let value = zeroize::Zeroizing::new(rows[index + 1..].join(""));
+        let parts = value.split('-').collect::<Vec<_>>();
+        if parts.len() != 12
+            || parts[0] != "PMR1"
+            || parts[1].len() != 32
+            || !parts[1].bytes().all(|b| b.is_ascii_hexdigit())
+            || parts[2].is_empty()
+            || !parts[2].bytes().all(|b| b.is_ascii_digit())
+            || !parts[3..]
+                .iter()
+                .all(|p| p.len() == 8 && p.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return None;
+        }
+        Some(value)
+    }
+
+    fn exercise_restore_rotations(fixture: &Fixture, paths: &MatrixPaths<'_>) -> io::Result<()> {
+        open_menu(fixture, "b", "Backup/recovery:")?;
+        open_menu(
+            fixture,
+            "3",
+            "Archive path|RESTORE (adds new IDs/keys; current authority is preserved):",
+        )?;
+        let restore = format!("{}|RESTORE", encode_operation_field(paths.backup));
+        type_visible_and_submit(fixture, &restore, "|RESTORE")?;
+        fixture.observer.wait_for_information("Restore committed with new IDs/keys; current authority preserved and imported grants inactive").map_err(io::Error::other)?;
+        eprintln!("TUI_STAGE stage=restore result=pass");
+        open_menu(fixture, "b", "Backup/recovery:")?;
+        open_menu(fixture, "5", "Recovery code shown temporarily")?;
+        let code = fixture
+            .observer
+            .wait_for_recovery_code()
+            .map_err(io::Error::other)?;
+        // No secret code is printed or sent through a visible-input oracle.
+        let request = zeroize::Zeroizing::new(format!("{}\r", code.as_str()));
+        write_keyboard_input(fixture, request.as_bytes())?;
+        fixture
+            .observer
+            .wait_for_information(
+                "Recovery rotated after exact re-entry; historical backups/copies remain usable",
+            )
+            .map_err(io::Error::other)?;
+        eprintln!("TUI_STAGE stage=recovery-rotation result=pass");
+        open_menu(fixture, "b", "Backup/recovery:")?;
+        open_menu(
+            fixture,
+            "4",
+            "New master password|ROTATE (old backups and exposed copies retain historical recovery paths):",
+        )?;
+        write_keyboard_input(fixture, b"synthetic-ticket27-rotated-master|ROTATE\r")?;
+        fixture
+            .observer
+            .wait_for_information(
+                "Master password rotated; old backups and exposed copies retain historical paths",
+            )
+            .map_err(io::Error::other)?;
+        fixture
+            .observer
+            .rejects(b"synthetic-ticket27-rotated-master")
+            .map_err(io::Error::other)?;
+        eprintln!("TUI_STAGE stage=master-rotation result=pass");
+        Ok(())
     }
 
     fn child_diagnostic(process: HANDLE) -> io::Result<String> {
@@ -1979,6 +2411,78 @@ mod windows_fixture {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn observer_validates_resize_reports_without_inventing_repaint() {
+            let observer = TerminalObserver::new();
+            observer.feed(b"\x1b[8;24;80t").unwrap();
+            let state = observer.state.lock().unwrap();
+            assert_eq!(state.resize_reports, 1);
+            assert_eq!(state.cursor_positions, 0);
+            assert!(
+                state
+                    .cells
+                    .iter()
+                    .all(|cell| matches!(cell, ScreenCell::Empty))
+            );
+        }
+
+        #[test]
+        fn observer_rejects_wrong_resize_geometry_or_unrecognized_window_ops() {
+            for sequence in [
+                b"\x1b[8;30;100t".as_slice(),
+                b"\x1b[4;24;80t",
+                b"\x1b[8;24t",
+                b"\x1b[?8;24;80t",
+            ] {
+                let observer = TerminalObserver::new();
+                assert!(observer.feed(sequence).is_err());
+                assert_eq!(observer.state.lock().unwrap().resize_reports, 0);
+            }
+        }
+
+        #[test]
+        fn observer_distinguishes_note_secret_from_its_public_type() {
+            let observer = TerminalObserver::new();
+            observer.feed(b"[note] synthetic public title").unwrap();
+            assert!(observer.rejects(b"note").is_err());
+            observer.rejects(b"ticket27-native-note-canary").unwrap();
+            observer
+                .feed(b"\x1b[22;2HExposure: ticket27-native-note-canary")
+                .unwrap();
+            assert!(observer.rejects(b"ticket27-native-note-canary").is_err());
+            observer
+                .feed(b"\x1b[22;2H\x1b[2KExposure: <hidden>")
+                .unwrap();
+            observer.rejects(b"ticket27-native-note-canary").unwrap();
+        }
+
+        #[test]
+        fn observer_requires_mandatory_information_in_main_panel() {
+            let observer = TerminalObserver::new();
+            observer
+                .feed(b"\x1b[20;2HPreview values hidden: exact-duplicates=1")
+                .unwrap();
+            assert!(
+                !observer
+                    .state
+                    .lock()
+                    .unwrap()
+                    .information_contains("exact-duplicates=1")
+            );
+            observer.feed("\x1b[4;1H┌Information───────────────────────────────────────────────────────────────────┐".as_bytes()).unwrap();
+            for y in 5..18 {
+                let text = if y == 5 {
+                    "Preview values hidden: exact-duplicates=1"
+                } else {
+                    ""
+                };
+                observer
+                    .feed(format!("\x1b[{y};1H│{text:<78}│").as_bytes())
+                    .unwrap();
+            }
+            observer.wait_for_information("exact-duplicates=1").unwrap();
+        }
 
         #[test]
         fn observer_matches_footer_suffix_and_cursor_in_one_screen() {

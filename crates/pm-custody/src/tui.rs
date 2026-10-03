@@ -51,7 +51,7 @@ use crate::linux::{
 };
 #[cfg(target_os = "windows")]
 use crate::windows::{
-    HUMAN_MAGIC, KeyMaterial, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared,
+    HUMAN_MAGIC, KeyMaterial, MAX_FRAME, Profile, Role, STREAM_CHUNK_BYTES, WirePrepared,
     connect_tui as connect, decode_prepared_response, finish_arguments, hex, open_1pux_source,
     push_bytes, read_import_source, read_profile, rpc_commit, rpc_download_atomic, rpc_history,
     rpc_prepare_purge_item, rpc_prepare_purge_revisions, rpc_prepare_restore, rpc_unlock,
@@ -190,6 +190,8 @@ struct App {
     mode: Mode,
     input: ProtectedInput,
     status: String,
+    information: Option<String>,
+    information_scroll: usize,
     reveal: Option<(ProtectedBytes, Instant)>,
     clipboard: Option<ClipboardLease>,
     idle_at: Instant,
@@ -215,6 +217,8 @@ struct App {
     initial_diagnostic: Option<console_diagnostic::Diagnostic>,
     #[cfg(windows)]
     csv_diagnostic: Option<console_diagnostic::Diagnostic>,
+    #[cfg(windows)]
+    transfer_diagnostic: Option<File>,
 }
 
 enum PendingOperation {
@@ -311,6 +315,8 @@ impl App {
             mode: Mode::Unlock,
             input: ProtectedInput::new()?,
             status: "Password required".into(),
+            information: None,
+            information_scroll: 0,
             reveal: None,
             clipboard: None,
             idle_at: Instant::now(),
@@ -336,6 +342,8 @@ impl App {
             initial_diagnostic: None,
             #[cfg(windows)]
             csv_diagnostic: None,
+            #[cfg(windows)]
+            transfer_diagnostic: None,
         })
     }
 
@@ -801,6 +809,10 @@ fn run_terminal(
         )?;
         #[cfg(windows)]
         {
+            app.transfer_diagnostic = diagnostic
+                .as_ref()
+                .map(console_diagnostic::Diagnostic::report_file)
+                .transpose()?;
             app.initial_diagnostic = diagnostic;
         }
         run_authenticated_session(profile, key, socket, &mut terminal, &mut app)
@@ -958,6 +970,8 @@ fn event_loop(
                     Err(error) if error.has_native_cleanup_failure() => return Err(error),
                     Err(error) => {
                         app.operation = None;
+                        app.information = None;
+                        app.reveal = None;
                         app.input.clear();
                         app.mode = Mode::Browse;
                         app.status = "Operation failed explicitly; no success was recorded".into();
@@ -976,6 +990,13 @@ fn event_loop(
 }
 
 fn handle_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result<bool, Failure> {
+    if scroll_information(app, key.code) {
+        return Ok(false);
+    }
+    if app.mode == Mode::Browse {
+        app.information = None;
+        app.information_scroll = 0;
+    }
     if app.mode == Mode::SelectField {
         return handle_field_key(app, tls, key).map(|()| false);
     }
@@ -1070,7 +1091,7 @@ fn handle_operation_key(
         (OperationMenu::Backup, KeyCode::Char('4')) => begin_prompt(
             app,
             Mode::MasterRotate,
-            "New master password|ROTATE (old backups retain historical recovery paths):",
+            "New master password|ROTATE (old backups and exposed copies retain historical recovery paths):",
         ),
         (OperationMenu::Backup, KeyCode::Char('5')) => rotate_recovery(app, tls)?,
         (OperationMenu::Devices, KeyCode::Char('1')) => begin_prompt(
@@ -1099,7 +1120,7 @@ fn handle_operation_key(
             Mode::AuditPurge,
             "generation:through-sequence:PURGE AUDIT (exact range becomes a gap):",
         ),
-        _ => app.status = operation_help(menu).into(),
+        _ => show_information(app, operation_help(menu)),
     }
     Ok(())
 }
@@ -1107,14 +1128,14 @@ fn handle_operation_key(
 fn open_operations(app: &mut App, menu: OperationMenu) {
     app.clear_exposure();
     app.mode = Mode::Operations(menu);
-    app.status = operation_help(menu).into();
+    show_information(app, operation_help(menu));
 }
 
 fn begin_prompt(app: &mut App, mode: Mode, status: &str) {
     app.clear_exposure();
     app.input.clear();
     app.mode = mode;
-    app.status = status.into();
+    show_information(app, status);
 }
 
 fn handle_prompt_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result<(), Failure> {
@@ -1130,6 +1151,7 @@ fn handle_prompt_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result
             app.operation = None;
             app.reveal = None;
             app.mode = Mode::Browse;
+            app.information = None;
             app.status = "Cancelled".into();
         }
         KeyCode::Backspace => {
@@ -1166,6 +1188,8 @@ fn submit_prompt(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
     app.input.clear();
     let value_text = std::str::from_utf8(&value).map_err(|_| Failure::Unavailable)?;
     app.mode = Mode::Browse;
+    app.information = None;
+    app.information_scroll = 0;
     match mode {
         Mode::Search => search(app, tls, value_text),
         Mode::Tag => organize(app, tls, Some(value_text.to_owned())),
@@ -1425,11 +1449,20 @@ fn preview_1pux(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Fa
         _ => return Err(Failure::Unavailable),
     };
     let source = open_1pux_source(Path::new(&*path))?;
+    #[cfg(windows)]
+    transfer_phase(app, "source-open")?;
     write_frame(tls, &[31, replace])?;
+    #[cfg(windows)]
+    transfer_phase(app, "request31-sent")?;
     if *read_frame(tls)? != [0] {
         return Err(Failure::Unavailable);
     }
+    #[cfg(windows)]
+    transfer_phase(app, "ack31-received")?;
+    #[cfg(not(windows))]
     let response = transfer_import_file(tls, &source)?;
+    #[cfg(windows)]
+    let response = transfer_import_file(app, tls, &source)?;
     let (summary, prepared) = decode_import_preview(&response)?;
     app.operation = Some(PendingOperation::Import(prepared));
     begin_prompt(app, Mode::ConfirmImport, &summary);
@@ -1442,16 +1475,74 @@ fn transfer_import_file(tls: &mut HumanTls, source: &File) -> Result<ProtectedBy
 }
 
 #[cfg(target_os = "windows")]
-fn transfer_import_file(tls: &mut HumanTls, source: &File) -> Result<ProtectedBytes, Failure> {
-    let lease = pm_native_channel::ProcessHandleTransferLease::begin()
-        .map_err(|error| Failure::Unavailable.after_native_cleanup(error.cleanup_result()))?;
-    let operation = send_file_handle(tls, source).and_then(|()| read_frame(tls));
-    match operation {
-        Ok(response) => match lease.finish() {
+fn transfer_phase(app: &mut App, phase: &'static str) -> Result<(), Failure> {
+    if let Some(report) = app.transfer_diagnostic.as_mut() {
+        writeln!(report, "TUI_PROBE transfer={phase}").map_err(|_| Failure::Unavailable)?;
+        report.flush().map_err(|_| Failure::Unavailable)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn transfer_import_file(
+    app: &mut App,
+    tls: &mut HumanTls,
+    source: &File,
+) -> Result<ProtectedBytes, Failure> {
+    let lease = match pm_native_channel::ProcessHandleTransferLease::begin() {
+        Ok(lease) => lease,
+        Err(error) => {
+            let failure = Failure::Unavailable.after_native_cleanup(error.cleanup_result());
+            return Err(match transfer_phase(app, error.phase()) {
+                Ok(()) => failure,
+                Err(diagnostic) => failure.merge(diagnostic),
+            });
+        }
+    };
+    let operation: Result<ProtectedBytes, Failure> = (|| {
+        transfer_phase(app, "child-lease-installed")?;
+        send_file_handle(tls, source)?;
+        transfer_phase(app, "handle-sent")?;
+        let response = match crate::human_wire::read_frame_bounded_classified(tls, MAX_FRAME) {
+            Ok(response) => response,
+            Err(error) => {
+                use crate::human_wire::FrameReadFailure;
+                let phase = match error {
+                    FrameReadFailure::Timeout => "preview-read-timeout",
+                    FrameReadFailure::Eof => "preview-read-eof",
+                    FrameReadFailure::OtherIo => "preview-read-other-io",
+                    FrameReadFailure::MalformedFrame => "preview-read-malformed",
+                };
+                let failure = error.public_failure();
+                return Err(match transfer_phase(app, phase) {
+                    Ok(()) => failure,
+                    Err(diagnostic) => failure.merge(diagnostic),
+                });
+            }
+        };
+        transfer_phase(app, "preview-received")?;
+        Ok(response)
+    })();
+    let restored = lease.finish();
+    let diagnostic = transfer_phase(
+        app,
+        if restored.is_ok() {
+            "lease-restored"
+        } else {
+            "lease-restore-failed"
+        },
+    );
+    let result = match operation {
+        Ok(response) => match restored {
             Ok(()) => Ok(response),
             Err(cleanup) => Err(Failure::Unavailable.after_native_cleanup(Err(cleanup))),
         },
-        Err(error) => Err(error.after_native_cleanup(lease.finish())),
+        Err(error) => Err(error.after_native_cleanup(restored)),
+    };
+    match (result, diagnostic) {
+        (Ok(response), Ok(())) => Ok(response),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(diagnostic)) => Err(error.merge(diagnostic)),
     }
 }
 
@@ -1475,6 +1566,7 @@ fn native_backup(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), F
     app.status = format!(
         "Native encrypted backup complete: {bytes} bytes; existing exposed copies are unchanged"
     );
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -1574,6 +1666,7 @@ fn confirm_plaintext_export(app: &mut App, tls: &mut HumanTls, value: &str) -> R
     let bytes = rpc_download_atomic(tls, &request, &destination)?;
     app.status =
         format!("Plaintext export complete: {bytes} bytes; protect or remove it explicitly");
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -1605,6 +1698,7 @@ fn native_restore(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), 
     rpc_commit(tls, &prepared)?;
     refresh(app, tls)?;
     app.status = "Restore committed with new IDs/keys; current authority preserved and imported grants inactive".into();
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -1639,6 +1733,7 @@ fn master_rotate(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), F
     drop(replacement);
     app.status =
         "Master password rotated; old backups and exposed copies retain historical paths".into();
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -1658,6 +1753,7 @@ fn query_audit(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
     app.status = format!(
         "Audit metadata: records={records} discontinuities={gaps} segments={segments}; values hidden"
     );
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -1684,6 +1780,7 @@ fn purge_audit(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Fai
     app.status = format!(
         "Audit purged only generation {generation} through sequence {through}; discontinuity retained"
     );
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -1698,7 +1795,7 @@ fn rotate_recovery(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
     begin_prompt(
         app,
         Mode::RecoveryRotate,
-        "Recovery code shown temporarily; store externally, then re-enter it exactly to commit:",
+        "Recovery code shown temporarily; store externally, then re-enter it exactly to commit: old backups and exposed copies retain historical recovery paths.",
     );
     if let Some(PendingOperation::RecoveryCode(code)) = app.operation.as_ref() {
         app.reveal = Some((protected_copy(code)?, Instant::now() + app.reveal_for));
@@ -1879,6 +1976,7 @@ fn confirm_recovery_rotation(
     app.reveal = None;
     app.status =
         "Recovery rotated after exact re-entry; historical backups/copies remain usable".into();
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -1925,6 +2023,7 @@ fn pair_device(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Fai
     app.status =
         "Protected pairing created for the exact observed RPK pin; transfer remains human custody"
             .into();
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -1966,6 +2065,7 @@ fn sync_now(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failur
         "Sync job {} authorized and queued; lock/idle does not retain the human root",
         hex(&job)
     );
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -2048,6 +2148,9 @@ fn poll_sync(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
         }
         _ => return Err(Failure::Unavailable),
     }
+    if app.mode == Mode::Browse {
+        show_information(app, &app.status.clone());
+    }
     Ok(())
 }
 
@@ -2081,6 +2184,7 @@ fn retire_device(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), F
         "Device {} retired at every locally observed prefix; later offline events are outside accepted history",
         &*device
     );
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -2218,6 +2322,7 @@ fn download_attachment(app: &mut App, tls: &mut HumanTls, value: &str) -> Result
     app.status = format!(
         "Attachment streamed atomically: {bytes} bytes; no human frame held the whole value"
     );
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -2423,6 +2528,7 @@ fn show_history(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
             "trash"
         }
     );
+    show_information(app, &app.status.clone());
     Ok(())
 }
 
@@ -2683,60 +2789,11 @@ fn copy_secret(secret: &[u8], duration: Duration) -> Result<ClipboardLease, Fail
 }
 
 fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Result<(), Failure> {
-    let completed = terminal.draw(|frame| {
-        let chunks = Layout::default().direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(6)]).split(frame.area());
-        let title = Paragraph::new("Password Manager — human TLS-RPK content")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(title, chunks[0]);
-        let content_rows: Vec<ListItem> = app.visible.iter().filter_map(|index| app.entries.get(*index)).map(|entry| {
-            let marker = if entry.trash { "trash" } else { "active" };
-            ListItem::new(Line::from(vec![
-                Span::raw(if entry.favorite { "★ " } else { "  " }),
-                Span::styled(format!("[{}] ", kind_label(entry.kind)), Style::default().fg(Color::Yellow)),
-                Span::raw(sanitize_text(&entry.title)), Span::raw(format!("  ({marker})")),
-            ]))
-        }).collect();
-        let (rows, selected, list_title) = if app.mode == Mode::SelectField {
-            let fields = app.fields.iter().map(|field| ListItem::new(format!("{} ({} bytes)", sanitize_text(&field.label), field.size))).collect();
-            (fields, app.field_selected, "Fields (explicit selection; values hidden)")
-        } else if app.mode == Mode::SelectAttachment {
-            let attachments = app.attachments.iter().map(|attachment| ListItem::new(format!("{} ({} bytes)", sanitize_text(&attachment.label), attachment.size))).collect();
-            (attachments, app.field_selected, "Attachments (exact descriptor; values hidden)")
-        } else {
-            match app.screen {
-                Screen::Content => (content_rows, app.selected, "Items (selection is metadata only)"),
-                Screen::Access => {
-                    let rows = app.access.iter().map(|entry| match entry {
-                        AccessEntry::Agent { subject, generation, label, environment, status } => ListItem::new(format!(
-                            "[agent {status}] {} generation={generation} environment={} subject={}",
-                            sanitize_text(label), sanitize_text(environment), hex(subject),
-                        )),
-                        AccessEntry::Credential { item, title, enabled } => ListItem::new(format!(
-                            "[credential {}] {} item={}", if *enabled { "enabled" } else { "disabled" }, sanitize_text(title), hex(item),
-                        )),
-                    }).collect();
-                    (rows, app.selected, "Delegated authority (metadata only)")
-                }
-                Screen::Pending => {
-                    let rows = app.pending.iter().map(|entry| {
-                        let passkey = entry.passkey.as_ref().map_or("", |_| " passkey-confirmation");
-                        ListItem::new(format!(
-                            "[{}] {} integration={} reason={} expires={} agent={}/{} status={} attempt={}{}",
-                            sanitize_text(&entry.state), sanitize_text(&entry.title), sanitize_text(&entry.integration),
-                            sanitize_text(&entry.reason), entry.expires_at_us, hex(&entry.owner), entry.generation,
-                            sanitize_text(&entry.agent_status), hex(&entry.attempt), passkey,
-                        ))
-                    }).collect();
-                    (rows, app.selected, "Attempts (safe context only)")
-                }
-            }
-        };
-        let mut state = ListState::default(); if !rows.is_empty() { state.select(Some(selected)); }
-        frame.render_stateful_widget(List::new(rows).highlight_symbol("› ").block(Block::default().title(list_title).borders(Borders::ALL)), chunks[1], &mut state);
-        render_footer(frame, chunks[2], app);
-    }).map_err(|_| Failure::Unavailable)?;
+    let completed = terminal
+        .draw(|frame| {
+            render_app(frame, app);
+        })
+        .map_err(|_| Failure::Unavailable)?;
     #[cfg(windows)]
     if let Some(mut probe) = app.initial_diagnostic.take() {
         probe.frame(completed.buffer)?;
@@ -2757,6 +2814,255 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
     #[cfg(not(windows))]
     let _ = completed;
     Ok(())
+}
+
+fn render_app(frame: &mut ratatui::Frame, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(6),
+        ])
+        .split(frame.area());
+    let title = Paragraph::new("Password Manager — human TLS-RPK content")
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(title, chunks[0]);
+    if app.information.is_some() {
+        render_information(frame, chunks[1], app);
+    } else {
+        render_catalog(frame, chunks[1], app);
+    }
+    render_footer(frame, chunks[2], app);
+}
+
+fn catalog_rows(app: &App) -> Vec<ListItem<'static>> {
+    app.visible
+        .iter()
+        .filter_map(|index| app.entries.get(*index))
+        .map(|entry| {
+            let marker = if entry.trash { "trash" } else { "active" };
+            ListItem::new(Line::from(vec![
+                Span::raw(if entry.favorite { "★ " } else { "  " }),
+                Span::styled(
+                    format!("[{}] ", kind_label(entry.kind)),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw(sanitize_text(&entry.title)),
+                Span::raw(format!("  ({marker})")),
+            ]))
+        })
+        .collect()
+}
+
+fn render_catalog(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
+    let content_rows = catalog_rows(app);
+    let (rows, selected, list_title) = if app.mode == Mode::SelectField {
+        let fields = app
+            .fields
+            .iter()
+            .map(|field| {
+                ListItem::new(format!(
+                    "{} ({} bytes)",
+                    sanitize_text(&field.label),
+                    field.size
+                ))
+            })
+            .collect();
+        (
+            fields,
+            app.field_selected,
+            "Fields (explicit selection; values hidden)",
+        )
+    } else if app.mode == Mode::SelectAttachment {
+        let attachments = app
+            .attachments
+            .iter()
+            .map(|attachment| {
+                ListItem::new(format!(
+                    "{} ({} bytes)",
+                    sanitize_text(&attachment.label),
+                    attachment.size
+                ))
+            })
+            .collect();
+        (
+            attachments,
+            app.field_selected,
+            "Attachments (exact descriptor; values hidden)",
+        )
+    } else {
+        match app.screen {
+            Screen::Content => (
+                content_rows,
+                app.selected,
+                "Items (selection is metadata only)",
+            ),
+            Screen::Access => {
+                let rows = app
+                    .access
+                    .iter()
+                    .map(|entry| match entry {
+                        AccessEntry::Agent {
+                            subject,
+                            generation,
+                            label,
+                            environment,
+                            status,
+                        } => ListItem::new(format!(
+                            "[agent {status}] {} generation={generation} environment={} subject={}",
+                            sanitize_text(label),
+                            sanitize_text(environment),
+                            hex(subject),
+                        )),
+                        AccessEntry::Credential {
+                            item,
+                            title,
+                            enabled,
+                        } => ListItem::new(format!(
+                            "[credential {}] {} item={}",
+                            if *enabled { "enabled" } else { "disabled" },
+                            sanitize_text(title),
+                            hex(item),
+                        )),
+                    })
+                    .collect();
+                (rows, app.selected, "Delegated authority (metadata only)")
+            }
+            Screen::Pending => {
+                let rows = app.pending.iter().map(|entry| {
+                        let passkey = entry.passkey.as_ref().map_or("", |_| " passkey-confirmation");
+                        ListItem::new(format!(
+                            "[{}] {} integration={} reason={} expires={} agent={}/{} status={} attempt={}{}",
+                            sanitize_text(&entry.state), sanitize_text(&entry.title), sanitize_text(&entry.integration),
+                            sanitize_text(&entry.reason), entry.expires_at_us, hex(&entry.owner), entry.generation,
+                            sanitize_text(&entry.agent_status), hex(&entry.attempt), passkey,
+                        ))
+                    }).collect();
+                (rows, app.selected, "Attempts (safe context only)")
+            }
+        }
+    };
+    let mut state = ListState::default();
+    if !rows.is_empty() {
+        state.select(Some(selected));
+    }
+    frame.render_stateful_widget(
+        List::new(rows)
+            .highlight_symbol("› ")
+            .block(Block::default().title(list_title).borders(Borders::ALL)),
+        area,
+        &mut state,
+    );
+}
+
+fn show_information(app: &mut App, information: &str) {
+    app.information = Some(information.to_owned());
+    app.information_scroll = 0;
+    app.status = "Review information in panel; PgUp/PgDn scroll".into();
+}
+
+fn scroll_information(app: &mut App, key: KeyCode) -> bool {
+    if app.information.is_none() {
+        return false;
+    }
+    match key {
+        KeyCode::PageDown => app.information_scroll = app.information_scroll.saturating_add(1),
+        KeyCode::PageUp => app.information_scroll = app.information_scroll.saturating_sub(1),
+        _ => return false,
+    }
+    true
+}
+
+// Wrap whole words where possible, splitting long words only at grapheme
+// boundaries. At the 80-column floor every grapheme fits; no Ratatui reflow
+// omission or ellipsis is used for this contractual information.
+fn information_lines(information: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut occupied = 0;
+    for word in information.split_whitespace() {
+        let word_width = Line::raw(word).width();
+        if occupied > 0 && occupied + 1 + word_width > width {
+            lines.push(std::mem::take(&mut line));
+            occupied = 0;
+        }
+        if occupied > 0 {
+            line.push(' ');
+            occupied += 1;
+        }
+        let span = Span::raw(word);
+        for grapheme in span.styled_graphemes(Style::default()) {
+            let cells = Line::raw(grapheme.symbol).width();
+            if occupied + cells > width {
+                lines.push(std::mem::take(&mut line));
+                occupied = 0;
+            }
+            line.push_str(grapheme.symbol);
+            occupied += cells;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn render_information(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mut App) {
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let mut lines = information_lines(
+        &sanitize_text(
+            app.information
+                .as_deref()
+                .expect("information panel selected"),
+        ),
+        usize::from(inner.width),
+    );
+    if app.mode == Mode::RecoveryRotate {
+        let code = app
+            .reveal
+            .as_ref()
+            .map_or_else(|| "<hidden>".into(), |(code, _)| display_secret(code));
+        lines.push("Recovery code:".into());
+        lines.extend(information_lines(&code, usize::from(inner.width)));
+    }
+    let height = usize::from(inner.height);
+    app.information_scroll = app
+        .information_scroll
+        .min(lines.len().saturating_sub(height));
+    let start = app.information_scroll;
+    let end = (start + height).min(lines.len());
+    let title = if lines.len() > height {
+        format!(
+            "Information {}-{} / {} — PgUp/PgDn",
+            start + 1,
+            end,
+            lines.len()
+        )
+    } else {
+        "Information".into()
+    };
+    frame.render_widget(block.title(title), area);
+    // Render already-wrapped rows individually; do not let reflow truncate or
+    // skip a glyph. Resize clamps the viewport while retaining every row.
+    for (offset, line) in lines[start..end].iter().enumerate() {
+        let row = ratatui::layout::Rect::new(
+            inner.x,
+            inner.y + u16::try_from(offset).expect("panel row fits"),
+            inner.width,
+            1,
+        );
+        frame.render_widget(Paragraph::new(line.as_str()), row);
+    }
 }
 
 fn render_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
@@ -2795,6 +3101,7 @@ fn render_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &
     let exposure = app
         .reveal
         .as_ref()
+        .filter(|_| app.mode != Mode::RecoveryRotate)
         .map_or_else(|| "<hidden>".into(), |(secret, _)| display_secret(secret));
     let controls = match app.screen {
         Screen::Content => {
@@ -3042,6 +3349,223 @@ mod tests {
         assert!(footer_row(&terminal, 20).starts_with("Input: ‹"));
         assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
         assert!(footer_row(&terminal, 19).ends_with('…'));
+    }
+
+    fn render_test_app(terminal: &mut Terminal<TestBackend>, app: &mut App) {
+        terminal.draw(|frame| render_app(frame, app)).unwrap();
+    }
+
+    fn panel_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        (4..area.height - 7)
+            .map(|y| {
+                (1..area.width - 1)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn information_import_counters_are_complete_in_panel_at_80x24() {
+        let mut app = footer_app("IMPORT");
+        let summary = "Mapping=chrome duplicate-action=keep; Preview values hidden: total=1 new=0 replaced=0 exact-duplicates=1 excluded=0 preserved-fields=3 pages=1; type IMPORT to commit";
+        begin_prompt(&mut app, Mode::ConfirmImport, summary);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        render_test_app(&mut terminal, &mut app);
+        let panel = panel_text(&terminal);
+        for token in [
+            "Mapping=chrome",
+            "duplicate-action=keep;",
+            "total=1",
+            "new=0",
+            "replaced=0",
+            "exact-duplicates=1",
+            "excluded=0",
+            "preserved-fields=3",
+            "pages=1;",
+            "type IMPORT to commit",
+        ] {
+            assert!(
+                panel
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains(token),
+                "missing mandatory token: {token}"
+            );
+        }
+        assert_eq!(footer_row(&terminal, 21), "Exposure: <hidden>");
+    }
+
+    #[test]
+    fn information_long_counters_survive_resize_in_panel() {
+        let mut app = footer_app("");
+        let summary = "Preview values hidden: total=18446744073709551615 new=18446744073709551615 replaced=18446744073709551615 exact-duplicates=18446744073709551615 excluded=18446744073709551615 preserved-fields=18446744073709551615 pages=18446744073709551615; type IMPORT to commit";
+        begin_prompt(&mut app, Mode::ConfirmImport, summary);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        render_test_app(&mut terminal, &mut app);
+        terminal.backend_mut().resize(80, 24);
+        terminal.autoresize().unwrap();
+        render_test_app(&mut terminal, &mut app);
+        let panel = panel_text(&terminal);
+        for key in [
+            "total",
+            "new",
+            "replaced",
+            "exact-duplicates",
+            "excluded",
+            "preserved-fields",
+            "pages",
+        ] {
+            assert!(
+                panel.contains(&format!("{key}=18446744073709551615")),
+                "missing {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn information_mandatory_confirmation_warnings_are_in_panel() {
+        let mut app = footer_app("");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for (mode, warning) in [
+            (
+                Mode::ConfirmPlaintextExport,
+                "PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:",
+            ),
+            (
+                Mode::MasterRotate,
+                "New master password|ROTATE (old backups and exposed copies retain historical recovery paths):",
+            ),
+            (
+                Mode::NativeRestore,
+                "Archive path|RESTORE (adds new IDs/keys; current authority is preserved):",
+            ),
+            (
+                Mode::ConfirmPurgeItem,
+                "Type PURGE to permanently delete trashed item:",
+            ),
+            (
+                Mode::RecoveryRotate,
+                "Recovery code shown temporarily; store externally, then re-enter it exactly to commit: old backups and exposed copies retain historical recovery paths.",
+            ),
+        ] {
+            begin_prompt(&mut app, mode, warning);
+            render_test_app(&mut terminal, &mut app);
+            assert_eq!(
+                panel_text(&terminal).split_whitespace().collect::<Vec<_>>(),
+                format!(
+                    "{warning}{}",
+                    if mode == Mode::RecoveryRotate {
+                        " Recovery code: <hidden>"
+                    } else {
+                        ""
+                    }
+                )
+                .split_whitespace()
+                .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn information_scroll_preserves_all_rows_and_input_after_resize() {
+        let mut app = footer_app("typed-confirmation");
+        let text = (0..80)
+            .map(|i| format!("counter-{i}=18446744073709551615"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        begin_prompt(&mut app, Mode::ConfirmImport, &text);
+        app.input.push('I');
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut observed = String::new();
+        for _ in 0..80 {
+            render_test_app(&mut terminal, &mut app);
+            observed.push_str(&panel_text(&terminal));
+            assert_eq!(footer_row(&terminal, 20), "Input: I");
+            assert!(scroll_information(&mut app, KeyCode::PageDown));
+        }
+        for i in 0..80 {
+            assert!(observed.contains(&format!("counter-{i}=18446744073709551615")));
+        }
+        assert!(format!("{:?}", terminal.backend().buffer()).contains("PgUp/PgDn"));
+        terminal.backend_mut().resize(100, 60);
+        terminal.autoresize().unwrap();
+        render_test_app(&mut terminal, &mut app);
+        assert_eq!(app.information_scroll, 0);
+        assert!(panel_text(&terminal).contains("counter-79=18446744073709551615"));
+        assert!(scroll_information(&mut app, KeyCode::PageUp));
+        assert_eq!(app.information_scroll, 0);
+        assert!(!scroll_information(&mut app, KeyCode::Enter));
+        assert!(app.mode == Mode::ConfirmImport);
+        assert_eq!(app.input.as_str(), "I");
+    }
+
+    #[test]
+    fn information_exact_width_wide_and_combining_glyphs_are_not_lost() {
+        let mut app = footer_app("");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for text in [
+            format!("{}界", "a".repeat(76)),
+            format!("{}界e\u{301}Z", "a".repeat(77)),
+        ] {
+            begin_prompt(&mut app, Mode::ConfirmImport, &text);
+            render_test_app(&mut terminal, &mut app);
+            let buffer = terminal.backend().buffer();
+            let actual = (4..17)
+                .flat_map(|y| (1..79).map(move |x| buffer[(x, y)].symbol()))
+                .filter(|s| *s != " ")
+                .collect::<String>();
+            assert_eq!(actual, text);
+        }
+        assert_eq!(terminal.backend().buffer()[(1, 5)].symbol(), "界");
+        assert_eq!(terminal.backend().buffer()[(3, 5)].symbol(), "e\u{301}");
+    }
+
+    #[test]
+    fn information_recovery_is_explicit_temporary_and_does_not_copy_secret_input() {
+        let mut app = footer_app("");
+        begin_prompt(
+            &mut app,
+            Mode::RecoveryRotate,
+            "Store externally; historical copies remain usable; re-enter exactly",
+        );
+        for c in "synthetic-secret-input-canary".chars() {
+            app.input.push(c);
+        }
+        app.password = protected_copy(b"synthetic-master-canary").unwrap();
+        app.reveal = Some((
+            protected_copy(b"PMR1-synthetic-recovery-canary").unwrap(),
+            Instant::now() + Duration::from_secs(1),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        render_test_app(&mut terminal, &mut app);
+        assert!(
+            panel_text(&terminal)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("Recovery code: PMR1-synthetic-recovery-canary")
+        );
+        let all = format!("{:?}", terminal.backend().buffer());
+        assert!(!all.contains("synthetic-secret-input-canary"));
+        assert!(!all.contains("synthetic-master-canary"));
+        assert_eq!(footer_row(&terminal, 21), "Exposure: <hidden>");
+        app.reveal.as_mut().unwrap().1 = Instant::now();
+        app.expire();
+        render_test_app(&mut terminal, &mut app);
+        assert!(!panel_text(&terminal).contains("PMR1-synthetic-recovery-canary"));
+        assert!(
+            panel_text(&terminal)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("Recovery code: <hidden>")
+        );
+        assert!(panel_text(&terminal).contains("historical copies remain usable"));
     }
 
     fn arguments<'a>(values: &'a [&'a str]) -> impl Iterator<Item = OsString> + 'a {

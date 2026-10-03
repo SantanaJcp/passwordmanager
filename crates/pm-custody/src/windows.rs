@@ -70,7 +70,7 @@ const ED25519_SPKI_PREFIX: &[u8] = &[
 ];
 const SPKI_BYTES: usize = 44;
 const MAX_PROTECTED_BYTES: usize = 64 * 1024;
-const MAX_FRAME: usize = 18 * 1024 * 1024;
+pub(super) const MAX_FRAME: usize = 18 * 1024 * 1024;
 pub(super) const STREAM_CHUNK_BYTES: usize = 1024 * 1024;
 pub(super) const HUMAN_MAGIC: &[u8; 5] = b"PMH1\n";
 const AGENT_MAGIC: &[u8; 5] = b"PMA1\n";
@@ -176,6 +176,12 @@ enum ServiceDiagnosticPhase {
     HumanAuditOpen,
     HumanAuditAppend,
     HumanLockAck,
+    TransferAck,
+    TransferToken,
+    TransferDuplicated,
+    TransferDuplicateFailed,
+    TransferPreviewSent,
+    TransferPreviewFailed,
     ServiceFailed,
 }
 
@@ -203,6 +209,12 @@ impl ServiceDiagnosticPhase {
             Self::HumanAuditOpen => b"phase=human-audit-open\n",
             Self::HumanAuditAppend => b"phase=human-audit-append\n",
             Self::HumanLockAck => b"phase=human-lock-ack\n",
+            Self::TransferAck => b"phase=transfer-ack31\n",
+            Self::TransferToken => b"phase=transfer-token\n",
+            Self::TransferDuplicated => b"phase=transfer-duplicated\n",
+            Self::TransferDuplicateFailed => b"phase=transfer-duplicate-failed\n",
+            Self::TransferPreviewSent => b"phase=transfer-preview-sent\n",
+            Self::TransferPreviewFailed => b"phase=transfer-preview-handler-failed\n",
             Self::ServiceFailed => b"phase=service-failed\n",
         }
     }
@@ -890,6 +902,9 @@ fn serve_human(
         match opcode {
             31 => {
                 write_frame(tls, &[0])?;
+                if let Some(diagnostics) = service.diagnostics.as_ref() {
+                    diagnostics.record(ServiceDiagnosticPhase::TransferAck)?;
+                }
                 let token = read_frame(tls)?;
                 let source_value = u64::from_be_bytes(
                     token
@@ -897,10 +912,34 @@ fn serve_human(
                         .try_into()
                         .map_err(|_| Failure::Unavailable)?,
                 );
-                let source = transfer_pipe
-                    .duplicate_client_file(source_value, 1024_u64.pow(4) + 256 * 1024 * 1024)
-                    .map_err(|_| Failure::Unavailable)?;
-                crate::human_wire::handle_1pux_file(&mut vault, tls, rest, source)?;
+                if let Some(diagnostics) = service.diagnostics.as_ref() {
+                    diagnostics.record(ServiceDiagnosticPhase::TransferToken)?;
+                }
+                let duplicated = transfer_pipe
+                    .duplicate_client_file(source_value, 1024_u64.pow(4) + 256 * 1024 * 1024);
+                if let Some(diagnostics) = service.diagnostics.as_ref() {
+                    diagnostics.record(if duplicated.is_ok() {
+                        ServiceDiagnosticPhase::TransferDuplicated
+                    } else {
+                        ServiceDiagnosticPhase::TransferDuplicateFailed
+                    })?;
+                }
+                let source = duplicated.map_err(|_| Failure::Unavailable)?;
+                let preview = crate::human_wire::handle_1pux_file(&mut vault, tls, rest, source);
+                let diagnostic = if let Some(diagnostics) = service.diagnostics.as_ref() {
+                    diagnostics.record(if preview.is_ok() {
+                        ServiceDiagnosticPhase::TransferPreviewSent
+                    } else {
+                        ServiceDiagnosticPhase::TransferPreviewFailed
+                    })
+                } else {
+                    Ok(())
+                };
+                match (preview, diagnostic) {
+                    (Ok(()), Ok(())) => {}
+                    (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+                    (Err(error), Err(diagnostic)) => return Err(error.merge(diagnostic)),
+                }
                 continue;
             }
             17 => {
@@ -1441,10 +1480,8 @@ pub(super) fn read_import_source(path: &Path) -> Result<Zeroizing<Vec<u8>>, Fail
 
 pub(super) fn open_1pux_source(path: &Path) -> Result<File, Failure> {
     let file = pm_native_channel::open_regular_file(path).map_err(|_| Failure::Unavailable)?;
-    let metadata = file.metadata().map_err(|_| Failure::Unavailable)?;
-    if metadata.len() == 0 || metadata.len() > 1024_u64.pow(4) + 256 * 1024 * 1024 {
-        return Err(Failure::Unavailable);
-    }
+    pm_native_channel::validate_transfer_file(&file, 1024_u64.pow(4) + 256 * 1024 * 1024)
+        .map_err(|_| Failure::Unavailable)?;
     Ok(file)
 }
 

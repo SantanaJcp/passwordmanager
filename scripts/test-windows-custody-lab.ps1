@@ -155,6 +155,12 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
         'phase=human-audit-open'
         'phase=human-audit-append'
         'phase=human-lock-ack'
+        'phase=transfer-ack31'
+        'phase=transfer-token'
+        'phase=transfer-duplicated'
+        'phase=transfer-duplicate-failed'
+        'phase=transfer-preview-sent'
+        'phase=transfer-preview-handler-failed'
         'phase=service-failed'
     )
     foreach ($line in $lines) {
@@ -523,6 +529,7 @@ try {
     Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
     if ($TuiConPtyRed) {
         Invoke-Checked 'cargo' @('build', '-p', 'pm-native-channel', '--example', 'windows_tui_conpty_fixture', '--locked', '--offline')
+        Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '--example', 'windows_human_tui_seed', '--locked', '--offline')
     }
     $custody = Join-Path $repo 'target\debug\pm-custody.exe'
     $cli = Join-Path $repo 'target\debug\pm.exe'
@@ -545,9 +552,15 @@ try {
     Invoke-Checked 'cargo' @('test', '-p', 'pm-sync', '--lib', '--locked', '--offline')
     $tuiFixture = $null
     $tuiCustody = $null
+    $tuiSeed = $null
     if ($TuiConPtyRed) {
         $builtFixture = Join-Path $repo 'target\debug\examples\windows_tui_conpty_fixture.exe'
         Assert-NativeStaticMsvcBinary $dumpbin $builtFixture 'windows_tui_conpty_fixture.exe'
+        $builtSeed = Join-Path $repo 'target\debug\examples\windows_human_tui_seed.exe'
+        Assert-NativeStaticMsvcBinary $dumpbin $builtSeed 'windows_human_tui_seed.exe'
+        $tuiSeed = Join-Path $humanDir 'windows_human_tui_seed.exe'
+        Copy-Item -LiteralPath $builtSeed -Destination $tuiSeed -ErrorAction Stop
+        Add-OwnedPath $ownedPaths $tuiSeed
         $tuiFixture = Join-Path $humanDir 'windows_tui_conpty_fixture.exe'
         $tuiCustody = Join-Path $humanDir 'pm-custody.exe'
         Copy-Item -LiteralPath $builtFixture -Destination $tuiFixture -ErrorAction Stop
@@ -679,6 +692,10 @@ try {
     Assert-True ($p.ExitCode -eq 0) 'human RPK channel failed after SCM restart'
 
     if ($TuiConPtyRed) {
+        $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId) $humanInput $humanOut $humanErr
+        Assert-True ($p.ExitCode -eq 0) ('ordinary human type seeding failed: ' + (Get-Content $humanErr -Raw))
+        Assert-True ((Get-Content $humanOut -Raw).Trim() -eq 'PASS windows-tui-seed types=7 ordinary-human-wire=1 readback=exact') 'seven-type readback was not exact'
+        Write-Host (Get-Content $humanOut -Raw)
         $stationSddl = "D:P(A;;GA;;;SY)(A;;GA;;;$humanSid)"
         $consoleDiagnostic = Join-Path $humanDir 'console-diagnostic.txt'
         Add-OwnedPath $ownedPaths $consoleDiagnostic
@@ -693,12 +710,17 @@ try {
         $matrixMode = if ($ServiceDiagnostics) { '--matrix-probe' } else { '--matrix' }
         $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, $matrixMode, $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
         Write-Host (Get-Content $tuiErr -Raw)
+        Write-ServiceSubphaseDiagnostics $diagnosticPath
         Assert-True ($p.ExitCode -eq 0) ('normal pm-custody TUI did not complete its ConPTY tracer: ' + (Get-Content $tuiErr -Raw))
         Assert-TuiFixtureOutput $tuiOut 'matrix'
         Assert-True (Test-Path -LiteralPath $tuiBackup -PathType Leaf) 'TUI native backup was not published'
         Assert-True ((Get-Item -LiteralPath $tuiBackup -ErrorAction Stop).Length -gt 0) 'TUI native backup is empty'
         Assert-True (Test-Path -LiteralPath $tuiPlaintext -PathType Leaf) 'TUI plaintext export was not published'
         Assert-True ((Get-Item -LiteralPath $tuiPlaintext -ErrorAction Stop).Length -gt 0) 'TUI plaintext export is empty'
+        # Matrix ends with a real keyboard master rotation; subsequent unlock
+        # must use that exact synthetic password, never an alternative path.
+        [IO.File]::WriteAllText($humanInput, "synthetic-ticket27-rotated-master`n", [Text.UTF8Encoding]::new($false))
+
     }
 
     $p = Start-AsUser $humanCredential $custody @('human-lock', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $humanInput $humanOut $humanErr

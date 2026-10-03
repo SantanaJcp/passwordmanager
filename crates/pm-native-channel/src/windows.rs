@@ -553,25 +553,47 @@ impl WindowsServerPipe {
             }
             return Err(ChannelAuthenticationError);
         }
-        let mut information = BY_HANDLE_FILE_INFORMATION::default();
-        let queried = unsafe { GetFileInformationByHandle(local, &raw mut information) } != 0;
-        let size =
-            (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
-        let valid = queried
-            && information.dwFileAttributes
-                & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
-                == 0
-            && information.nNumberOfLinks == 1
-            && ((u64::from(information.nFileIndexHigh) << 32)
-                | u64::from(information.nFileIndexLow))
-                != 0
-            && size != 0
-            && size <= maximum;
-        if !valid {
+        if validate_transfer_handle(local, maximum).is_err() {
             close_handle(local)?;
             return Err(ChannelAuthenticationError);
         }
         Ok(unsafe { std::fs::File::from_raw_handle(local) })
+    }
+}
+
+/// Validates the exact open import handle before negotiating its transfer.
+/// The service repeats the same validation on the duplicated handle.
+///
+/// # Errors
+/// Rejects a non-regular/reparse/multilink source, missing identity, empty or
+/// oversized file, and native query failures.
+pub fn validate_transfer_file(
+    file: &std::fs::File,
+    maximum: u64,
+) -> Result<(), ChannelAuthenticationError> {
+    use std::os::windows::io::AsRawHandle;
+    validate_transfer_handle(file.as_raw_handle(), maximum)
+}
+
+fn validate_transfer_handle(
+    handle: HANDLE,
+    maximum: u64,
+) -> Result<(), ChannelAuthenticationError> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    let queried = unsafe { GetFileInformationByHandle(handle, &raw mut information) } != 0;
+    let size = (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
+    if queried
+        && information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            == 0
+        && information.nNumberOfLinks == 1
+        && ((u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow))
+            != 0
+        && size != 0
+        && size <= maximum
+    {
+        Ok(())
+    } else {
+        Err(ChannelAuthenticationError)
     }
 }
 
@@ -1023,6 +1045,7 @@ impl ProcessHandleTransferReservation {
             .map(|_| Self { active: true })
             .map_err(|_| ProcessHandleTransferBeginError {
                 cleanup_failed: false,
+                phase: "lease-reservation-failed",
             })
     }
 
@@ -1044,9 +1067,15 @@ impl Drop for ProcessHandleTransferReservation {
 #[derive(Debug)]
 pub struct ProcessHandleTransferBeginError {
     cleanup_failed: bool,
+    phase: &'static str,
 }
 
 impl ProcessHandleTransferBeginError {
+    /// Fixed failure category, without OS identity or resource values.
+    pub const fn phase(&self) -> &'static str {
+        self.phase
+    }
+
     /// Returns the result of cleanup attempted while starting the lease.
     pub const fn cleanup_result(&self) -> Result<(), ChannelAuthenticationError> {
         if self.cleanup_failed {
@@ -1072,11 +1101,13 @@ impl ProcessHandleTransferLease {
     ) -> Result<Self, ProcessHandleTransferBeginError> {
         let sid = installed_service_sid().map_err(|_| ProcessHandleTransferBeginError {
             cleanup_failed: false,
+            phase: "lease-sid-failed",
         })?;
         let process = unsafe { GetCurrentProcess() };
         let (original_descriptor, original_dacl) =
             query_process_dacl(process).map_err(|_| ProcessHandleTransferBeginError {
                 cleanup_failed: false,
+                phase: "lease-query-failed",
             })?;
         let mut entry = EXPLICIT_ACCESS_W {
             grfAccessPermissions: PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
@@ -1096,6 +1127,7 @@ impl ProcessHandleTransferLease {
             let original = free_local(original_descriptor);
             return Err(ProcessHandleTransferBeginError {
                 cleanup_failed: installed.is_err() || original.is_err(),
+                phase: "lease-acl-create-failed",
             });
         }
         let installed_bytes = match acl_bytes(installed_dacl) {
@@ -1105,6 +1137,7 @@ impl ProcessHandleTransferLease {
                 let original = free_local(original_descriptor);
                 return Err(ProcessHandleTransferBeginError {
                     cleanup_failed: installed.is_err() || original.is_err(),
+                    phase: "lease-acl-bytes-failed",
                 });
             }
         };
@@ -1124,6 +1157,7 @@ impl ProcessHandleTransferLease {
             let second = free_local(original_descriptor);
             return Err(ProcessHandleTransferBeginError {
                 cleanup_failed: first.is_err() || second.is_err(),
+                phase: "lease-install-failed",
             });
         }
         reservation.transfer();
@@ -1136,7 +1170,10 @@ impl ProcessHandleTransferLease {
         };
         if lease.current_matches(&lease.installed_bytes).is_err() {
             let cleanup_failed = lease.finish().is_err();
-            return Err(ProcessHandleTransferBeginError { cleanup_failed });
+            return Err(ProcessHandleTransferBeginError {
+                cleanup_failed,
+                phase: "lease-postinstall-failed",
+            });
         }
         Ok(lease)
     }

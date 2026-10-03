@@ -69,7 +69,7 @@ mod windows;
 pub use windows::{
     ConPty, OwnedClipboard, ProcessHandleTransferBeginError, ProcessHandleTransferLease,
     WindowsClientPipe, WindowsServerPipe, WindowsStopEvent, WindowsSyncPipeInstance,
-    dpapi_protect_machine, dpapi_unprotect, windows_named_pipe_available,
+    dpapi_protect_machine, dpapi_unprotect, validate_transfer_file, windows_named_pipe_available,
 };
 
 /// One of the two Windows named-pipe endpoints. Roles are fixed by the

@@ -38,3 +38,31 @@ def pairing_namespace(data):
     length, offset = cbor_length(data, offset, 2); assert length == 16; offset += length
     length, offset = cbor_length(data, offset, 2); assert length == 32
     return data[offset:offset + length].hex()
+
+
+def information_rows(rendered):
+    """Only the current main panel, excluding title/footer and border cells."""
+    rows = rendered.splitlines()
+    if len(rows) < 24 or "Information" not in rows[3]:
+        return ()
+    body = rows[4:-7]
+    if not all(row.startswith("│") and row.endswith("│") for row in body):
+        return ()
+    return tuple(row[1:-1].rstrip() for row in body)
+
+
+def information_text(rendered):
+    return " ".join(row for row in information_rows(rendered) if row)
+
+
+def recovery_code(rendered):
+    # A long code can span physical rows. Concatenate only its panel suffix;
+    # neither the status nor the input/exposure line can satisfy this oracle.
+    rows = information_rows(rendered)
+    for index, row in enumerate(rows):
+        if row == "Recovery code:":
+            value = "".join(rows[index + 1:])
+            import re
+            if re.fullmatch(r"PMR1-[0-9a-f]{32}-[0-9]+(?:-[0-9a-f]{8}){9}", value):
+                return value
+    return None
