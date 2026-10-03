@@ -14,7 +14,11 @@ el reductor pasan, junto con el RED PMB1/purge ahora GREEN. El checkpoint
 `fa8049e94d0c98b67ceca4fc59f5f19f1e1babb3` pasa los 40 gates Linux sin
 regresión. macOS ya no observa el rechazo de integridad en ARM, pero ambas
 CPU vencen en `pushing` sin publicar roots. Un diagnóstico nativo de volumen
-queda en preparación; no se integra ni se cambian tickets.
+publicado en `7b4b5f591470de8ffcb0ac39b5039163a3126af0` sí publica un root y
+converge en ambas CPU; los 29 E2EE pasan nativamente. El happy sync de la TUI
+sigue rojo. Se detiene ante la decisión de ampliar el diagnóstico hacia la
+fixture que pertenece a W1 o cambiar la estrategia del cliente; no se integra
+ni se cambian tickets. Quedan dos de las cuatro corridas autorizadas.
 
 ## Decisiones y formato exacto
 
@@ -366,6 +370,62 @@ no la terminación del sync. En Intel todavía no alcanza el root y por tanto
 no se afirma que ya recorrió todas las revisiones restauradas.
 Entorno observado: macOS 15.7.9/kernel 24.6.0, Rust 1.98.1 con hosts nativos
 `aarch64-apple-darwin` y `x86_64-apple-darwin`.
+ImageOS `macos15`; ImageVersion ARM `20260907.0337.1`, Intel
+`20260824.0482.1`; usuario `runner`, UID 501. Labels `macos-15` y
+`macos-15-intel`.
+
+### Segunda corrida de fase 3 — diagnóstico nativo observado
+
+[37128301263](https://github.com/SantanaJcp/passwordmanager/actions/runs/37128301263),
+SHA `7b4b5f591470de8ffcb0ac39b5039163a3126af0`, `completed/failure`.
+Mismos flags, workflow y entorno nativo observado que la primera corrida.
+Logs/API `/tmp/pmw2c-macos-run2.log` y `.json`; labels comprobados por API en
+`/tmp/pmw2c-macos-run2-labels.json`. Ningún cache/artifact/secret propio.
+**29/29 E2EE pasan por CPU**, incluidos el RED PMB1/purge corregido y el caso
+de 259 eventos/dos páginas con negativas de orden/omisión intactas. El happy
+sync TUI posterior sigue fallido; el workflow conserva ese fallo.
+
+Diagnóstico sobre el transporte real: 39 eventos, una página, 271 puts,
+272 gets, un root publicado, 35 elementos más un marcador de purge,
+outbox reconocido solo después de publish y convergencia real:
+
+| CPU | Antes de publish | Publish completo | Coste de publish | Convergencia total |
+| --- | --- | --- | --- | --- |
+| Apple silicon | 15309 ms | 15342 ms | 33 ms | 27716 ms |
+| Intel | 22082 ms | 22124 ms | 42 ms | 36387 ms |
+
+En el happy TUI de esa misma corrida: ARM `pushing`, 198 bloques/0 roots;
+Intel `pushing`, 119 bloques/0 roots, mismo PID en ambos, observación de 20 s
+intacta. No se observó `Integrity` en ningún happy job de fase 3.
+
+**Hechos:** el caso control publica roots con el código corregido en ambas
+CPU; con una sola página ya puede tardar más de 20 s; el commit del root del
+control tarda 33/42 ms, no decenas de segundos. No hay evidencia de bloqueo
+del root ni de un fallo exclusivo de paginación. `ProcessTlsTransport::call`
+crea un proceso por RPC; el control completa 271 puts y después 272 gets.
+
+**Inferencia:** el volumen y coste acumulado de objetos/RPC, antes de publish,
+es una explicación respaldada para el timeout TUI. No se atribuye todavía
+ese coste al spawn, TLS, SQLite, I/O o scheduler de launchd por separado.
+La fixture TUI tiene otro historial y corre bajo launchd; el control no es una
+réplica exacta de su estado. `ProcessType=Background` existe en el plist,
+pero no se midió su impacto ni se cambió ese perfil.
+
+**Decisión fuera de la zona actual:** para aislar el siguiente cambio hacen
+falta contadores/fases del happy job TUI exacto en
+`macos_tui_migration_lab.py`, path actualmente editado por W1. Opciones:
+
+1. **Recomendada:** el orquestador coordina con W1 una ampliación solo de
+   diagnóstico: cantidad de eventos/grafos/páginas/puts previstos y completos,
+   fase alcanzada y tiempos por categoría, sin IDs, contenidos, hashes ni
+   cambio de plazos. Usar una de las dos corridas restantes para discriminar
+   volumen real frente a coste por RPC/perfil launchd.
+2. Seleccionar una nueva estrategia de cliente (por ejemplo, reducir procesos
+   por RPC manteniendo TLS/RPK y request/backoff actuales) y definir su método
+   de fallo/reinicio/compatibilidad antes de implementarla. Es propuesta;
+   no se añadió un worker, protocolo, batching ni fallback a ciegas.
+
+No se consume otra corrida idéntica ni se amplía el plazo del fixture.
 
 ### Corrida anterior de fase 2
 
@@ -405,7 +465,7 @@ otro valor sustitutivo: `kind` ausente/corrupto se rechaza.
 | `decode_event` | Falla decoder primario: intenta `decode_legacy_body` heredado |
 | `CausalReducer::open` / SQLite | Archivo ausente: apertura puede crearlo; frontera W3 sin cambio |
 | TestDir y labs heredados | Limpieza best-effort puede ocultar residuos; no hubo sweep de `/tmp/pm-*` |
-| `backup.rs::RestoreStager::finish` | Un error SQL al comprobar la revisión visible se convierte en `false` por `.unwrap_or(false)` y después en `Integrity`; oculta la categoría de almacenamiento |
+| `backup.rs::RestoreCollector::finish` | Un error SQL al comprobar la revisión visible se convierte en `false` por `.unwrap_or(false)` y después en `Integrity`; oculta la categoría de almacenamiento |
 
 `from_utf8_lossy` y fallbacks de provider/listener siguen en
 [integración](integration-26-28.md#fallbacks-y-limitaciones-heredadas-conservadas),
@@ -422,7 +482,16 @@ apertura y las verificaciones de W2. `pm-sync/src/lib.rs` puede compartir edici�
 con W4; su listener en `main.rs` no se tocó. El módulo nuevo al final de los
 tests puede dar conflicto menor con otros añadidos. No se integra desde W2.
 
-**Siguiente acción de fase 3:** completar la corrida diagnóstica y decidir la
-corrección de latencia que permita happy sync dentro del plazo vigente. El
-fix del digest y los gates Linux ya están publicados; no pasar W2 como cerrado
-al merger mientras ese happy sync siga rojo.
+En fase 3 se tocaron solo cinco paths: `backup.rs` (la función autorizada),
+`reducer.rs` (unitarios al final), `e2ee_replication.rs` (habilitación macOS y
+path corto de fixture), `e2ee_replication/purge_sync.rs` (diagnóstico) y este
+informe. Verificada la rama W3: su hunk de backup está en `write_backup`,
+no en el digest; composición de esta fase debería ser trivial. Sus hunks de
+reducer están en apertura de bóveda/conexión, separados de los unitarios.
+No hay paths nuevos compartidos con W1/W4. El merger deberá verificar la
+composición de todos los commits W2 anteriores; no se simuló ni realizó merge.
+
+**Siguiente acción de fase 3:** el orquestador decide la ampliación diagnóstica
+acotada con W1 (recomendada) o concreta la estrategia/método del cliente.
+El fix del digest, los gates Linux y el diagnóstico nativo están publicados;
+no pasar W2 como cerrado al merger mientras el happy sync TUI siga rojo.
