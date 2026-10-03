@@ -2872,6 +2872,20 @@ def run_tui_ticket23_matrix(binary, profile, private, endpoint):
         close_session_preserving_primary(session)
 
 
+def wait_pending_context(session, attempt, *, since, timeout=8):
+    deadline = time.monotonic() + timeout
+    required = ("Attempts (safe context only)", "[CREATED] Synthetic TLS shared account",
+                "integration=controlled.external", attempt)
+    while True:
+        rendered = session._current_text_after(since)
+        if rendered is not None and all(value in rendered for value in required):
+            return rendered
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError("TUI pending context did not paint within the original bound")
+        session._read_once(min(0.1, remaining))
+
+
 def run_tui_ticket24_matrix(
     binary, profile, private, endpoint, agent_profile, agent_private, agent_endpoint,
     agent_directory,
@@ -2986,7 +3000,7 @@ def run_tui_ticket24_matrix(
         )
         pending = session.mark()
         session.send_key("w")
-        page = session.wait_text("Attempts (safe context only)", since=pending)
+        page = wait_pending_context(session, attempt, since=pending)
         assert "[CREATED] Synthetic TLS shared account" in page
         assert "integration=controlled.external" in page
         assert attempt in page

@@ -1884,3 +1884,41 @@ controls still positive. The September/earlier October indeterminate clipboard
 runs remain failure evidence; their cause is not inferred from this success.
 Full25 reached the same sync-readiness PID disappearance on both CPUs. No
 product or deadline correction to sync is made without its exit discriminant.
+
+
+Run [37089591305](https://github.com/SantanaJcp/passwordmanager/actions/runs/37089591305),
+exact `8a852cb7293c9f71633a49bded7f31722a3b83cb`, completed FAILED on
+Intel and Apple Silicon. Both retained `completed-with-human-open` and both
+recorded the pending-row observation failure and sync-readiness failure.
+The sync lifecycle discriminant on both CPUs observed ordinary exit `4` and exact
+`SYNC_UNAVAILABLE` stderr, not evidence of a signal or panic. After successful
+bind/connect in `pm-sync::serve`, the only fallible operation which can return
+this error from the listener loop is
+`pm_native_channel::configure_unix_stream(&stream)`. The closed readiness peer
+thus exposes a **product per-connection guard error terminating the listener**.
+The TUI's own online check also connects and closes before launching sync, so
+removing a fixture probe would conceal the real defect.
+
+Minimal correction method: keep the same checked native socket guard, but run
+it first inside `serve_one`, before timeouts/TLS/request processing. A guard
+failure rejects that connection through the existing handler error path and
+transfers no bytes; the opaque listener continues exactly as it already does
+for other rejected connections. No guard, retry, transport, deadline or key
+validation is removed. Preserve the original readiness close, then require
+real pinned sync plus negative pin/closing/offline cases in Full25 on both CPUs.
+Product scope is the macOS `pm-sync` port; Linux's configure call is a no-op.
+
+Both CPUs also retained a separate partial Ticket24 observer failure: the
+pending header was found before the `[CREATED]` row/context painted. The
+ordinary daemon has no provider and the same started attempt must be CREATED.
+Wait for the header, exact state/title, integration and attempt ID **together
+on the current screen** within the existing eight seconds, then perform the
+unchanged secrecy/cancel/terminal assertions. This is a fixture repaint
+correction, not a state transition, authentication retry or product change.
+
+Local verification of the listener correction:
+`flock /tmp/pm-cargo-window.lock ./scripts/check.sh` completed successfully
+(workspace format/check/tests/Clippy and repository guards), logged in the
+owned `/tmp/pm26-20261002-sync-check.log`. This Linux host verifies compilation
+and regressions; the native closed-peer case still requires the next exact
+Mac candidate on both architectures.
