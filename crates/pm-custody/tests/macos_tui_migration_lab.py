@@ -443,7 +443,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         negative_count = snapshot(m, session)["vault_items"]
         wrong = "00" * 44
         mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value.replace(pin + "|SYNC", wrong + "|SYNC"))
-        rejected = session.wait_text("rejected its fixed authority/request context", since=mark)
+        rejected = session.wait_text("rejected its fixed authority/request context; no success recorded", since=mark)
         assert "no success recorded" in rejected
         assert snapshot(m, session)["vault_items"] == negative_count
         print("PM26_MATRIX full25-offline+wrong-pin=observed", flush=True)
@@ -501,13 +501,13 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         mark = operation(session, "b", "5", "Recovery code shown temporarily")
         code = wait_recovery_code(m, session, since=mark)
         submit(session, code, hidden=True)
-        page = session.wait_text("Recovery rotated after exact re-entry", since=mark)
+        page = session.wait_text("Recovery rotated after exact re-entry; historical backups/copies remain usable", since=mark)
         assert "historical backups/copies remain usable" in page
         lock(m, session); session = None
         session = start(m, binary, profile, private, endpoint)
         mark = operation(session, "b", "4", "New master password|ROTATE",
                          NEW_PASSWORD.decode() + "|ROTATE", hidden=True)
-        page = session.wait_text("Master password rotated", since=mark)
+        page = session.wait_text("Master password rotated; old backups and exposed copies retain historical paths", since=mark)
         assert "historical" in page
         lock(m, session); session = None
         wrong = m.MacPtySession.start(binary, profile, private, endpoint, idle=30, reveal=1, copy=1)

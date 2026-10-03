@@ -2064,3 +2064,28 @@ then re-raise the original timeout. No screen, ID, digest or archive content is
 printed. Do not retry restore or extend its observation into a success. This
 distinguishes committed state/late repaint from an incomplete or explicitly
 failed operation; any original timeout still fails the matrix.
+
+Composite-status repaint correction: the wrong-pin observer can read the
+fixed rejection prefix before its required `no success recorded` suffix.
+Wait for the entire literal rejection phrase, retaining the suffix and durable
+count assertions. Apply the same complete-literal rule to the recovery and
+master-rotation historical-copy warnings, whose required suffixes follow their
+status prefixes in `tui.rs`. Every wait remains eight seconds. No status,
+warning, pin, password, confirmation or operation is changed; incomplete
+repaints can no longer satisfy a prerequisite observation.
+
+Run [37093502065](https://github.com/SantanaJcp/passwordmanager/actions/runs/37093502065),
+exact `af5a99c568ef8326f730ca81c3ab68253135e338`, completed FAILED on both
+CPUs. Both completed Ticket23/partial Ticket24, immediate concurrent discovery,
+Full25 imports, retirement, protected pairing/readiness/offline and retained
+the five missing pending purge graphs. ARM hit the wrong-pin prefix/suffix
+repaint assertion, plus independent clipboard indeterminacy/`-1700`; it did
+not reach recovery. Intel completed the wrong-pin negative, backup/export,
+exact attachment stream, audit and native restore within the original bounds;
+the stricter authority fingerprint passed. It observed a complete recovery
+code, performed exact hidden re-entry and received the rotation status prefix,
+then failed before observing the historical-copy warning suffix. This is
+direct evidence for the composite-status observer correction above. Intel
+had no independent core failure. Both strict cleanups completed without
+additional errors. No timeout was converted into success and neither job
+reached output-collision classification or overall acceptance.
