@@ -1290,6 +1290,7 @@ pub(crate) fn current_frontier(connection: &Connection) -> Result<[u8; 32], Huma
 }
 fn open_connection(path: &Path) -> Result<Connection, HumanCommitError> {
     let c = Connection::open(path)?;
+    crate::configure_platform_durability(&c)?;
     c.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY; PRAGMA trusted_schema=OFF;")?;
     Ok(c)
 }

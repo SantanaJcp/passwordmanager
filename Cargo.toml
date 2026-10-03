@@ -46,3 +46,6 @@ tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt-multi
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO"] }
 zeroize = "=1.9.0"
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[profile.dev.package."libsodium-sys-stable:1.24.0"]
+opt-level = 2

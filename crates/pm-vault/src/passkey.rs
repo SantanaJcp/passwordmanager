@@ -714,6 +714,7 @@ impl PasskeyProvider {
         let bytes = request.to_bytes();
         let request_digest = digest(&bytes);
         let connection = Connection::open(self.attempts.path())?;
+        crate::configure_platform_durability(&connection)?;
         if let Some((stored, response)) = connection
             .query_row(
                 "SELECT request_digest,response FROM passkey_requests WHERE request_id=?1",
@@ -780,6 +781,7 @@ impl PasskeyProvider {
         verification: HumanVerification,
     ) -> Result<PasskeyStatus, PasskeyError> {
         let mut connection = Connection::open(self.attempts.path())?;
+        crate::configure_platform_durability(&connection)?;
         let tx = connection.transaction()?;
         let (request_bytes, state, expires): (Vec<u8>, String, i64) = tx
             .query_row(
@@ -868,6 +870,7 @@ impl PasskeyProvider {
     /// Rejects corrupt or unavailable encrypted provider state.
     pub fn response(&self, request_id: [u8; 16]) -> Result<Option<PasskeyStatus>, PasskeyError> {
         let connection = Connection::open(self.attempts.path())?;
+        crate::configure_platform_durability(&connection)?;
         let row: Option<(String, Option<Vec<u8>>)> = connection
             .query_row(
                 "SELECT state,response FROM passkey_requests WHERE request_id=?1",
@@ -897,6 +900,7 @@ impl PasskeyProvider {
         request_id: [u8; 16],
     ) -> Result<Option<PasskeyRequest>, PasskeyError> {
         let connection = Connection::open(self.attempts.path())?;
+        crate::configure_platform_durability(&connection)?;
         let row: Option<(Vec<u8>, String, i64)> = connection
             .query_row(
                 "SELECT request,state,expires_at_us FROM passkey_requests WHERE request_id=?1",
@@ -927,6 +931,7 @@ impl PasskeyProvider {
         request_id: [u8; 16],
     ) -> Result<Option<PasskeyPrompt>, PasskeyError> {
         let connection = Connection::open(self.attempts.path())?;
+        crate::configure_platform_durability(&connection)?;
         let row: Option<(Vec<u8>, String, i64)> = connection
             .query_row(
                 "SELECT response,state,expires_at_us FROM passkey_requests WHERE request_id=?1",
@@ -957,6 +962,7 @@ impl PasskeyProvider {
     /// Rejects incomplete, non-registration, or corrupt request state.
     pub fn registered_item(&self, request_id: [u8; 16]) -> Result<[u8; 16], PasskeyError> {
         let connection = Connection::open(self.attempts.path())?;
+        crate::configure_platform_durability(&connection)?;
         let row: Option<(String, String, Option<Vec<u8>>)> = connection
             .query_row(
                 "SELECT operation,state,item_id FROM passkey_requests WHERE request_id=?1",
@@ -984,6 +990,7 @@ impl PasskeyProvider {
         request_id: [u8; 16],
     ) -> Result<Option<PasskeyStatus>, PasskeyError> {
         let connection = Connection::open(self.attempts.path())?;
+        crate::configure_platform_durability(&connection)?;
         let attempt: Option<Option<Vec<u8>>> = connection
             .query_row(
                 "SELECT attempt_id FROM passkey_requests WHERE request_id=?1",

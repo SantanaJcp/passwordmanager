@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use pm_crypto::{ProtectedBytes, digest};
@@ -114,6 +114,10 @@ fn serve(
     Ok(())
 }
 fn serve_one(stream: UnixStream, db: &Path, config: Arc<ServerConfig>) -> Result<(), ()> {
+    // A peer can close before accept completes (including the TUI online
+    // probe). Failure to guard this socket rejects only this connection;
+    // no TLS/request bytes are processed before the native guard succeeds.
+    pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|_| ())?;
@@ -350,6 +354,7 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
         _ => return Err(()),
     };
     let stream = UnixStream::connect(socket).map_err(|_| ())?;
+    pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
     let config = client_config(&key, &server)?;
     let conn = ClientConnection::new(
         Arc::new(config),

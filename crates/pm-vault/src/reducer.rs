@@ -2091,6 +2091,7 @@ fn parse_kind(value: &str) -> Result<CausalEventKind, ReductionError> {
 }
 fn open_connection(path: &Path) -> Result<rusqlite::Connection, ReductionError> {
     let c = rusqlite::Connection::open(path)?;
+    crate::configure_platform_durability(&c)?;
     c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")?;
     Ok(c)
 }

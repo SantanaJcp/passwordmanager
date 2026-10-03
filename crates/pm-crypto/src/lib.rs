@@ -27,6 +27,8 @@ pub use root::{
     verify_audit_signature, verify_device_event, verify_human_command, verify_human_event,
     verify_passkey_signature,
 };
+#[cfg(feature = "macos-ticket26-diagnostics")]
+pub use root::{KdfDiagnosticBoundary, open_human_root_diagnostic};
 
 /// Applies the Unix process-level controls required before accepting secrets.
 ///

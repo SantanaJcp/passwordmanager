@@ -15,7 +15,7 @@ use std::{
     },
     path::Path,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use aws_lc_rs::{
@@ -45,6 +45,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use pm_crypto::{KdfProfile, NativeStdin, ProtectedBytes, RecoveryCode};
 use pm_custody::{AuthenticatedHumanChannel, unix_peer_uid};
+#[cfg(target_os = "macos")]
+use pm_native_channel::OwnedClipboard;
 use pm_vault::{
     AgentEnrollment, AgentPeer, Attachment, AttachmentReader, AttemptOutcome, AttemptState,
     AttemptVault, AuditAction, AuditActorKind, AuditDeviceCustody, AuditEvent, AuditOutcome,
@@ -92,6 +94,273 @@ fn protected_equal(left: &ProtectedBytes, right: &ProtectedBytes) -> bool {
 enum Role {
     Agent,
     Human,
+}
+
+#[derive(Clone, Copy)]
+enum Ticket26DiagnosticPhase {
+    ClientProcess,
+    ClientProfile,
+    ClientKey,
+    ClientHumanInput,
+    ClientConnected,
+    ClientStreamConfigured,
+    ClientPeer,
+    ClientTlsConfigured,
+    ClientTlsFlushed,
+    ClientReady,
+    ClientHumanMagic,
+    ClientHumanUnlocked,
+    ClientHumanSetupRequest,
+    ClientHumanSetupResponse,
+    ServerStreamConfigured,
+    ServerPeer,
+    ServerTlsConfigured,
+    ServerTlsRequest,
+    ServerAlpn,
+    ServerReady,
+    ServerHumanUnlockFrame,
+    ServerHumanUnlocked,
+    ServerHumanUnlockResponse,
+    ServerHumanSetupRequest,
+    ServerHumanSetupResponse,
+}
+
+#[derive(Clone, Copy)]
+enum Ticket26DiagnosticStreamStage {
+    Before,
+    After,
+}
+
+impl Ticket26DiagnosticPhase {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::ClientProcess => "client-process",
+            Self::ClientProfile => "client-profile",
+            Self::ClientKey => "client-key",
+            Self::ClientHumanInput => "client-human-input",
+            Self::ClientConnected => "client-connected",
+            Self::ClientStreamConfigured => "client-stream-configured",
+            Self::ClientPeer => "client-peer",
+            Self::ClientTlsConfigured => "client-tls-configured",
+            Self::ClientTlsFlushed => "client-tls-flushed",
+            Self::ClientReady => "client-ready",
+            Self::ClientHumanMagic => "client-human-magic",
+            Self::ClientHumanUnlocked => "client-human-unlocked",
+            Self::ClientHumanSetupRequest => "client-human-setup-request",
+            Self::ClientHumanSetupResponse => "client-human-setup-response",
+            Self::ServerStreamConfigured => "server-stream-configured",
+            Self::ServerPeer => "server-peer",
+            Self::ServerTlsConfigured => "server-tls-configured",
+            Self::ServerTlsRequest => "server-tls-request",
+            Self::ServerAlpn => "server-alpn",
+            Self::ServerReady => "server-ready",
+            Self::ServerHumanUnlockFrame => "server-human-unlock-frame",
+            Self::ServerHumanUnlocked => "server-human-unlocked",
+            Self::ServerHumanUnlockResponse => "server-human-unlock-response",
+            Self::ServerHumanSetupRequest => "server-human-setup-request",
+            Self::ServerHumanSetupResponse => "server-human-setup-response",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Ticket26DiagnosticError {
+    ClientHumanInput,
+    ClientHumanConnect,
+    ClientHumanMagic,
+    ClientHumanUnlock,
+    ClientHumanSetupRequest,
+    ClientHumanSetupResponse,
+    ServerHumanUnlockRead,
+    ServerHumanUnlockDecode,
+    ServerHumanUnlockVault,
+    ServerHumanUnlockResponse,
+    ServerHumanRequestRead,
+    ServerHumanSetupInput,
+    ServerHumanSetupPasswordPrepare,
+    ServerHumanSetupPasswordCommit,
+    ServerHumanSetupNotePrepare,
+    ServerHumanSetupNoteCommit,
+    ServerHumanSetupAgentAPrepare,
+    ServerHumanSetupAgentACommit,
+    ServerHumanSetupAgentBPrepare,
+    ServerHumanSetupAgentBCommit,
+    ServerHumanSetupResumePrepare,
+    ServerHumanSetupResumeCommit,
+    ServerHumanSetupEnablePrepare,
+    ServerHumanSetupEnableCommit,
+    ServerHumanResponseWrite,
+}
+
+#[derive(Clone, Copy)]
+enum Ticket26ClientUnlockResult {
+    Timeout,
+    Eof,
+    OtherIo,
+    MalformedFrame,
+    StatusNonzero,
+}
+
+impl Ticket26ClientUnlockResult {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Eof => "eof",
+            Self::OtherIo => "other-io",
+            Self::MalformedFrame => "malformed-frame",
+            Self::StatusNonzero => "status-nonzero",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Ticket26ServerUnlockResult {
+    Ok,
+    VaultError,
+}
+
+#[derive(Clone, Copy)]
+struct Ticket26DiagnosticTimer(Option<Instant>);
+
+impl Ticket26ServerUnlockResult {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::VaultError => "vault-error",
+        }
+    }
+}
+
+impl Ticket26DiagnosticError {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::ClientHumanInput => "client-human-input",
+            Self::ClientHumanConnect => "client-human-connect",
+            Self::ClientHumanMagic => "client-human-magic",
+            Self::ClientHumanUnlock => "client-human-unlock",
+            Self::ClientHumanSetupRequest => "client-human-setup-request",
+            Self::ClientHumanSetupResponse => "client-human-setup-response",
+            Self::ServerHumanUnlockRead => "server-human-unlock-read",
+            Self::ServerHumanUnlockDecode => "server-human-unlock-decode",
+            Self::ServerHumanUnlockVault => "server-human-unlock-vault",
+            Self::ServerHumanUnlockResponse => "server-human-unlock-response",
+            Self::ServerHumanRequestRead => "server-human-request-read",
+            Self::ServerHumanSetupInput => "server-human-setup-input",
+            Self::ServerHumanSetupPasswordPrepare => "server-human-setup-password-prepare",
+            Self::ServerHumanSetupPasswordCommit => "server-human-setup-password-commit",
+            Self::ServerHumanSetupNotePrepare => "server-human-setup-note-prepare",
+            Self::ServerHumanSetupNoteCommit => "server-human-setup-note-commit",
+            Self::ServerHumanSetupAgentAPrepare => "server-human-setup-agent-a-prepare",
+            Self::ServerHumanSetupAgentACommit => "server-human-setup-agent-a-commit",
+            Self::ServerHumanSetupAgentBPrepare => "server-human-setup-agent-b-prepare",
+            Self::ServerHumanSetupAgentBCommit => "server-human-setup-agent-b-commit",
+            Self::ServerHumanSetupResumePrepare => "server-human-setup-resume-prepare",
+            Self::ServerHumanSetupResumeCommit => "server-human-setup-resume-commit",
+            Self::ServerHumanSetupEnablePrepare => "server-human-setup-enable-prepare",
+            Self::ServerHumanSetupEnableCommit => "server-human-setup-enable-commit",
+            Self::ServerHumanResponseWrite => "server-human-response-write",
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic(phase: Ticket26DiagnosticPhase) {
+    if std::env::var_os("PM_MACOS_TICKET26_DIAGNOSTIC").as_deref() == Some(OsStr::new("1")) {
+        eprintln!("PM26_DIAGNOSTIC phase={}", phase.name());
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic(_phase: Ticket26DiagnosticPhase) {}
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic_accepted_nonblocking(
+    stage: Ticket26DiagnosticStreamStage,
+    nonblocking: bool,
+) {
+    if std::env::var_os("PM_MACOS_TICKET26_DIAGNOSTIC").as_deref() == Some(OsStr::new("1")) {
+        let value = u8::from(nonblocking);
+        match stage {
+            Ticket26DiagnosticStreamStage::Before => {
+                eprintln!("PM26_DIAGNOSTIC accepted-stream-nonblocking-before={value}");
+            }
+            Ticket26DiagnosticStreamStage::After => {
+                eprintln!("PM26_DIAGNOSTIC accepted-stream-nonblocking-after={value}");
+            }
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic_accepted_nonblocking(
+    _stage: Ticket26DiagnosticStreamStage,
+    _nonblocking: bool,
+) {
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic_error(error: Ticket26DiagnosticError) {
+    if std::env::var_os("PM_MACOS_TICKET26_DIAGNOSTIC").as_deref() == Some(OsStr::new("1")) {
+        eprintln!("PM26_DIAGNOSTIC error={}", error.name());
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic_error(_error: Ticket26DiagnosticError) {}
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic_timer() -> Ticket26DiagnosticTimer {
+    Ticket26DiagnosticTimer(
+        (std::env::var_os("PM_MACOS_TICKET26_DIAGNOSTIC").as_deref() == Some(OsStr::new("1")))
+            .then(Instant::now),
+    )
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic_timer() -> Ticket26DiagnosticTimer {
+    Ticket26DiagnosticTimer(None)
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic_client_unlock(
+    result: Ticket26ClientUnlockResult,
+    timer: Ticket26DiagnosticTimer,
+) {
+    if let Some(started) = timer.0 {
+        let elapsed_ms = started.elapsed().as_millis().min(999_999);
+        eprintln!(
+            "PM26_DIAGNOSTIC client-human-unlock-result={} elapsed-ms={elapsed_ms}",
+            result.name()
+        );
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic_client_unlock(
+    _result: Ticket26ClientUnlockResult,
+    _timer: Ticket26DiagnosticTimer,
+) {
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-ticket26-diagnostics"))]
+fn ticket26_diagnostic_server_unlock(
+    result: Ticket26ServerUnlockResult,
+    timer: Ticket26DiagnosticTimer,
+) {
+    if let Some(started) = timer.0 {
+        let elapsed_ms = started.elapsed().as_millis().min(999_999);
+        eprintln!(
+            "PM26_DIAGNOSTIC server-human-unlock-result={} elapsed-ms={elapsed_ms}",
+            result.name()
+        );
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-ticket26-diagnostics")))]
+const fn ticket26_diagnostic_server_unlock(
+    _result: Ticket26ServerUnlockResult,
+    _timer: Ticket26DiagnosticTimer,
+) {
 }
 
 impl Role {
@@ -160,6 +429,7 @@ struct ControlledProvider {
 }
 
 pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
+    configure_macos_process()?;
     let mut arguments = arguments.into_iter();
     let command = arguments.next().ok_or(Failure::Usage)?;
     match command.to_str() {
@@ -193,8 +463,64 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
         Some("human-recovery-restore") => human_recovery_restore(&mut arguments),
         Some("human-master-rotate") => human_master_rotate(&mut arguments),
         Some("human-recovery-rotate") => human_recovery_rotate(&mut arguments),
+        #[cfg(target_os = "macos")]
+        Some("macos-native-probe") => macos_native_probe(&mut arguments),
         _ => Err(Failure::Usage),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_native_probe(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
+    finish_arguments(arguments)?;
+    let tty = File::open("/dev/tty").map_err(|_| Failure::Unavailable)?;
+    if unsafe { libc::isatty(tty.as_raw_fd()) } != 1 {
+        return Err(Failure::Unavailable);
+    }
+    let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrlimit(libc::RLIMIT_CORE, &raw mut limit) } != 0
+        || limit.rlim_cur != 0
+        || limit.rlim_max != 0
+    {
+        return Err(Failure::Unavailable);
+    }
+    let first = OwnedClipboard::copy(b"ticket26-first-synthetic-canary")
+        .map_err(|_| Failure::Unavailable)?;
+    let second = OwnedClipboard::copy(b"ticket26-new-owner-synthetic-canary")
+        .map_err(|_| Failure::Unavailable)?;
+    if first.clear_if_owned().map_err(|_| Failure::Unavailable)?
+        || !second.clear_if_owned().map_err(|_| Failure::Unavailable)?
+    {
+        return Err(Failure::Unavailable);
+    }
+    println!("PASS macos-native tty=real rlimit-core=0 clipboard=AppKit-changeCount");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_process() -> Result<(), Failure> {
+    let limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let result = unsafe {
+        // SAFETY: limit is a valid immutable rlimit and RLIMIT_CORE is a
+        // process-local resource setting applied before reading key material.
+        libc::setrlimit(libc::RLIMIT_CORE, &raw const limit)
+    };
+    if result != 0 {
+        return Err(Failure::Unavailable);
+    }
+    unsafe {
+        // SAFETY: umask has no pointer arguments and affects only this process.
+        libc::umask(0o077);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::unnecessary_wraps)]
+const fn configure_macos_process() -> Result<(), Failure> {
+    Ok(())
 }
 
 fn human_ssh_lab_setup(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
@@ -298,6 +624,7 @@ pub fn agent_rpc(
     socket_path: &Path,
     request: Option<&[u8]>,
 ) -> Result<ProtectedBytes, String> {
+    configure_macos_process().map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())?;
     let profile = read_profile(profile_path).map_err(|_| "CUSTODY_UNAVAILABLE".to_owned())?;
     if profile.role != Role::Agent {
         return Err("UNAUTHORIZED".to_owned());
@@ -565,6 +892,21 @@ fn serve_loop(
         });
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        serve_independent_accept_lanes(
+            &agent_listener,
+            human_listener,
+            bootstrap.agent_uid,
+            bootstrap.human_uid,
+            &bootstrap.agent_spki,
+            &agent_config,
+            human_config,
+            vault,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
     loop {
         accept_one(
             &agent_listener,
@@ -573,7 +915,7 @@ fn serve_loop(
             &agent_config,
             vault,
             Some(&bootstrap.agent_spki),
-        );
+        )?;
         accept_one(
             &human_listener,
             bootstrap.human_uid,
@@ -581,7 +923,56 @@ fn serve_loop(
             &human_config,
             vault,
             None,
-        );
+        )?;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+// Darwin's ordinary service must accept delegated requests while a persistent
+// human RPC/TUI is open. There are exactly two accept lanes, not one thread
+// per client. Keep Linux's existing dispatcher outside this port's change.
+#[allow(clippy::too_many_arguments)]
+fn serve_independent_accept_lanes(
+    agent_listener: &UnixListener,
+    human_listener: UnixListener,
+    agent_uid: u32,
+    human_uid: u32,
+    agent_spki: &[u8],
+    agent_config: &Arc<ServerConfig>,
+    human_config: Arc<ServerConfig>,
+    vault: Option<&VaultService>,
+) -> Result<(), Failure> {
+    let human_vault = vault.cloned();
+    let human_lane = std::thread::Builder::new()
+        .name("pm-human-accept".to_owned())
+        .spawn(move || -> Result<(), Failure> {
+            loop {
+                accept_one(
+                    &human_listener,
+                    human_uid,
+                    Role::Human,
+                    &human_config,
+                    human_vault.as_ref(),
+                    None,
+                )?;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .map_err(|_| Failure::Unavailable)?;
+    loop {
+        // A stopped or panicked human lane is a fatal custody condition. The
+        // binary's existing top-level error path terminates the whole process.
+        if human_lane.is_finished() {
+            return Err(Failure::Unavailable);
+        }
+        accept_one(
+            agent_listener,
+            agent_uid,
+            Role::Agent,
+            agent_config,
+            vault,
+            Some(agent_spki),
+        )?;
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -591,10 +982,16 @@ fn probe(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> 
     let private_path = take_path(arguments, "--private")?;
     let socket_path = take_path(arguments, "--socket")?;
     finish_arguments(arguments)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientProcess);
     let profile = read_profile(&profile_path)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientProfile);
     let key = read_key(&private_path, current_uid())?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientKey);
 
     let stream = UnixStream::connect(socket_path).map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientConnected);
+    configure_unix_stream(&stream)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientStreamConfigured);
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
         .map_err(|_| Failure::Unavailable)?;
@@ -605,20 +1002,24 @@ fn probe(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> 
     if observed_uid != profile.server_uid {
         return Err(Failure::Unavailable);
     }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientPeer);
     let config = client_config(&key, &profile.server_spki, profile.role)?;
     let server_name =
         ServerName::try_from("passwordmanager.invalid").map_err(|_| Failure::Unavailable)?;
     let connection =
         ClientConnection::new(Arc::new(config), server_name).map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientTlsConfigured);
     let mut tls = rustls::StreamOwned::new(connection, stream);
     tls.write_all(b"PING\n").map_err(|_| Failure::Unavailable)?;
     tls.flush().map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientTlsFlushed);
     let mut response = [0_u8; 5];
     tls.read_exact(&mut response)
         .map_err(|_| Failure::Unavailable)?;
     if response != *b"READY" || tls.conn.alpn_protocol() != Some(profile.role.alpn()) {
         return Err(Failure::Unavailable);
     }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientReady);
     println!(
         "READY role={} peer_uid={} tls=1.3 rpk=pinned alpn={}",
         profile.role.name(),
@@ -745,6 +1146,7 @@ fn agent_attempt(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), F
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Failure> {
     let profile_path = take_path(arguments, "--profile")?;
     let private_path = take_path(arguments, "--private")?;
@@ -754,14 +1156,34 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
     if action_flag != "--action" {
         return Err(Failure::Usage);
     }
+    let diagnostic_setup = action.to_str() == Some("setup");
     finish_arguments(arguments)?;
-    let profile = read_profile(&profile_path)?;
+    let profile = read_profile(&profile_path).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+        }
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientProcess);
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientProfile);
+    }
     if profile.role != Role::Human {
         return Err(Failure::Unavailable);
     }
-    let key = read_key(&private_path, current_uid())?;
+    let key = read_key(&private_path, current_uid()).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+        }
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientKey);
+    }
     let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
-    let password = read_protected_wire_field(&mut input, 1024)?;
+    let password = read_protected_wire_field(&mut input, 1024).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+        }
+    })?;
     let (opcode, mut request) = match action.to_str() {
         Some("setup") => (19, vec![19]),
         Some("suspend") => (20, vec![20]),
@@ -772,14 +1194,28 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
         _ => return Err(Failure::Usage),
     };
     if matches!(opcode, 19 | 22) {
-        let first = read_wire_field(&mut input, SPKI_BYTES)?;
+        let first = read_wire_field(&mut input, SPKI_BYTES).inspect_err(|_| {
+            if diagnostic_setup {
+                ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+            }
+        })?;
         if first.len() != SPKI_BYTES {
+            if diagnostic_setup {
+                ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+            }
             return Err(Failure::Unavailable);
         }
         request.extend_from_slice(&first);
         if opcode == 19 {
-            let second = read_wire_field(&mut input, SPKI_BYTES)?;
+            let second = read_wire_field(&mut input, SPKI_BYTES).inspect_err(|_| {
+                if diagnostic_setup {
+                    ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+                }
+            })?;
             if second.len() != SPKI_BYTES {
+                if diagnostic_setup {
+                    ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanInput);
+                }
                 return Err(Failure::Unavailable);
             }
             request.extend_from_slice(&second);
@@ -791,12 +1227,52 @@ fn human_authorization(arguments: &mut impl Iterator<Item = OsString>) -> Result
         push_bytes(&mut request, &subject_token)?;
         push_bytes(&mut request, &requester_secret)?;
     }
-    let mut tls = connect(&profile, &key, &socket_path)?;
-    tls.write_all(HUMAN_MAGIC)
-        .map_err(|_| Failure::Unavailable)?;
-    rpc_unlock(&mut tls, &password)?;
-    write_frame(&mut tls, &request)?;
-    expect_status(&read_frame(&mut tls)?, 0)?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientHumanInput);
+    }
+    let mut tls = connect(&profile, &key, &socket_path).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanConnect);
+        }
+    })?;
+    tls.write_all(HUMAN_MAGIC).map_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanMagic);
+        }
+        Failure::Unavailable
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientHumanMagic);
+    }
+    rpc_unlock(&mut tls, &password).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanUnlock);
+        }
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientHumanUnlocked);
+    }
+    write_frame(&mut tls, &request).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanSetupRequest);
+        }
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientHumanSetupRequest);
+    }
+    let response = read_frame(&mut tls).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanSetupResponse);
+        }
+    })?;
+    expect_status(&response, 0).inspect_err(|_| {
+        if diagnostic_setup {
+            ticket26_diagnostic_error(Ticket26DiagnosticError::ClientHumanSetupResponse);
+        }
+    })?;
+    if diagnostic_setup {
+        ticket26_diagnostic(Ticket26DiagnosticPhase::ClientHumanSetupResponse);
+    }
     println!(
         "PASS human-authorization action={}",
         action.to_string_lossy()
@@ -2740,6 +3216,9 @@ fn connect(
     socket_path: &Path,
 ) -> Result<rustls::StreamOwned<ClientConnection, UnixStream>, Failure> {
     let stream = UnixStream::connect(socket_path).map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientConnected);
+    configure_unix_stream(&stream)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientStreamConfigured);
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
         .map_err(|_| Failure::Unavailable)?;
@@ -2749,11 +3228,13 @@ fn connect(
     if unix_peer_uid(&stream).map_err(|_| Failure::Unavailable)? != profile.server_uid {
         return Err(Failure::Unavailable);
     }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientPeer);
     let config = client_config(key, &profile.server_spki, profile.role)?;
     let server_name =
         ServerName::try_from("passwordmanager.invalid").map_err(|_| Failure::Unavailable)?;
     let connection =
         ClientConnection::new(Arc::new(config), server_name).map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ClientTlsConfigured);
     Ok(rustls::StreamOwned::new(connection, stream))
 }
 
@@ -2761,9 +3242,21 @@ fn rpc_unlock(
     tls: &mut rustls::StreamOwned<ClientConnection, UnixStream>,
     password: &[u8],
 ) -> Result<(), Failure> {
+    let timer = ticket26_diagnostic_timer();
     let request = protected_fields_frame(&[1], &[password])?;
     write_frame(tls, &request)?;
-    expect_status(&read_frame(tls)?, 0)
+    let response = read_frame_bounded_classified(tls, MAX_HUMAN_FRAME).map_err(|error| {
+        ticket26_diagnostic_client_unlock(error.client_result(), timer);
+        error.public_failure()
+    })?;
+    expect_status(&response, 0).inspect_err(|_| {
+        let result = if response.len() == 1 {
+            Ticket26ClientUnlockResult::StatusNonzero
+        } else {
+            Ticket26ClientUnlockResult::MalformedFrame
+        };
+        ticket26_diagnostic_client_unlock(result, timer);
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2908,16 +3401,27 @@ fn expect_status(response: &[u8], status: u8) -> Result<(), Failure> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn handle_human_rpc(
     tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
     service: &VaultService,
     channel: AuthenticatedHumanChannel,
 ) -> Result<(), Failure> {
-    let unlock = read_human_unlock_frame(tls, service)?;
+    let unlock = read_human_unlock_frame(tls, service).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockRead);
+    })?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanUnlockFrame);
     let mut cursor = Cursor::new(&unlock);
-    cursor.expect(&[1])?;
-    let password = cursor.bytes()?;
-    cursor.finish()?;
+    cursor.expect(&[1]).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockDecode);
+    })?;
+    let password = cursor.bytes().inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockDecode);
+    })?;
+    cursor.finish().inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockDecode);
+    })?;
+    let unlock_timer = ticket26_diagnostic_timer();
     let mut vault = HumanVault::unlock(
         &service.path,
         password,
@@ -2925,13 +3429,26 @@ fn handle_human_rpc(
         channel,
         Arc::clone(&service.audit_custody),
     )
-    .map_err(|_| Failure::Unavailable)?;
-    write_frame(tls, &[0])?;
+    .map_err(|_| {
+        ticket26_diagnostic_server_unlock(Ticket26ServerUnlockResult::VaultError, unlock_timer);
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockVault);
+        Failure::Unavailable
+    })?;
+    ticket26_diagnostic_server_unlock(Ticket26ServerUnlockResult::Ok, unlock_timer);
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanUnlocked);
+    write_frame(tls, &[0]).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockResponse);
+    })?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanUnlockResponse);
+    let mut setup_completed = false;
     loop {
         let Ok(request) = read_frame(tls) else {
+            if !setup_completed {
+                ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanRequestRead);
+            }
             return Ok(());
         };
-        if *request == [14] {
+        if request.as_ref() == [14] {
             drop(vault);
             let mut autonomous = AutonomousAuditVault::open(
                 &service.path,
@@ -2982,13 +3499,26 @@ fn handle_human_rpc(
             handle_recovery_rotation(&mut vault, tls, &request[1..])?;
             continue;
         }
+        let setup_request = request.first() == Some(&19);
+        if setup_request {
+            ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanSetupRequest);
+        }
         let drop_response = request.first() == Some(&8);
         let response = handle_human_request(&mut vault, service, &request);
         if drop_response {
             let _ = tls.sock.shutdown(Shutdown::Both);
             return response.map(|_| ());
         }
-        write_frame(tls, response?.as_ref())?;
+        let response = response?;
+        write_frame(tls, response.as_ref()).inspect_err(|_| {
+            if setup_request {
+                ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanResponseWrite);
+            }
+        })?;
+        if setup_request {
+            ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanSetupResponse);
+            setup_completed = true;
+        }
     }
 }
 
@@ -3340,6 +3870,7 @@ fn call_controlled_provider(
         return call_ssh_provider(provider, lease);
     }
     let mut stream = UnixStream::connect(&provider.socket).map_err(|_| ())?;
+    configure_unix_stream(&stream).map_err(|_| ())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|_| ())?;
@@ -3442,6 +3973,7 @@ fn call_ssh_provider(
         });
     }
     let mut stream = UnixStream::connect(&provider.socket).map_err(|_| ())?;
+    configure_unix_stream(&stream).map_err(|_| ())?;
     stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(|_| ())?;
     if unix_peer_uid(&stream).map_err(|_| ())? != provider.uid {
@@ -3629,6 +4161,7 @@ fn commit_authority(
 
 fn authorization_setup(vault: &mut HumanVault, first: &[u8], second: &[u8]) -> Result<(), Failure> {
     if first.len() != SPKI_BYTES || second.len() != SPKI_BYTES || first == second {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupInput);
         return Err(Failure::Unavailable);
     }
     let record = PasswordRecord::new(
@@ -3638,12 +4171,18 @@ fn authorization_setup(vault: &mut HumanVault, first: &[u8], second: &[u8]) -> R
         "https://ticket07.invalid/login",
         "",
     )
-    .map_err(|_| Failure::Unavailable)?;
-    let prepared = vault
-        .prepare_create(&record)
-        .map_err(|_| Failure::Unavailable)?;
+    .map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupPasswordPrepare);
+        Failure::Unavailable
+    })?;
+    let prepared = vault.prepare_create(&record).map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupPasswordPrepare);
+        Failure::Unavailable
+    })?;
     let item = *prepared.item_id();
-    commit_authority(vault, &prepared)?;
+    commit_authority(vault, &prepared).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupPasswordCommit);
+    })?;
     let note = LogicalRecord::new(
         RecordKind::Note,
         HumanMetadata {
@@ -3659,30 +4198,59 @@ fn authorization_setup(vault: &mut HumanVault, first: &[u8], second: &[u8]) -> R
         vec![],
         vec![],
     )
-    .map_err(|_| Failure::Unavailable)?;
-    let prepared = vault
-        .prepare_create_record(&note)
-        .map_err(|_| Failure::Unavailable)?;
-    commit_authority(vault, &prepared)?;
+    .map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupNotePrepare);
+        Failure::Unavailable
+    })?;
+    let prepared = vault.prepare_create_record(&note).map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupNotePrepare);
+        Failure::Unavailable
+    })?;
+    commit_authority(vault, &prepared).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupNoteCommit);
+    })?;
     for (subject, request, rpk, label) in [
         (LAB_AGENT_A, [0x31; 16], first, "Synthetic agent A"),
         (LAB_AGENT_B, [0x32; 16], second, "Synthetic agent B"),
     ] {
+        let (prepare_error, commit_error) = if subject == LAB_AGENT_A {
+            (
+                Ticket26DiagnosticError::ServerHumanSetupAgentAPrepare,
+                Ticket26DiagnosticError::ServerHumanSetupAgentACommit,
+            )
+        } else {
+            (
+                Ticket26DiagnosticError::ServerHumanSetupAgentBPrepare,
+                Ticket26DiagnosticError::ServerHumanSetupAgentBCommit,
+            )
+        };
         let enrollment = AgentEnrollment::new(subject, request, rpk, label, "ticket07-userns")
-            .map_err(|_| Failure::Unavailable)?;
-        let prepared = vault
-            .prepare_agent_enrollment(&enrollment)
-            .map_err(|_| Failure::Unavailable)?;
-        commit_authority(vault, prepared.prepared())?;
+            .map_err(|_| {
+                ticket26_diagnostic_error(prepare_error);
+                Failure::Unavailable
+            })?;
+        let prepared = vault.prepare_agent_enrollment(&enrollment).map_err(|_| {
+            ticket26_diagnostic_error(prepare_error);
+            Failure::Unavailable
+        })?;
+        commit_authority(vault, prepared.prepared()).inspect_err(|_| {
+            ticket26_diagnostic_error(commit_error);
+        })?;
     }
-    let prepared = vault
-        .prepare_delegated_resume()
-        .map_err(|_| Failure::Unavailable)?;
-    commit_authority(vault, &prepared)?;
-    let prepared = vault
-        .prepare_enable(item)
-        .map_err(|_| Failure::Unavailable)?;
-    commit_authority(vault, &prepared)
+    let prepared = vault.prepare_delegated_resume().map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupResumePrepare);
+        Failure::Unavailable
+    })?;
+    commit_authority(vault, &prepared).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupResumeCommit);
+    })?;
+    let prepared = vault.prepare_enable(item).map_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupEnablePrepare);
+        Failure::Unavailable
+    })?;
+    commit_authority(vault, &prepared).inspect_err(|_| {
+        ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupEnableCommit);
+    })
 }
 
 fn authorization_suspend(vault: &mut HumanVault) -> Result<(), Failure> {
@@ -4410,6 +4978,7 @@ fn handle_human_request(
         }
         19 => {
             if rest.len() != SPKI_BYTES * 2 {
+                ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanSetupInput);
                 return Err(Failure::Unavailable);
             }
             authorization_setup(vault, &rest[..SPKI_BYTES], &rest[SPKI_BYTES..])?;
@@ -5448,23 +6017,63 @@ fn write_frame(output: &mut impl Write, value: &[u8]) -> Result<(), Failure> {
         .map_err(|_| Failure::Unavailable)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrameReadFailure {
+    Timeout,
+    Eof,
+    OtherIo,
+    MalformedFrame,
+}
+
+impl FrameReadFailure {
+    fn from_io(error: &std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => Self::Timeout,
+            std::io::ErrorKind::UnexpectedEof => Self::Eof,
+            _ => Self::OtherIo,
+        }
+    }
+
+    const fn client_result(self) -> Ticket26ClientUnlockResult {
+        match self {
+            Self::Timeout => Ticket26ClientUnlockResult::Timeout,
+            Self::Eof => Ticket26ClientUnlockResult::Eof,
+            Self::OtherIo => Ticket26ClientUnlockResult::OtherIo,
+            Self::MalformedFrame => Ticket26ClientUnlockResult::MalformedFrame,
+        }
+    }
+
+    const fn public_failure(self) -> Failure {
+        let _ = self;
+        Failure::Unavailable
+    }
+}
+
 fn read_frame(input: &mut impl Read) -> Result<ProtectedBytes, Failure> {
     read_frame_bounded(input, MAX_HUMAN_FRAME)
 }
 
 fn read_frame_bounded(input: &mut impl Read, maximum: usize) -> Result<ProtectedBytes, Failure> {
+    read_frame_bounded_classified(input, maximum).map_err(FrameReadFailure::public_failure)
+}
+
+fn read_frame_bounded_classified(
+    input: &mut impl Read,
+    maximum: usize,
+) -> Result<ProtectedBytes, FrameReadFailure> {
     let mut length = [0_u8; 4];
     input
         .read_exact(&mut length)
-        .map_err(|_| Failure::Unavailable)?;
-    let length = usize::try_from(u32::from_be_bytes(length)).map_err(|_| Failure::Unavailable)?;
+        .map_err(|error| FrameReadFailure::from_io(&error))?;
+    let length = usize::try_from(u32::from_be_bytes(length))
+        .map_err(|_| FrameReadFailure::MalformedFrame)?;
     if length == 0 || length > maximum {
-        return Err(Failure::Unavailable);
+        return Err(FrameReadFailure::MalformedFrame);
     }
-    let mut value = ProtectedBytes::zeroed(length).map_err(|_| Failure::Unavailable)?;
+    let mut value = ProtectedBytes::zeroed(length).map_err(|_| FrameReadFailure::OtherIo)?;
     input
         .read_exact(&mut value)
-        .map_err(|_| Failure::Unavailable)?;
+        .map_err(|error| FrameReadFailure::from_io(&error))?;
     Ok(value)
 }
 
@@ -5544,11 +6153,69 @@ fn accept_one(
     config: &Arc<ServerConfig>,
     vault: Option<&VaultService>,
     peer_rpk: Option<&[u8]>,
-) {
+) -> Result<(), Failure> {
     let Ok((stream, _)) = listener.accept() else {
-        return;
+        return Ok(());
     };
+    normalize_accepted_stream(&stream)?;
+    if configure_unix_stream(&stream).is_err() {
+        return Ok(());
+    }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerStreamConfigured);
     let _ = handle_connection(stream, expected_uid, role, config, vault, peer_rpk);
+    Ok(())
+}
+
+fn accepted_stream_flags(stream: &UnixStream) -> Result<libc::c_int, Failure> {
+    let flags = unsafe {
+        // SAFETY: stream owns a live Unix socket and F_GETFL only reads its
+        // descriptor status flags.
+        libc::fcntl(stream.as_raw_fd(), libc::F_GETFL)
+    };
+    (flags >= 0).then_some(flags).ok_or(Failure::Unavailable)
+}
+
+fn normalize_accepted_stream(stream: &UnixStream) -> Result<(), Failure> {
+    let before = accepted_stream_flags(stream)?;
+    ticket26_diagnostic_accepted_nonblocking(
+        Ticket26DiagnosticStreamStage::Before,
+        before & libc::O_NONBLOCK != 0,
+    );
+    stream
+        .set_nonblocking(false)
+        .map_err(|_| Failure::Unavailable)?;
+    let after = accepted_stream_flags(stream)?;
+    let nonblocking = after & libc::O_NONBLOCK != 0;
+    ticket26_diagnostic_accepted_nonblocking(Ticket26DiagnosticStreamStage::After, nonblocking);
+    if nonblocking {
+        return Err(Failure::Unavailable);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn configure_unix_stream(stream: &UnixStream) -> Result<(), Failure> {
+    let enabled: libc::c_int = 1;
+    let result = unsafe {
+        // SAFETY: enabled is a valid immutable integer option value and stream
+        // owns a live Unix socket. Darwin SO_NOSIGPIPE prevents process-wide
+        // SIGPIPE without changing the protocol.
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            (&raw const enabled).cast(),
+            libc::socklen_t::try_from(std::mem::size_of_val(&enabled))
+                .map_err(|_| Failure::Unavailable)?,
+        )
+    };
+    (result == 0).then_some(()).ok_or(Failure::Unavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::unnecessary_wraps)]
+const fn configure_unix_stream(_stream: &UnixStream) -> Result<(), Failure> {
+    Ok(())
 }
 
 fn handle_connection(
@@ -5568,6 +6235,7 @@ fn handle_connection(
     if unix_peer_uid(&stream).map_err(|_| Failure::Unavailable)? != expected_uid {
         return Err(Failure::Unavailable);
     }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerPeer);
     let human_channel = if role == Role::Human && vault.is_some() {
         Some(
             AuthenticatedHumanChannel::authenticate(
@@ -5580,13 +6248,16 @@ fn handle_connection(
         None
     };
     let connection = ServerConnection::new(config.clone()).map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerTlsConfigured);
     let mut tls = rustls::StreamOwned::new(connection, stream);
     let mut request = [0_u8; 5];
     tls.read_exact(&mut request)
         .map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerTlsRequest);
     if tls.conn.alpn_protocol() != Some(role.alpn()) {
         return Err(Failure::Unavailable);
     }
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerAlpn);
     if request == *HUMAN_MAGIC && role == Role::Human {
         let service = vault.ok_or(Failure::Unavailable)?;
         return handle_human_rpc(
@@ -5603,7 +6274,9 @@ fn handle_connection(
         return Err(Failure::Unavailable);
     }
     tls.write_all(b"READY").map_err(|_| Failure::Unavailable)?;
-    tls.flush().map_err(|_| Failure::Unavailable)
+    tls.flush().map_err(|_| Failure::Unavailable)?;
+    ticket26_diagnostic(Ticket26DiagnosticPhase::ServerReady);
+    Ok(())
 }
 
 fn crypto_provider() -> CryptoProvider {
@@ -5936,20 +6609,22 @@ fn send_file_descriptor(socket: &UnixStream, descriptor: RawFd) -> Result<(), Fa
         message.msg_iov = &raw mut vector;
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = usize::try_from(libc::CMSG_SPACE(
-            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?,
-        ))
-        .map_err(|_| Failure::Unavailable)?;
+        let descriptor_size =
+            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?;
+        let control_space = libc::CMSG_SPACE(descriptor_size);
+        if usize::try_from(control_space).map_err(|_| Failure::Unavailable)?
+            > mem::size_of_val(&control)
+        {
+            return Err(Failure::Unavailable);
+        }
+        message.msg_controllen = ancillary_field(control_space)?;
         let header = libc::CMSG_FIRSTHDR(&raw const message);
         if header.is_null() {
             return Err(Failure::Unavailable);
         }
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = usize::try_from(libc::CMSG_LEN(
-            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?,
-        ))
-        .map_err(|_| Failure::Unavailable)?;
+        (*header).cmsg_len = ancillary_field(libc::CMSG_LEN(descriptor_size))?;
         std::ptr::copy_nonoverlapping(
             &raw const descriptor,
             libc::CMSG_DATA(header).cast::<RawFd>(),
@@ -5971,55 +6646,133 @@ fn receive_file_descriptor(socket: &UnixStream) -> Result<File, Failure> {
         iov_len: 1,
     };
     let mut control = [0_usize; 4];
-    // SAFETY: recvmsg owns valid aligned buffers for the duration of the call;
-    // MSG_CMSG_CLOEXEC closes the inheritance race before File assumes ownership.
-    let (received, flags, descriptors, extra) = unsafe {
+    // SAFETY: recvmsg owns valid aligned buffers for the duration of the call.
+    let (received, flags, descriptors, malformed) = unsafe {
         let mut message: libc::msghdr = mem::zeroed();
         message.msg_iov = &raw mut vector;
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = usize::try_from(libc::CMSG_SPACE(
-            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?,
-        ))
-        .map_err(|_| Failure::Unavailable)?;
-        let received = libc::recvmsg(socket.as_raw_fd(), &raw mut message, libc::MSG_CMSG_CLOEXEC);
+        let descriptor_size =
+            u32::try_from(mem::size_of::<RawFd>()).map_err(|_| Failure::Unavailable)?;
+        let control_space = libc::CMSG_SPACE(descriptor_size);
+        if usize::try_from(control_space).map_err(|_| Failure::Unavailable)?
+            > mem::size_of_val(&control)
+        {
+            return Err(Failure::Unavailable);
+        }
+        message.msg_controllen = ancillary_field(control_space)?;
+        let received = libc::recvmsg(socket.as_raw_fd(), &raw mut message, receive_fd_flags());
         let header = libc::CMSG_FIRSTHDR(&raw const message);
         let mut descriptors = Vec::new();
-        let mut extra = false;
+        let mut malformed = false;
         if !header.is_null()
             && (*header).cmsg_level == libc::SOL_SOCKET
             && (*header).cmsg_type == libc::SCM_RIGHTS
         {
-            let base = usize::try_from(libc::CMSG_LEN(0)).map_err(|_| Failure::Unavailable)?;
-            let payload = (*header).cmsg_len.saturating_sub(base);
-            if payload % mem::size_of::<RawFd>() == 0 {
-                for index in 0..payload / mem::size_of::<RawFd>() {
-                    descriptors.push(std::ptr::read_unaligned(
-                        libc::CMSG_DATA(header).cast::<RawFd>().add(index),
-                    ));
+            let available = ancillary_usize(message.msg_controllen)?;
+            match ancillary_payload_size((*header).cmsg_len, libc::CMSG_LEN(0), available) {
+                Ok(payload) => {
+                    for index in 0..payload / mem::size_of::<RawFd>() {
+                        descriptors.push(std::ptr::read_unaligned(
+                            libc::CMSG_DATA(header).cast::<RawFd>().add(index),
+                        ));
+                    }
+                    if payload % mem::size_of::<RawFd>() != 0 {
+                        malformed = true;
+                    }
                 }
+                Err(_) => malformed = true,
             }
-            extra = !libc::CMSG_NXTHDR(&raw const message, header).is_null();
+        } else {
+            malformed = true;
         }
-        (received, message.msg_flags, descriptors, extra)
+        let extra = !header.is_null() && !libc::CMSG_NXTHDR(&raw const message, header).is_null();
+        if extra {
+            malformed = true;
+        }
+        (received, message.msg_flags, descriptors, malformed)
     };
-    let mut files = descriptors
+    let invalid_descriptor = descriptors.iter().any(|descriptor| *descriptor < 0);
+    let files = descriptors
         .into_iter()
         .filter(|descriptor| *descriptor >= 0)
         .map(|descriptor| {
-            // SAFETY: every SCM_RIGHTS descriptor is newly owned by this process.
+            // SAFETY: every nonnegative SCM_RIGHTS descriptor is newly owned by
+            // this process. Constructing every File before later checks ensures
+            // every received descriptor closes on every failure path.
             unsafe { File::from_raw_fd(descriptor) }
         })
         .collect::<Vec<_>>();
+    #[cfg(target_os = "macos")]
+    for file in &files {
+        let descriptor = file.as_raw_fd();
+        // SAFETY: `descriptor` remains owned by `file` throughout both calls.
+        let descriptor_flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        if descriptor_flags < 0
+            || unsafe {
+                libc::fcntl(
+                    descriptor,
+                    libc::F_SETFD,
+                    descriptor_flags | libc::FD_CLOEXEC,
+                )
+            } != 0
+        {
+            return Err(Failure::Unavailable);
+        }
+    }
     if received != 1
         || carrier != 0x20
         || flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0
-        || extra
+        || malformed
+        || invalid_descriptor
         || files.len() != 1
     {
         return Err(Failure::Unavailable);
     }
-    files.pop().ok_or(Failure::Unavailable)
+    files.into_iter().next().ok_or(Failure::Unavailable)
+}
+
+fn ancillary_field<T>(value: u32) -> Result<T, Failure>
+where
+    T: TryFrom<u32>,
+{
+    value.try_into().map_err(|_| Failure::Unavailable)
+}
+
+fn ancillary_usize<T>(value: T) -> Result<usize, Failure>
+where
+    T: TryInto<usize>,
+{
+    value.try_into().map_err(|_| Failure::Unavailable)
+}
+
+fn ancillary_payload_size<L, B>(
+    header_length: L,
+    base_length: B,
+    available: usize,
+) -> Result<usize, Failure>
+where
+    L: TryInto<usize>,
+    B: TryInto<usize>,
+{
+    let header_length = header_length.try_into().map_err(|_| Failure::Unavailable)?;
+    let base_length = base_length.try_into().map_err(|_| Failure::Unavailable)?;
+    if header_length > available {
+        return Err(Failure::Unavailable);
+    }
+    header_length
+        .checked_sub(base_length)
+        .ok_or(Failure::Unavailable)
+}
+
+#[cfg(target_os = "linux")]
+const fn receive_fd_flags() -> libc::c_int {
+    libc::MSG_CMSG_CLOEXEC
+}
+
+#[cfg(target_os = "macos")]
+const fn receive_fd_flags() -> libc::c_int {
+    0
 }
 
 fn read_regular(
@@ -6421,5 +7174,118 @@ mod protected_frame_tests {
                 .any(|value| value == b"PM28_RESPONSE_LOCK_DENIED"),
             "response denial marker missing"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FailingReader(std::io::ErrorKind);
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(self.0))
+        }
+    }
+
+    #[test]
+    fn classified_frame_failures_keep_the_public_unavailable_result() {
+        for (kind, category) in [
+            (std::io::ErrorKind::TimedOut, FrameReadFailure::Timeout),
+            (std::io::ErrorKind::WouldBlock, FrameReadFailure::Timeout),
+            (std::io::ErrorKind::UnexpectedEof, FrameReadFailure::Eof),
+            (std::io::ErrorKind::BrokenPipe, FrameReadFailure::OtherIo),
+        ] {
+            let mut classified = FailingReader(kind);
+            assert!(matches!(
+                read_frame_bounded_classified(&mut classified, MAX_HUMAN_FRAME),
+                Err(actual) if actual == category
+            ));
+            let mut public = FailingReader(kind);
+            assert!(matches!(read_frame(&mut public), Err(Failure::Unavailable)));
+        }
+
+        let malformed = [0_u8; 4];
+        assert!(matches!(
+            read_frame_bounded_classified(&mut malformed.as_slice(), MAX_HUMAN_FRAME),
+            Err(FrameReadFailure::MalformedFrame)
+        ));
+        assert!(matches!(
+            read_frame(&mut malformed.as_slice()),
+            Err(Failure::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn ancillary_widths_and_payload_bounds_are_checked() {
+        let darwin_field: Result<u32, _> = ancillary_field(24);
+        let linux_field: Result<usize, _> = ancillary_field(24);
+        assert!(matches!(darwin_field, Ok(24)));
+        assert!(matches!(linux_field, Ok(24)));
+        assert!(matches!(ancillary_payload_size(20_u32, 16_u32, 24), Ok(4)));
+        assert!(ancillary_payload_size(15_u32, 16_u32, 24).is_err());
+        assert!(ancillary_payload_size(25_u32, 16_u32, 24).is_err());
+        assert!(ancillary_field::<u8>(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn accepted_stream_is_blocking_after_preparation() {
+        let mut suffix = 0_u32;
+        let (listener, path) = loop {
+            let path = std::env::temp_dir().join(format!(
+                "passwordmanager-accepted-stream-{}-{suffix}.sock",
+                std::process::id()
+            ));
+            match UnixListener::bind(&path) {
+                Ok(listener) => break (listener, path),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::AlreadyExists
+                    ) =>
+                {
+                    suffix += 1;
+                }
+                Err(error) => panic!("bind test Unix listener at {path:?}: {error}"),
+            }
+        };
+        listener
+            .set_nonblocking(true)
+            .expect("set test listener nonblocking");
+        let client = UnixStream::connect(&path).expect("connect test Unix listener");
+        let (accepted, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("accept test Unix listener: {error}"),
+            }
+        };
+
+        accepted
+            .set_nonblocking(true)
+            .expect("set accepted stream nonblocking");
+        assert!(
+            normalize_accepted_stream(&accepted).is_ok(),
+            "normalize accepted stream"
+        );
+        let flags = unsafe {
+            // SAFETY: accepted owns a live Unix socket and F_GETFL does not
+            // mutate the descriptor.
+            libc::fcntl(accepted.as_raw_fd(), libc::F_GETFL)
+        };
+        assert!(flags >= 0, "F_GETFL failed: {flags}");
+        assert_eq!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "accepted stream stayed nonblocking"
+        );
+
+        drop(client);
+        drop(accepted);
+        drop(listener);
+        fs::remove_file(path).expect("remove test Unix socket");
     }
 }
