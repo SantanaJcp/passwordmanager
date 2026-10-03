@@ -1399,7 +1399,7 @@ def assert_information_panel_regression():
     """Mandatory values must come from the current panel, never the footer."""
     from types import SimpleNamespace
     from tui_migration_fixtures import recovery_code
-    from macos_tui_migration_lab import start
+    from macos_tui_migration_lab import start, wait_recovery_code
     boundary = object.__new__(MacPtySession)
     boundary.screen = VtScreen(80, 24)
     boundary.eof = False
@@ -1424,6 +1424,13 @@ def assert_information_panel_regression():
     assert "rejected its fixed authority/request context; no success recorded" in boundary.wait_information(
         "rejected its fixed authority/request context; no success recorded", timeout=0,
     )
+    import textwrap
+    warning = "Recovery code shown temporarily; store externally, then re-enter it exactly to commit: old backups and exposed copies retain historical recovery paths."
+    rows = textwrap.wrap(warning, width=78) + ["Recovery code:", code[:78], code[78:]]
+    rows += [""] * (13 - len(rows))
+    for y, row in enumerate(rows, 5):
+        boundary.screen.feed(f"\x1b[{y};1H│{row:<78}│".encode(), final=True)
+    assert wait_recovery_code(SimpleNamespace(time=time), boundary, since=0) == code
 
     class AlreadyUnlocked:
         screen = SimpleNamespace(columns=80, rows=24)

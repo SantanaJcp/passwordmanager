@@ -240,7 +240,7 @@ def main():
         send(root, "1"); send(root, str(native), enter=True); wait_information(root, "Native encrypted backup complete")
         assert native.stat().st_mode & 0o777 == 0o600 and native.stat().st_size > 0
         send(root, "b"); send(root, "2"); send(root, str(plaintext), enter=True)
-        wait_information(root, "PLAINTEXT WARNING")
+        wait_information(root, "PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:")
         send(root, "EXPORT", enter=True); wait_information(root, "Plaintext export complete")
         assert plaintext.stat().st_mode & 0o777 == 0o600 and plaintext.read_bytes().startswith(b"PM-LOGICAL-JSONL/1\n")
 
@@ -262,12 +262,12 @@ def main():
         assert after_parts == before_parts
 
         send(root, "b"); wait_information(root, "Backup/recovery:")
-        send(root, "3"); wait_information(root, "Archive path|RESTORE")
+        send(root, "3"); wait_information(root, "Archive path|RESTORE (adds new IDs/keys; current authority is preserved):")
         send(root, f"{native}|RESTORE", enter=True)
         wait_information(root, "Restore committed with new IDs/keys")
         tmux(root, "resize-window", "-x", "80", "-y", "24")
         send(root, "b"); send(root, "5")
-        recovery = wait_information(root, "Recovery code shown temporarily")
+        recovery = wait_information(root, "Recovery code shown temporarily; store externally, then re-enter it exactly to commit: old backups and exposed copies retain historical recovery paths.")
         deadline = time.monotonic() + 8
         code = None
         while time.monotonic() < deadline:
@@ -284,7 +284,9 @@ def main():
             time.sleep(0.05)
         assert tmux(root, "has-session", check=False).returncode == 1
         start_tui(root, binary, profile, key, runtime, password, idle=90, reveal=10, copy=2)
-        send(root, "b"); send(root, "4"); send(root, "synthetic-ticket25-new-master|ROTATE", enter=True, hidden=True)
+        send(root, "b"); send(root, "4")
+        wait_information(root, "New master password|ROTATE (old backups and exposed copies retain historical recovery paths):")
+        send(root, "synthetic-ticket25-new-master|ROTATE", enter=True, hidden=True)
         wait_information(root, "Master password rotated; old backups and exposed copies retain historical paths")
         send(root, "l")
         deadline = time.monotonic() + 5

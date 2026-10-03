@@ -2766,3 +2766,69 @@ fresca `/tmp/pmw1-resume-gate-results.json`, logs
 types7/resize/Unicode/máscara y el recorrido completo de operations,
 rotaciones/pair/sync/retire incluidos. El resto de los40 casos todavía está
 en curso al publicar este checkpoint; no declarar la barrida concluida aquí.
+
+### Candidata W1 cae2a4a: barrido Linux completo y avisos macOS
+
+SHA `cae2a4af901e194715a5fe487d8ddf54b590da0c`. La barrida fresca ya terminó:
+`/tmp/pmw1-resume-gate-results.json`, 40 casos, 39 rc0, cero mismatches nuevos
+frente a `/tmp/pmrs-gate-results.json` (40 casos, 38 rc0). Único cambio de rc:
+operations1→0. G7 matrix conserva rc1 por staging superviviente a fallos de
+commit/outbox/audit EIO/ENOSPC; corresponde a W3 y no se convierte en PASS.
+Check, clean-offline-build y los 26 wrappers Linux pasan; los otros casos de
+publicación/G7 conservan su resultado. Comandos exactos por caso y logs en el
+JSON; driver `/tmp/pmw1-resume-gate-run.py`, resumen
+`/tmp/pmw1-resume-gate-summary.log`. Cada invocación se ejecutó bajo flock,
+con los artefactos Keycloak26.7.3 y Chrome autorizados y sin modificar sus
+asserts/plazos. Logs principales:
+`/tmp/pmw1-resume-gate-final-{check,clean}.log` y
+`/tmp/pmw1-resume-gate-lab-tui-{content,access,operations}.log`.
+
+[macOS 37125454851](https://github.com/SantanaJcp/passwordmanager/actions/runs/37125454851)
+terminó FAIL sobre ese SHA, con alcance distinto por CPU:
+
+- Intel supera la reapertura Audit que antes fallaba y emite
+  `PM26_MATRIX full25-local=observed`: backup/plaintext, adjunto grande,
+  query/purge de audit, restore con autoridad preservada, recuperación con
+  reentrada exacta y avisos históricos, rotación maestra y rechazo de la
+  maestra anterior/desbloqueo de la nueva observados desde el panel a80×24.
+  Falla después en sync feliz: `durable=integrity screen=integrity process=same`,
+  `blocks=1 roots=0`, panel válido/proceso vivo. El outbox retenía referencias
+  purgadas (`missing-items=5`); es el bloqueo conocido de W2. No se altera el
+  timeout20s ni se interpreta el FAIL global como ausencia de los PASS previos.
+- Apple silicon falla antes de Full25, en `diagnose_agent_accept_lane` al
+  esperar unlock: password-prompt, evento posterior al mark, parser ground,
+  hijo vivo. No se ha discriminado su causa; no se atribuye al panel ni se
+  parchea/repite un SHA idéntico. El FAIL previo de backup ARM tampoco queda
+  resuelto por esta corrida que no lo alcanza.
+
+Logs `/tmp/pmw1-native-macos4.log` y `...macos4-arm.log`. Entorno observado:
+macOS15.7.9/kernel24.6.0, Rust1.98.1; Intel x86_64 imagen
+`20260824.0482.1`, Apple silicon aarch64 imagen `20260907.0337.1`. Windows
+run37124375821: Windows11 Enterprise build26200 ARM64, imagen
+`20260924.168.1`, Rust1.98.1, `UAC_ENABLE_LUA=1`; el privilegio real se
+comprueba por el fixture, no se deduce de la descripción histórica del runner.
+Estas VMs no acreditan Terminal.app/Windows Terminal humano, x64, reboot/FDE
+ni firma real. Todas las corridas propias anteriores ya concluyeron.
+
+### Oráculos completos antes de confirmar — siguiente checkpoint W1
+
+Relectura posterior al barrido: los resultados históricos completos ya se
+exigían, pero algunos prompts previos a confirmar sólo se verificaban por
+prefijo. No bastan para acreditar toda la información contractual antes de
+EXPORT/RESTORE/ROTATE/reentrada. Método extendido sin cambiar producto:
+Linux operations y Mac Full25 deben observar el literal completo de copia
+plaintext persistente, IDs/keys y autoridad actual de restore, copias históricas
+de maestra, y guardar/reentrar recovery con todo su aviso histórico antes de
+enviar cada confirmación. Conservar tamaño80×24, marcas, plazos y código
+completo; añadir regresión sintética del warning recovery partido en filas.
+
+Helpers macOS PASS bajo flock, `/tmp/pmw1-resume-macos-helpers5.log`.
+Operations reforzado rc0 bajo el mismo flock y artefactos, comando
+`env PYTHONDONTWRITEBYTECODE=1 PM_KEYCLOAK_DIST=<artefacto autorizado>
+PM_CFT_DIR=<artefacto autorizado> ./scripts/test-linux-tui-operations-lab.sh`,
+log `/tmp/pmw1-resume-operations5.log`: todo el recorrido original y los
+cuatro avisos completos previos a confirmar PASS. No repetir Windows: este
+cambio de asserts Mac/Linux no
+interviene en su frontera de transferencia1PUX. El barrido40 anterior queda
+ligado a cae2a4a; el fixture reforzado recibe evidencia nueva separada, sin
+atribuirle una barrida que no se ejecutó.

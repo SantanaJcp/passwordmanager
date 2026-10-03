@@ -276,7 +276,7 @@ def wait_recovery_code(m, session, *, since):
         if page is not None:
             panel = information_text(page)
             code = recovery_code(page)
-            if code is not None and "Recovery code shown temporarily" in panel and "historical recovery paths" in panel:
+            if code is not None and "Recovery code shown temporarily; store externally, then re-enter it exactly to commit: old backups and exposed copies retain historical recovery paths." in panel:
                 return code
         remaining = deadline - m.time.monotonic()
         if remaining <= 0:
@@ -458,11 +458,11 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         assert native.stat().st_mode & 0o777 == 0o600 and native.stat().st_size > 0
         native_digest = source_digest(native)
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
-        session.wait_information("PLAINTEXT WARNING", since=mark)
+        session.wait_information("PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:", since=mark)
         submit(session, "NOT EXPORT"); session.wait_text("Confirmation mismatch", since=mark)
         assert not plaintext.exists()
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
-        session.wait_information("PLAINTEXT WARNING", since=mark)
+        session.wait_information("PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:", since=mark)
         submit(session, "EXPORT"); session.wait_information("Plaintext export complete", since=mark)
         assert plaintext.stat().st_mode & 0o777 == 0o600 \
             and plaintext.read_bytes().startswith(b"PM-LOGICAL-JSONL/1\n")
@@ -488,10 +488,10 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         authority = after["authority_events"]
         authority_state = after["authority_state"]
         before_count = after["vault_items"]
-        mark = operation(session, "b", "3", "Archive path|RESTORE", f"{native}|NOT RESTORE")
+        mark = operation(session, "b", "3", "Archive path|RESTORE (adds new IDs/keys; current authority is preserved):", f"{native}|NOT RESTORE")
         session.wait_text("Confirmation mismatch", since=mark)
         assert snapshot(m, session)["vault_items"] == before_count
-        mark = operation(session, "b", "3", "Archive path|RESTORE", f"{native}|RESTORE")
+        mark = operation(session, "b", "3", "Archive path|RESTORE (adds new IDs/keys; current authority is preserved):", f"{native}|RESTORE")
         try:
             session.wait_information("Restore committed with new IDs/keys", since=mark)
         except BaseException as error:
@@ -510,7 +510,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         assert "historical backups/copies remain usable" in page
         lock(m, session); session = None
         session = start(m, binary, profile, private, endpoint)
-        mark = operation(session, "b", "4", "New master password|ROTATE",
+        mark = operation(session, "b", "4", "New master password|ROTATE (old backups and exposed copies retain historical recovery paths):",
                          NEW_PASSWORD.decode() + "|ROTATE", hidden=True)
         page = session.wait_information("Master password rotated; old backups and exposed copies retain historical paths", since=mark)
         assert "historical" in page
@@ -530,7 +530,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         mark = operation(session, "b", "1", "New native backup path", native)
         expect_output_collision(session, "backup", native, native_digest, since=mark)
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
-        session.wait_information("PLAINTEXT WARNING", since=mark)
+        session.wait_information("PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:", since=mark)
         submit(session, "EXPORT")
         expect_output_collision(session, "plaintext", plaintext, plaintext_digest, since=mark)
 
