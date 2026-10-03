@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Opt-in, first-public-frame measurements; never logs cell contents.
+//! Opt-in public-frame measurements; never logs cell contents.
 
 use std::{fs::File, io::Write, os::windows::io::AsRawHandle, path::Path};
 
@@ -161,6 +161,30 @@ impl Diagnostic {
         writeln!(self.output,
             "TUI_PROBE stage=frame area={},{},{}x{} manager={} rpk={} prompt={} prompt-at={prompt_at:?}",
             area.x, area.y, area.width, area.height, markers[0], markers[1], markers[2]
+        ).map_err(|_| Failure::Unavailable)?;
+        self.output.flush().map_err(|_| Failure::Unavailable)
+    }
+
+    pub(super) fn csv_frame(
+        &mut self,
+        buffer: &Buffer,
+        model_suffix: bool,
+        input_columns: usize,
+        status_columns: usize,
+    ) -> Result<(), Failure> {
+        let mut input_visible = false;
+        let mut suffix_visible = false;
+        for y in buffer.area.y..buffer.area.bottom() {
+            let mut row = Zeroizing::new(String::new());
+            for x in buffer.area.x..buffer.area.right() {
+                row.push_str(buffer[(x, y)].symbol());
+            }
+            input_visible |= row.contains("Input:");
+            suffix_visible |= row.contains("|chrome|keep");
+        }
+        writeln!(self.output,
+            "TUI_PROBE stage=csv-input area={}x{} model-suffix={model_suffix} input-columns={input_columns} status-columns={status_columns} input-visible={input_visible} suffix-visible={suffix_visible}",
+            buffer.area.width, buffer.area.height
         ).map_err(|_| Failure::Unavailable)?;
         self.output.flush().map_err(|_| Failure::Unavailable)
     }

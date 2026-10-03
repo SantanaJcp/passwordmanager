@@ -209,6 +209,8 @@ struct App {
     sync_poll_at: Instant,
     #[cfg(windows)]
     initial_diagnostic: Option<console_diagnostic::Diagnostic>,
+    #[cfg(windows)]
+    csv_diagnostic: Option<console_diagnostic::Diagnostic>,
 }
 
 enum PendingOperation {
@@ -267,6 +269,8 @@ impl App {
             sync_poll_at: Instant::now(),
             #[cfg(windows)]
             initial_diagnostic: None,
+            #[cfg(windows)]
+            csv_diagnostic: None,
         }
     }
 
@@ -2616,6 +2620,18 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
     if let Some(mut probe) = app.initial_diagnostic.take() {
         probe.frame(completed.buffer)?;
         probe.record("after-draw")?;
+        app.csv_diagnostic = Some(probe);
+    }
+    #[cfg(windows)]
+    if app.mode == Mode::CsvImport && app.input.ends_with("keep") {
+        if let Some(mut probe) = app.csv_diagnostic.take() {
+            probe.csv_frame(
+                completed.buffer,
+                app.input.ends_with("|chrome|keep"),
+                Line::raw(app.input.as_str()).width(),
+                Line::raw(app.status.as_str()).width(),
+            )?;
+        }
     }
     #[cfg(not(windows))]
     let _ = completed;

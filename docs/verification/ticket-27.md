@@ -2166,3 +2166,32 @@ el prompt no depende de probes y avanzar la misma matriz por teclado.
 Inspección del fixture: `Keyboard 1PUX` es prefijo de los dos títulos importados
 (login y File), ambos activos; el assert heredado de un resultado era incorrecto.
 Se exige exactamente dos resultados, preservando ambos registros y el buscador.
+
+Extensión acotada de negativas de lease, antes de ejecutar: en el proceso
+sintético de tests nativos, bajo el mismo mutex DACL test-only, conservar el
+descriptor original e instalar temporalmente un DACL nulo. `begin` debe fallar
+explícitamente en la query/validación del DACL, sin reservar la lease ni indicar
+cleanup fallido. Restaurar/comprobar/free del descriptor original antes de
+asserts, y después exigir que una nueva lease normal pueda comenzar/terminar.
+No se cambia ningún descriptor de servicio, agente o proceso ajeno; no se usa
+fault injection ni mocks. Esta negativa no demuestra el lease real de una
+transferencia TUI ni todos los fallos de instalación/restauración del API.
+
+[Run42](https://github.com/SantanaJcp/passwordmanager/actions/runs/37090071597),
+SHA `32fffbba6f13186fd51617cfda56784dc79568e6`, job `111108337776`: modo normal,
+sin sondas/diagnóstico: build + 12 nativos + 1 pipe + 15 observer + 1 sync PASS.
+Prompt/input oculto/unlock PASS reales. FAIL antes de enviar CSV: no se observa
+`|chrome|keep` dentro de 15 s. No se envía Enter ni se declara importación.
+
+Siguiente diagnóstico, antes del código: opt-in únicamente en CSV, después de
+que el modelo haya consumido exactamente el sufijo público `|chrome|keep`, medir
+ancho de input/status y booleanos del sufijo/Input en CompletedFrame 80×24.
+No leer nuevamente el screen buffer Win32 tras introducir contraseña, ni
+imprimir rutas, celdas o valores. El frame tiene modelo=true pero sufijo=false
+implica recorte de layout; ausencia del evento implica input incompleto y
+exige investigar el teclado. Modelo y frame true con observer false implica
+reconstrucción/decodificación. No cambiar footer, pantalla, rutas ni plazos.
+Si resulta necesario elegir prioridades de layout, se respeta la frontera de
+decisión del usuario: reportar la causa y detener la matriz, sin elegir diseño.
+La sonda se activa al consumir `keep` y distingue además si el modelo tiene
+el sufijo completo con separadores; así no confunde pérdida de `|` con recorte.
