@@ -906,3 +906,11 @@ Entrega parcial publicable: conserva el WIP `8bf30bf`, añade validación y
 regresiones, **no** completa G7 ni autoriza integración a ciegas. La migración
 del inventario anterior y el negativo audit-loss siguen abiertos; la
 corrección de los fallbacks espera la respuesta explícita solicitada.
+
+Otros silenciamientos heredados observados en `linux.rs::serve_loop`: si
+`DelegatedVault::open` falla al arrancar un servicio con proveedor, el
+`if let Ok` omite `recover_inflight` y continúa el arranque; el worker descarta
+el error de `run_provider_once` y vuelve al loop cada 5 ms. Se conserva ese
+comportamiento. El lab audit-loss no usa proveedor, por lo que no demuestra
+las consecuencias de esos caminos ni ausencia de duplicación bajo esa pérdida.
+No quedan incluidos en la autorización específica solicitada para audit custody.
