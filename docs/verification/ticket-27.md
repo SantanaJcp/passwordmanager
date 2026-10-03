@@ -2995,3 +2995,43 @@ Preflight local de la corrección: fmt y `check.sh` rc0 bajo un bloque flock,
 `/tmp/pmw1b-check2.log`; `git diff --check` PASS. Sólo cambia cfg Windows;
 la barrida Linux ya iniciada sigue con propagación explícita por caso. No
 atribuir una GREEN Windows hasta la corrida siguiente.
+
+Barrido Linux fresco terminado, `/tmp/pmw1b-gate-results.json`:40 casos,
+39 rc0, comandos y rc idénticos por nombre a
+`/tmp/pmw1-resume-gate-results.json`; sólo `g7-matrix` conserva rc1 conocido.
+Driver `/tmp/pmw1b-gate-run.py`, resumen `/tmp/pmw1b-gate-summary.log`, logs
+`/tmp/pmw1b-gate-*.log`. Incluye check, clean offline y todos los labs; comenzó
+sobre4e6ca0c y durante su ejecución se añadió únicamente el helper cfg Windows
+7e5febb, sin cambiar los cuerpos ejecutados en Linux. Check2 fresco también
+cubre7e5febb. No existe evidencia Windows GREEN todavía.
+
+Mac: método discriminante posterior al FAIL8s documentado en
+[ticket26](ticket-26.md#w1-fase-2--discriminante-arm-de-colisión-2026-10-03).
+Sólo cambia observación del fixture; nunca prolonga la aserción de colisión
+ni modifica el backup de W2.
+
+### Corrida 2 fase 2: GREEN de 1PUX, siguiente frontera clipboard
+
+[Windows 37128434031](https://github.com/SantanaJcp/passwordmanager/actions/runs/37128434031),
+SHA `7e5febb8586c1f3d897abb9896be79e01996a811`, terminó FAIL global, con
+**GREEN acotado de la causa1**. Negativa hardlink local: error explícito,
+cero lease, DACL original exacta. Probe API token humano PASS. Positivo siguiente
+en la misma TUI: sampler real antes/durante/después PASS; ack31, lease del hijo,
+handle enviado, `preview-received`, restauración y commit1PUX PASS. Servicio
+`transfer-duplicated`; preview2/2/0/0/0/4/1 completo antes de IMPORT.
+Esto confirma la atribución del fallo previo a la negativa que abortaba el
+canal, no a SID/PID equivocado ni a falta de derechos/plazo en la lease.
+Primitives13/pipe1/observer17/sync-lib1 y salida encoding también PASS.
+Log `/tmp/pmw1b-windows2.log`.
+
+Nueva frontera: después de organización, history, selección de password,
+reveal y lectura exacta del clipboard copiado, el fixture publica un nuevo
+owner y falla esperando `Clipboard custody expired`15s. No emite PASS del
+grupo organization-history-copy; preservación del reemplazo tras expiry no
+queda demostrada. No atribuir aún el fallo a producto, deadline o repaint.
+Método siguiente: categoría del status actual/child/parser, más muestreo nativo
+sólo de booleanos owner/sequence/cleanup si resulta necesario; conservar lease1s,
+SCREEN_WAIT15s, sustitución y comparación exacta. No modificar DestroyWindow
+Drop ni ninguna omisión heredada sin autorización.
+
+Consumo nativo propio fase2: dos corridas Windows terminadas, de máximo6.

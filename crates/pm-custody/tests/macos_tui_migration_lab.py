@@ -252,7 +252,34 @@ def assert_stream(path):
     assert offset == size and actual.digest() == expected.digest()
 
 
-def expect_output_collision(session, kind, path, expected_digest, *, since):
+def sample_collision_process(m, session, label, pid, path):
+    """Sample only an owned synthetic process after the failed eight-second gate."""
+    report = path.with_suffix(f".collision-{label}.sample")
+    assert not report.exists(), "collision sample destination already exists"
+    try:
+        result = session.run_sudo_while_draining(
+            ["sample", str(pid), "1", "1", "-file", report], check=False, timeout=8,
+        )
+        assert result.returncode == 0, "owned collision process sample failed"
+        text = report.read_text()
+        markers = {
+            "download": "rpc_download_atomic",
+            "read-frame": "read_frame",
+            "backup-write": "write_backup",
+            "native-backup": "write_native_backup",
+            "socket-read": "__recvfrom",
+            "file-sync": "fsync",
+            "sqlite": "sqlite3",
+        }
+        categories = " ".join(f"{name}={marker in text}" for name, marker in markers.items())
+        print(f"PM26_COLLISION_SAMPLE process={label} {categories}", flush=True)
+    finally:
+        # The sample tool owns this exact output; never scan unrelated /tmp files.
+        if report.exists():
+            report.unlink()
+
+
+def expect_output_collision(session, kind, path, expected_digest, *, since, m):
     try:
         session.wait_text("Operation failed explicitly; no success was recorded", since=since)
     except BaseException as error:
@@ -262,11 +289,25 @@ def expect_output_collision(session, kind, path, expected_digest, *, since):
                         "plaintext": "Plaintext export complete"}[kind]
             result = "unexpected-complete" if page is not None and complete in page else "unclassified"
             destination = "same" if source_digest(path) == expected_digest else "changed"
-            print(f"PM26_OUTPUT_COLLISION kind={kind} result={result} destination={destination}", flush=True)
+            panel = "valid" if page is not None and information_text(page) else "absent"
+            rejection = page is not None and "Operation failed explicitly; no success was recorded" in page
+            temporary = path.with_suffix(".partial")
+            partial = "absent"
+            if temporary.exists():
+                size = temporary.stat().st_size
+                partial = "empty" if size == 0 else "nonempty"
+            print(f"PM26_OUTPUT_COLLISION kind={kind} result={result} destination={destination} panel={panel} rejection={rejection} partial={partial}", flush=True)
+            custody = m.running_launchd_pid(session.run_sudo_while_draining(["launchctl", "print", f"system/{m.LABEL}"]))
+            sample_collision_process(m, session, "tui", session.pid, path)
+            sample_collision_process(m, session, "custody", custody, path)
+            after = session._current_text_after(since)
+            late_rejection = after is not None and "Operation failed explicitly; no success was recorded" in after
+            print(f"PM26_OUTPUT_COLLISION_AFTER_SAMPLE kind={kind} late-rejection={late_rejection} destination-same={source_digest(path) == expected_digest}", flush=True)
         except BaseException as diagnostic_error:
             raise error from diagnostic_error
         raise
     assert source_digest(path) == expected_digest, "collision changed the original output"
+    print(f"PM26_OUTPUT_COLLISION kind={kind} result=rejected destination=same", flush=True)
 
 
 def wait_recovery_code(m, session, *, since):
@@ -528,11 +569,11 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         print("PM26_MATRIX full25-local=observed", flush=True)
 
         mark = operation(session, "b", "1", "New native backup path", native)
-        expect_output_collision(session, "backup", native, native_digest, since=mark)
+        expect_output_collision(session, "backup", native, native_digest, since=mark, m=m)
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
         session.wait_information("PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:", since=mark)
         submit(session, "EXPORT")
-        expect_output_collision(session, "plaintext", plaintext, plaintext_digest, since=mark)
+        expect_output_collision(session, "plaintext", plaintext, plaintext_digest, since=mark, m=m)
 
         mark = operation(session, "y", "2", "pairing|pm-sync program", sync_value)
         try:

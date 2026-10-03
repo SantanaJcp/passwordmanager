@@ -2418,3 +2418,26 @@ After those changes and merger regression checks, dispatch a new exact native
 candidate on both CPUs and execute the still-mandatory gates. Do not resolve
 26, delete pending revision events, bypass purge, substitute a provider,
 reinterpret clipboard indeterminacy as denial or extend deadlines here.
+
+### W1 fase 2 — discriminante ARM de colisión (2026-10-03)
+
+Baseline W1 `7d8ba007729bd637add676a6a34429b176ef7d11`,
+[37126535485](https://github.com/SantanaJcp/passwordmanager/actions/runs/37126535485):
+ambas CPU completan Full25 local con avisos completos; Intel observa ambas
+colisiones y llega al bloqueo purge/outbox W2. ARM conserva destino intacto,
+pero no observa rechazo en8s. Hipótesis del rechazo trasladado al panel
+**descartada por código**: sigue en status y el oráculo busca el mismo literal;
+los resultados exitosos de backup sí van al panel.
+
+Método acotado de diagnóstico antes de ejecutarlo: mantener la negativa y su
+wait8s sin modificación. Si falla, registrar sólo estado booleano de rechazo,
+validez de panel, destino same/changed y temporal propio absent/empty/nonempty.
+Después del gate ya fallido, usar `sample` nativo durante1s en el hijo TUI y
+custodio launchd propios, sin suspenderlos ni cambiar el plazo/aserción. Reducir
+cada sample a presencia booleana de símbolos download/read-frame/backup-write/
+native-backup/socket-read/fsync/sqlite. No imprimir direcciones, PIDs, paths,
+contenido del sample ni secretos. Outputs propios collision-checked dentro de
+la raíz sintética, eliminados con errores propagados. El diagnóstico nunca
+convierte el FAIL8s en PASS; falta sample también es error. No tocar el flujo
+compartido de backup/persistencia de W2. Registrar asimismo cada colisión que
+sí pase con `result=rejected destination=same`, conservando digest y literal.
