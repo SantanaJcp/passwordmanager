@@ -107,7 +107,6 @@ fn serve(
     fs::set_permissions(socket, fs::Permissions::from_mode(0o666)).map_err(|_| ())?;
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
         let store_path = db.to_owned();
         let config = Arc::clone(&config);
         std::thread::spawn(move || {
@@ -117,6 +116,10 @@ fn serve(
     Ok(())
 }
 fn serve_one(stream: UnixStream, db: &Path, config: Arc<ServerConfig>) -> Result<(), ()> {
+    // A peer can close before accept completes (including the TUI online
+    // probe). Failure to guard this socket rejects only this connection;
+    // no TLS/request bytes are processed before the native guard succeeds.
+    pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|_| ())?;
