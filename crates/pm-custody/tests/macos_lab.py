@@ -3643,7 +3643,8 @@ def main():
             plist_to_install = diagnostic_plist
         # W2: inject only categorical sync timing into this owned service.
         global SYNC_TIMING_ENABLED
-        SYNC_TIMING_ENABLED = not diagnostic and not final_phase_only
+        SYNC_TIMING_ENABLED = (os.environ.get("PMW2_TIMING") == "1"
+                               and not diagnostic and not final_phase_only)
         if SYNC_TIMING_ENABLED:
             sync_timing_plist = scratch / "w2-sync-timing.plist"
             launchd_config["EnvironmentVariables"] = {"PMW2_TIMING": "1"}

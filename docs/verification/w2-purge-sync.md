@@ -644,3 +644,47 @@ Fallbacks heredados adicionales observados y conservados: `serve_one` convierte
 error de parser/dispatch a `{"ok":false}` genérico; `sync_job::record_journal_failure`
 ignora el error secundario de persistencia de su estado de emergencia mientras
 expone JournalFailure en memoria. No son la causa medida y no se modifican.
+
+### Diagnóstico 2: happy Intel completo dentro del plazo
+
+[37132696664](https://github.com/SantanaJcp/passwordmanager/actions/runs/37132696664),
+SHA `1b1df0663bd1d786bcb9b72575a6a9e154fd4086`, completed/failure.
+32 E2EE pasan en cada CPU. Intel happy `succeeded`, 287 bloques/1 root,
+job 15.725 s y observación TUI 18.328 s, dentro del plazo original de 20 s.
+PIDs de custodio/servidor iguales, un proceso/un handshake, 59 eventos/1 página:
+
+| Fase Intel | Cantidad | Tiempo acumulado |
+| --- | --- | --- |
+| Preparación job / spawn de hilo | 1 / 1 | 2.773 / 0.116 ms |
+| Preparación push | 1 | 66.866 ms |
+| Exportación de grafos | 59 | 4.518 s |
+| RPC put | 287 | 7.247 s |
+| Publish | 1 | 0.949 ms |
+| Ack local | 1 | 179.034 ms |
+| Push completo | 1 | 12.971 s |
+| RPC get | 287 | 1.049 s |
+| Descarga de grafos | 29 | 2.286 s |
+| Fsync de archivos descargados | 36 | 209.662 ms |
+| Activación atómica de grupo | 1 | 278.691 ms |
+| Pull completo | 1 | 2.633 s |
+| Handshake TLS / spawn cliente | 1 / 1 | 36.139 / 0.952 ms |
+| Cierre cliente / journal fsync | 1 / 4 | 15.273 / 106.470 ms |
+| SQLite dispatch / apertura servidor | 576 / 1 | 6.666 s / 1.841 ms |
+
+Scopes anidados: no sumar export/RPC, download/get/fsync y sus fases totales.
+Sin temporal por put ni backoff. El workflow después falla en la aserción
+visual intacta `pushed=/pulled=`: el estado durable es exitoso; no se relaja
+ni se toca la TUI W1. ARM vuelve a fallar antes del job (password-prompt).
+Control 39 eventos: ARM publish/convergencia 5.255/6.910 s; Intel
+16.141/20.102 s. La variabilidad Intel es visible frente a la corrida previa;
+**no se atribuye una reducción nativa aislada al keeper**. Su RED/GREEN prueba
+el checkpoint por último close y durabilidad, mientras la corrección conjunta
+acredita la conclusión acotada del happy Intel.
+
+Segundo barrido sobre `1b1df06`: `/tmp/pmw2d-wal-gate-results.json`,
+40/38 rc0/0 regresiones; check 60.001 s, clean 46.275 s. Mismos dos fallos
+heredados, sin nuevos skips/retries/deadlines. Producto permanece intacto en
+la última verificación: únicamente se devuelve el fixture al plist normal y
+el opt-in `PMW2_TIMING=1` pasa a ser explícito. Hipótesis final: discriminar
+instrumentación de los fallos ARM pre-sync. No se cambia ninguna aserción;
+se emiten también los contadores del registro durable válido, sin su ID.

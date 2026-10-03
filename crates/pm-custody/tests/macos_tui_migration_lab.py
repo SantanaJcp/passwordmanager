@@ -247,6 +247,10 @@ def diagnose_sync_wait(m, session, since, sync_db, expected_pid):
     pid = m.running_launchd_pid(record)
     process = "same" if pid == expected_pid else "missing" if pid is None else "changed"
     print(f"PM26_SYNC_WAIT durable={phase} screen={screen} process={process}", flush=True)
+    if len(value) == 38 and value[:5] == b"PMSS1" and 1 <= value[21] <= 9:
+        pushed = int.from_bytes(value[22:30], "big")
+        pulled = int.from_bytes(value[30:38], "big")
+        print(f"PMW2_DURABLE pushed={pushed} pulled={pulled}", flush=True)
     record = session.run_sudo_while_draining(["launchctl", "print", "system/" + m.LABEL], check=False)
     custody_pid = m.running_launchd_pid(record)
     custody = "same" if custody_pid == session.w2_custodian_pid else "missing" if custody_pid is None else "changed"
