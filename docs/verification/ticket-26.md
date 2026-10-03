@@ -99,6 +99,50 @@ in PTY output. This tests the empty-pasteboard hypothesis directly on both CPUs;
 it is not a manufactured isolation denial and cannot replace a failed agent
 probe. The old timeout and shared-bootstrap exposure remain historical FAILs.
 
+Second run
+[37107134590](https://github.com/SantanaJcp/passwordmanager/actions/runs/37107134590),
+SHA `87baf92505b0aa67b346c993a30a598866d6cbb5`, completed **FAIL, both CPUs**,
+explicit `final_phase_only=true`, ordinary binaries. Both reached core
+Ticket23/partial24 and kept the human canary string/value/stable before/after.
+The direct AppKit agent process completed nonzero in under the copy bound
+(approximately 0.3 s Intel / 1.1 s ARM), but the first classifier reported
+`probe-native=invalid`; no clipboard denial or scoped PASS was accepted.
+Both independently observed real owned expiry as empty/nil/absent/stable and
+the exact human AppleScript expression returning `coercion-1700`. This proves
+that error's empty-pasteboard cause on both architectures. Both then observed
+`PM26_FINAL suspension=durable restart=real identity=unchanged peer=verified`.
+The later resume fixture failed its original 8-second exit wait: it sent `l`
+while still on the Access screen, where `handle_access_key` ignores it.
+The established path is `Esc` → `Content view` → `l`; fix that fixture path,
+without modifying product keys, event handling or the wait.
+
+The new observer must preserve the old **substring** canary oracle, not only
+whole-string equality. Scan hash-matched windows natively without exporting
+data/digests, and add an embedded synthetic-canary positive control to the
+independent causal session after its expiry assertion (then replace it with
+the existing harmless external marker). This control does not touch the timed
+isolated lease or introduce a warmup before it.
+
+Final native-rejection discriminant: emit `PM26_PB denied=pasteboard-null`
+with the unique exit 69 **only** when `NSPasteboard.generalPasteboard` returns
+nil. Accept this completed explicit API rejection as the negative result only
+with that exact sentinel/exit, absent canary in both captured streams, verified
+agent UID/system manager/different domain and unchanged positive human controls
+using the same native binary. This is an expected failure of the attempted
+secret read, not a fallback or an unavailable result treated as success.
+Timeout, bad arguments/signal/other exit, malformed schema, unavailable types,
+unstable data or any exact canary remain FAIL. A human nil board still fails
+the positive control. Cocoa stderr is captured/scanned and never dumped;
+arbitrary nonzero statuses are never accepted as a denial. The next run must
+confirm this sentinel before attributing the preceding generic nonzero result.
+
+Historical CPU claim checked against GitHub: run
+[37087946638](https://github.com/SantanaJcp/passwordmanager/actions/runs/37087946638),
+SHA `7038e667e67b1521df04d10efdc68569c92c31ae`, contains post-control `-1700`
+on **both Intel and ARM**. The latest 26 candidate failed only on Intel at
+that boundary; the defect is not inherently Intel-only. No root cause for
+the operating system's variable AppleScript startup latency is claimed.
+
 ## Native contract under test
 
 The port keeps the existing vault engine, binary request framing, TLS 1.3 RPK

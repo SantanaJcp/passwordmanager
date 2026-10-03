@@ -146,9 +146,9 @@ DIAGNOSTIC_LINE = re.compile(
     rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-success-read="
     rb"(?:yes|no|indeterminate)|"
     rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-error="
-    rb"(?:none|coercion-1700|other|timeout)|"
+    rb"(?:none|coercion-1700|pasteboard-null|other|timeout)|"
     rb"PM26_DIAGNOSTIC pasteboard-isolated-probe-native="
-    rb"(?:valid|invalid|unavailable|unstable|timeout)|"
+    rb"(?:valid|denied|invalid|unavailable|unstable|timeout)|"
     rb"PM26_DIAGNOSTIC unlock-phase="
     rb"(?:channel-verified|sqlite-opened|durability-configured|bundle-loaded|"
     rb"kdf-start|kdf-end|root-authenticated) elapsed-ms=[0-9]{1,6}|"
@@ -290,6 +290,12 @@ if native_result is not None:
     stdout_canary = stdout_canary or b"canary=present" in probe_stdout
 if probe_status == "timeout":
     native_category = "timeout"
+elif probe.returncode == 69 and probe.stdout == b"PM26_PB denied=pasteboard-null\n":
+    # This sentinel is emitted only when generalPasteboard itself returns nil.
+    # Human pre/post use this same native binary and must fetch the exact
+    # canary. Stderr is scanned for the canary and never printed.
+    native_category = "denied"
+    probe_error = "pasteboard-null"
 elif probe.returncode != 0 or probe.stderr or native_result is None:
     native_category = "invalid"
 elif b"types=unavailable" in probe_stdout:
@@ -300,7 +306,7 @@ else:
     native_category = "valid"
 probe_success = (
     "yes" if stdout_canary or stderr_canary
-    else "indeterminate" if native_category != "valid" else "no"
+    else "no" if native_category in ("valid", "denied") else "indeterminate"
 )
 result_path.write_text(
     "\n".join((
@@ -331,8 +337,8 @@ AGENT_PASTEBOARD_RESULT_LINE = re.compile(
     rb"probe-canary-stdout=(?:present|absent)|"
     rb"probe-canary-stderr=(?:present|absent)|"
     rb"probe-success-read=(?:yes|no|indeterminate)|"
-    rb"probe-error=(?:none|coercion-1700|other|timeout)|"
-    rb"probe-native=(?:valid|invalid|unavailable|unstable|timeout))$"
+    rb"probe-error=(?:none|coercion-1700|pasteboard-null|other|timeout)|"
+    rb"probe-native=(?:valid|denied|invalid|unavailable|unstable|timeout))$"
 )
 
 
@@ -1550,7 +1556,7 @@ def pasteboard_snapshot(phase, session):
         rb"PM26_PB types=(?:unavailable|empty|string|other) text=(?:nil|value) "
         rb"canary=(?:present|absent) stable=(?:yes|no)\n", result.stdout,
     ), "native pasteboard snapshot emitted unclassified output"
-    assert phase in ("before", "after", "expired")
+    assert phase in ("before", "after", "expired", "embedded")
     print("PM26_CLIPBOARD phase=" + phase + " " + result.stdout.decode("ascii").strip(), flush=True)
     assert b"types=unavailable" not in result.stdout and b"stable=yes" in result.stdout, (
         "native pasteboard snapshot was unavailable or unstable"
@@ -1956,8 +1962,11 @@ def assert_launchd_agent_cannot_read_pasteboard(
     assert fields[b"probe-success-read"] == b"no", (
         "isolated pasteboard probe result was indeterminate or exposed the canary"
     )
-    assert fields[b"probe-native"] == b"valid" and fields[b"probe-error"] == b"none", (
-        "isolated native pasteboard observer did not complete a valid read"
+    assert (fields[b"probe-native"], fields[b"probe-error"], fields[b"probe-result"]) in {
+        (b"valid", b"none", b"zero"),
+        (b"denied", b"pasteboard-null", b"nonzero"),
+    }, (
+        "isolated native pasteboard observer did not complete a valid read or explicit rejection"
     )
 
 
@@ -3348,6 +3357,13 @@ def assert_empty_pasteboard_coercion(binary, profile, private, endpoint):
         assert category == "coercion-1700" and observer.stdout == b"", (
             "empty-pasteboard AppleScript coercion hypothesis was not confirmed"
         )
+        write_appkit_pasteboard(
+            b"synthetic-prefix-" + TUI_PASSWORD_RECORD + b"-synthetic-suffix", session=expiry,
+        )
+        assert pasteboard_snapshot("embedded", expiry) == (
+            b"PM26_PB types=string text=value canary=present stable=yes\n"
+        ), "native observer did not detect a canary embedded in other bytes"
+        write_appkit_pasteboard(TUI_EXTERNAL_REPLACEMENT, session=expiry)
         expiry.send_key("l")
         assert expiry.wait_exit(timeout=8) == 0
         assert TUI_PASSWORD_RECORD not in bytes(expiry.output) and PASSWORD not in bytes(expiry.output)
@@ -3477,6 +3493,9 @@ def run_final_native_gates(binary, human_profile, human_key, agent_profile, agen
         start = resumed.mark()
         resumed.send_key("s")
         resumed.wait_text("Delegated access: RESUMED", since=start)
+        content = resumed.mark()
+        resumed.send_key("escape")
+        resumed.wait_text("Content view", since=content)
         resumed.send_key("l")
         assert resumed.wait_exit(timeout=8) == 0
         assert current_password not in bytes(resumed.output) and TUI_PASSWORD_RECORD not in bytes(resumed.output)
