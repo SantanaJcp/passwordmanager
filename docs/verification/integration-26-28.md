@@ -166,7 +166,7 @@ Logs locales `/tmp/pmint-20261003-candidate-{macos,windows}.log`, metadata `.jso
 
 Warnings nativos adicionales conservados en logs: helper checked Unix sin uso en Windows; import MetadataExt y helpers ClipboardControl test-only sin uso en build macOS. No son la causa de los FAIL, ni se aflojaron lints para ocultarlos.
 
-## Entrega y decisiones pendientes
+## Entrega y decisiones pendientes — corte previo a la remediación
 
 La rama contiene cuatro merges y este informe; **composición realizada, aceptación nativa fallida**. Se entrega al orquestador con evidencia, sin corregir los defectos abiertos ni repetir runs autorizados una sola vez.
 
@@ -226,3 +226,48 @@ publicaciones PASS; cero raíces residuales nuevas en el inventario acotado.
 Resumen `/tmp/pmint2-20261003-local-summary.log`, detalle
 `/tmp/pmint2-20261003-local-results.json`. AST Python, configuración CI y
 enlaces relativos del informe comprobados; no cambia ningún workflow.
+
+### Discriminante nativo y corrección mínima
+
+Commit publicado `9c9ab960d6c23ce43d46c9fdfbb3696e572d4734`:
+
+- [macOS 37101488048](https://github.com/SantanaJcp/passwordmanager/actions/runs/37101488048),
+  **FAIL terminado, ambas CPU**. Jobs [ARM 111141736709](https://github.com/SantanaJcp/passwordmanager/actions/runs/37101488048/job/111141736709)
+  e [Intel 111141736823](https://github.com/SantanaJcp/passwordmanager/actions/runs/37101488048/job/111141736823).
+  Ambos completan Full25-import y observan `PM26_SYNC_FAILURE
+  accepted-socket-guard=failed`, `exit=4`, seguido de la desaparición del PID
+  durante readiness. La categoría demuestra que el error viene del guard
+  del socket aceptado, después de bind; descarta inicialización/clave protegida
+  y publicación paginada como causa de esta salida. Log
+  `/tmp/pmint2-20261003-native-macos-diagnostic.log` y metadata `.json`.
+- [Windows 37101489213](https://github.com/SantanaJcp/passwordmanager/actions/runs/37101489213),
+  **FAIL terminado por el defecto conocido del resumen**, job
+  [111141740142](https://github.com/SantanaJcp/passwordmanager/actions/runs/37101489213/job/111141740142).
+  Build nativo pasa sin E0004; primitives 13, pipe 1, observer 16 y sync-lib 1
+  pasan. TUI normal: first-prompt, hidden-input, unlock y footer-horizontal
+  PASS; llega al preview CSV y falla exactamente en `exact-duplicates=0`,
+  sin teclear IMPORT. Recupera el mismo punto de la candidata 27. Teardown
+  termina sin error adicional reportado; no acredita los Drops que ocultan
+  errores. Log `/tmp/pmint2-20261003-native-windows.log` y metadata `.json`.
+
+La causa macOS es la llamada redundante compuesta en `serve`, cuyo `?`
+propagaba el rechazo de una conexión al servidor completo. Se elimina esa
+llamada; `serve_one_unix` conserva la misma guarda comprobada como primera
+operación, antes de timeouts/TLS/bytes. Un rechazo termina y cierra solamente
+ese stream mediante el camino existente del worker. También se retira la
+segunda guarda idéntica de `client_exchange`, quedando una antes de TLS como
+en 26. Sin cambio del helper nativo, parser protegido, publicación exclusiva,
+permisos, límites o plazos. Se retira el diagnóstico temporal y su lector del
+fixture: la siguiente CI usa binarios normales y el probe original intacto.
+
+Se vuelve a ejecutar el método completo ya autorizado después de este cambio;
+logs `/tmp/pmint2-20261003-fixed-*.log`. No se repite Windows: su corrección
+es idéntica y los cambios posteriores de producto están exclusivamente en cfg
+Unix; no justificarían una corrida Windows idéntica.
+
+Segunda barrida, con la corrección macOS: `check.sh` rc0 (43.10 s), clean
+offline rc0 (42.88 s), **36 casos / 368.15 s, cero cambios de rc respecto al
+baseline**, mismo único mismatch de TUI y ambos REDs conservados. Sync y las
+tres publicaciones PASS; cero raíces residuales nuevas en el inventario
+acotado. Resumen `/tmp/pmint2-20261003-fixed-local-summary.log` y detalle
+`/tmp/pmint2-20261003-fixed-local-results.json`. Diff y enlaces comprobados.

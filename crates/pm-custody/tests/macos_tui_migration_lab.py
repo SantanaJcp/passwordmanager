@@ -198,8 +198,6 @@ def diagnose_service_exit(m, label, session):
     )
     print("PM26_SYNC_LIFECYCLE exit=" + exit_code + " signal=" + last_signal
           + " stderr=" + stderr, flush=True)
-    guard_failed = log.returncode == 0 and b"SYNC_FAILURE phase=accepted-socket-guard\n" in log.stdout.splitlines(keepends=True)
-    print("PM26_SYNC_FAILURE accepted-socket-guard=" + ("failed" if guard_failed else "unobserved"), flush=True)
 
 
 def diagnose_sync_wait(m, session, since, sync_db, expected_pid):

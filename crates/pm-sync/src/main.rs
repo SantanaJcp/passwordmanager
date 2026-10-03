@@ -147,9 +147,6 @@ fn serve(
     fs::set_permissions(socket, fs::Permissions::from_mode(0o666)).map_err(|_| ())?;
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        pm_native_channel::configure_unix_stream(&stream).map_err(|_| {
-            eprintln!("SYNC_FAILURE phase=accepted-socket-guard");
-        })?;
         let store_path = db.to_owned();
         let config = Arc::clone(&config);
         std::thread::spawn(move || {
@@ -313,7 +310,9 @@ fn run_with_deadline(
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn serve_one_unix(stream: UnixStream, db: &Path, config: Arc<ServerConfig>) -> Result<(), ()> {
-    // Native guard rejects only this connection, before TLS/request bytes.
+    // A peer can close before accept completes (including the TUI online
+    // probe). Failure to guard this socket rejects only this connection;
+    // no TLS/request bytes are processed before the native guard succeeds.
     pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -576,7 +575,6 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Result<Vec<u8>, ()> {
     let stream = UnixStream::connect(socket).map_err(|_| ())?;
-    pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
     pm_native_channel::configure_unix_stream(&stream).map_err(|_| ())?;
     let conn = ClientConnection::new(
         Arc::new(config),
