@@ -2055,3 +2055,22 @@ Fallback heredado observado en Crossterm 0.29 `ansi_support.rs`: si falla
 enable_vt_processing, TERM distinto de dumb puede declarar soporte. Reportado,
 sin usar ni modificar. Los cleanups heredados del handoff siguen pendientes
 de autorización y no se tocan.
+
+[Run37](https://github.com/SantanaJcp/passwordmanager/actions/runs/37087440530)
+exacto `ade41ae4ba8525277fc9311d91f60c6c9e87f0df`, job `111100551230`:
+build Windows + 12 nativos + 1 pipe + 14 observer + 1 sync PASS. Imagen
+`20260924.168.1`, Win11 Enterprise 10.0.26200, Rust ARM64 1.98.1.
+El cuerpo falla en Start-Process con `The parameter is incorrect`, antes de
+obtener las métricas: no aporta causa del prompt. Se esperó su conclusión.
+
+Inspección del diagnóstico detectó dos defectos propios: archivo nuevo sin
+registro de cleanup, y lectura desde el instalador después de sellar el árbol
+humano. Se corrigen registrando la ruta y leyendo/validando dentro del fixture
+humano antes de que el lab limpie; stderr sólo contiene métricas públicas.
+Además el argumento nuevo largo aumentaba el command line de Start-Process:
+[CreateProcessWithLogonW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw)
+tiene máximo 1024 caracteres. Se conserva exactamente el argv externo previo;
+el fixture agrega el flag/path diagnóstico sólo al CreateProcessW interno de
+ConPTY. No cambia identidad/API ni usa un launcher alternativo. El próximo
+run discrimina esta precondición y el primer frame; no se presenta run37 como
+RED del producto ni como validación del diagnóstico.

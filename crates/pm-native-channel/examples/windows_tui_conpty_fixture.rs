@@ -1808,11 +1808,21 @@ mod windows_fixture {
         }
         let password = read_synthetic_password()?;
         let mut fixture = Fixture::new();
+        let diagnostic_path =
+            std::path::Path::new(&args[4]).with_file_name("console-diagnostic.txt");
+        let mut child_arguments = args[9..].to_vec();
+        child_arguments.push("--console-diagnostics".into());
+        child_arguments.push(
+            diagnostic_path
+                .to_str()
+                .ok_or_else(|| io::Error::other("console diagnostic path is not UTF-8"))?
+                .into(),
+        );
         let operation = (|| {
             let desktop = create_private_desktop(&mut fixture, &args[1])?;
             setup_conpty(&mut fixture)?;
             setup_attributes(&mut fixture)?;
-            spawn_tui(&mut fixture, &args[2], &desktop, &args[9..])?;
+            spawn_tui(&mut fixture, &args[2], &desktop, &child_arguments)?;
             start_drain_and_release_conpty_ends(&mut fixture)?;
             exercise_keyboard_screen(
                 &fixture,
@@ -1826,6 +1836,33 @@ mod windows_fixture {
             )
         })();
         let cleanup = fixture.cleanup();
+        let diagnostic = (|| {
+            let file = std::fs::File::open(&diagnostic_path)?;
+            let mut metrics = String::new();
+            file.take(8193).read_to_string(&mut metrics)?;
+            if metrics.len() > 8192
+                || metrics.lines().any(|line| {
+                    !line.starts_with("TUI_PROBE ")
+                        || !line.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || b"= ,:()?._-".contains(&byte)
+                        })
+                })
+            {
+                return Err(io::Error::other(
+                    "console diagnostic is not bounded public metrics",
+                ));
+            }
+            eprint!("{metrics}");
+            Ok(())
+        })();
+        let operation = match (operation, diagnostic) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(primary), Ok(())) => Err(primary),
+            (Ok(()), Err(diagnostic)) => Err(diagnostic),
+            (Err(primary), Err(diagnostic)) => Err(io::Error::other(format!(
+                "{primary}; console diagnostic unavailable: {diagnostic}"
+            ))),
+        };
         match (operation, cleanup) {
             (Ok(()), Ok(Some(report))) if !report.overflow && report.captured_bytes > 0 => Ok(()),
             (Ok(()), Ok(_)) => Err(io::Error::other(

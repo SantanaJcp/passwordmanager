@@ -671,14 +671,9 @@ try {
     if ($TuiConPtyRed) {
         $stationSddl = "D:P(A;;GA;;;SY)(A;;GA;;;$humanSid)"
         $consoleDiagnostic = Join-Path $humanDir 'console-diagnostic.txt'
-        $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, '--matrix', $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1', '--console-diagnostics', $consoleDiagnostic) $humanInput $tuiOut $tuiErr
-        Assert-True (Test-Path -LiteralPath $consoleDiagnostic -PathType Leaf) 'console diagnostic was not created'
-        Assert-True ((Get-Item -LiteralPath $consoleDiagnostic).Length -le 8192) 'console diagnostic exceeded its bound'
-        $consoleLines = @(Get-Content -LiteralPath $consoleDiagnostic)
-        foreach ($line in $consoleLines) {
-            Assert-True ($line -cmatch '^TUI_PROBE [A-Za-z0-9= ,:()?._\-]+$') 'console diagnostic format is not public metrics'
-            Write-Host $line
-        }
+        Add-OwnedPath $ownedPaths $consoleDiagnostic
+        $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, '--matrix', $tuiCsv, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
+        Write-Host (Get-Content $tuiErr -Raw)
         Assert-True ($p.ExitCode -eq 0) ('normal pm-custody TUI did not complete its ConPTY tracer: ' + (Get-Content $tuiErr -Raw))
         Assert-True ((Get-Content $tuiOut -Raw) -eq "TUI_CONPTY_READY$([Environment]::NewLine)") 'TUI fixture emitted unexpected public output'
         Assert-True (Test-Path -LiteralPath $tuiBackup -PathType Leaf) 'TUI native backup was not published'
