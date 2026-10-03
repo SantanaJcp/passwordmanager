@@ -2592,6 +2592,31 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
         };
         let mut state = ListState::default(); if !rows.is_empty() { state.select(Some(selected)); }
         frame.render_stateful_widget(List::new(rows).highlight_symbol("› ").block(Block::default().title(list_title).borders(Borders::ALL)), chunks[1], &mut state);
+        render_footer(frame, chunks[2], app);
+    }).map_err(|_| Failure::Unavailable)?;
+    #[cfg(windows)]
+    if let Some(mut probe) = app.initial_diagnostic.take() {
+        probe.frame(completed.buffer)?;
+        probe.record("after-draw")?;
+        app.csv_diagnostic = Some(probe);
+    }
+    #[cfg(windows)]
+    if app.mode == Mode::CsvImport && app.input.ends_with("keep") {
+        if let Some(mut probe) = app.csv_diagnostic.take() {
+            probe.csv_frame(
+                completed.buffer,
+                app.input.ends_with("|chrome|keep"),
+                Line::raw(app.input.as_str()).width(),
+                Line::raw(app.status.as_str()).width(),
+            )?;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = completed;
+    Ok(())
+}
+
+fn render_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &App) {
         let prompt = if matches!(
             app.mode,
             Mode::Unlock
@@ -2614,28 +2639,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
             Line::from(format!("Exposure: {exposure}")),
             Line::from(controls),
         ]).wrap(Wrap { trim: true }).block(Block::default().borders(Borders::ALL));
-        frame.render_widget(footer, chunks[2]);
-    }).map_err(|_| Failure::Unavailable)?;
-    #[cfg(windows)]
-    if let Some(mut probe) = app.initial_diagnostic.take() {
-        probe.frame(completed.buffer)?;
-        probe.record("after-draw")?;
-        app.csv_diagnostic = Some(probe);
-    }
-    #[cfg(windows)]
-    if app.mode == Mode::CsvImport && app.input.ends_with("keep") {
-        if let Some(mut probe) = app.csv_diagnostic.take() {
-            probe.csv_frame(
-                completed.buffer,
-                app.input.ends_with("|chrome|keep"),
-                Line::raw(app.input.as_str()).width(),
-                Line::raw(app.status.as_str()).width(),
-            )?;
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = completed;
-    Ok(())
+        frame.render_widget(footer, area);
 }
 
 fn display_secret(value: &[u8]) -> String {
@@ -2674,6 +2678,114 @@ const fn kind_label(kind: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use ratatui::backend::TestBackend;
+
+    fn render_test_footer(terminal: &mut Terminal<TestBackend>, app: &App) {
+        terminal.draw(|frame| {
+            let chunks = Layout::default().direction(Direction::Vertical)
+                .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(6)])
+                .split(frame.area());
+            render_footer(frame, chunks[2], app);
+        }).unwrap();
+    }
+
+    fn footer_app(input: &str) -> App {
+        let mut app = App::new(Duration::from_secs(300), Duration::from_secs(15), Duration::from_secs(30));
+        app.mode = Mode::CsvImport;
+        app.input.push_str(input);
+        app.status = "CSV source path|chrome|keep with synthetic mapping and confirmation before importing".into();
+        app
+    }
+
+    fn footer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        (1..79).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned()
+    }
+
+    #[test]
+    fn footer_long_input_keeps_suffix_and_cursor_at_80x24() {
+        let input = format!("{}|chrome|keep", "synthetic-path/".repeat(8));
+        let app = footer_app(&input);
+        assert!(app.input.ends_with("|chrome|keep"));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        render_test_footer(&mut terminal, &app);
+        let expected = format!("Input: ‹{}", &input[input.len() - 69..]);
+        assert_eq!(footer_row(&terminal, 20), expected);
+        assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        assert!(footer_row(&terminal, 19).ends_with('…'));
+        assert_eq!(footer_row(&terminal, 21), "Exposure: <hidden>");
+    }
+
+    #[test]
+    fn footer_exact_input_width_and_one_more_cell() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for (length, expected) in [(70, format!("Input: {}", "a".repeat(70))), (71, format!("Input: ‹{}", "a".repeat(69)))] {
+            render_test_footer(&mut terminal, &footer_app(&"a".repeat(length)));
+            assert_eq!(footer_row(&terminal, 20), expected);
+            assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        }
+    }
+
+    #[test]
+    fn footer_wide_glyph_at_the_edge_is_never_split_or_omitted() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for (length, expected) in [(68, format!("Input: {}界", "a".repeat(68))), (69, format!("Input: ‹{}界", "a".repeat(67)))] {
+            render_test_footer(&mut terminal, &footer_app(&format!("{}界", "a".repeat(length))));
+            assert!(footer_row(&terminal, 20).starts_with(&expected));
+            assert_eq!(terminal.backend().buffer()[(76, 20)].symbol(), "界");
+            assert_eq!(terminal.backend().buffer()[(78, 20)].symbol(), " ");
+            assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        }
+    }
+
+    #[test]
+    fn footer_combining_graphemes_scroll_as_screen_cells() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for (length, expected) in [(70, format!("Input: {}", "e\u{301}".repeat(70))), (71, format!("Input: ‹{}", "e\u{301}".repeat(69)))] {
+            render_test_footer(&mut terminal, &footer_app(&"e\u{301}".repeat(length)));
+            assert_eq!(footer_row(&terminal, 20), expected);
+            assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        }
+    }
+
+    #[test]
+    fn footer_secret_scroll_only_renders_the_existing_mask() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for mode in [Mode::Unlock, Mode::ConfirmPasskeyPassword, Mode::MasterRotate, Mode::RecoveryRotate] {
+            let mut app = footer_app(&"synthetic-secret-界e\u{301}".repeat(8));
+            app.mode = mode;
+            render_test_footer(&mut terminal, &app);
+            assert_eq!(footer_row(&terminal, 20), format!("Input: ‹{}", "•".repeat(69)));
+            assert!(!format!("{:?}", terminal.backend().buffer()).contains("synthetic-secret"));
+            assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        }
+    }
+
+    #[test]
+    fn footer_long_status_cannot_overwrite_input_and_preserves_graphemes() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut app = footer_app("typed-suffix");
+        app.status = format!("{}界e\u{301}tail", "s".repeat(75));
+        render_test_footer(&mut terminal, &app);
+        assert!(footer_row(&terminal, 19).starts_with(&format!("{}界…", "s".repeat(75))));
+        assert_eq!(footer_row(&terminal, 20), "Input: typed-suffix");
+        assert_eq!(terminal.get_cursor_position().unwrap(), (20, 20).into());
+    }
+
+    #[test]
+    fn footer_resize_recomputes_scroll_at_80x24() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let app = footer_app(&format!("{}|chrome|keep", "synthetic/".repeat(9)));
+        render_test_footer(&mut terminal, &app);
+        terminal.backend_mut().resize(80, 24);
+        terminal.autoresize().unwrap();
+        render_test_footer(&mut terminal, &app);
+        assert!(footer_row(&terminal, 20).ends_with("|chrome|keep"));
+        assert!(footer_row(&terminal, 20).starts_with("Input: ‹"));
+        assert_eq!(terminal.get_cursor_position().unwrap(), (78, 20).into());
+        assert!(footer_row(&terminal, 19).ends_with('…'));
+    }
 
     fn arguments<'a>(values: &'a [&'a str]) -> impl Iterator<Item = OsString> + 'a {
         values.iter().map(OsString::from)

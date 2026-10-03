@@ -2314,3 +2314,45 @@ normal exacta; continuar tipos/resize/restore/rotaciones, negativas de lease y
 peer/source y sync E2E. No repetir este candidato sin cambio/experimento.
 Siguen reportados sin corregir los cleanups WindowsServerPipe/SD/LocalFree,
 WindowsClipboardWindow y la lista del handoff: su autorización no fue concedida.
+
+
+### Fase 2: método del footer autorizado — 2026-10-02
+
+Decisión explícita del usuario: input de una línea con scroll horizontal por
+celdas/grafemas, cursor y final visibles, `‹` a la izquierda oculta; status de
+una línea recortado con `…`, sin desplazar el input. Se conserva la máscara
+existente por modo. El editor actual sólo inserta/borra al final; no admite
+movimiento dentro del input, por lo que no hay texto a la derecha ni `›`.
+No se cambia límite de entrada, keymap, rutas Windows, pantalla ni deadlines.
+
+Extensión acordada de verificación, antes de modificar el render: extraer sólo
+el footer existente sin cambiar su comportamiento y probarlo con el backend
+TestBackend de Ratatui a 80×24 y el mismo layout 3/Min(5)/6. Un RED debe mostrar
+que el modelo contiene el sufijo y la fila input no. Casos adicionales: ancho
+útil exacto y +1 (una celda reservada para cursor), glyph ancho al borde,
+combinantes, máscara secreta, status e input largos simultáneos y resize desde
+100×30 a 80×24. Se comprueban fila/celdas y cursor, no sólo una cadena auxiliar.
+
+El lab Linux de operaciones ya ofrece `send_long`: teclea, exige sufijo visible
+en PTY y sólo entonces envía Enter. Un CSV sintético con nombre largo propio
+extiende ese mismo oráculo a 80×24; no se amplían plazos ni se sustituye el motor.
+Se conserva el RED antes del cambio y se repite tras el GREEN. Desde este cwd,
+toda ejecución Cargo/check/lab se envuelve con `flock
+/tmp/pm-cargo-window.lock`; ningún lock queda retenido mientras se espera CI.
+Regresión autorizada: rustfmt, check/tests pm-custody, check.sh y los tres labs
+Linux TUI 23–25, con los artefactos absolutos indicados por el usuario. Cualquier
+fallo se conserva y diagnostica antes de corregir/repetir; no se presenta cfg
+Linux como Windows/macOS. Después se publica commit exacto por push normal y
+se despacha el lab Windows normal con matriz ConPTY; se espera su conclusión.
+
+
+RED previo, producto sin cambio semántico: `flock
+/tmp/pm-cargo-window.lock ./scripts/cargo-local.sh test -p pm-custody --lib
+footer_ --locked --offline` retornó 101, 0/7 PASS. El caso largo confirma el
+modelo completo y la fila de input contiene `importing` (continuación de status)
+en vez del sufijo. Log: `/tmp/pm27-phase2-footer-red.log`.
+`flock /tmp/pm-cargo-window.lock env PM_KEYCLOAK_DIST=<ruta autorizada>
+PM_CFT_DIR=<ruta autorizada> ./scripts/test-linux-tui-operations-lab.sh`
+retornó 1 en el oráculo `|chrome|keep` a 80×24: status en dos filas, `Input:`
+en otra y path recortado en la última. No se envió Enter. Log:
+`/tmp/pm27-phase2-linux-tui-red.log`; cleanup propio sin error agregado.
