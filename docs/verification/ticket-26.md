@@ -2441,3 +2441,15 @@ la raíz sintética, eliminados con errores propagados. El diagnóstico nunca
 convierte el FAIL8s en PASS; falta sample también es error. No tocar el flujo
 compartido de backup/persistencia de W2. Registrar asimismo cada colisión que
 sí pase con `result=rejected destination=same`, conservando digest y literal.
+
+Corrida W1 fase2 propia3:
+[37129005704](https://github.com/SantanaJcp/passwordmanager/actions/runs/37129005704),
+SHA `c4038653314a8adeef1e75f16d3828106894d5aa`, terminó FAIL en ambos CPU.
+Intel y ARM pasan Full25 local y **ambas colisiones** con literal de rechazo
+antes de8s y digest de destino intacto: Intel14:23:30/14:23:34 UTC,
+ARM14:19:02/14:19:06 UTC. Ambos avanzan al bloqueo conocido de W2:
+`durable=integrity screen=integrity process=same`, missingpurgeditems5.
+Log `/tmp/pmw1b-macos1.log`. No se ejecutó el sample posterior al fallo porque
+el gate pasó. No atribuir causa raíz al timeout histórico ARM ni afirmar que
+la instrumentación lo corrigió: **no reproducido**, causa pendiente. No repetir
+el mismo SHA sin hipótesis nueva. Deadline8s, backup y aserciones intactos.

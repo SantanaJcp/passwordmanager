@@ -527,6 +527,7 @@ try {
     Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
     if ($TuiConPtyRed) {
         Invoke-Checked 'cargo' @('build', '-p', 'pm-native-channel', '--example', 'windows_tui_conpty_fixture', '--locked', '--offline')
+        Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '--example', 'windows_human_tui_seed', '--locked', '--offline')
     }
     $custody = Join-Path $repo 'target\debug\pm-custody.exe'
     $cli = Join-Path $repo 'target\debug\pm.exe'
@@ -549,9 +550,15 @@ try {
     Invoke-Checked 'cargo' @('test', '-p', 'pm-sync', '--lib', '--locked', '--offline')
     $tuiFixture = $null
     $tuiCustody = $null
+    $tuiSeed = $null
     if ($TuiConPtyRed) {
         $builtFixture = Join-Path $repo 'target\debug\examples\windows_tui_conpty_fixture.exe'
         Assert-NativeStaticMsvcBinary $dumpbin $builtFixture 'windows_tui_conpty_fixture.exe'
+        $builtSeed = Join-Path $repo 'target\debug\examples\windows_human_tui_seed.exe'
+        Assert-NativeStaticMsvcBinary $dumpbin $builtSeed 'windows_human_tui_seed.exe'
+        $tuiSeed = Join-Path $humanDir 'windows_human_tui_seed.exe'
+        Copy-Item -LiteralPath $builtSeed -Destination $tuiSeed -ErrorAction Stop
+        Add-OwnedPath $ownedPaths $tuiSeed
         $tuiFixture = Join-Path $humanDir 'windows_tui_conpty_fixture.exe'
         $tuiCustody = Join-Path $humanDir 'pm-custody.exe'
         Copy-Item -LiteralPath $builtFixture -Destination $tuiFixture -ErrorAction Stop
@@ -683,6 +690,10 @@ try {
     Assert-True ($p.ExitCode -eq 0) 'human RPK channel failed after SCM restart'
 
     if ($TuiConPtyRed) {
+        $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId) $humanInput $humanOut $humanErr
+        Assert-True ($p.ExitCode -eq 0) ('ordinary human type seeding failed: ' + (Get-Content $humanErr -Raw))
+        Assert-True ((Get-Content $humanOut -Raw).Trim() -eq 'PASS windows-tui-seed types=7 ordinary-human-wire=1 readback=exact') 'seven-type readback was not exact'
+        Write-Host (Get-Content $humanOut -Raw)
         $stationSddl = "D:P(A;;GA;;;SY)(A;;GA;;;$humanSid)"
         $consoleDiagnostic = Join-Path $humanDir 'console-diagnostic.txt'
         Add-OwnedPath $ownedPaths $consoleDiagnostic

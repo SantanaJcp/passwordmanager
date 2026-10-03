@@ -3035,3 +3035,50 @@ SCREEN_WAIT15s, sustitución y comparación exacta. No modificar DestroyWindow
 Drop ni ninguna omisión heredada sin autorización.
 
 Consumo nativo propio fase2: dos corridas Windows terminadas, de máximo6.
+
+### Corrida 3 fase2: colisión Mac no reproducida
+
+[macOS 37129005704](https://github.com/SantanaJcp/passwordmanager/actions/runs/37129005704),
+SHA `c4038653314a8adeef1e75f16d3828106894d5aa`, terminó FAIL Intel/ARM por
+purge/outbox W2, después de Full25 local y ambas negativas de colisión PASS8s,
+destino intacto. [Detalle en26](ticket-26.md#w1-fase-2--discriminante-arm-de-colisión-2026-10-03).
+La hipótesis de status/panel está descartada por código; la causa del timeout
+histórico ARM sigue desconocida. Instrumentación posterior al fallo no
+alcanzada. No se confunde no reproducción con reparación. Tres corridas
+propias terminadas de máximo6.
+
+### Método siguiente: tipos, resize y discriminante clipboard Windows
+
+Fixture autónomo `windows_human_tui_seed` prepara los ocho registros sintéticos
+ya usados por el lab Linux (siete tipos y token-exchange) por el canal humano
+RPK normal, opcodes1/9/5/10/14. Exige igualdad exacta del LogicalRecord leído;
+no añade entrypoints de producto ni engine alternativo. Se ejecuta como humano
+no elevado y se inspecciona su PE ARM64/static MSVC antes de lanzarlo.
+La TUI real debe mostrar los siete tipos, selección metadata sin canarios,
+selector de campo sin valor, reveal exacto de cada tipo y expiración1s.
+Passkey es contenido almacenado, no evidencia WebAuthn/UP/UV. Resize real
+100×30→42×12→80×24 exige salida nativa fresca en la geometría actual; observer
+no inventa reflow ni sustituye glifos. Negativas adicionales empty/directory
+antes de31 deben producir error explícito, cero lease y DACL original exacta;
+se conserva hardlink y el positivo en la misma conexión.
+
+Clipboard conserva copia exacta, interloper, lease1s y wait15s. Añadir sólo
+categorías del status actual (expired/cleanup-not-confirmed/reveal-expired/
+copied), proceso/parser y booleano de si la publicación interloper duró al
+menos la lease. Hipótesis a discriminar: EmptyClipboard entrega un mensaje al
+owner anterior mientras el nuevo owner mantiene abierto el clipboard; la TUI
+sin pump de mensajes Windows puede llegar al expiry con ese recurso ocupado.
+No se adopta como causa ni se modifica producto antes de evidencia nativa.
+No cambiar DestroyWindow Drop, plazos ni resultado esperado.
+
+Fallback heredado adicional: WindowsClientPipe::Drop omite CloseHandle. El
+fixture seed consume su pipe y comprueba CloseHandle explícitamente; no altera
+el Drop del producto ni lo usa para convertir un fallo en éxito. El checker
+textual PE selecciona ahora la línea exacta del build de ambos productos,
+para distinguir el nuevo build del fixture sin omitir ninguna inspección.
+
+Preflight local: `check.sh` rc0 bajo flock,
+`/tmp/pmw1b-check4.log` (check3 falló en el selector textual PE al añadir el
+segundo build, antes de producto; corregido seleccionando ambos productos).
+Fmt y diff-check PASS. Linux no compila los cuerpos cfg Windows; la aceptación
+nativa del fixture nuevo y del resize sigue pendiente de la próxima corrida.

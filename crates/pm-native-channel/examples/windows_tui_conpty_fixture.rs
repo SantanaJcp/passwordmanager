@@ -36,7 +36,7 @@ mod windows_fixture {
             SECURITY_ATTRIBUTES,
         },
         System::{
-            Console::{COORD, ClosePseudoConsole, CreatePseudoConsole},
+            Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole},
             DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
             Memory::{GlobalLock, GlobalSize, GlobalUnlock},
             Pipes::CreatePipe,
@@ -112,6 +112,8 @@ mod windows_fixture {
     }
 
     struct ScreenState {
+        columns: usize,
+        rows: usize,
         cells: Vec<ScreenCell>,
         row: usize,
         column: usize,
@@ -155,6 +157,8 @@ mod windows_fixture {
     impl ScreenState {
         fn new() -> Self {
             Self {
+                columns: SCREEN_COLUMNS,
+                rows: SCREEN_ROWS,
                 cells: vec![ScreenCell::Empty; SCREEN_COLUMNS * SCREEN_ROWS],
                 row: 0,
                 column: 0,
@@ -188,7 +192,7 @@ mod windows_fixture {
         }
 
         fn contains(&self, expected: &str) -> bool {
-            self.cells.chunks(SCREEN_COLUMNS).any(|row| {
+            self.cells.chunks(self.columns).any(|row| {
                 let mut rendered = String::new();
                 for cell in row {
                     match cell {
@@ -204,7 +208,7 @@ mod windows_fixture {
         fn information_rows(&self) -> Option<Vec<String>> {
             let row_text = |y: usize| {
                 let mut row = String::new();
-                for cell in &self.cells[y * SCREEN_COLUMNS..(y + 1) * SCREEN_COLUMNS] {
+                for cell in &self.cells[y * self.columns..(y + 1) * self.columns] {
                     match cell {
                         ScreenCell::Empty => row.push(' '),
                         ScreenCell::Glyph(value) => row.push_str(value),
@@ -213,10 +217,10 @@ mod windows_fixture {
                 }
                 row
             };
-            if !row_text(3).contains("Information") {
+            if self.rows <= 7 || !row_text(3).contains("Information") {
                 return None;
             }
-            (4..SCREEN_ROWS - 7)
+            (4..self.rows - 7)
                 .map(|y| {
                     let row = row_text(y);
                     row.strip_prefix('│')
@@ -449,19 +453,19 @@ mod windows_fixture {
                 self.advance_row();
                 self.wrap_pending = false;
             }
-            if width == 2 && self.column == SCREEN_COLUMNS - 1 {
+            if width == 2 && self.column == self.columns - 1 {
                 self.column = 0;
                 self.advance_row();
             }
-            let index = self.row * SCREEN_COLUMNS + self.column;
+            let index = self.row * self.columns + self.column;
             self.erase_cell_footprint(index);
             self.cells[index] = ScreenCell::Glyph(character.to_string());
             if width == 2 {
                 self.erase_cell_footprint(index + 1);
                 self.cells[index + 1] = ScreenCell::WideContinuation;
             }
-            if self.column + width == SCREEN_COLUMNS {
-                self.column = SCREEN_COLUMNS - 1;
+            if self.column + width == self.columns {
+                self.column = self.columns - 1;
                 self.wrap_pending = true;
             } else {
                 self.column += width;
@@ -469,7 +473,7 @@ mod windows_fixture {
         }
 
         fn combine(&mut self, character: char) {
-            let row_start = self.row * SCREEN_COLUMNS;
+            let row_start = self.row * self.columns;
             let mut index = row_start + self.column;
             if self.wrap_pending {
                 index = row_start + self.column;
@@ -507,14 +511,14 @@ mod windows_fixture {
         }
 
         fn advance_row(&mut self) {
-            if self.row == SCREEN_ROWS - 1 {
+            if self.row == self.rows - 1 {
                 let Some(next) = self.bottom_scrolls.checked_add(1) else {
                     self.fail("ConPTY bottom-scroll counter overflow");
                     return;
                 };
                 self.bottom_scrolls = next;
-                self.cells.rotate_left(SCREEN_COLUMNS);
-                self.cells[(SCREEN_ROWS - 1) * SCREEN_COLUMNS..].fill(ScreenCell::Empty);
+                self.cells.rotate_left(self.columns);
+                self.cells[(self.rows - 1) * self.columns..].fill(ScreenCell::Empty);
             } else {
                 self.row += 1;
             }
@@ -585,7 +589,7 @@ mod windows_fixture {
                 b'H' | b'f' if parameters.len() <= 2 => {
                     let row = parameters.first().copied().unwrap_or(1).max(1) - 1;
                     let column = parameters.get(1).copied().unwrap_or(1).max(1) - 1;
-                    if row >= SCREEN_ROWS || column >= SCREEN_COLUMNS {
+                    if row >= self.rows || column >= self.columns {
                         self.fail("ConPTY absolute cursor position outside screen");
                     } else {
                         let Some(next) = self.cursor_positions.checked_add(1) else {
@@ -603,11 +607,11 @@ mod windows_fixture {
                     self.wrap_pending = false;
                 }
                 b'B' if parameters.len() <= 1 => {
-                    self.row = (self.row + distance()).min(SCREEN_ROWS - 1);
+                    self.row = (self.row + distance()).min(self.rows - 1);
                     self.wrap_pending = false;
                 }
                 b'C' if parameters.len() <= 1 => {
-                    self.column = (self.column + distance()).min(SCREEN_COLUMNS - 1);
+                    self.column = (self.column + distance()).min(self.columns - 1);
                     self.wrap_pending = false;
                 }
                 b'D' if parameters.len() <= 1 => {
@@ -616,7 +620,7 @@ mod windows_fixture {
                 }
                 b'G' if parameters.len() <= 1 => {
                     let column = distance() - 1;
-                    if column >= SCREEN_COLUMNS {
+                    if column >= self.columns {
                         self.fail("ConPTY horizontal cursor position outside screen");
                     } else {
                         self.column = column;
@@ -625,7 +629,7 @@ mod windows_fixture {
                 }
                 b'd' if parameters.len() <= 1 => {
                     let row = distance() - 1;
-                    if row >= SCREEN_ROWS {
+                    if row >= self.rows {
                         self.fail("ConPTY vertical cursor position outside screen");
                     } else {
                         self.row = row;
@@ -637,26 +641,26 @@ mod windows_fixture {
                     if first == 2 || first == 3 {
                         self.cells.fill(ScreenCell::Empty);
                     } else {
-                        for cell in &mut self.cells[self.row * SCREEN_COLUMNS + self.column..] {
+                        for cell in &mut self.cells[self.row * self.columns + self.column..] {
                             *cell = ScreenCell::Empty;
                         }
                     }
                 }
                 b'K' if parameters.len() <= 1 && matches!(first, 0 | 1 | 2) => {
                     self.wrap_pending = false;
-                    let start = self.row * SCREEN_COLUMNS;
+                    let start = self.row * self.columns;
                     let (from, through) = match first {
-                        0 => (start + self.column, start + SCREEN_COLUMNS),
+                        0 => (start + self.column, start + self.columns),
                         1 => (start, start + self.column + 1),
-                        2 => (start, start + SCREEN_COLUMNS),
+                        2 => (start, start + self.columns),
                         _ => unreachable!(),
                     };
                     self.cells[from..through].fill(ScreenCell::Empty);
                 }
                 b'X' if parameters.len() <= 1 => {
                     self.wrap_pending = false;
-                    let from = self.row * SCREEN_COLUMNS + self.column;
-                    let count = distance().min(SCREEN_COLUMNS - self.column);
+                    let from = self.row * self.columns + self.column;
+                    let count = distance().min(self.columns - self.column);
                     for index in from..from + count {
                         self.erase_cell_footprint(index);
                     }
@@ -771,7 +775,9 @@ mod windows_fixture {
         fn wait_for_footer_suffix(&self, expected: &str) -> Result<(), String> {
             self.wait_for_matching("footer suffix and insertion cursor", |state| {
                 let mut row = String::new();
-                for cell in &state.cells[20 * SCREEN_COLUMNS..21 * SCREEN_COLUMNS] {
+                for cell in
+                    &state.cells[(state.rows - 4) * state.columns..(state.rows - 3) * state.columns]
+                {
                     match cell {
                         ScreenCell::Empty => row.push(' '),
                         ScreenCell::Glyph(value) => row.push_str(value),
@@ -780,8 +786,8 @@ mod windows_fixture {
                 }
                 row.starts_with("│Input: ‹")
                     && row.trim_end_matches('│').trim_end().ends_with(expected)
-                    && state.row == 20
-                    && state.column == 78
+                    && state.row == state.rows - 4
+                    && state.column == state.columns - 2
             })
         }
 
@@ -853,7 +859,7 @@ mod windows_fixture {
                 .count();
             let row_counts = state
                 .cells
-                .chunks(SCREEN_COLUMNS)
+                .chunks(state.columns)
                 .map(|row| {
                     row.iter()
                         .filter(|cell| matches!(cell, ScreenCell::Glyph(_)))
@@ -1665,6 +1671,7 @@ mod windows_fixture {
             eprintln!("TUI_STAGE stage=encoding-natural-exit result=pass");
             return Ok(());
         }
+        exercise_types_and_resize(fixture)?;
         // Ticket 25 migration is driven through the real keyboard and common
         // human handler. The service result is awaited before the next input;
         // no operation is retried by the fixture.
@@ -1698,6 +1705,7 @@ mod windows_fixture {
             .map_err(io::Error::other)?;
 
         eprintln!("TUI_STAGE stage=csv-import result=pass");
+        reject_invalid_local_sources(fixture, paths.onepux)?;
         reject_multilink_source(fixture, paths.onepux)?;
         crate::acl::probe_human_token_lease()?;
         eprintln!("TUI_STAGE stage=human-token-lease-discriminant result=pass");
@@ -1795,13 +1803,29 @@ mod windows_fixture {
                 "TUI clipboard did not contain the exact selected synthetic field",
             ));
         }
+        let replacement_started = Instant::now();
         let replacement = pm_native_channel::OwnedClipboard::copy(b"synthetic-ticket27-new-owner")
             .map_err(|_| io::Error::other("fixture interloper could not own private clipboard"))?;
+        eprintln!(
+            "TUI_CLIPBOARD replacement-crossed-lease={}",
+            replacement_started.elapsed() >= Duration::from_secs(1)
+        );
         thread::sleep(Duration::from_millis(1_200));
         fixture
             .observer
             .wait_for("Clipboard custody expired")
-            .map_err(io::Error::other)?;
+            .map_err(|primary| {
+                let categories = fixture.observer.state.lock().map(|state| format!(
+                    "expired={} cleanup-not-confirmed={} reveal-expired={} copied={}",
+                    state.contains("Clipboard custody expired"),
+                    state.contains("Clipboard cleanup not confirmed"),
+                    state.contains("Reveal expired"),
+                    state.contains("Copied explicitly"),
+                ));
+                let observer = fixture.observer.diagnostic();
+                let child = child_diagnostic(fixture.process);
+                io::Error::other(format!("{primary}; clipboard-status={categories:?}; child={child:?}; observer={observer:?}"))
+            })?;
         let expected_replacement = zeroize::Zeroizing::new(
             "synthetic-ticket27-new-owner"
                 .encode_utf16()
@@ -1916,6 +1940,187 @@ mod windows_fixture {
         exercise_restore_rotations(fixture, &paths)?;
         write_keyboard_input(fixture, b"q")?;
         require_tui_exit(fixture.process)
+    }
+
+    fn exercise_types_and_resize(fixture: &Fixture) -> io::Result<()> {
+        for kind in [
+            "Password", "TOTP", "Passkey", "SSH", "Token", "Note", "File",
+        ] {
+            fixture
+                .observer
+                .wait_for(&format!("[{}]", kind.to_lowercase()))
+                .map_err(io::Error::other)?;
+        }
+        for (title, field, index, value) in [
+            (
+                "Password",
+                "auth[0].password",
+                14,
+                "ticket05-e2e-password-canary",
+            ),
+            ("TOTP", "auth[0].secret", 13, "ticket05-e2e-totp-canary"),
+            (
+                "Passkey",
+                "auth[0].private_key",
+                17,
+                "ssssssssssssssssssssssssssssssss",
+            ),
+            ("SSH", "auth[0].private_key", 14, "ticket05-e2e-ssh-canary"),
+            ("Token", "auth[0].secret", 13, "ticket05-e2e-token-canary"),
+            ("ticket05-e2e-search-canary", "notes", 5, "note"),
+            (
+                "File",
+                "attachment[0].content",
+                18,
+                "ticket05-e2e-attachment-canary 🌎",
+            ),
+        ] {
+            search(fixture, title)?;
+            fixture
+                .observer
+                .wait_for("Search returned 1 active items")
+                .map_err(io::Error::other)?;
+            // Catalogue and explicit field labels expose no selected field value.
+            if value != "note" {
+                fixture
+                    .observer
+                    .rejects(value.as_bytes())
+                    .map_err(io::Error::other)?;
+            }
+            press(fixture, "r")?;
+            fixture
+                .observer
+                .wait_for("Fields (explicit selection; values hidden)")
+                .map_err(io::Error::other)?;
+            press(fixture, &"j".repeat(index))?;
+            fixture
+                .observer
+                .wait_for(&format!("› {field}"))
+                .map_err(io::Error::other)?;
+            if value != "note" {
+                fixture
+                    .observer
+                    .rejects(value.as_bytes())
+                    .map_err(io::Error::other)?;
+            }
+            press(fixture, "\r")?;
+            fixture.observer.wait_for(value).map_err(io::Error::other)?;
+            fixture
+                .observer
+                .wait_for("Reveal expired")
+                .map_err(io::Error::other)?;
+            fixture
+                .observer
+                .rejects(value.as_bytes())
+                .map_err(io::Error::other)?;
+        }
+        eprintln!("TUI_STAGE stage=seven-types-explicit-fields result=pass");
+        for (columns, rows, expected) in [
+            (100, 30, "Items (selection is metadata only)"),
+            (42, 12, "Password Manager"),
+            (80, 24, "Items (selection is metadata only)"),
+        ] {
+            let previous_positions = {
+                let mut state = fixture
+                    .observer
+                    .state
+                    .lock()
+                    .map_err(|_| io::Error::other("resize observer poisoned"))?;
+                let previous_positions = state.cursor_positions;
+                if unsafe {
+                    ResizePseudoConsole(
+                        fixture.pseudo_console,
+                        COORD {
+                            X: columns,
+                            Y: rows,
+                        },
+                    )
+                } != 0
+                {
+                    return Err(io::Error::other("native ConPTY resize rejected"));
+                }
+                state.columns = columns as usize;
+                state.rows = rows as usize;
+                // No inferred reflow content: demand new native output at this geometry.
+                state.cells = vec![ScreenCell::Empty; state.columns * state.rows];
+                state.row = 0;
+                state.column = 0;
+                state.saved_row = 0;
+                state.saved_column = 0;
+                state.wrap_pending = false;
+                previous_positions
+            };
+            fixture
+                .observer
+                .wait_for_matching("fresh native resize repaint", |state| {
+                    state.cursor_positions > previous_positions && state.contains(expected)
+                })
+                .map_err(io::Error::other)?;
+        }
+        eprintln!("TUI_STAGE stage=resize-native-100x30-42x12-80x24 result=pass");
+        Ok(())
+    }
+
+    fn reject_invalid_local_sources(fixture: &Fixture, source: &str) -> io::Result<()> {
+        let empty = std::path::Path::new(source).with_extension("negative-empty.1pux");
+        let directory = std::path::Path::new(source).with_extension("negative-directory.1pux");
+        if empty.try_exists()? || directory.try_exists()? {
+            return Err(io::Error::other("owned 1PUX negative source collision"));
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&empty)?;
+        use std::os::windows::io::IntoRawHandle;
+        let mut handle = file.into_raw_handle();
+        let mut close_errors = Vec::new();
+        close_handle(
+            &mut handle,
+            "CloseHandle(owned empty source)",
+            &mut close_errors,
+        );
+        if !close_errors.is_empty() {
+            return Err(io::Error::other(close_errors.join("; ")));
+        }
+        if let Err(error) = std::fs::create_dir(&directory) {
+            return match std::fs::remove_file(&empty) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(io::Error::other(format!(
+                    "{error}; empty-source cleanup: {cleanup}"
+                ))),
+            };
+        }
+        let operation = (|| {
+            for path in [&empty, &directory] {
+                crate::acl::Sampling::observe(fixture.process, false, || {
+                    open_menu(fixture, "m", "Migration:")?;
+                    open_menu(fixture, "2", "1PUX source")?;
+                    let path = path
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("synthetic source not UTF-8"))?;
+                    let request = format!("{}|keep", encode_operation_field(path));
+                    type_visible_and_submit(fixture, &request, "|keep")?;
+                    fixture
+                        .observer
+                        .wait_for("Operation failed explicitly; no success was recorded")
+                        .map_err(io::Error::other)
+                })?;
+            }
+            eprintln!("TUI_STAGE stage=source-empty-directory-rejected-dacl-unchanged result=pass");
+            Ok(())
+        })();
+        let empty_cleanup = std::fs::remove_file(&empty);
+        let directory_cleanup = std::fs::remove_dir(&directory);
+        let errors = [operation, empty_cleanup, directory_cleanup]
+            .into_iter()
+            .filter_map(Result::err)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(errors.join("; ")))
+        }
     }
 
     fn reject_multilink_source(fixture: &Fixture, source: &str) -> io::Result<()> {

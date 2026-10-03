@@ -396,7 +396,7 @@ test "$diagnostic_dir_line" -lt "$diagnostic_dir_owned_line" &&
     exit 1
 }
 
-build_line=$(grep -nF "Invoke-Checked 'cargo' @('build', '-p', 'pm-custody'" "$lab" | cut -d: -f1)
+build_line=$(grep -nF "Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli'" "$lab" | cut -d: -f1)
 dumpbin_line=$(grep -nE 'Assert-NativeStaticMsvcBinary \$dumpbin \$(custody|cli) ' "$lab" | cut -d: -f1)
 test "$(printf '%s\n' "$dumpbin_line" | wc -l)" -eq 2 || {
     echo 'Windows custody lab must inspect both native product executables' >&2
