@@ -42,6 +42,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(all(test, windows))]
+mod windows_pipe_tests;
+
 const MAGIC: &[u8] = b"PMK1";
 const ALPN: &[u8] = b"pm-sync/1";
 const MAX_FRAME: usize = 1024 * 1024;
@@ -767,6 +770,8 @@ fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Resul
                 1,
             );
         }
+        #[cfg(test)]
+        windows_pipe_tests::after_response(tls.sock.raw_handle());
         drop(reading);
         drop(exchange);
         let verifying = timing::Span::new("client_pipe_verify");

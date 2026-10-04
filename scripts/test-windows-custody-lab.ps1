@@ -657,6 +657,9 @@ try {
     $serviceSid = Get-Sid "NT SERVICE\$serviceName"
     Invoke-Checked 'cargo' @('test', '-p', 'pm-native-channel', '--all-targets', '--locked', '--offline')
     Invoke-Checked 'cargo' @('test', '-p', 'pm-sync', '--lib', '--locked', '--offline')
+    $env:PMW1_TEST_SID = Get-Sid $installerName
+    try { Invoke-Checked 'cargo' @('test', '-p', 'pm-sync', '--bin', 'pm-sync', '--locked', '--offline', '--', '--nocapture') }
+    finally { Remove-Item Env:PMW1_TEST_SID -ErrorAction Stop }
     $tuiFixture = $null
     $tuiCustody = $null
     $tuiSeed = $null

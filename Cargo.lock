@@ -1692,6 +1692,7 @@ dependencies = [
  "pm-vault",
  "rusqlite",
  "rustls",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

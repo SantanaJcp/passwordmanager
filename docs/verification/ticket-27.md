@@ -4847,3 +4847,36 @@ cursor ausente/inicio0 (inferencia de fuente). Cleanup de temporales/staging,
 write de diagnóstico y clasificación genérica exit→Unavailable conservados;
 server dispatch sigue sustituyendo error por ok=false. No usar esos caminos
 para aceptar el RPC. Root/integración y cambios ajenos preservados.
+
+## W1 fase 8 — método autorizado (2026-10-04)
+
+Base limpia `9897badaf44eaa5f238152c37c47c7d0dc7557b2`, rama W1 aislada.
+Hasta seis corridas Windows, sobre SHAs publicados distintos según hipótesis;
+una macOS si cambia código común. Sin integración, cambio de tickets, límites,
+KDF, ACL, retry ni fallbacks. Runner estándar/repo público, datos sintéticos,
+sin caches/artifacts/secrets conforme a native-ci.md.
+
+Regresión nativa mínima: el cliente real `client_exchange` usa un pipe local
+con DACL protegida del creador y TLS1.3/RPK reales. Un hook compilado sólo en
+tests, después de leer el frame completo, ordena el cierre comprobado del
+handle servidor y espera su confirmación por un canal de test (30s). Consulta
+por separado GetNamedPipeServerProcessId y PeekNamedPipe, con flags/errores
+Win32 categóricos, sin IDs/handles/rutas/payload. Exige identidad PID intacta
+si la consulta la conserva, y fallo de liveness posterior al cierre; el
+intercambio autenticado completo debe tener éxito sin requerir servidor vivo
+después de responder. Antes de corregir orden: RED nativo de esa última
+aserción. Después: GREEN mismo test; negativas TLS existentes intactas.
+No ACK, sleep, replay ni consulta sustitutiva en producto. Este pipe de test
+no acredita separación de identidades, cubierta por el lab SCM existente.
+
+Luego medir job completo con PMW1_TIMING existente y mantener corte TUI15s.
+Si supera el plazo, portar exclusivamente transporte de sesión Windows,
+reutilizando engine W2, wire/límites/deadline30s y ACL/commit por RPC; obtener
+regresión nativa de sesión y medir de nuevo. Matriz incluye SYNC y RETIRE y
+observadores durables, sin anunciar NOT_RUN como PASS. Clasificar por separado
+el FAIL histórico local-operations (37176911110).
+
+Gates locales: check, clean offline y los 52 comandos de fase6, bajo flock
+individual /tmp/pm-cargo-window.lock, cwd W1, artefactos absolutos indicados y
+sesión Wayland real. Esperados49 rc0 + matrix y dos extras rc1 conocidos;
+W4 fuera de gates. Logs nuevos /tmp/pmw1g-phase8-*.log, sin borrar ajenos.
