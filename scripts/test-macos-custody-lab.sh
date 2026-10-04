@@ -80,8 +80,6 @@ main() {
   local root
   root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
   cd "$root"
-  # W6 phase 2 diagnostic: measure duplicate revision decoding without changing gates.
-  export PMW6_TIMING=1
   configure_ticket26_build_commands "$mode" "$root"
   local libsodium_out_dir
   libsodium_out_dir=$("${build_command[@]}" |
@@ -117,7 +115,8 @@ main() {
   configure_ticket26_harness_command \
     "$mode" "$root" "$libsodium_out_dir/source/libsodium-stable/config.log" \
     "$final_phase_only"
-  "${harness_command[@]}"
+  # W6 phase 2 diagnostic: enable timing only where owned logs are prepared.
+  PMW6_TIMING=1 "${harness_command[@]}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

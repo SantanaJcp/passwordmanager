@@ -2915,3 +2915,31 @@ Preflight de coste: repo PUBLIC comprobado por gh; runners estándar macos-15
 e Intel, manual, permissions contents:read, sin cache/artifacts/secrets/larger.
 [Facturación oficial](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
 consultada2026-10-04: runners estándar públicos gratuitos.
+
+
+Restore RED local medible: siete tipos reales en backup_lifecycle,14 decodes
+frente al criterio de uno por revisión (7). /tmp/pmw6b-decode-red-measure.log
+test funcional rc0; oráculo de coste rc1 en decode-red-oracle.log.1.187ms
+acumulados. Tras transferir LogicalRecord ya validado del verifier al collector,
+GREEN siete decodes/0.671ms en decode-green-measure.log y green-oracle.log.
+Ganancia aislada0.516ms, no prueba de mejora del tiempo total ni del margen
+Intel. Instrumentación temporal Linux retirada, sin eprintln en producto.
+La nueva ruta revision es obligatoria del collector: ninguna segunda lectura
+ni decode alternativo; mismas comprobaciones de manifiesto/topología, IDs
+frescos/reencriptado y revalidación commit. Extensión del lab plaintext cubre
+además destino creado entre warning y EXPORT, custodio pausado y sin temporal.
+
+Diagnóstico de referencia despachado: run37182547706, SHA
+b9429d7d17b74619b97646e77bc65f1282ba16e3, inputs false/false; esperar ambos
+jobs antes de interpretar. Referencia mantiene los14/7 decodes según inventario
+y restore íntegro anterior para comparación con candidato optimizado.
+
+
+Corrida1 fase2: ARM terminó antes del harness por defecto del launcher W6: el
+export global de PMW6_TIMING llegó a los tests Cargo sin log privado, panic
+phase_timing.rs32 en backup_stream. No es RED productivo ni evidencia de
+unlock/restore. Corrección de launcher: variable sólo en invocación del
+harness, que prepara logs y retira el entorno de las CLI de setup. Intel
+sigue ejecutando a este corte; esperar terminación de ambos. El siguiente
+checkpoint publica sólo este ajuste y evidencia, manteniendo decoder anterior
+para una referencia válida. Candidato optimizado aún no publicado.
