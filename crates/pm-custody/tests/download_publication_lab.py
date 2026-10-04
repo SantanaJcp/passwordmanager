@@ -78,6 +78,22 @@ def main():
         assert (digest(destination), destination.stat().st_size, destination.stat().st_mode,
                 destination.stat().st_ino) == original
         assert not destination.with_suffix(".partial").exists()
+        if kind == "plaintext":
+            confirmation_collision = destination.with_name("confirmation-plaintext.output")
+            request(root, kind, confirmation_collision, confirm=False)
+            wait_text(root, "PLAINTEXT WARNING")
+            os.kill(daemon.pid, signal.SIGSTOP)
+            try:
+                as_uid(HUMAN, [sys.executable, "-c",
+                    "import os,sys;fd=os.open(sys.argv[1],os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600);os.write(fd,b'synthetic-confirmation-destination');os.close(fd)", confirmation_collision])
+                before_confirmation = (digest(confirmation_collision), confirmation_collision.stat())
+                send(root, "EXPORT", enter=True)
+                wait_text(root, "Operation failed explicitly; no success was recorded (DESTINATION_EXISTS)")
+                assert (digest(confirmation_collision), confirmation_collision.stat()) == before_confirmation
+                assert not confirmation_collision.with_suffix(".partial").exists()
+            finally:
+                os.kill(daemon.pid, signal.SIGCONT)
+            print("PASS plaintext-confirmation collision=DestinationExists server=paused partial=absent", flush=True)
         if kind in ("backup", "plaintext"):
             print(f"PASS {kind}-early collision=DestinationExists server=paused partial=absent", flush=True)
             raced = destination.with_name(f"raced-{kind}.output")

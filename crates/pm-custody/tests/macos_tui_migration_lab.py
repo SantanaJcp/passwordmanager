@@ -315,7 +315,7 @@ def sample_collision_process(m, session, label, pid, path):
 
 def expect_output_collision(session, kind, path, expected_digest, *, since, m):
     try:
-        session.wait_text("Operation failed explicitly; no success was recorded", since=since)
+        session.wait_information("Operation failed explicitly; no success was recorded (DESTINATION_EXISTS)", since=since)
     except BaseException as error:
         try:
             page = session._current_text_after(since)
@@ -341,6 +341,7 @@ def expect_output_collision(session, kind, path, expected_digest, *, since, m):
             raise error from diagnostic_error
         raise
     assert source_digest(path) == expected_digest, "collision changed the original output"
+    assert not path.with_suffix(".partial").exists(), "collision retained a temporary"
     print(f"PM26_OUTPUT_COLLISION kind={kind} result=rejected destination=same", flush=True)
 
 
@@ -612,9 +613,8 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
 
         mark = operation(session, "b", "1", "New native backup path", native)
         expect_output_collision(session, "backup", native, native_digest, since=mark, m=m)
+        # Existing destinations are rejected before preparing the warning/RPC.
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
-        session.wait_information("PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:", since=mark)
-        submit(session, "EXPORT")
         expect_output_collision(session, "plaintext", plaintext, plaintext_digest, since=mark, m=m)
 
         session.w2_custodian_pid = m.running_launchd_pid(

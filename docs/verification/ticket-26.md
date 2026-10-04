@@ -2943,3 +2943,56 @@ harness, que prepara logs y retira el entorno de las CLI de setup. Intel
 sigue ejecutando a este corte; esperar terminación de ambos. El siguiente
 checkpoint publica sólo este ajuste y evidencia, manteniendo decoder anterior
 para una referencia válida. Candidato optimizado aún no publicado.
+
+
+#### Referencia nativa fase2: ambas CPU terminadas
+
+| Run / SHA / CPU | Resultado y frontera |
+| --- | --- |
+| [37182547706](https://github.com/SantanaJcp/passwordmanager/actions/runs/37182547706) / b9429d7d17b74619b97646e77bc65f1282ba16e3 / Intel y ARM | FAIL antes de harness por alcance incorrecto PMW6_TIMING; no aceptación ni medición restore. artifacts0. |
+| [37182840765](https://github.com/SantanaJcp/passwordmanager/actions/runs/37182840765) / 9a743870a1dba6388df2a37c33c1ba84f53fff87 / [Intel111378691284](https://github.com/SantanaJcp/passwordmanager/actions/runs/37182840765/job/111378691284) | FAIL: endpoint PASS, core/Full25 local y restore PASS; backup collision rechazado. Fixture esperaba PLAINTEXT WARNING después del destino existente, pero TUI ya daba operation-failure. Sync/final NOT_RUN. artifacts0. |
+| Mismo run/SHA / [ARM111378691315](https://github.com/SantanaJcp/passwordmanager/actions/runs/37182840765/job/111378691315) | Misma frontera FAIL de expectativa obsoleta plaintext; endpoint y restore PASS. Sync/final NOT_RUN. artifacts0. |
+
+Restore de referencia con17 revisiones reales: Intel TUI2.570260s, prepare
+2.146351s, commit0.386675s;34 decodes/10.956ms acumulados. ARM TUI3.429893s,
+prepare3.087762s, commit0.315793s;34 decodes/4.474ms. La diferencia frente al
+Intel fase1 de7.970014s ocurre **antes** de optimizar; demuestra variabilidad
+de runner, no ganancia atribuible al cambio. Captura con overhead de logging
+opt-in; scopes anidados no se suman. KDF efectivo256MiB/3/p1 preservado.
+
+El fixture de macOS se adaptará al rechazo temprano autorizado: eliminar
+espera de warning/EXPORT únicamente para destino existente; mantener warning
+y confirmación en happy export/cancelación. Exigir código DESTINATION_EXISTS
+completo en panel, hash intacto y temporal ausente con mismo wait8s. Sin
+aceptar alternativamente el flujo antiguo ni relajar errores. Patch preparado
+en /tmp/pmw6b-macos-early-fixture.py, pendiente de aplicar tras congelación
+del barrido52. Launcher/env corregido; no nuevos parámetros ni skips.
+
+Ambos runs: macOS15.7.9/kernel24.6.0, Rust1.98.1 y arquitectura nativa
+comprobada. Intel image_os macos15/image_version20260824.0482.1;
+ARM macos15/20260907.0337.1. Inputs false/false; dos corridas del presupuesto
+fase2 consumidas, quedan dos. Logs /tmp/pmw6b-macos{1,2}-*.log.
+
+
+#### Candidato optimizado: verificación local final
+
+Linux52 terminado:49rc0 + tresrc1 conocidos, cero regresiones; manifest
+congelado por caso y Wayland de sesión real. Check47.994s/clean98.504s
+(wall incluye espera del lock). /tmp/pmw6b-final-gates-results.json y
+summary.log; logs individuales final-gates-*.log. Mismas causas: g7-matrix
+stream staging retenido tras EIO/ENOSPC en commit-outbox-audit; g7-extra
+bootstrap/vault autoridad/receipts cambiados tras pérdida. W4 concurrency
+rc0 sólo observación fuera de gates. No se convirtió ningún RED en éxito.
+
+Happy plaintext + colisión temprana/confirmación/carrera, destino intacto y
+sin temporales, PASS también /tmp/pmw6b-plaintext-confirmation-green.log.
+Backup y attachment publicación PASS en barrido. Producto optimizado de
+restore comprobado por tests funcionales/corrupción/staging del check y
+digest de grafos; KDF/límites/commits FULL/oráculos existentes preservados.
+
+Tras terminar el snapshot52 sólo se adapta fixture nativo macOS (dos esperas
+obsoletas removidas y exigencia de código completo/temp ausente añadida).
+Rust y fixtures Linux byte-idénticos al snapshot52. AST/diff/config/shell
+locales validan este ajuste; la interfaz macOS requiere siguiente corrida
+nativa. Se mantiene timing opt-in forzado exclusivamente al harness en
+este candidato de comparación; todavía no se declara aceptación normal.
