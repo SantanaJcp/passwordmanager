@@ -90,11 +90,18 @@ W6_OFFSETS = {"custody": 0, "tui": 0}
 W6_LINE = re.compile(
     rb"(?:PMW6_PHASE operation=(?:kdf|root-open|vault-unlock|restore-prepare|"
     rb"archive-parse|restore-commit|server-unlock|human-dispatch|server-restore|"
-    rb"tui-unlock|tui-restore|catalog) phase=[a-z-]+ elapsed_us=[0-9]{1,20} "
+    rb"tui-unlock|tui-restore|catalog) phase=(?:aborted|archive-sent|archive-staged|argon2id|audit-appended|audit-committed|audit-transaction|batch-verified|bundle-loaded|catalog-received|catalog-refreshed|challenge-staged|channel-verified|committed|committed-response|complete|connected-magic-written|decoded-dispatched|events-applied|frame-decoded|frame-received|frame-written|graphs-verified|headers-read|keys-opened|manifest-verified|prepared|prepared-response|protected-output|records-processed|repainted|response-encoded|response-received|response-written|revisions-verified|root-opened|rows-read|sqlite-closed|sqlite-configured|sqlite-opened|sqlite-transaction|staging-retired|start|state-digest|tls-magic-received|vault-unlocked) elapsed_us=[0-9]{1,20} "
     rb"total_us=[0-9]{1,20} at_us=[0-9]{1,20}|"
     rb"PMW6_KDF algorithm=argon2id13 memory_mib=[0-9]{1,4} "
     rb"passes=[0-9]{1,2} parallelism=1 output_bytes=32)$"
 )
+
+
+def w6_observer(operation, result):
+    if W6_TIMING_ENABLED:
+        assert operation in {"unlock", "restore"}
+        assert result in {"submitted", "observed", "failed"}
+        print(f"PMW6_OBSERVER operation={operation} result={result} at_us={time.time_ns() // 1000}", flush=True)
 
 
 def w6_phase_timings():
@@ -2872,9 +2879,11 @@ def start_macos_tui(binary, profile, private, endpoint, *, idle, reveal, copy, p
         )
         session.send_text(password.decode("ascii"), enter=True, hidden=True)
         submitted = time.monotonic()
+        w6_observer("unlock", "submitted")
         try:
             session.wait_text("Unlocked: selection never reveals secrets")
         except BaseException as primary:
+            w6_observer("unlock", "failed")
             print(f"PMW2_UNLOCK result=failed prompt_ms={round((prompted-started)*1000)} submit_ms={round((submitted-prompted)*1000)} wait_ms={round((time.monotonic()-submitted)*1000)}", flush=True)
             try:
                 w6_phase_timings()
@@ -2882,6 +2891,7 @@ def start_macos_tui(binary, profile, private, endpoint, *, idle, reveal, copy, p
             except BaseException as diagnostic:
                 raise primary from diagnostic
             raise
+        w6_observer("unlock", "observed")
         print(f"PMW2_UNLOCK result=observed prompt_ms={round((prompted-started)*1000)} submit_ms={round((submitted-prompted)*1000)} wait_ms={round((time.monotonic()-submitted)*1000)}", flush=True)
         w6_phase_timings()
         return session

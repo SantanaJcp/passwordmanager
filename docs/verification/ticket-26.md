@@ -2611,3 +2611,50 @@ check rc101 sólo por missing-panics-doc de la nueva instrumentación;
 no es RED del comportamiento. Se documenta el fallo explícito del log/clock
 opt-in, sin suprimir lint. Verificación Linux52 se ejecutará sobre este
 checkpoint congelado mientras CI usa runners separados.
+
+
+W6 diagnóstico1 [37180184678](https://github.com/SantanaJcp/passwordmanager/actions/runs/37180184678),
+SHA `e60b8dfa88c0b6e6f6cf7627b69c1ca12889bd58`, completed/failure, ambos jobs
+terminados, artifacts0. Intel: unlock observado1.565s, pero el recolector
+rechazó la categoría fija `argon2id` (regex sin dígitos), antes de core/Full25;
+**defecto de instrumentación W6**, no causa histórica ni aceptación.
+ARM: antes de TUI, test heredado
+`session_endpoint_failure_returns_explicit_ipc_error_and_failed_exit`
+falló en purge_sync.rs:1490 por BrokenPipe escribiendo stdin. El peer cerró
+el handshake sin esperar el envío único del fixture. W6 no modificó ese
+archivo ni transporte; test/observer race, no fallo de unlock/restore.
+Preparado `/tmp/pmw6-endpoint-order.patch`, sin aplicar, autorización de zona
+pendiente: ordenar el cierre después del envío, conservar rc4/frame IPC exacto,
+stderr vacío/roots0. No reintentar el envío ni ampliar espera.
+
+Intel sólo dejó SQLite4.184ms/protección de salida KDF0.186ms y parámetros
+256MiB/3/p1 antes del rechazo del recolector; duración Argon2/restore no
+recuperable porque cleanup elimina los logs privados propios. No inferir
+fases faltantes ni presentar la muestra parcial como tabla completa.
+Entorno: macOS15.7.9/kernel24.6.0, Rust1.98.1; Intel imagen20260824.0482.1,
+ARM20260907.0337.1, hosts/artefactos nativos comprobados. Workflow intacto,
+inputs false/false, sin cache/artifacts/secrets/larger. Repositorio público y
+[runners estándar gratuitos](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+verificados en vivo antes del dispatch. Logs `/tmp/pmw6-macos1-{intel,arm}.log`.
+
+Linux52 sobre e60b8df: `/tmp/pmw6-diag1-gates-results.json`, **49rc0, tresrc1
+esperados, cero regresiones**, manifest estable entre todos los casos,
+Wayland real desde inicio, flock por comando, W4 sólo observación. Check75.419s,
+clean47.302s (wall incluye espera de lock). REDs por las mismas causas:
+g7-matrix commit-outbox-audit EIO/ENOSPC staging retenido; g7-extra-bootstrap/
+vault autoridad/receipts cambiados tras pérdida. Cleanup errors0 en esos labs.
+Logs `/tmp/pmw6-diag1-gates-*.log`. No se renombra ningún RED como PASS.
+
+Corrección de instrumentación para diagnóstico2: lista explícita de las46
+fases fijas, incluido argon2id, sin permitir etiquetas arbitrarias. REDrc1
+`/tmp/pmw6-parser-red.log` → GREENrc0 `/tmp/pmw6-parser-green.log`; contenido
+extra/path/salt sigue rechazado. Config/AST/diff PASS
+`/tmp/pmw6-parser-config.log`. Se añaden marcas de envío/resultado/cutoff
+para filtrar por reloj las fases posteriores al gate; respuesta tardía no
+satisface el oráculo. Rust/producto/fixtures Linux idénticos a e60b8df.
+
+Hipótesis diagnóstico2: con captura válida y cutoff explícito, discriminar
+frame/espera humana, KDF, SQLite/audit, catálogo/repaint y restore. Misma
+operación y waits8/20s. El test compartido permanece intacto mientras su
+corrección siga fuera de autorización. Diagnóstico1 consumió1/3 diagnósticos
+(y1/6 dispatches), aunque no alcanzó el objetivo de reproducción.
