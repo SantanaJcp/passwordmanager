@@ -2492,3 +2492,22 @@ fase4:17.671 s y2.329 s conservadores; esta muestra tiene0.316 s menos de
 margen conservador. No repetir un SHA idéntico por variabilidad ni cambiar
 el oráculo. FDE/reboot/firma/terminal humano siguen sin acreditarse;26 no cambia
 estado ni se integra en la rama unificada.
+
+### W2 fase 5 — diagnóstico y rendimiento (2026-10-04)
+
+Base W2 actualizada por fast-forward a `1d270ad`; no se toca rama unificada,
+W1 Windows ni estados de tickets. Método, RED/GREEN, matriz y runs están en
+[W2 fase5](w2-purge-sync.md#fase-5--método-autorizado-y-discriminantes).
+El cambio verifica una snapshot completa del DAG/purgas por página de
+exportación en vez de por revisión; conserva fsync, wire, límites, KDF,
+publicación y ack. No añade batching, prohibido por el wire vigente.
+
+Diagnóstico
+[37175725951](https://github.com/SantanaJcp/passwordmanager/actions/runs/37175725951),
+SHA `aac3d4429ea68c4758d23d97aee0bcb66baa9376`, ARM terminado FAIL en restore
+antes de sync. Nueve unlocks observados: KDF0.820–5.415s, wait1.084–5.772s;
+entrada Full25 wait4.927s/KDF4.707s. Unlock intermitente **no reproducido**,
+causa histórica pendiente. Backup6.883s, restore no acreditado dentro8s,
+sync/final NOT_RUN. Intel aún pendiente en esta anotación; no aceptación
+ambas CPU. Siguiente discriminante: retirar perfil unlock y feature de
+instrumentación, manteniendo Full25 y plazos completos.

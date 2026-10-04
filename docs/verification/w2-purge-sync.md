@@ -849,3 +849,83 @@ check completo. Control TLS bajo interposición: antes publicación3.462s /
 convergencia4.341s; después2.914 /3.785s. Puts271/gets272 en ambos;
 fsync426/fdatasync0 en el proceso de prueba en ambos, incluye setup y
 recepción, no es total del servidor remoto. Los fsync no se eliminan.
+
+Corridas consumidas hasta el diagnóstico nativo:
+
+- [37175688148](https://github.com/SantanaJcp/passwordmanager/actions/runs/37175688148),
+  `7f4709687ff85f36c7a8e7937781472f493fa89c`: **completed/cancelled**,
+  ambos jobs cancelados. Se publicó por error antes de inspeccionar el último
+  preflight: la negativa nueva usó `slice::repeat` sobre un tipo Clone que no
+  es Copy. No es RED de comportamiento ni aceptación; consume un dispatch.
+- [37175725951](https://github.com/SantanaJcp/passwordmanager/actions/runs/37175725951),
+  `aac3d4429ea68c4758d23d97aee0bcb66baa9376`: diagnóstico 1, pendiente de
+  completar. Construcción de página negativa corregida, preflight focalizado
+  rc0 (`/tmp/pmw2e-native-profile-preflight3.log`).
+
+El primer check del barrido rc101 por Clippy `too_many_lines` en el test
+ampliado, después de pasar tests; clean offline rc0. No se presenta como gate
+PASS. La fuente permanece congelada durante los 52 casos; después se extraerá
+un helper de negativas sin relajar el lint ni las aserciones y se repetirá
+check. Logs originales conservados, ningún ticket cambia estado.
+
+Diagnóstico 1 ARM (job111357812404) terminado **failure**: nueve unlocks
+observados con wait1.084–5.772s; KDF0.820–5.415s. En la entrada Full25:
+wait4.927s, KDF4.707s, servidor unlock4.747s, SQLite/config≤1ms.
+Ningún unlock alcanza8s ni muestra error de protección; no se ejecutó sample
+porque el gate no falló. Esto no prueba la causa del fallo histórico ARM ni
+excluye congestión anterior al handler. La variabilidad de KDF es real pero
+atribuirle el timeout histórico sigue siendo **inferencia, no causa probada**.
+
+Backup feliz ARM6.883s; después FAIL en el wait8s original de restore,
+`before-ui=unclassified after-ui=unclassified delta-items=0 authority=same`.
+Full25/sync/final no terminan; sync **NOT_RUN**. Control TLS39 eventos:
+publicación4.660s/convergencia6.323s, puts271/gets272. No sustituye la TUI.
+La segunda hipótesis nativa retirará el perfil de unlock/feature diagnóstico,
+conservando solamente scopes sync y tiempos de observación del fixture.
+
+### Diagnóstico 1 Intel y siguiente RED permitido
+
+Diagnóstico1 terminado: Intel PASS completo, ARM FAIL restore; workflow FAIL.
+Intel happy wait15.363s/submit1.701s/total17.064s; margen4.637s (23.2%).
+Exportación1/0.888212s frente a59/4.518s en fase4; push10.724549s,
+pull4.191001s, job15.048742s. Put287/8.270936s, get287/1.490303s;
+server dispatch576/7.630256s; download fsync36/0.586470s,
+joined fsync5/0.425102s, status fsync4/0.128198s. Sin backoff;
+PIDs estables y pushed59/pulled59. Scopes anidados, no sumar con fases.
+KDF Intel0.605–5.504s; ninguno de los15 unlocks vence8s.
+
+Método siguiente: TLS/RPK real, secuencia16 puts+16 gets+publish+list,
+32 respuestas de bloques y root durables comprobadas por conexión RO antes
+cerrar TLS. Contar aperturas SQLite del dispatch; RED34 frente a1.
+GREEN reutiliza sólo la conexión propia de cada TLS, sin transacción retenida
+ni agrupar commits; ACL/hash/límites por RPC, FULL/WAL/autocheckpoint y cierre
+comprobado intactos. El camino Windows no cambia. Repetir los52 casos tras
+el nuevo cambio productivo, logs `/tmp/pmw2e-session-*`.
+
+SQLite RED `/tmp/pmw2e-sqlite-red.log` rc101: secuencia real intacta,
+34 aperturas frente a1. GREEN `/tmp/pmw2e-sqlite-green-check.log`:
+34 RPCs durables/una apertura, control TLS2.851s publicación/3.729s
+convergencia; puts271/gets272 y fsync426 del proceso de prueba conservados.
+El check de ese bloque tuvo dos `needless_borrow` tras extraer las negativas;
+no es gate PASS. Se corrigen sin allow y se conserva ese log rojo.
+
+Se reutiliza la conexión SQLite propia del TLS Unix en el dispatch, sin
+transacción entre RPCs, autorización cacheada ni cambios de synchronous,
+checkpoint o commit. `OpaqueSyncStore` conserva el modo explícito de conexión
+por llamada para sus consumidores, incluido Windows; un error al abrir la
+sesión Unix falla, no elige ese modo como alternativa. El cierre de la sesión
+se comprueba antes de devolver el handler. Se retira el build/inyección del
+perfil de unlock; quedan los scopes sync y observaciones del fixture.
+
+Fallback heredado adicional inspeccionado y conservado: `optional_field`
+(pm-sync/src/main.rs) devuelve None para valor con escape/newline/CR. En el
+cursor opcional de list eso se trata como parámetro ausente y comienza en0,
+concebiblemente ocultando un cursor suministrado inválido. Es inferencia de
+código; no se modifica el parser ni se usa para validar esta corrección.
+
+Check final del segundo cambio `/tmp/pmw2e-sqlite-check3.log` rc0, suite y
+Clippy completos. El log check2 rc101 conserva el cast de longitud de log
+señalado por Clippy; se sustituyó por conversión comprobada. Sin lints
+suprimidos. Primer barrido52:48 rc0/tres RED conocidos/un FAIL Clippy del
+nuevo test; escenarios funcionales y negativos esperados conservados.
+El segundo barrido completo corresponde al nuevo servidor persistente.

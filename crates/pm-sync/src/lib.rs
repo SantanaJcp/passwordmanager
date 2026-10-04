@@ -421,6 +421,30 @@ impl OpaqueSyncStore {
             .optional()?;
         ok.ok_or(SyncError::Unauthorized).map(drop)
     }
+    fn rpc_connection(&self) -> Result<OpaqueSyncConnection, SyncError> {
+        let connection = Connection::open(&self.path)?;
+        timing::count("store_sqlite_open", 1);
+        Ok(OpaqueSyncConnection {
+            connection: std::cell::RefCell::new(connection),
+        })
+    }
+
+    /// Opens the connection owned by one Unix TLS session, without a retained
+    /// read/write transaction or cached namespace authorization.
+    ///
+    /// # Errors
+    /// Propagates opening/schema errors; never chooses another execution mode.
+    #[cfg(unix)]
+    pub fn session_connection(&self) -> Result<OpaqueSyncConnection, SyncError> {
+        let session = self.rpc_connection()?;
+        {
+            let c = session.connection.borrow();
+            c.execute_batch("PRAGMA trusted_schema=OFF")?;
+            c.query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))?;
+        }
+        Ok(session)
+    }
+
     pub fn put(
         &self,
         namespace: [u8; 32],
@@ -431,8 +455,75 @@ impl OpaqueSyncStore {
         if bytes.is_empty() || bytes.len() > MAX_BLOCK_BYTES || digest(bytes) != hash {
             return Err(SyncError::Integrity);
         }
-        let c = Connection::open(&self.path)?;
-        Self::check(&c, &namespace, rpk)?;
+        self.rpc_connection()?.put(namespace, rpk, hash, bytes)
+    }
+    pub fn get(
+        &self,
+        namespace: [u8; 32],
+        rpk: &[u8],
+        hash: [u8; 32],
+    ) -> Result<Vec<u8>, SyncError> {
+        self.rpc_connection()?.get(namespace, rpk, hash)
+    }
+    pub fn publish(
+        &self,
+        namespace: [u8; 32],
+        rpk: &[u8],
+        root: [u8; 32],
+    ) -> Result<(), SyncError> {
+        self.rpc_connection()?.publish(namespace, rpk, root)
+    }
+    pub fn list(
+        &self,
+        namespace: [u8; 32],
+        rpk: &[u8],
+        cursor: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(u64, [u8; 32])>, SyncError> {
+        if limit == 0 || limit > MAX_LIST_LIMIT {
+            return Err(SyncError::InvalidRequest);
+        }
+        self.rpc_connection()?.list(namespace, rpk, cursor, limit)
+    }
+    pub fn delete(
+        &self,
+        namespace: [u8; 32],
+        rpk: &[u8],
+        hashes: &[[u8; 32]],
+    ) -> Result<(), SyncError> {
+        if hashes.len() > 256 {
+            return Err(SyncError::InvalidRequest);
+        }
+        self.rpc_connection()?.delete(namespace, rpk, hashes)
+    }
+}
+
+/// One database connection with independently committed and authorized RPCs.
+/// The Unix server owns it for exactly one TLS connection; single-RPC callers
+/// still create a short-lived connection through `OpaqueSyncStore`.
+pub struct OpaqueSyncConnection {
+    connection: std::cell::RefCell<Connection>,
+}
+#[allow(clippy::missing_errors_doc)]
+impl OpaqueSyncConnection {
+    pub fn close(self) -> Result<(), SyncError> {
+        self.connection
+            .into_inner()
+            .close()
+            .map_err(|(_, error)| SyncError::Storage(error))
+    }
+    pub fn put(
+        &self,
+        namespace: [u8; 32],
+        rpk: &[u8],
+        hash: [u8; 32],
+        bytes: &[u8],
+    ) -> Result<(), SyncError> {
+        if bytes.is_empty() || bytes.len() > MAX_BLOCK_BYTES || digest(bytes) != hash {
+            return Err(SyncError::Integrity);
+        }
+        let c = self.connection.borrow();
+        OpaqueSyncStore::check(&c, &namespace, rpk)?;
         let existing: Option<Vec<u8>> = c
             .query_row(
                 "SELECT bytes FROM blocks WHERE namespace=?1 AND hash=?2",
@@ -459,8 +550,8 @@ impl OpaqueSyncStore {
         rpk: &[u8],
         hash: [u8; 32],
     ) -> Result<Vec<u8>, SyncError> {
-        let c = Connection::open(&self.path)?;
-        Self::check(&c, &namespace, rpk)?;
+        let c = self.connection.borrow();
+        OpaqueSyncStore::check(&c, &namespace, rpk)?;
         let bytes: Vec<u8> = c
             .query_row(
                 "SELECT bytes FROM blocks WHERE namespace=?1 AND hash=?2",
@@ -480,8 +571,8 @@ impl OpaqueSyncStore {
         rpk: &[u8],
         root: [u8; 32],
     ) -> Result<(), SyncError> {
-        let c = Connection::open(&self.path)?;
-        Self::check(&c, &namespace, rpk)?;
+        let c = self.connection.borrow();
+        OpaqueSyncStore::check(&c, &namespace, rpk)?;
         let exists: Option<i64> = c
             .query_row(
                 "SELECT 1 FROM blocks WHERE namespace=?1 AND hash=?2",
@@ -506,8 +597,8 @@ impl OpaqueSyncStore {
         if limit == 0 || limit > MAX_LIST_LIMIT {
             return Err(SyncError::InvalidRequest);
         }
-        let c = Connection::open(&self.path)?;
-        Self::check(&c, &namespace, rpk)?;
+        let c = self.connection.borrow();
+        OpaqueSyncStore::check(&c, &namespace, rpk)?;
         let mut s = c.prepare(
             "SELECT seq,hash FROM roots WHERE namespace=?1 AND seq>?2 ORDER BY seq LIMIT ?3",
         )?;
@@ -538,8 +629,8 @@ impl OpaqueSyncStore {
         if hashes.len() > 256 {
             return Err(SyncError::InvalidRequest);
         }
-        let mut c = Connection::open(&self.path)?;
-        Self::check(&c, &namespace, rpk)?;
+        let mut c = self.connection.borrow_mut();
+        OpaqueSyncStore::check(&c, &namespace, rpk)?;
         let tx = c.transaction()?;
         for hash in hashes {
             tx.execute("DELETE FROM blocks WHERE namespace=?1 AND hash=?2 AND NOT EXISTS(SELECT 1 FROM roots WHERE namespace=?1 AND hash=?2)",params![namespace.as_slice(),hash.as_slice()])?;

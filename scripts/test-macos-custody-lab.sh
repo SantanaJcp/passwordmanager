@@ -81,14 +81,6 @@ main() {
   root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
   cd "$root"
   configure_ticket26_build_commands "$mode" "$root"
-  # Phase-5 W2 profiling uses the existing diagnostic boundaries in ordinary
-  # Full25, injecting activation only into the owned custody daemon.
-  local w2_unlock_profile=0
-  if [[ "$mode" == normal && "$final_phase_only" == false ]]; then
-    w2_unlock_profile=1
-    build_command+=(--features macos-ticket26-diagnostics)
-    test_command+=(--features macos-ticket26-diagnostics)
-  fi
   local libsodium_out_dir
   libsodium_out_dir=$("${build_command[@]}" |
     python3 scripts/extract-libsodium-build-metadata.py)
@@ -123,7 +115,7 @@ main() {
   configure_ticket26_harness_command \
     "$mode" "$root" "$libsodium_out_dir/source/libsodium-stable/config.log" \
     "$final_phase_only"
-  PMW2_UNLOCK_PROFILE="$w2_unlock_profile" "${harness_command[@]}"
+  "${harness_command[@]}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

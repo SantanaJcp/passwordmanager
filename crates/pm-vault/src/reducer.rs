@@ -2743,7 +2743,16 @@ mod export_page_tests {
             checks, 1,
             "one complete ledger verification per export page"
         );
-        let db = rusqlite::Connection::open(&path).unwrap();
+        reject_corrupt_export_page(&reducer, &path, &fixture.0, &events);
+    }
+
+    fn reject_corrupt_export_page(
+        reducer: &CausalReducer,
+        path: &Path,
+        directory: &Path,
+        events: &[SignedCausalEvent],
+    ) {
+        let db = rusqlite::Connection::open(path).unwrap();
         let signature: Vec<u8> = db
             .query_row(
                 "SELECT device_signature FROM authority_events WHERE event_digest=?1",
@@ -2756,10 +2765,10 @@ mod export_page_tests {
             [events[0].digest().as_slice()],
         )
         .unwrap();
-        let bad_directories: Vec<_> = (0..4).map(|i| fixture.0.join(format!("bad-{i}"))).collect();
+        let bad_directories: Vec<_> = (0..4).map(|i| directory.join(format!("bad-{i}"))).collect();
         assert!(
             reducer
-                .export_ciphertext_graphs(&events, &bad_directories)
+                .export_ciphertext_graphs(events, &bad_directories)
                 .is_err()
         );
         assert!(
@@ -2778,7 +2787,7 @@ mod export_page_tests {
         .unwrap();
         assert!(
             reducer
-                .export_ciphertext_graphs(&events, &bad_directories)
+                .export_ciphertext_graphs(events, &bad_directories)
                 .is_err(),
             "every graph digest remains mandatory"
         );
@@ -2787,7 +2796,7 @@ mod export_page_tests {
                 .export_ciphertext_graphs(
                     &(0..257).map(|_| events[0].clone()).collect::<Vec<_>>(),
                     &(0..257)
-                        .map(|i| fixture.0.join(format!("oversized-{i}")))
+                        .map(|i| directory.join(format!("oversized-{i}")))
                         .collect::<Vec<_>>()
                 )
                 .is_err(),

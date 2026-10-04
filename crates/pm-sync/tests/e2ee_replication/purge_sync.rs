@@ -804,7 +804,8 @@ impl TlsServer {
             .arg("--client-pub")
             .arg(client_public)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .env("PMW2_TIMING", "1")
+            .stderr(fs::File::create(f.dir.path("w2-server-timing.log")).unwrap())
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1572,5 +1573,41 @@ fn authenticated_session_preserves_wal_and_durable_commits_between_blocks() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[test]
+fn authenticated_session_reuses_one_sqlite_connection_for_durable_rpc_sequence() {
+    let mut f = PurgeFixture::new();
+    let server = TlsServer::start(&mut f);
+    let log = f.dir.path("w2-server-timing.log");
+    let offset = usize::try_from(fs::metadata(&log).unwrap().len()).unwrap();
+    let mut last = [0; 32];
+    for index in 0..16_u8 {
+        let bytes = vec![index; 32];
+        last = pm_crypto::digest(&bytes);
+        server.transport.put(f.namespace, last, &bytes).unwrap();
+        assert_eq!(server.transport.get(f.namespace, last).unwrap(), bytes);
+    }
+    server.transport.publish(f.namespace, last).unwrap();
+    assert_eq!(
+        server.transport.list(f.namespace, None, 128).unwrap().len(),
+        1
+    );
+    // Every response already denotes a committed row, before closing TLS.
+    assert_eq!(count_rows(&f.dir.path("tls-store.sqlite3"), "blocks"), 16);
+    assert_eq!(count_rows(&f.dir.path("tls-store.sqlite3"), "roots"), 1);
+    server.transport.finish().unwrap();
+    let log = fs::read(log).unwrap();
+    let opens = log[offset..]
+        .split(|b| *b == b'\n')
+        .filter(|line| line.starts_with(b"PMW2_TIMING category=store_sqlite_open count=1 "))
+        .count();
+    workload_trace(format_args!(
+        "PMW2_STORE puts=16 gets=16 publish=1 list=1 sqlite_opens={opens}"
+    ));
+    assert_eq!(
+        opens, 1,
+        "one SQLite connection for sequential authenticated RPCs"
     );
 }
