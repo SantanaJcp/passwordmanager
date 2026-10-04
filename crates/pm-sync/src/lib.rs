@@ -455,7 +455,8 @@ impl OpaqueSyncStore {
         if bytes.is_empty() || bytes.len() > MAX_BLOCK_BYTES || digest(bytes) != hash {
             return Err(SyncError::Integrity);
         }
-        self.rpc_connection()?.put(namespace, rpk, hash, bytes)
+        self.rpc_connection()?
+            .put_validated(namespace, rpk, hash, bytes)
     }
     pub fn get(
         &self,
@@ -522,6 +523,17 @@ impl OpaqueSyncConnection {
         if bytes.is_empty() || bytes.len() > MAX_BLOCK_BYTES || digest(bytes) != hash {
             return Err(SyncError::Integrity);
         }
+        self.put_validated(namespace, rpk, hash, bytes)
+    }
+
+    // Both public store modes validate exactly once before reaching this SQL.
+    fn put_validated(
+        &self,
+        namespace: [u8; 32],
+        rpk: &[u8],
+        hash: [u8; 32],
+        bytes: &[u8],
+    ) -> Result<(), SyncError> {
         let c = self.connection.borrow();
         OpaqueSyncStore::check(&c, &namespace, rpk)?;
         let existing: Option<Vec<u8>> = c

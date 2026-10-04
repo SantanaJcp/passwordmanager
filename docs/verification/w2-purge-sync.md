@@ -960,3 +960,48 @@ respuesta tardía como PASS. Se eliminan las hooks temporales de KDF ya
 retiradas del build; scopes sync siguen activos para medir Intel si alcanza
 happy. La corrida final retirará también scopes/plist y confirmará el perfil
 normal. Sin producto nuevo tras el barrido52.
+
+### Ajuste final de compatibilidad antes del plist normal
+
+La revisión del wrapper por llamada detectó validación SHA duplicada respecto
+al modo anterior. Se comparte únicamente el SQL privado ya validado: cada
+entrada pública comprueba hash/tamaño una vez, antes de abrir DB cuando
+corresponde, con mismos errores/ACL/commit. No se toca transporte Windows.
+El test de secuencia usa ahora `SQLITE_OPEN_READ_ONLY` explícito en la
+conexión independiente antes de cerrar TLS, con cierre comprobado. El test
+anterior hizo SELECT por conexión independiente R/W, no un open con flag RO;
+la observación de filas comprometidas era válida, pero la descripción RO
+requería esta precisión. Repetir52 sobre el ajuste final.
+
+Última corrida: soporte de timing vuelve al opt-in original PMW2_TIMING=1;
+workflow no lo fija, por tanto plist normal y ningún scope. Se conservan
+los timers externos y samples posteriores a FAIL, sin tocar waits ni inputs.
+
+### Diagnóstico 2: síntoma unlock también en Intel y restore tardío
+
+[37177948387](https://github.com/SantanaJcp/passwordmanager/actions/runs/37177948387),
+`f5539986214e52602e646ec2155ec83896796fdf`, completed/failure.
+ARM **PASS completo**; happy wait6.677s/envío0.873s/total7.550s,
+margen13.323s/**66.6%**, backup0.787s. Sin fallo de unlock/restore.
+Intel mantiene dos fallos independientes: unlock de la matriz core8.032s,
+TUI viva/password-prompt, y restore Full25 wait8s. Full25 es independiente
+por el método existente y no convirtió el fallo core en éxito.
+
+Muestras posteriores al unlock: TUI unlock=1/socket-read=1/SQLite=1,
+custodio unlock=1/catalog=1/socket-read=1/SQLite=1, KDF=0 y protección=0
+ambos. Muestras terminan unos6.3/8.9s **después** del gate: sólo presencia de
+símbolos en sample, no stack íntegro ni evidencia de la fase al cutoff.
+Confirma que el síntoma no es exclusivo ARM y que la solicitud llegó al
+camino RPC; no prueba causa del fallo histórico ni descarta KDF previo,
+retención de lane o repaint. No se reautenticó ni cambió el wait.
+
+Restore: TUI socket-read=1; custodio protección=1/file-sync=1/SQLite=1,
+KDF=0/restore=0 (las categorías son heurísticas de símbolos, no error de
+memlock). Diagnóstico después del sample: `before-ui=unclassified
+ after-ui=complete delta-items=16 authority=same`. Es finalización tardía real,
+no PASS8s ni demostración de todo restore. Intel sync/final NOT_RUN;
+control39 publicación13.076s/convergencia17.984s. Backup2.583s.
+Root cause adicional precisa requiere tiempos de cola, commit de audit/unlock,
+catálogo y fases restore en sus propietarios; no se modifica custodia/W3/W4,
+TUI/W1 o protección/W5. Último run normal; el presupuesto total incluirá
+la cancelación inicial y no admite sexta corrida.

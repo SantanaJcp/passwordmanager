@@ -2521,3 +2521,13 @@ una por576 RPCs, commits y ACL por RPC. Unlock no falla; ninguna causa
 histórica confirmada. Linux52:49 rc0/tres RED conocidos/cero regresiones,
 check y clean offline PASS, W4 fuera de gates. Pendiente última evidencia
 Intel del producto actual y confirmación plist normal en ambas CPU.
+
+W2 diagnóstico2
+[37177948387](https://github.com/SantanaJcp/passwordmanager/actions/runs/37177948387),
+`f5539986214e52602e646ec2155ec83896796fdf`: ARM PASS completo,
+sync wait6.677s/margen13.323s (66.6%); Intel FAIL core-unlock8.032s y
+restore8s, sync/final NOT_RUN. Síntoma unlock observado también en Intel;
+samples posteriores RPC/SQLite/sockets, sin KDF activo en esa muestra;
+no demuestra qué ocurrió al cutoff ni la causa histórica ARM. Restore
+terminó después del wait con16 elementos nuevos/autoridad preservada,
+sin convertir FAIL en PASS. Última corrida pendiente con plist normal.

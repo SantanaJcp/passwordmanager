@@ -1595,8 +1595,20 @@ fn authenticated_session_reuses_one_sqlite_connection_for_durable_rpc_sequence()
         1
     );
     // Every response already denotes a committed row, before closing TLS.
-    assert_eq!(count_rows(&f.dir.path("tls-store.sqlite3"), "blocks"), 16);
-    assert_eq!(count_rows(&f.dir.path("tls-store.sqlite3"), "roots"), 1);
+    let observation = rusqlite::Connection::open_with_flags(
+        f.dir.path("tls-store.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let blocks: i64 = observation
+        .query_row("SELECT count(*) FROM blocks", [], |row| row.get(0))
+        .unwrap();
+    let roots: i64 = observation
+        .query_row("SELECT count(*) FROM roots", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(blocks, 16);
+    assert_eq!(roots, 1);
+    observation.close().unwrap();
     server.transport.finish().unwrap();
     let log = fs::read(log).unwrap();
     let opens = log[offset..]
