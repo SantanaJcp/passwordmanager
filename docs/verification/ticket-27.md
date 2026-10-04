@@ -4167,3 +4167,33 @@ La anotación W2 sigue sin aplicar. No se omite el build: su fallo será gate
 rojo después de haber observado reparse/RPK/operaciones. Ningún fallback nuevo.
 Estas diferencias son cfgWindows/harness; no cambian las ramas Linux del
 producto y el check posterior conserva todos los guards estáticos.
+
+Windows fase5 corrida2 [37171139137](https://github.com/SantanaJcp/passwordmanager/actions/runs/37171139137),
+[job111344164081](https://github.com/SantanaJcp/passwordmanager/actions/runs/37171139137/job/111344164081),
+SHA98ad4fb4050a5a30811a377a156bf284dcd3a6ac, termina **FAIL**. Build producto y
+fixtures Windows, claves PMK1/cierres, PE/static, primitives14/pipe1/observer24/
+sync-lib1 PASS. RPK nueva PASS: mismo SID aceptado por pipe instalado, alerta
+UnknownCA exacta, cero magic/unlock/solicitud de app, cierre propio comprobado.
+Siete wire negativos y sus DACL/cierres/witnesses siguen PASS. Resize real
+100×30→42×12→80×24 con repaint completo/clamp0; clipboard/access/rotations/
+local-operations PASS, readback types7/CSV y antigua/nueva master verificados.
+
+Dos fronteras: matrix conserva crypto-resource seed8 W5; sources falla antes
+de TUI con INVALID_ARGUMENT/hijo2/pantalla vacía porque la llamada nueva omitió
+reveal-seconds/copy-seconds obligatorios. Alias sí fue creado/verificado y
+eliminado explícitamente sin traversal, pero **rechazo productivo no probado**.
+Se corrigen sólo los argumentos del fixture, también en los casos de devices;
+no defaults/fallbacks del parser ni cambios de plazos. Después pm-sync bin
+falla E0282/E0283 como corrida1: SCM segundo ID/pair/sync/retire no alcanzados.
+No se observó error adicional de cleanup propio. Log/metadata
+`/tmp/pmw1e-windows2.{log,json}`, artifacts0; presupuestoWindows2/6,Mac1/2.
+
+La siguiente candidata deja el build pm-sync obligatorio inmediatamente antes
+de SYNC. SCM alternado/paquetes y PAIR no necesitan ese binario y se observan
+antes del bloqueo conocido, conservando el orden pair→sync→retire. No se omite
+build ni se sustituye servidor/transporte, no se declara sync si falta; la
+anotación de W2 continúa pendiente de autorización y permanece sin aplicar.
+
+Preflight de argumentos/orden fase5 rc0, `/tmp/pmw1e-windows-fixtures-check4.log`,
+check completo bajo flock. Diff-check rc0. Sólo cambia el harness Windows;
+código Linux y los oráculos del barrido52 permanecen idénticos.

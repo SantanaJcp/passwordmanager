@@ -867,7 +867,7 @@ try {
         }
         Invoke-Checked $installerSeed @('--installer-alias', $aliasPath, $tuiOnePux)
         $aliasOwned = $true
-        $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, '--sources', $tuiCsv, $tuiOnePux, $aliasPath, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300') $humanInput $tuiOut $tuiErr
+        $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, '--sources', $tuiCsv, $tuiOnePux, $aliasPath, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
         Write-Host (Get-Content $tuiErr -Raw)
         if ($p.ExitCode -eq 0) { Assert-TuiFixtureOutput $tuiOut 'sources'; Write-Host 'TUI_CASE case=sources result=pass' }
         else { $tuiCaseFailures.Add('sources'); Write-Host 'TUI_CASE case=sources result=fail' }
@@ -924,13 +924,9 @@ try {
     }
 
     if ($TuiConPtyRed) {
-        Invoke-Checked 'cargo' @('build', '-p', 'pm-sync', '--locked', '--offline')
-        Assert-NativeStaticMsvcBinary $dumpbin $builtSync 'pm-sync.exe'
         $devicePid = Get-StoppableServicePid $serviceName
         Stop-OwnedService $serviceName $devicePid
         Open-StoppedInstallerNode $serviceDir
-        Copy-Item -LiteralPath $builtSync -Destination $syncBinary -ErrorAction Stop
-        Set-ExactTreeAcl $syncBinary @('SYSTEM', "NT SERVICE\$serviceName")
         Open-StoppedInstallerNode $auditPath
         Assert-True (-not (Test-Path -LiteralPath $ownerAudit)) 'owner audit collision'
         Assert-True (-not (Test-Path -LiteralPath $remoteAudit)) 'remote audit collision'
@@ -965,6 +961,18 @@ try {
         Write-Host 'SECOND_DEVICE method=scm-alternated audit-owner=restored audit-remote=preserved second-agent=not-tested'
         foreach ($deviceMode in @('pair', 'sync', 'retire')) {
             if ($deviceMode -eq 'sync') {
+                # Pairing does not require a running sync endpoint. Build the
+                # ordinary binary here as a mandatory gate, after observing the
+                # independent SCM/audit/pairing contract.
+                Invoke-Checked 'cargo' @('build', '-p', 'pm-sync', '--locked', '--offline')
+                Assert-NativeStaticMsvcBinary $dumpbin $builtSync 'pm-sync.exe'
+                $installPid = Get-StoppableServicePid $serviceName
+                Stop-OwnedService $serviceName $installPid
+                Open-StoppedInstallerNode $serviceDir
+                Copy-Item -LiteralPath $builtSync -Destination $syncBinary -ErrorAction Stop
+                Set-ExactTreeAcl $syncBinary @('SYSTEM', "NT SERVICE\$serviceName")
+                Close-StoppedInstallerDirectory $serviceDir
+                $postStopPid = Start-OwnedServiceWithNewPid $serviceName $installPid
                 $p = Start-AsUser $humanCredential $tuiSeed @('--pair-namespace', $pairing) $emptyInput $humanOut $humanErr
                 Assert-True ($p.ExitCode -eq 0) 'protected pairing namespace unavailable'
                 $namespace = (Get-Content $humanOut -Raw).Trim()
@@ -978,7 +986,7 @@ try {
                 Start-Sleep -Seconds 1
                 Assert-True (-not $syncProcess.HasExited) 'ordinary sync server exited before TUI submit'
             }
-            $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, "--$deviceMode", $deviceConfig, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300') $humanInput $tuiOut $tuiErr
+            $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, "--$deviceMode", $deviceConfig, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
             Write-Host (Get-Content $tuiErr -Raw)
             if ($p.ExitCode -eq 0) { Assert-TuiFixtureOutput $tuiOut $deviceMode; Write-Host "TUI_CASE case=device-$deviceMode result=pass" }
             else { $tuiCaseFailures.Add("device-$deviceMode"); Write-Host "TUI_CASE case=device-$deviceMode result=fail" }
