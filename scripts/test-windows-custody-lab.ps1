@@ -454,10 +454,13 @@ function Write-SyncTimingSummary([string]$Path, [string]$Source = 'server') {
         Write-Host "WINDOWS_SYNC_TIMING source=$Source category=$category count=$($row.Count) us=$($row.Us) max_us=$($row.Max)"
     }
     if ($Source -eq 'job') {
-        foreach ($required in @('job_prepare', 'events', 'process_started', 'spawn_to_main', 'client_prepare', 'client_pipe_open', 'tls_handshake_first_write', 'rpc_put')) {
+        foreach ($required in @('job_prepare', 'events', 'process_started', 'spawn_to_main', 'client_prepare', 'client_pipe_open', 'tls_handshake', 'rpc_put')) {
             Assert-True ($totals.ContainsKey($required)) 'sync job lacks a required measurement category'
         }
-        Write-Host 'WINDOWS_SYNC_CUTOFF source=job scope=partial-observation wait-seconds=15'
+        Assert-True ($totals['process_started'].Count -eq 1) 'sync job did not reuse one owned client process'
+        Assert-True ($totals['tls_handshake'].Count -eq 1) 'sync job did not reuse one TLS handshake'
+        if ($totals.ContainsKey('job_total')) { Write-Host 'WINDOWS_SYNC_CUTOFF source=job scope=completed-job-observation wait-seconds=15' }
+        else { Write-Host 'WINDOWS_SYNC_CUTOFF source=job scope=partial-observation wait-seconds=15' }
     }
 }
 
@@ -630,7 +633,7 @@ try {
         Set-ExactTreeAcl $diagnosticDir @('SYSTEM', $installerName)
     }
 
-    Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
+    Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '-p', 'pm-sync', '--locked', '--offline')
     if ($OnePuxMemoryDiagnostics) {
         Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '--example', 'windows_onepux_memory_probe', '--locked', '--offline')
     }
@@ -658,8 +661,10 @@ try {
     Invoke-Checked 'cargo' @('test', '-p', 'pm-native-channel', '--all-targets', '--locked', '--offline')
     Invoke-Checked 'cargo' @('test', '-p', 'pm-sync', '--lib', '--locked', '--offline')
     $env:PMW1_TEST_SID = Get-Sid $installerName
+    $env:PMW1_SYNC_BINARY = Join-Path $repo 'target\debug\pm-sync.exe'
+    Assert-NativeStaticMsvcBinary $dumpbin $env:PMW1_SYNC_BINARY 'pm-sync.exe'
     try { Invoke-Checked 'cargo' @('test', '-p', 'pm-sync', '--bin', 'pm-sync', '--locked', '--offline', '--', '--nocapture') }
-    finally { Remove-Item Env:PMW1_TEST_SID -ErrorAction Stop }
+    finally { Remove-Item Env:PMW1_TEST_SID, Env:PMW1_SYNC_BINARY -ErrorAction Stop }
     $tuiFixture = $null
     $tuiCustody = $null
     $tuiSeed = $null

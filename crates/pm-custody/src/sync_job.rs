@@ -264,14 +264,6 @@ impl Manager {
         if pairing.server_pin() != &config.pin {
             return Err(WorkerError::Sync(SyncError::Unauthorized));
         }
-        #[cfg(windows)]
-        let transport = ProcessTlsTransport::new(
-            &config.program,
-            &config.socket,
-            &config.client_key,
-            &config.server_public,
-        );
-        #[cfg(unix)]
         let transport = ProcessTlsTransport::authenticated_session(
             &config.program,
             &config.socket,
@@ -298,7 +290,6 @@ impl Manager {
                 u64::try_from(pulled).map_err(|_| WorkerError::Sync(SyncError::Integrity))?,
             ))
         })();
-        #[cfg(unix)]
         {
             let closed = transport.finish().map_err(WorkerError::Sync);
             match (result, closed) {
@@ -310,8 +301,6 @@ impl Manager {
                 }
             }
         }
-        #[cfg(windows)]
-        result
     }
 
     fn advance(&self, id: [u8; 16], phase: Phase, pushed: u64, pulled: u64) -> Result<(), ()> {

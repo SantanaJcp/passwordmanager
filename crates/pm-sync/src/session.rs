@@ -2,11 +2,15 @@
 //! One bounded ciphertext RPC at a time over an owned TLS client process.
 use std::{
     io::{Read, Write},
-    os::fd::AsRawFd,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(windows)]
+mod windows_io;
 
 use crate::{SyncError, timing};
 
@@ -15,28 +19,62 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) struct Session {
     child: Child,
+    #[cfg(unix)]
     input: Option<ChildStdin>,
+    #[cfg(unix)]
     output: ChildStdout,
+    #[cfg(windows)]
+    io: windows_io::PipeIo,
 }
 
 impl Session {
     pub(super) fn spawn(command: &mut Command) -> Result<Self, SyncError> {
+        #[cfg(windows)]
+        if timing::w1_enabled() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| SyncError::Unavailable)?;
+            command.env("PMW1_SPAWN_US", now.as_micros().to_string());
+        }
+        #[cfg(unix)]
         let _spawn = timing::Span::new("process_spawn");
+        #[cfg(windows)]
+        let spawning = timing::Span::new("process_spawn");
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|_| SyncError::Unavailable)?;
+        #[cfg(windows)]
+        drop(spawning);
+        #[cfg(windows)]
+        timing::count("process_started", 1);
         let input = child.stdin.take().expect("piped session input");
         let output = child.stdout.take().expect("piped session output");
+        #[cfg(windows)]
+        let io = match windows_io::PipeIo::spawn(input, output) {
+            Ok(io) => io,
+            Err(error) => {
+                child.kill().map_err(|_| SyncError::Unavailable)?;
+                child.wait().map_err(|_| SyncError::Unavailable)?;
+                return Err(error);
+            }
+        };
+        #[allow(unused_mut)]
         let mut session = Self {
             child,
+            #[cfg(unix)]
             input: Some(input),
+            #[cfg(unix)]
             output,
+            #[cfg(windows)]
+            io,
         };
+        #[cfg(unix)]
         let configured = nonblocking(session.input.as_ref().unwrap())
             .and_then(|()| nonblocking(&session.output));
+        #[cfg(unix)]
         if configured.is_err() {
             session.abort()?;
             return Err(SyncError::Unavailable);
@@ -56,34 +94,44 @@ impl Session {
                 .to_be_bytes(),
         );
         frame.extend_from_slice(request);
-        let input = self.input.as_mut().ok_or(SyncError::Unavailable)?;
-        let mut remaining = frame.as_slice();
-        while !remaining.is_empty() {
-            ready(input, libc::POLLOUT, deadline)?;
-            match input.write(remaining) {
-                Ok(0) => return Err(SyncError::Unavailable),
-                Ok(n) => remaining = &remaining[n..],
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) => {}
-                Err(_) => return Err(SyncError::Unavailable),
+        #[cfg(windows)]
+        {
+            self.io.exchange(frame, deadline)
+        }
+        #[cfg(unix)]
+        {
+            let input = self.input.as_mut().ok_or(SyncError::Unavailable)?;
+            let mut remaining = frame.as_slice();
+            while !remaining.is_empty() {
+                ready(input, libc::POLLOUT, deadline)?;
+                match input.write(remaining) {
+                    Ok(0) => return Err(SyncError::Unavailable),
+                    Ok(n) => remaining = &remaining[n..],
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(_) => return Err(SyncError::Unavailable),
+                }
             }
+            let mut length = [0; 4];
+            read_exact(&mut self.output, &mut length, deadline)?;
+            let length = u32::from_be_bytes(length) as usize;
+            if length > MAX_FRAME {
+                return Err(SyncError::Integrity);
+            }
+            let mut response = vec![0; length];
+            read_exact(&mut self.output, &mut response, deadline)?;
+            String::from_utf8(response).map_err(|_| SyncError::Integrity)
         }
-        let mut length = [0; 4];
-        read_exact(&mut self.output, &mut length, deadline)?;
-        let length = u32::from_be_bytes(length) as usize;
-        if length > MAX_FRAME {
-            return Err(SyncError::Integrity);
-        }
-        let mut response = vec![0; length];
-        read_exact(&mut self.output, &mut response, deadline)?;
-        String::from_utf8(response).map_err(|_| SyncError::Integrity)
     }
 
     pub(super) fn abort(&mut self) -> Result<(), SyncError> {
+        #[cfg(unix)]
         drop(self.input.take());
+        #[cfg(windows)]
+        self.io.shutdown();
         if self
             .child
             .try_wait()
@@ -93,15 +141,31 @@ impl Session {
             self.child.kill().map_err(|_| SyncError::Unavailable)?;
         }
         self.child.wait().map_err(|_| SyncError::Unavailable)?;
+        #[cfg(windows)]
+        self.io.join()?;
         Ok(())
     }
 
     pub(super) fn finish(mut self) -> Result<(), SyncError> {
+        #[cfg(unix)]
         drop(self.input.take());
+        #[cfg(windows)]
+        self.io.shutdown();
         let _close = timing::Span::new("process_close");
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         loop {
             if let Some(status) = self.child.try_wait().map_err(|_| SyncError::Unavailable)? {
+                #[cfg(windows)]
+                self.io.join()?;
+                #[cfg(windows)]
+                timing::count(
+                    if status.success() {
+                        "process_exit_success"
+                    } else {
+                        "process_exit_unavailable"
+                    },
+                    1,
+                );
                 return status.success().then_some(()).ok_or(SyncError::Unavailable);
             }
             if Instant::now() >= deadline {
@@ -123,6 +187,7 @@ impl Drop for Session {
     }
 }
 
+#[cfg(unix)]
 fn nonblocking(file: &impl AsRawFd) -> Result<(), SyncError> {
     let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
     if flags < 0
@@ -133,6 +198,7 @@ fn nonblocking(file: &impl AsRawFd) -> Result<(), SyncError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn ready(file: &impl AsRawFd, events: libc::c_short, deadline: Instant) -> Result<(), SyncError> {
     loop {
         let remaining = deadline
@@ -156,6 +222,7 @@ fn ready(file: &impl AsRawFd, events: libc::c_short, deadline: Instant) -> Resul
     }
 }
 
+#[cfg(unix)]
 fn read_exact(
     file: &mut (impl Read + AsRawFd),
     mut output: &mut [u8],
@@ -177,7 +244,7 @@ fn read_exact(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

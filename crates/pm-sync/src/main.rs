@@ -44,6 +44,8 @@ use std::{
 
 #[cfg(all(test, windows))]
 mod windows_pipe_tests;
+#[cfg(windows)]
+mod windows_session;
 
 const MAGIC: &[u8] = b"PMK1";
 const ALPN: &[u8] = b"pm-sync/1";
@@ -104,7 +106,6 @@ fn run() -> Result<(), ()> {
                 )
             }
         }
-        #[cfg(unix)]
         Some("session") => {
             if client_session(&mut a).is_err() {
                 // This owned client's result channel is framed IPC. Report the
@@ -244,9 +245,7 @@ fn serve(
                     eprintln!("SYNC_REQUEST_FAILED");
                     return;
                 };
-                let result = run_with_deadline(&stop, || {
-                    serve_one_windows(pipe, &store_path, worker_config)
-                });
+                let result = windows_session::serve(pipe, &store_path, worker_config, &stop);
                 let closed = stop.close().map_err(|_| ());
                 if result.is_err() || closed.is_err() {
                     eprintln!("SYNC_REQUEST_FAILED");
@@ -275,21 +274,6 @@ fn create_sync_listener(
             stop.close().map_err(|_| ())?;
             Err(())
         }
-    }
-}
-
-#[cfg(windows)]
-fn serve_one_windows(
-    mut pipe: WindowsServerPipe,
-    db: &Path,
-    config: Arc<ServerConfig>,
-) -> Result<(), ()> {
-    pipe.verify().map_err(|_| ())?;
-    let result = serve_one(&mut pipe, db, config);
-    let peer = pipe.verify().map_err(|_| ());
-    match (result, peer) {
-        (Ok(()), Ok(())) => Ok(()),
-        _ => Err(()),
     }
 }
 
@@ -363,6 +347,7 @@ fn serve_one_unix(stream: UnixStream, db: &Path, config: Arc<ServerConfig>) -> R
     serve_one(stream, db, config)
 }
 
+#[cfg(unix)]
 fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) -> Result<(), ()> {
     let conn = ServerConnection::new(config).map_err(|_| ())?;
     let mut tls = rustls::StreamOwned::new(conn, stream);
@@ -397,12 +382,7 @@ fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) ->
     drop(opening);
     let result = (|| loop {
         let dispatching = timing::Span::new("server_dispatch");
-        let response = dispatch(
-            &store,
-            &peer,
-            std::str::from_utf8(&request).map_err(|_| ())?,
-        )
-        .unwrap_or_else(|()| "{\"ok\":false}".to_owned());
+        let response = dispatch_response(&store, &peer, &request)?;
         drop(dispatching);
         write_frame(&mut tls, response.as_bytes())?;
         if cfg!(windows) {
@@ -420,6 +400,14 @@ fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) ->
     }
     #[cfg(windows)]
     result
+}
+
+// Retain the existing server failure mapping in one place for both transports.
+fn dispatch_response(store: &OpaqueSyncStore, peer: &[u8], request: &[u8]) -> Result<String, ()> {
+    Ok(
+        dispatch(store, peer, std::str::from_utf8(request).map_err(|_| ())?)
+            .unwrap_or_else(|()| "{\"ok\":false}".to_owned()),
+    )
 }
 
 fn dispatch(store: &OpaqueSyncStore, rpk: &[u8], json: &str) -> Result<String, ()> {
@@ -647,6 +635,11 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
     }
     println!("{response}");
     Ok(())
+}
+
+#[cfg(windows)]
+fn client_session(a: &mut impl Iterator<Item = std::ffi::OsString>) -> Result<(), ()> {
+    windows_session::client(a)
 }
 
 #[cfg(unix)]

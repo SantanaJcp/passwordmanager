@@ -4919,3 +4919,51 @@ PMW1/SYNC. No hay prueba de fallo de commit ni de mera carrera del observer.
 transfer-duplicate-failed es historial reimpreso, no atribución causal válida.
 37177593290 pasa el mismo caso intacto: intermitencia confirmada, causa raíz
 pendiente; el FAIL se conserva, no se declara corregido por este cambio.
+
+### Fase8 corrida2 — GREEN del peer, rendimiento aún RED
+
+[37179249644](https://github.com/SantanaJcp/passwordmanager/actions/runs/37179249644),
+SHA `6b4357a2412bdfd86ed8d3a48662e94494cce977`, completed/failure,
+2/6 Windows consumidas. Misma regresión binaria: PASS, mismo PID retenido y
+Peek error109 tras cierre comprobado. No cambios del oráculo. Check del fix
+rc0 /tmp/pmw1g-phase8-peer-check.log. Sources/resize/clipboard/access/rotations/
+matrix/local-operations/PAIR pasan; SYNC FAIL15s y RETIRE NOT_RUN.
+
+Medición todavía **parcial**:70 eventos seleccionados,17 iniciados y16 completos;
+53 procesos/puts iniciados,52 procesos y RPCs completos/exitosos.53 verifies
+previos correctos, ningún verify_failed/backoff. RPC_put acumulado8.162730s;
+spawn→main1.792648s, ClientConnection2.171079s, leer TLS3.812397s. Export17
+grafos0.624356s, preparación worker0.003298s y grupo0.098476s. Spans anidados
+no se suman; no hay job_total, publish, get/list ni activación completa.
+TUI submit→pushing6.093s, pushing parcial8.913s, espera15.006s.
+
+Esto activa la autorización condicional de portar sesión Windows. No atribuir
+la eliminación del backoff a amortizar procesos: fue la corrección funcional
+anterior. La nueva sesión reutiliza Session/ProcessTlsTransport y dispatch/
+OpaqueSyncStore comunes; sólo IPC Windows y ciclo TLS/pipe Windows son nuevos.
+No integrar agrupación W2 ni duplicar el engine.
+
+El cutoff conserva otro FAIL: cleanup estricto rechaza staging productivo
+no inventariado dejado por el worker interrumpido y confirma raíz restante.
+No se amplía el inventario ni se borra por glob; no se cambia sync_stage/Drop.
+No es la causa del timeout; constituye evidencia adicional fallida del corte.
+
+Método del port: stdio Windows síncrono en un único worker propietario,
+una petición ciphertext≤1MiB a la vez; padre exige deadline absoluto30s de
+escritura+lectura y rechaza respuesta tardía. Error aborta/recolecta hijo antes
+de join, sin replay interno; finish cierra stdin y exige exit exitoso. Se
+conservan abort/Drop comunes y sus diagnósticos heredados. Cliente verifica
+PID/liveness al conectar y antes de cada request; TLS1.3/RPK/ALPN conservados.
+Servidor verifica el peer antes de dispatch/commit/respuesta, nunca después
+del cierre intencional; consulta ACL SQLite por petición. Mantiene keeper WAL
+como Unix, sin transacción lectora/PRAGMA alterada/batching/fsync omitido.
+Cierre de sesión con close_notify TLS comprobado y EOF sólo en límite de
+frame; EOF truncado falla. Cliente legado por RPC permanece seleccionable
+explícitamente, nunca como recuperación tras fallo de sesión.
+
+Regresión nueva nativa: dos RPCs sobre la misma conexión TLS/proceso real,
+revocación de ACL entre ambos y rechazo del segundo; malformed IPC (length,
+truncado y UTF-8), deadline ya vencido y cleanup del hijo. El harness exige
+un process_started/un handshake en el job completo, además de oráculos previos
+SYNC/RETIRE. Measurement handshake ahora completo, no first_write del legado.
+Una corrida macOS adicional verifica código común sin integrar W2.

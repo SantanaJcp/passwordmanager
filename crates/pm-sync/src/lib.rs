@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod session;
 pub mod timing;
 
@@ -82,7 +82,7 @@ pub struct ProcessTlsTransport {
     socket: PathBuf,
     client_key: PathBuf,
     server_public: PathBuf,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     session: Option<std::sync::Mutex<Option<session::Session>>>,
 }
 impl ProcessTlsTransport {
@@ -93,13 +93,13 @@ impl ProcessTlsTransport {
             socket: socket.to_owned(),
             client_key: client_key.to_owned(),
             server_public: server_public.to_owned(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             session: None,
         }
     }
     /// Reuse one mutually authenticated TLS connection for sequential sync RPCs.
     /// Request/frame/block limits and replica-level retry policy remain unchanged.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[must_use]
     pub fn authenticated_session(
         program: &Path,
@@ -116,7 +116,7 @@ impl ProcessTlsTransport {
     ///
     /// # Errors
     /// Reports a failed client exit, deadline or cleanup explicitly.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub fn finish(&self) -> Result<(), SyncError> {
         if let Some(state) = &self.session
             && let Some(session) = state.lock().map_err(|_| SyncError::Unavailable)?.take()
@@ -126,7 +126,7 @@ impl ProcessTlsTransport {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn session_call(&self, request: &str) -> Result<String, SyncError> {
         let mut state = self
             .session
@@ -268,7 +268,7 @@ impl ProcessTlsTransport {
 impl SyncTransport for ProcessTlsTransport {
     fn put(&self, n: [u8; 32], h: [u8; 32], b: &[u8]) -> Result<(), SyncError> {
         timing::put_started();
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.session.is_some() {
             let _rpc = timing::Span::new("rpc_put");
             if b.is_empty() || b.len() > MAX_BLOCK_BYTES || digest(b) != h {
@@ -307,7 +307,7 @@ impl SyncTransport for ProcessTlsTransport {
         result.map(drop)
     }
     fn get(&self, n: [u8; 32], h: [u8; 32]) -> Result<Vec<u8>, SyncError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let response = if self.session.is_some() {
             let _rpc = timing::Span::new("rpc_get");
             self.session_call(&format!(
@@ -318,7 +318,7 @@ impl SyncTransport for ProcessTlsTransport {
         } else {
             self.call("get", n, &[("--hash", hex(&h))])?
         };
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         let response = self.call("get", n, &[("--hash", hex(&h))])?;
         let encoded = json_string(&response, "bytes").ok_or(SyncError::Integrity)?;
         let bytes = STANDARD.decode(encoded).map_err(|_| SyncError::Integrity)?;
@@ -327,7 +327,7 @@ impl SyncTransport for ProcessTlsTransport {
             .ok_or(SyncError::Integrity)
     }
     fn publish(&self, n: [u8; 32], h: [u8; 32]) -> Result<(), SyncError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.session.is_some() {
             let _rpc = timing::Span::new("rpc_publish");
             return self
@@ -346,7 +346,7 @@ impl SyncTransport for ProcessTlsTransport {
         c: Option<u64>,
         l: usize,
     ) -> Result<Vec<(u64, [u8; 32])>, SyncError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.session.is_some() {
             let _rpc = timing::Span::new("rpc_list");
             let cursor = c
