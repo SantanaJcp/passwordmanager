@@ -5079,3 +5079,99 @@ conservar FAIL sin ampliar15s/30s ni consumir corridas extra. Código nuevo
 sólo cfgWindows: el camino emit Unix sigue textualmente igual al verificado
 por la corrida macOS, no se repite por hipótesis. Finalizar con los52 gates
 sobre el código final, bajo flock y sesión Wayland real.
+
+### Fase8 corrida6 — peer/sesión GREEN; SYNC70 continúa fuera de15s
+
+[37182761489](https://github.com/SantanaJcp/passwordmanager/actions/runs/37182761489),
+SHA `d034c31974cc72ee10762ccac6803c6145a73269`, completed/failure;
+6/6 corridas Windows consumidas, artifacts0, sin caches/secrets/upload ni
+cambios del workflow. Compilación nativa y 14primitivas/1pipe/24observer/
+3sync-lib/2sync-bin PASS; mismo test cierre109 y revocación de ACL sobre
+sesión/proceso real. Sources/resize/clipboard/access/rotaciones/matrix/
+local-operations/PAIR PASS. El PASS actual de local-operations **no resuelve**
+los FAILs históricos intermitentes ni demuestra su causa.
+
+SYNC TUI FAIL, espera15s: pushing first6.198s,observed8.805s,ended=false.
+Workload completo70eventos; snapshot parcial57exports/eventos completos de58
+iniciados,256puts completos de257 iniciados. Un process_started/un handshake,
+258verifies previos OK; sin fallo de peer/backoff observado. Preparación
+job0.003312s,push_prepare0.098943s,spawn0.048535s,spawn_to_main0.078161s,
+TLSconfig0.041290s/handshake0.044032s,puts256=6.510261s,export57=2.539292s,
+TLSread256=6.126572s. Export/RPC anidados: no sumar sin jerarquía.
+
+Servidor snapshot posterior281RPC: dispatch2.999405s,request_read2.651483s,
+verify0.005915s,response_write0.022479s,spawn0.018218s,join0.031233s,
+SQLite_open0.003039s. Resumen estricto acepta todas las líneas de este snapshot;
+ninguna categoría inesperada. Una write_all por línea queda compilada/probada
+nativamente, pero workload/runner distintos impiden atribuir una reducción
+exacta sólo a esa modificación. Contador server_timing_emit no aparece: la
+sesión seguía activa al snapshot, no declarar coste total medido.
+
+**Job final70 incompleto:** no push/publish/list/get/pull/job_total ni exit/close
+finales observados; no extrapolar tiempos ni sustituirlos por el job36 del
+run3. El único job completo de fase8 es9.288192s sobre063bba4/36eventos,
+medido después de su cutoff TUI, como arriba. SYNCdurable FAIL
+WINDOWS_HUMAN_FIXTURE_FAILED; RETIRE TUI NOT_RUN por sync-failed y observer
+retire durable FAIL. Cleanup vuelve a rechazar staging no inventariado y
+fixture root restante; no ampliación de inventario ni eliminación del RED.
+
+Frontera final nativa: PAIR PASS, SYNC FAIL15s, RETIRE NOT_RUN. Agotado el
+presupuesto autorizado; ninguna séptima corrida, ampliación de plazos,
+relajación de KDF/ACL/peer/framing/aserciones ni claim de aceptación global.
+No se optimiza watchdog (coste descartado), ni se integra agrupación W2.
+Siguiente acción propuesta: merger concilia transporte Windows con DispatchStore/
+agrupación W2, preservando ACL/commit por RPC, y después un nuevo ciclo Windows
+con presupuesto explícito para medir el job70 completo y llevar SYNC/RETIRE
+a aceptación. W1 no realiza integración ni cambia estados de tickets.
+
+Archivos fase8: Cargo.lock, crates/pm-sync/Cargo.toml, src/{main.rs,lib.rs,
+session.rs,session/windows_io.rs,windows_pipe_tests.rs,windows_session.rs,
+timing.rs}, crates/pm-custody/src/sync_job.rs, scripts/test-windows-custody-lab.ps1
+y este documento. Engine de replicación/agrupación Unix sin cambios propios.
+Conflictos previsibles W2: cfg de sesión en lib.rs/session.rs; selección/finish
+en sync_job.rs; helper dispatch_response(main.rs) requiere el tipo DispatchStore
+W2 en vez de OpaqueSyncStore W1. timing.rs incorpora sólo ramales cfgWindows;
+W2 puede conservar su emisión Unix. No modificar raíces/worktrees ajenos,
+no integrar ni fusionar PR1. Fallbacks heredados reportados e intactos.
+
+Compatibilidad pendiente: el cliente Windows legado por RPC sigue seleccionable
+y su intercambio/verificación previa tiene GREEN en la prueba nativa mínima,
+pero no se ejecutó un job legado integral contra el servidor de sesiones nuevo.
+El cliente legado termina sin close_notify; la lectura posterior del servidor
+puede clasificar ese fin abrupto como fallo de conexión (inferencia de fuente),
+sin alterar la respuesta ya emitida. No aceptar EOF truncado, cambiarlo por éxito
+ni introducir ruta recuperadora. Añadir esa combinación a la próxima verificación
+nativa autorizada; los52 gates Linux no demuestran esa compatibilidad Windows.
+
+### Fase8 cierre de evidencia local y publicación
+
+Barrido final sobre código `d034c31974cc72ee10762ccac6803c6145a73269`:
+**52casos,49rc0 +3rc1 conocidos,unexpected=[]**, source_unchanged=true.
+Check60.002s y clean-offline77.218s PASS; Wayland real wayland-1 (TUI access,
+content y operations PASS). Cada comando bajo flock /tmp/pm-cargo-window.lock,
+cwd W1; PM_KEYCLOAK_DIST/PM_CFT_DIR absolutos de la ubicación autorizada.
+Sin W4 dentro de gates, skips, límites/oráculos relajados ni reintentos ocultos.
+
+Comparación directa con /tmp/pmw1f-gates: g7-matrix mismo ProductRed
+commit-outbox-audit EIO+ENOSPC (stream staging survives operation/restart);
+g7-extra-bootstrap y g7-extra-vault misma AssertionError authority-or-receipts
+changed across loss. No confundir rc1 de esos diagnósticos con fallo de build.
+Token-exchange ahora rc0; su FAIL previo063bba4/hostile-startCUSTODY_UNAVAILABLE
+sigue conservado, sin corrección ni causa raíz demostrada. Purge-probe,
+e2ee_replication+shared_purge y restore_graph_digest finales PASS.
+
+Logs/manifest/resultado: /tmp/pmw1g-phase8-final-gates-*.log,
+/tmp/pmw1g-phase8-final-gates-local-results.json y -local-summary.json;
+primer barrido /tmp/pmw1g-phase8-gates-* preservado. Logs nativos completos
+/tmp/pmw1g-phase8-windows{1..6}.{log,json}, resúmenes3..6 y macos1 log/json.
+Commit final posterior cambia sólo este documento; el código observado por
+52gates y sexta corrida queda exactamente d034c31. Enlaces nativos/SHA y
+consistencia de PASS/FAIL/NOT_RUN revisados; ninguna modificación de estados
+de tickets, integración, force push, reglas o PR1.
+
+Resultado entregable: causa del rechazo del peer aislada y corregida con
+RED→GREEN; sesión Windows portada y validaciones nativas conservadas; job36
+completo medido. **Aceptación Windows pendiente: SYNC70 FAIL15s y RETIRE
+NOT_RUN**, observers durables/cleanup FAIL conservados, presupuesto6/6 agotado.
+macOS ARM Full25 PASS y33E2EE por CPU PASS; Intel SYNC20s FAIL, sin aceptación
+global. Merger/revisión y siguiente ciclo nativo siguen pendientes, como arriba.
