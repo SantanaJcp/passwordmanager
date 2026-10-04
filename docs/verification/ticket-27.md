@@ -3,8 +3,10 @@
 Corte actual: 2026-10-03, **W1 fase 4 en verificación; aceptación integral
 pendiente**, ticket `claimed`. Composición c8325fb y gates registrados en
 82075cd; se aplican las dos propuestas aprobadas CUP/HVP y cierre nativo.
-Su GREEN nativo, reparse integral y pair/sync/retire siguen pendientes en este
-checkpoint; preview 1PUX seed8 `crypto-resource` pertenece a W5. Los métodos y
+Las dos propuestas tienen GREEN nativo acotado; reparse integral y
+pair/sync/retire siguen pendientes de método. Preview 1PUX seed8
+`crypto-resource` pertenece a W5; Mac Intel PASS completo, ARM FAIL de colisión
+de backup. Los métodos y
 runs exactos del corte están al final. No acredita soporte completo, x64/reboot
 ni resuelve el ticket.
 Las entradas desde 2026-09-13 se conservan como cronología de checkpoints,
@@ -3826,3 +3828,81 @@ Verificación local previa: `flock /tmp/pm-cargo-window.lock
 nuevos del observer y la rama de cierre Windows requieren CI nativa.
 No se cambia memoria protegida, listener/admisión/proveedor, sync, workflows,
 dependencias ni estados de tickets; no se integra en la rama unificada.
+
+### Corridas 1 de fase4 — propuestas GREEN, aceptación global pendiente
+
+Código publicado y comprobado local=origin antes/después de los dos dispatch:
+`6aeaf1ade290cdd79d08710a9a0f3d8463019134`. Repositorio público/workflows
+manuales activos/labels estándar comprobados por API; gratuidad revalidada en
+la [fuente primaria GitHub](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+Workflows originales sin cambios, datos sintéticos, sin caches/artifacts/
+secrets ni lock local retenido al esperar. API de artifacts: total0 en ambos.
+Los dos runs y todos sus jobs han terminado: **Windows1/6, Mac1/2**.
+
+| Run / SHA6aeaf1a | Resultado |
+| --- | --- |
+| [Windows37167760858](https://github.com/SantanaJcp/passwordmanager/actions/runs/37167760858), [job111334203151](https://github.com/SantanaJcp/passwordmanager/actions/runs/37167760858/job/111334203151) | **FAIL global conocido: sólo `matrix`**. CUP/HVP/repaint y cuatro cierres wire GREEN; preview1PUX seed8 sigue `crypto-resource`, fuera de W1. Inputs false/true/true. |
+| [Mac37167762198](https://github.com/SantanaJcp/passwordmanager/actions/runs/37167762198), [Intel111334206916](https://github.com/SantanaJcp/passwordmanager/actions/runs/37167762198/job/111334206916), [ARM111334207056](https://github.com/SantanaJcp/passwordmanager/actions/runs/37167762198/job/111334207056) | **FAIL global: Intel PASS completo, ARM FAIL de colisión backup**. Inputs false/false; no se acredita PASS completo de ambas CPU. |
+
+Windows: build/PE ARM64/static MSVC, primitives14, pipe1, observer24 y
+sync-lib1 PASS. Los dos controles nuevos pasan realmente en Windows: CUP y
+HVP32767 clampan al borde y cuentan1 cada uno;32768 falla. Frame100×30
+recortado a42×12 y título parcial no satisfacen repaint; frame42×12 completo
+sí. Resize real100×30→42×12→80×24 pasa con witness nuevo de buffer/viewport/
+frame coincidente y repaint completo, sin modificar15s. **Métrica acumulada
+`cup-hvp-clamped`:0,0,0**, respectivamente. En esta corrida real no ocurrió
+el clamp; su semántica y contador están ejercitados por el control sintético,
+no se afirma reproducción de aquella secuencia fuera del viewport.
+
+Null/invalid-handle/thread-pseudohandle/malformed-token: cuatro PASS completos,
+BrokenPipe observado, `native-confirmed=true` por PeekNamedPipe en cada uno,
+finish/close PASS y DACL exacta antes/durante/después. Cada caso conserva una
+ack31, rechazo del servicio y cero duplicado/parser; token malformado nunca se
+decodifica como handle. RED37140120697/69e1782→GREEN37167760858/6aeaf1a del
+oráculo de cierre. No se aceptan respuestas ni otros errores.
+
+Peer SID/ACL agente→Human y servidor PID impostor instalado PASS; seed7 tipos
+con readback exacto, encoding/salida natural, reveal/expiry, CSV con revisión
+completa antes de IMPORT, empty/directory/hardlink con cero lease, clipboard
+propio vacío/owner nuevo, generator/access/pending/audit, recovery/master y
+local-operations PASS. Ambos gates de antigua maestra denegada/nueva aceptada
+y archivos publicados regulares no vacíos pasan. SCM stop/restart/crash/
+restart y cleanup estricto propio no añaden otro error al FAIL agregado.
+La matriz integral llega a ack31/handle validado/duplicado y preview
+`crypto-resource`, restaura la lease y termina hijo4; no alcanza preparación,
+IMPORT1PUX ni los grupos posteriores. No parchear esta frontera de W5.
+
+Mac Intel: Full25/fase final/cleanup completos, ambas colisiones rechazadas
+con destinos intactos, mismo custodio/servidor, durable/screen=succeeded,
+pushed59/pulled59, blocks287/roots1. Panel completo **17.671s**, dentro de
+wait20: margen **2.329s**, frente al margen histórico0.955s en6e6ee7a. No se
+amplía el plazo ni se presenta un margen observado como garantía futura.
+
+Mac ARM: import/offline+wrong-pin/local/restore/rotaciones pasan; falla
+`macos_tui_migration_lab.py:606` al exigir la negativa de colisión backup.
+Destino intacto, parcial no vacío, panel válido/parser ground/hijo vivo; el
+muestreo posterior observa TUI download/read-frame y custodio backup-write/
+native-backup. Ni siquiera tras el sample aparece el rechazo. **No alcanza
+happy sync ni Full25/fase final completos**. Coincide con la frontera
+documentada en [fase2 de26](ticket-26.md#w1-fase-2--discriminante-arm-de-colisión-2026-10-03);
+no se atribuye causalmente al cambio cfgWindows de esta candidata.
+
+Inspección causal: `linux.rs::rpc_download_atomic` solicita y descarga todo
+el backup antes de `publish_new_file`, que detecta DestinationExists. El
+muestreo respalda operación todavía activa, no corrupción del destino; no
+localiza la causa interna del tiempo de backup. Alternativas: conservar este
+FAIL con el plazo original, o autorizar rechazo temprano de destino existente
+en el cliente TUI, manteniendo también publicación exclusiva final contra
+carreras. Se recomienda evaluar la segunda; cambia el punto de rechazo y
+evita ejecutar esa solicitud, por lo que **no se implementa sin acuerdo**.
+No tocar backup/custodia/sync ni repetir Mac idéntico para ocultar el FAIL.
+
+Logs propios `/tmp/pmw1d-windows1.log`, `...-macos1.log`, metadata `.json` del
+mismo prefijo; ARM además `...-macos1-arm.log`. Referencias recuperadas de
+GitHub en `...-reference-windows-phase3.log` y
+`...-reference-macos-composition.log`; no se confunden con los logs perdidos.
+Entorno: Win11 Enterprise10.0.26200 ARM64, imagen20260924.168.1,
+UAC_ENABLE_LUA1, Rust1.98.1-aarch64-pc-windows-msvc/libsodium1.0.22 ARM64/MT.
+Mac15.7.9/kernel24.6.0, imágenes Intel20260824.0482.1 y
+ARM20260907.0337.1, toolchain1.98.1 por host nativo. No acredita32/reboot/FDE/
+firma/terminal visible ni revisión/integración del merger.
