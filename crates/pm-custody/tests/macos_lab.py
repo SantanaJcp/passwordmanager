@@ -2792,17 +2792,79 @@ def agent_attempt_state(binary, profile, private, endpoint, attempt):
     return match.group(1), output
 
 
+def sample_unlock_failure(session):
+    """Observe owned processes only after the original unlock gate has failed."""
+    result = session.run_sudo_while_draining(["launchctl", "print", "system/" + LABEL])
+    custodian = running_launchd_pid(result)
+    assert custodian is not None, "unlock custodian not running"
+    markers = {
+        "kdf": ("argon2", "derive_password", "crypto_pwhash"),
+        "unlock": ("HumanVault::unlock", "handle_human_rpc", "rpc_unlock"),
+        "prompt": ("read_prompt", "crossterm::event::read"),
+        "catalog": ("decode_catalog", "replace_catalog", "catalog"),
+        "protected": ("sodium_mlock", "mlock", "ProtectedBytes"),
+        "file_sync": ("fsync", "F_FULLFSYNC"),
+        "sqlite": ("sqlite3",),
+        "socket_read": ("__recvfrom", "read_frame"),
+    }
+    for category, pid in (("tui", session.pid), ("custodian", custodian)):
+        report = STATE.parent / ("w2-unlock-" + category + ".sample")
+        assert not report.exists(), "unlock sample destination exists"
+        try:
+            sampled = session.run_sudo_while_draining(
+                ["sample", str(pid), "1", "1", "-file", report], check=False, timeout=8)
+            assert sampled.returncode == 0, "owned unlock process sample failed"
+            value = session.run_sudo_while_draining(["cat", report]).stdout.decode()
+            flags = " ".join(f"{name}={int(any(marker in value for marker in symbols))}"
+                             for name, symbols in markers.items())
+            print(f"PMW2_UNLOCK_SAMPLE process={category} {flags}", flush=True)
+        finally:
+            removed = session.run_sudo_while_draining(["rm", "-f", report], check=False)
+            assert removed.returncode == 0, "owned unlock sample cleanup failed"
+
+
+def unlock_diagnostic_lines(session, offset):
+    if offset is None:
+        return
+    result = session.run_sudo_while_draining(["cat", STATE / "w2-sync-timing.log"])
+    phases = 0
+    for line in result.stdout[offset:].splitlines():
+        if DIAGNOSTIC_LINE.fullmatch(line) and (
+                b"unlock-phase=" in line or b"server-human-unlock-result=" in line
+                or b"error=" in line):
+            print("PMW2_UNLOCK_DIAG " + line.decode("ascii"), flush=True)
+            phases += 1
+    print(f"PMW2_UNLOCK_DIAG phases={phases}", flush=True)
+
+
 def start_macos_tui(binary, profile, private, endpoint, *, idle, reveal, copy, password=PASSWORD):
+    offset = None
+    if os.environ.get("PMW2_UNLOCK_PROFILE") == "1":
+        offset = len(sudo(["cat", STATE / "w2-sync-timing.log"]).stdout)
     session = MacPtySession.start(
         binary, profile, private, endpoint, idle=idle, reveal=reveal, copy=copy,
     )
+    started = time.monotonic()
     try:
         session.wait_text("Password required")
+        prompted = time.monotonic()
         assert b"\x1b[6n" not in bytes(session.output), (
             "TUI PTY startup must not require a terminal-emulator cursor response"
         )
         session.send_text(password.decode("ascii"), enter=True, hidden=True)
-        session.wait_text("Unlocked: selection never reveals secrets")
+        submitted = time.monotonic()
+        try:
+            session.wait_text("Unlocked: selection never reveals secrets")
+        except BaseException as primary:
+            print(f"PMW2_UNLOCK result=failed prompt_ms={round((prompted-started)*1000)} submit_ms={round((submitted-prompted)*1000)} wait_ms={round((time.monotonic()-submitted)*1000)}", flush=True)
+            try:
+                unlock_diagnostic_lines(session, offset)
+                sample_unlock_failure(session)
+            except BaseException as diagnostic:
+                raise primary from diagnostic
+            raise
+        print(f"PMW2_UNLOCK result=observed prompt_ms={round((prompted-started)*1000)} submit_ms={round((submitted-prompted)*1000)} wait_ms={round((time.monotonic()-submitted)*1000)}", flush=True)
+        unlock_diagnostic_lines(session, offset)
         return session
     except BaseException:
         close_session_preserving_primary(session)
@@ -3746,11 +3808,12 @@ def main():
             plist_to_install = diagnostic_plist
         # W2: inject only categorical sync timing into this owned service.
         global SYNC_TIMING_ENABLED
-        SYNC_TIMING_ENABLED = (os.environ.get("PMW2_TIMING") == "1"
-                               and not diagnostic and not final_phase_only)
+        SYNC_TIMING_ENABLED = (not diagnostic and not final_phase_only)
         if SYNC_TIMING_ENABLED:
             sync_timing_plist = scratch / "w2-sync-timing.plist"
             launchd_config["EnvironmentVariables"] = {"PMW2_TIMING": "1"}
+            if os.environ.get("PMW2_UNLOCK_PROFILE") == "1":
+                launchd_config["EnvironmentVariables"][DIAGNOSTIC_ENV] = "1"
             launchd_config["StandardErrorPath"] = str(STATE / "w2-sync-timing.log")
             with open(sync_timing_plist, "wb") as destination:
                 plistlib.dump(launchd_config, destination)

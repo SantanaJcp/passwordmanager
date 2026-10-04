@@ -589,16 +589,20 @@ impl SyncReplica {
         for batch in events.chunks(256) {
             let mut hashes = Vec::with_capacity(batch.len());
             let mut graph_hashes = Vec::new();
-            for event in batch {
+            let stages = batch
+                .iter()
+                .map(|event| sync_stage(&self.vault, event.digest()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let exporting = timing::Span::new("graph_export");
+            let graphs = reducer.export_ciphertext_graphs(batch, &stages)?;
+            drop(exporting);
+            timing::count("exported_graphs", graphs.iter().flatten().count());
+            for ((event, graph), stage) in batch.iter().zip(graphs).zip(stages) {
                 let sealed = self.pairing.seal(&event.to_bytes())?;
                 let hash = digest(&sealed);
                 retry(|| server.put(namespace, hash, &sealed))?;
                 hashes.push(hash);
                 event_ids.push(event.digest());
-                let stage = sync_stage(&self.vault, event.digest())?;
-                let exporting = timing::Span::new("graph_export");
-                let graph = reducer.export_ciphertext_graph(event, &stage)?;
-                drop(exporting);
                 if let Some(graph) = graph {
                     graph_hashes.push(self.upload_graph(server, &graph)?);
                 }

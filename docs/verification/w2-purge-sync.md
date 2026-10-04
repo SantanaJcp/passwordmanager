@@ -802,3 +802,50 @@ ARM/presentación con los checkpoints W2 y verifica el happy TUI en ambas CPU.
 Las cuatro corridas W2 autorizadas se agotaron: una nueva aceptación nativa
 requiere autorización adicional y un cambio verificable, no repetir este SHA.
 W2 entrega la corrección y su evidencia; permanece abierto por ese gate.
+
+## Fase 5 — método autorizado y discriminantes
+
+Base `1d270ad`, fast-forward y push ordinario de W2 desde la integración 4.
+El wire G5 §9.5 permite un bloque por put; G4 prohíbe batches. No se añade
+batch ni se aumenta ningún límite. La optimización propuesta comparte la
+verificación completa del DAG y de purgas durante la exportación de una
+página, en una única snapshot SQLite de lectura, cerrada antes del transporte.
+Conserva fsync de cada fichero, digest de cada grafo, límites y commit/ack.
+RED Linux: cuatro revisiones reales, cuatro exportaciones en una página,
+contador por hilo de verificaciones completas del ledger: exigir una, observar
+cuatro antes del fix. GREEN exige una y los mismos grafos, más rechazo de
+corrupción/firma/payload y todas las negativas de purga/recepción existentes.
+Control TLS restaurado de 39 eventos: medir puts/gets y tiempo hasta root y
+convergencia, sin variar sus oráculos. Registrar fsync por escenario mediante
+interposición local categórica, sin rutas, descriptores ni bytes.
+
+Unlock Mac: medir prompt y envío→Unlocked sin alterar wait8s. Ante FAIL,
+muestrear después del gate los procesos propios TUI/custodio; emitir sólo
+presencia de KDF, unlock, protección, fsync, SQLite y lecturas. La muestra
+posterior no sustituye tiempos ni demuestra que una fase acabó dentro del
+plazo. Hasta cinco runs exactos, nunca idénticos sin cambio/hipótesis nueva;
+Full25 normal y final/cleanup obligatorios en ambas CPU, plazos originales.
+Barrido local: los 52 casos de `/tmp/pmint6-gates-local-results.json`,
+49 rc0 y tres RED conocidos; W4 concurrency fuera de gates. Todo cargo/lab
+bajo `flock /tmp/pm-cargo-window.lock`; logs `/tmp/pmw2e-*`.
+
+Fallback heredado adicional conservado: `sync_stage` en pm-sync/src/lib.rs,
+cuando ya existe su ruta calculada, elimina ese staging y lo recrea en lugar
+de rechazar la colisión. No se cambia ni se usa como optimización.
+
+Diagnóstico W2 nativo 1: el script de laboratorio habilita las fronteras
+`macos-ticket26-diagnostics` ya existentes para Full25 normal; no ejecuta el
+modo `--diagnostic` ni omite ninguna matriz. `PM_MACOS_TICKET26_DIAGNOSTIC`
+se inyecta exclusivamente en el daemon propio; su stderr va al log W2, no
+al log del modo diagnóstico. Antes de cada TUI se toma offset y al acabar
+su wait8 se filtran exclusivamente categorías/tiempos de unlock admitidos.
+El código productivo de unlock/KDF es idéntico; no hay otra autenticación.
+La siguiente verificación retirará esta instrumentación para discriminar su
+impacto y confirmar el plist normal. No se cambia el workflow ni sus inputs.
+
+RED `/tmp/pmw2e-export-red.log`: rc101, grafos4/verificaciones4 frente a1.
+GREEN `/tmp/pmw2e-export-green-check.log`: rc0, grafos4/verificaciones1 y
+check completo. Control TLS bajo interposición: antes publicación3.462s /
+convergencia4.341s; después2.914 /3.785s. Puts271/gets272 en ambos;
+fsync426/fdatasync0 en el proceso de prueba en ambos, incluye setup y
+recepción, no es total del servidor remoto. Los fsync no se eliminan.
