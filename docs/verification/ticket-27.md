@@ -5270,3 +5270,47 @@ ningún resultado. Antes no se distinguía el fallo durante commit de uno durant
 prepare; sólo emite para la misma operación de organización Windows. No añadir
 código correctivo a local-operations por un PASS no discriminante. Plazos y
 oráculos permanecen idénticos; medición completa sigue pendiente del método.
+
+### Corrida2 fase9 — preparación inválida aislada y error de fixture propio
+
+[37186570419](https://github.com/SantanaJcp/passwordmanager/actions/runs/37186570419),
+SHA `357a778fe71d358768d065e5a08098b62dc0b020`, completed/failure,2/4.
+Local-operations vuelve a fallar y la traza nueva registra
+organization-preparation category=invalid-input, antes de commit. No es una
+simple carrera de pantalla ni falta de KH al unlock, que ya pasó. La misma
+operación anterior de Matrix registra prepare/commit/frame/catalog ok.
+Log `/tmp/pmw1h-run2.log`.
+
+Inferencia fundada pendiente de discriminante nativo de forma: el Password
+sintético tiene adjunto inline; restore crea otra copia cuyo adjunto se conserva
+como stream. Search devuelve ambas y selecciona la primera por IDs aleatorios.
+HumanVault::read_revision_from admite descriptores si has_stream, pero
+prepare_organize llama LogicalRecord::set_organization, que exige
+validate_shape(true): size/content/digest no coinciden en un descriptor sin
+cuerpo inline. Esto explica InvalidInput y la intermitencia por copia escogida.
+Arreglarlo en vault/content/reencryption común excede la zona W1 y puede
+solaparse con W3; se solicita decisión de alcance, sin elegir otro elemento,
+retirar el adjunto ni relajar validación como sustitución del comportamiento.
+
+El test positivo nuevo de cleanup tiene un error demostrado propio: el padre
+sellado tiene Installer:F no heredable. New-Item crea el directorio con roles
+custodiales heredados y WriteAllText(revision) falla AccessDenied. El harness
+sí inventaría/borrar el directorio vacío y acaba sin error adicional de cleanup,
+pero todavía no se alcanzan las tres aserciones ni SYNC; no se cuenta como
+GREEN completo. Corrección3: asignar DACL exacta a ese directorio sintético
+recién creado, con installer/SYSTEM/servicio y herencia para su archivo; ninguna
+DACL productiva ni del padre cambia. Agregar marcador sólo después de verificar
+la ausencia de todos los recursos propios.
+
+Discriminante3, Windows opt-in: leer el mismo registro por HumanVault antes de
+prepare y emitir sólo shape-read ok/error y stream-descriptor o
+complete-attachments, sin IDs/valores. Se libera el objeto antes de ejecutar la
+misma preparación, sin reenviarla. El modo normal no hace esa lectura adicional.
+Exigir asociación forma→prepare y conservar todo fallo. El arreglo común sigue
+pendiente de autorización; no tocar vault/content/W3 por inferencia.
+
+Primer barrido52 congelado sobre357a778:49rc0 + g7-matrix/g7-extra-bootstrap/
+g7-extra-vault rc1 conocidos, unexpected=[], Wayland real y fuentes intactas.
+Check22.895s/clean47.633s rc0; W4 concurrency fuera de gates. Logs y resultado
+`/tmp/pmw1h-gates-*`, runner `/tmp/pmw1h-run-local.py`. Se repetirá el barrido
+final porque diagnóstico3 modifica fuente Windows común cfg y el harness.

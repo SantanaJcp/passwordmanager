@@ -38,7 +38,7 @@ const LAB_AGENT_B: [u8; 16] = [0xb2; 16];
 
 /// Handles the shared catalog and exposure operations, or returns `None` for an opcode
 /// owned by another shared human-wire slice.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn handle_request_slice(
     vault: &mut HumanVault,
     path: &std::path::Path,
@@ -46,6 +46,7 @@ pub(crate) fn handle_request_slice(
     audit_custody: &std::sync::Arc<pm_vault::AuditDeviceCustody>,
     opcode: u8,
     request: &[u8],
+    #[cfg(target_os = "windows")] organization_diagnostics: bool,
     #[cfg(target_os = "windows")] mut organization_observer: impl FnMut(
         &str,
         Option<&HumanCommitError>,
@@ -185,6 +186,23 @@ pub(crate) fn handle_request_slice(
                 tags.push(cursor.public_string()?);
             }
             cursor.finish()?;
+            #[cfg(target_os = "windows")]
+            if organization_diagnostics {
+                let record = vault.read_record(item);
+                organization_observer("shape-read", record.as_ref().err())?;
+                let record = record.map_err(|_| Failure::Unavailable)?;
+                let descriptor_only = record.attachments().iter().any(|attachment| {
+                    u64::try_from(attachment.content().len()).ok() != Some(attachment.size())
+                });
+                organization_observer(
+                    if descriptor_only {
+                        "stream-descriptor"
+                    } else {
+                        "complete-attachments"
+                    },
+                    None,
+                )?;
+            }
             let preparation = vault.prepare_organize(item, tags, favorite);
             #[cfg(target_os = "windows")]
             organization_observer("preparation", preparation.as_ref().err())?;

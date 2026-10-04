@@ -96,6 +96,7 @@ function Assert-OwnedResourcesAbsent(
     if ($RootWasOwned) {
         Assert-True (-not (Test-Path -LiteralPath $RootPath -ErrorAction Stop)) 'owned fixture root remains after cleanup'
     }
+    Write-Host 'WINDOWS_CLEANUP_ABSENCE owned-resources=absent'
 }
 
 function Write-ServiceDiagnostic([string]$Phase, [string]$Name) {
@@ -176,7 +177,7 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
             }
         }
     }
-    foreach ($stage in @('preparation', 'frame-ready', 'frame-failed', 'frame-sent', 'commit')) {
+    foreach ($stage in @('preparation', 'frame-ready', 'frame-failed', 'frame-sent', 'commit', 'shape-read', 'stream-descriptor', 'complete-attachments')) {
         foreach ($category in @('ok', 'crypto-resource', 'crypto-other', 'invalid-input', 'io-permission', 'io-eof', 'io-input', 'io-other', 'storage', 'state-changed', 'wrong-channel', 'other', 'integrity', 'item-missing', 'invalid-command', 'vault', 'random', 'audit', 'body-changed', 'invalid-signature', 'expired', 'transaction-conflict')) {
             $allowed += "phase=organization-$stage category=$category"
         }
@@ -400,6 +401,12 @@ function Test-StoppedSyncStageInventory([int]$StoppedPid) {
         $stage = Join-Path $serviceDir ".pm-sync-stage-$testPid-$digest"
         Assert-True (-not (Test-Path -LiteralPath $stage)) 'synthetic staging fixture collision'
         New-Item -ItemType Directory -Path $stage | Out-Null
+        # The sealed parent's installer ACE is deliberately non-inheritable.
+        # Provision only this freshly created synthetic test directory; do not
+        # change the parent or any product staging DACL.
+        Invoke-Checked 'takeown.exe' @('/F', $stage, '/A')
+        Invoke-Checked 'icacls.exe' @($stage, '/inheritance:r', '/grant:r', "${installerName}:(OI)(CI)F", 'SYSTEM:(OI)(CI)F', "NT SERVICE\${serviceName}:(OI)(CI)F")
+        Assert-ExactNodeAcl $stage @($installerName, 'SYSTEM', "NT SERVICE\$serviceName")
         $fileName = if ($case -eq 'unexpected-child') { 'unplanned.txt' } else { 'revision' }
         $file = Join-Path $stage $fileName
         [IO.File]::WriteAllText($file, 'synthetic-ticket27-stopped-staging')

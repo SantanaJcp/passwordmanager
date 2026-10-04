@@ -1113,6 +1113,7 @@ fn serve_human(
             &service.audit_custody,
             opcode,
             rest,
+            service.diagnostics.is_some(),
             |stage, error| match service.diagnostics.as_ref() {
                 Some(diagnostics) if organization_active => {
                     diagnostics.record_human_result("organization", stage, error)?;
