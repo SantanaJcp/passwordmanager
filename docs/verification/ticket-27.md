@@ -5183,7 +5183,8 @@ normal; sólo worktree/rama W1, sin integrar W6 ni editar macOS, memoria W5,
 admisión/proveedor W4, staging W3 o wire sync. Base publicada
 `9a45482308c38294aff6a7689bf1e3ebc271343f`.
 Hasta cuatro corridas nuevas Windows con SHA exacto y discriminante distinto,
-workflow manual gratuito/sintético, sin cache/artifacts/secrets/native-ci.md.
+workflow manual gratuito/sintético, sin cache/artifacts/secrets, conforme al
+[método CI nativo](native-ci.md).
 Plazos/KDF/DACL/oráculos intactos; estados de tickets sin cambios.
 
 Baseline rojo conservado: run37184712787/SHA07830a4, local-operations obtiene
@@ -5314,3 +5315,121 @@ g7-extra-vault rc1 conocidos, unexpected=[], Wayland real y fuentes intactas.
 Check22.895s/clean47.633s rc0; W4 concurrency fuera de gates. Logs y resultado
 `/tmp/pmw1h-gates-*`, runner `/tmp/pmw1h-run-local.py`. Se repetirá el barrido
 final porque diagnóstico3 modifica fuente Windows común cfg y el harness.
+
+### Corrida3 fase9 — causa confirmada, cleanup GREEN del harness
+
+[37187231152](https://github.com/SantanaJcp/passwordmanager/actions/runs/37187231152),
+SHA `5b4fa05a506ccba30ce87911f1c239e9c6df69dd`, completed/failure,3/4.
+Windows11 Enterprise10.0.26200/build26200, ARM64, imagen
+win11-vs2026-arm64/20260924.168.1, host aarch64-pc-windows-msvc. Artifacts0
+comprobado en los tres runs nuevos; workflow/config sin cambios.
+
+**Organización: causa confirmada, corrección común no autorizada.** La misma
+traza muestra shape-read ok + complete-attachments → preparation/commit ok,
+y shape-read ok + stream-descriptor → preparation invalid-input. Este último
+pertenece al local-operations rojo después de Matrix/restore. No fallo de
+unlock, pérdida de peer, agotamiento protegido ni observer que ocultara un
+commit correcto: la preparación falla realmente antes de crearlo. La lectura
+extra del discriminante devuelve un registro autenticado válido por la ruta
+de descriptores; su cuerpo de adjunto está fuera del registro inline. Esto
+confirma el diagnóstico de read_revision_from/set_organization/validate_shape
+explicado arriba. La selección entre la copia inline y la restaurada por IDs
+aleatorios convierte el defecto común en un resultado intermitente del fixture.
+
+No se modifica el oráculo, selección, adjunto, validación ni vault común. El
+arreglo debe preservar datos/streams y la nueva revisión al organizar/favorite,
+con regresión determinista y lectura exacta del adjunto antes/después. Ese
+trabajo excede la zona W1 del encargo y puede solaparse con W3; pendiente de
+asignación/autorización, no cierre de ticket ni PASS de local-operations.
+
+**Cleanup: GREEN del harness.** Tests owned/foreign-owner/unexpected-child PASS,
+incluida limpieza del revision sintético no vacío y rechazo sin ampliar ledger.
+DACL sintética aprovisionada explícitamente, sin tocar roles productivos. Al
+final: WINDOWS_CLEANUP_STAGING directories=0 files=0 owners=stopped
+namespace=checked y WINDOWS_CLEANUP_ABSENCE owned-resources=absent. El agregado
+final sólo conserva local-operations/device-sync/device-retire-durable, sin
+cleanup errors. Corrida2 ya había borrado el residuo vacío inventariado del test
+fallido. La eliminación de un staging productivo no vacío en el cutoff70 no
+se observó con esta candidata; la gramática revision/temporal está validada por
+el fixture positivo, no se inventa cobertura integral de todos los streams.
+No valida los fallbacks Drop/LocalFree/DestroyWindow ni G7 productivo.
+
+### Tiempos Windows — fuentes y cortes exactos
+
+Scopes anidados: no sumar gets/activación a pull ni export/put a push. Ausencia
+de span completo significa NOT_MEASURED, nunca cero. Relectura del log histórico
+37180406421 confirma SHA y números; no es benchmark pareado con W2 compuesto.
+
+| Workload / fuente | Push | Gets | Descarga grafos | Aplicación | Pull completo | Job total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 36, histórico [37180406421](https://github.com/SantanaJcp/passwordmanager/actions/runs/37180406421),063bba4 |5.374986s |154/3.440835s |24/2.903289s |group_activate0.084500s |3.876555s |9.288192s |
+| 36, fase9 run3,5b4fa05 |6.001968s |112/3.473106s al corte |17 completos/18 iniciados,2.537452s |NOT_MEASURED |NOT_MEASURED |NOT_MEASURED |
+| 70, fase9 run1,a455c02 |NOT_MEASURED;286put/8.264494s al corte |NOT_RUN al corte |NOT_RUN al corte |NOT_RUN al corte |NOT_MEASURED |NOT_MEASURED |
+
+Run3 export compartido0.283117s/24grafos,154put5.480071s; TUI pushing
+first6.226s/observed5.983s/ended=true, pulling first12.210s/observed2.802s/
+ended=false, espera15.012s FAIL. NATIVE_SYNC154blocks/1root/close checked
+acredita push durable, no recepción íntegra ni RETIRE. Run1 export compartido
+0.528595s/52grafos,70eventos seleccionados/63 completos; espera15.004s FAIL
+con pushing aún activo. Corrida2 no alcanza SYNC por el error del test propio.
+Los tres runs están terminados; logs `/tmp/pmw1h-run{1,2,3}.log`, histórico
+`/tmp/pmw1h-historical36.log`, métricas `/tmp/pmw1h-native-metrics.json`.
+
+No existe nueva medición completa36/70 sobre la composición actual. La pregunta
+pendiente propone observar el mismo worker hasta su final después del FAIL15s,
+como diagnóstico separado máximo120s, sin reenviar ni cambiar ningún deadline
+productivo. El método anterior no autorizaba esa espera posterior; la extensión
+requiere acuerdo conforme a las instrucciones de Verificación del encargo.
+No se ejecuta por transcurso de tiempo ni se consume el cuarto run sin acuerdo
+concreto/discriminante. La política de plazos y RPC de lote siguen pendientes.
+
+### Gates locales de la candidata final
+
+Barrido sobre5b4fa05, fuentes congeladas:52casos/48rc0, g7-matrix y dos extras
+rc1 conocidos, y FAIL adicional token-exchange en token_exchange_lab.py:492:
+cancellable.returncode!=0. No diagnósticos de rc/stdout/stderr en esa aserción;
+no se atribuye a CUSTODY_UNAVAILABLE ni se equipara a los fallos históricos de
+hostile-start/denied-audience por semejanza. No se tocó código/fixture del
+proveedor fuera de W1. Logs `/tmp/pmw1h-final-gates-*`, summary/json y runner
+`/tmp/pmw1h-final-run-local.py`. TUI content/access/operations PASS en Wayland real.
+
+Ejecución enfocada independiente del mismo laboratorio sobre el mismo código:
+rc0, controles cancel=terminal PASS, log
+`/tmp/pmw1h-token-exchange-independent.log`. No borra el FAIL anterior ni prueba
+su causa/corrección. La falla nueva justifica una última barrida completa
+independiente con el mismo método52, sin reintentos internos, modificación de
+aserciones, recuperación ni cambio de fuentes. Logs
+`/tmp/pmw1h-confirmation-gates-*`, runner
+`/tmp/pmw1h-confirmation-run-local.py`; resultado se registra al terminar.
+
+### Discriminante4 — conservar el oráculo de staging tras SYNC exitoso
+
+Revisión del nuevo ledger: admitir namespace propio para el cutoff fallido no
+puede convertir residuos de un SYNC exitoso en aceptación de producto. Registrar
+si la TUI SYNC pasó; después de detener SCM e inventariar, cualquier staging
+residual en ese contexto agrega successful sync left product staging behind al
+agregado final, aunque el harness continúe borrando los recursos propios. La
+prueba positiva verifica además contexto fallido+1 admitido, exitoso+1 rechazado
+y exitoso+0 admitido. No cambia wire, plazos, DACL ni limpieza productiva.
+La cuarta y última corrida se destina a este guard y los tres casos de cleanup.
+
+Confirmación terminada antes de editar el guard:52casos/49rc0/tres RED conocidos,
+unexpected=[], source_unchanged=true, sobre5b4fa05. Summary creado08:17:01UTC;
+el script Windows se modificó08:17:55UTC. Logs/filas completos conservados.
+El barrido48 y la ejecución enfocada token-exchange PASS siguen separados;
+la repetición49 no demuestra la causa ni la corrección del FAIL cancellable.
+
+Después del guard se ejecuta check separado. Sólo cambian este documento y el
+harness PowerShell respecto al código del barrido49; crates/scripts Linux/Cargo
+son byte-idénticos. La verificación del cambio nuevo es la cuarta corrida nativa
+con el test negativo de aceptación conservada, no una nueva prueba Linux que
+no ejecuta ese harness. Check/clean locales y las52casos de fuente Linux final
+permanecen registrados con SHA y alcance exactos.
+
+Otros fallos ignorados heredados observados en pm-sync: push descarta el error
+de remove_dir_all(stage) al completar el evento; download_graph descarta el
+error de remove_file(joined) tras reconstruir los chunks. Pueden ocultar fallos
+de borrado; se conservan sin autorización para alterarlos. Los residuos del
+cutoff no prueban que esos llamados fallaran ni que se alcanzaran; el control
+nuevo conserva FAIL si quedan después de un SYNC aceptado. No se presentan los
+Drop/LocalFree/DestroyWindow heredados como corregidos o verificados.

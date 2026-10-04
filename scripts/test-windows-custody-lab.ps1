@@ -391,6 +391,11 @@ function Register-StoppedSyncStages([string]$Directory, [hashtable]$Owned) {
         $files += $children.Count
     }
     Write-Host "WINDOWS_CLEANUP_STAGING directories=$stages files=$files owners=stopped namespace=checked"
+    return $stages
+}
+
+function Assert-ProductSyncStageAbsence([bool]$Accepted, [int]$Stages) {
+    Assert-True (-not $Accepted -or $Stages -eq 0) 'successful sync left product staging behind'
 }
 
 function Test-StoppedSyncStageInventory([int]$StoppedPid) {
@@ -413,10 +418,19 @@ function Test-StoppedSyncStageInventory([int]$StoppedPid) {
         $ledger = $ownedPaths.Clone()
         $before = $ledger.Count
         $errorMessage = $null
-        try { Register-StoppedSyncStages $serviceDir $ledger }
+        $registeredStages = 0
+        try { $registeredStages = Register-StoppedSyncStages $serviceDir $ledger }
         catch { $errorMessage = $_.Exception.Message }
         if ($case -eq 'owned') {
             Assert-True ($null -eq $errorMessage -and $ledger.ContainsKey($stage) -and $ledger.ContainsKey($file)) 'valid owned staging was not inventoried'
+            Assert-True ($registeredStages -eq 1) 'synthetic owned staging count was not exact'
+            Assert-ProductSyncStageAbsence $false $registeredStages
+            $acceptedError = $null
+            try { Assert-ProductSyncStageAbsence $true $registeredStages }
+            catch { $acceptedError = $_.Exception.Message }
+            Assert-True ($acceptedError -ceq 'successful sync left product staging behind') 'successful-sync residue did not preserve the product failure oracle'
+            Assert-ProductSyncStageAbsence $true 0
+            Write-Host 'WINDOWS_CLEANUP_TEST case=completed-sync-residue result=pass'
             Repair-OwnedCleanupAcl $stage $installerName $ledger
             Remove-OwnedTree $stage $ledger
         }
@@ -446,7 +460,11 @@ function Repair-OwnedCleanupAcl([string]$Path, [string]$Installer, [hashtable]$O
     Assert-ExactNodeAcl $Path @($Installer, 'SYSTEM')
     if ($item.PSIsContainer) {
         if ([IO.Path]::GetFullPath($Path) -ceq [IO.Path]::GetFullPath($serviceDir)) {
-            Register-StoppedSyncStages $Path $Owned
+            $stages = Register-StoppedSyncStages $Path $Owned
+            try { Assert-ProductSyncStageAbsence $syncAccepted $stages }
+            catch { $cleanupErrors.Add($_.Exception.Message) }
+            # Continue removing the proven owned fixture, but retain the error
+            # above in the final aggregate; cleanup cannot erase product failure.
         }
         $children = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)
         foreach ($child in $children) {
@@ -687,6 +705,7 @@ $cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $ownedPaths = @{}
 $ownedServicePids = @{}
 $passMessage = $null
+$syncAccepted = $false
 
 try {
     $runnerPrincipal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -1243,7 +1262,11 @@ try {
             $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, "--$deviceMode", $deviceConfig, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
             Write-Host (Get-Content $tuiErr -Raw)
             if ($deviceMode -eq 'sync' -and $measureSync) { Write-SyncTimingSummary $syncTimingPath 'job' }
-            if ($p.ExitCode -eq 0) { Assert-TuiFixtureOutput $tuiOut $deviceMode; Write-Host "TUI_CASE case=device-$deviceMode result=pass" }
+            if ($p.ExitCode -eq 0) {
+                Assert-TuiFixtureOutput $tuiOut $deviceMode
+                if ($deviceMode -eq 'sync') { $syncAccepted = $true }
+                Write-Host "TUI_CASE case=device-$deviceMode result=pass"
+            }
             else { $tuiCaseFailures.Add("device-$deviceMode"); Write-Host "TUI_CASE case=device-$deviceMode result=fail" }
             if ($deviceMode -eq 'sync' -and $p.ExitCode -ne 0) {
                 Write-Host 'TUI_CASE case=device-retire result=not-run reason=sync-failed'
