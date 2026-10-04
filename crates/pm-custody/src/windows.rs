@@ -254,7 +254,6 @@ impl ServiceDiagnostics {
         error: Option<&pm_vault::HumanCommitError>,
     ) -> Result<(), Failure> {
         use crate::human_wire::OnePuxTransferStage;
-        use pm_vault::HumanCommitError;
         let stage = match stage {
             OnePuxTransferStage::Preview => "preview",
             OnePuxTransferStage::Preparation => "preparation",
@@ -263,6 +262,16 @@ impl ServiceDiagnostics {
             OnePuxTransferStage::FrameSent => "frame-sent",
             OnePuxTransferStage::FrameFailed => "frame-failed",
         };
+        self.record_human_result("onepux", stage, error)
+    }
+
+    fn record_human_result(
+        &self,
+        operation: &str,
+        stage: &str,
+        error: Option<&pm_vault::HumanCommitError>,
+    ) -> Result<(), Failure> {
+        use pm_vault::HumanCommitError;
         let category = match error {
             None => "ok",
             Some(HumanCommitError::Crypto(pm_crypto::CryptoError::ResourceUnavailable)) => {
@@ -284,7 +293,7 @@ impl ServiceDiagnostics {
         let mut file = self.file.lock().map_err(|_| Failure::Unavailable)?;
         file.seek(SeekFrom::End(0))
             .map_err(|_| Failure::Unavailable)?;
-        writeln!(file, "phase=onepux-{stage} category={category}")
+        writeln!(file, "phase={operation}-{stage} category={category}")
             .map_err(|_| Failure::Unavailable)?;
         file.sync_all().map_err(|_| Failure::Unavailable)
     }
@@ -1083,6 +1092,19 @@ fn serve_human(
             &service.audit_custody,
             opcode,
             rest,
+            |stage, error| match service.diagnostics.as_ref() {
+                Some(diagnostics) => {
+                    diagnostics.record_human_result("organization", stage, error)?;
+                    if error.is_some() || stage == "frame-failed" {
+                        diagnostics.memory(
+                            pm_crypto::windows_memory_failure()
+                                .map_err(|_| Failure::Unavailable)?,
+                        )?;
+                    }
+                    Ok(())
+                }
+                None => Ok(()),
+            },
         )
         .or_else(|| {
             handle_sync_request(&mut vault, service, opcode, rest)

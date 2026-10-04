@@ -5175,3 +5175,43 @@ completo medido. **Aceptación Windows pendiente: SYNC70 FAIL15s y RETIRE
 NOT_RUN**, observers durables/cleanup FAIL conservados, presupuesto6/6 agotado.
 macOS ARM Full25 PASS y33E2EE por CPU PASS; Intel SYNC20s FAIL, sin aceptación
 global. Merger/revisión y siguiente ciclo nativo siguen pendientes, como arriba.
+
+## W1 fase 9 — diagnóstico Windows (2026-10-04)
+
+Encargo explícito: fast-forward W1 limpio46f3464 a integración9a45482 y push
+normal; sólo worktree/rama W1, sin integrar W6 ni editar macOS, memoria W5,
+admisión/proveedor W4, staging W3 o wire sync. Base publicada
+`9a45482308c38294aff6a7689bf1e3ebc271343f`.
+Hasta cuatro corridas nuevas Windows con SHA exacto y discriminante distinto,
+workflow manual gratuito/sintético, sin cache/artifacts/secrets/native-ci.md.
+Plazos/KDF/DACL/oráculos intactos; estados de tickets sin cambios.
+
+Baseline rojo conservado: run37184712787/SHA07830a4, local-operations obtiene
+CUSTODY_UNAVAILABLE al esperar Organization committed15s; búsqueda exacta2
+ya pasó. No se atribuye a observer ni commit sin evidencia. Cleanup rechaza
+un directorio productivo .pm-sync-stage bajo service y confirma raíz restante;
+SCM/usuarios no figuran como fallos del agregado. Snapshot sync36 parcial:
+push6.864544s/get70RPC2.711078s, pull/job completos no medidos.
+Log actualizado `/tmp/pmw1h-baseline-native.log`.
+
+Primer discriminante: diagnóstico opt-in del handler Windows de organización,
+en su preparación (categoría HumanCommitError) y frame de respuesta; ante fallo
+captura el estado/fallo protegido ya disponible de W5, sin modificar ese motor.
+Únicamente categorías fijas, sin IDs/paths/payload; propagación de errores de
+escritura como en ServiceDiagnostics existente. Handler común cambia sólo
+para entregar la observación cfgWindows; operación y oráculo originales.
+Se ejecuta la secuencia completa con el mismo fixture/estado previo, sin
+repetir operaciones ni reautenticar dentro del caso. Si falla, identificar
+fase/recurso antes de corregir. PASS aislado no cierra la intermitencia.
+
+Gates locales: check.sh, clean-offline-build y lista congelada52 de pmint7,
+cwd W1 y cada invocación bajo flock /tmp/pm-cargo-window.lock; artefactos
+Keycloak26.7.3/CFT absolutos, Wayland real.49rc0 y tres RED conocidos esperados;
+concurrency W4 sólo observación. Logs `/tmp/pmw1h-*.log`.
+
+Fallbacks heredados observados, sin modificación ni atribución causal:
+WindowsServerPipe::drop ignora CloseHandle; ClipboardWindow::drop ignora
+DestroyWindow; sync_stage recrea el mismo directorio tras AlreadyExists.
+No corregir estos mecanismos sin autorización ni confundirlos con la negativa
+explícita de inventario del harness. Medición posterior al cutoff se mantiene
+pendiente de acuerdo del método; no ampliar plazos por inferencia.

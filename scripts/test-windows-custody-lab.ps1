@@ -170,6 +170,9 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
     foreach ($stage in @('preview', 'preparation', 'signature', 'frame-ready', 'frame-sent', 'frame-failed')) {
         foreach ($category in @('ok', 'crypto-resource', 'crypto-other', 'invalid-input', 'io-permission', 'io-eof', 'io-input', 'io-other', 'storage', 'state-changed', 'wrong-channel', 'other')) {
             $allowed += "phase=onepux-$stage category=$category"
+            if ($stage -in @('preparation', 'frame-ready', 'frame-failed')) {
+                $allowed += "phase=organization-$stage category=$category"
+            }
         }
     }
     foreach ($line in $lines) {

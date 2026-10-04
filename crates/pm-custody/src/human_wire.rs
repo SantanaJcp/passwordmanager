@@ -46,6 +46,10 @@ pub(crate) fn handle_request_slice(
     audit_custody: &std::sync::Arc<pm_vault::AuditDeviceCustody>,
     opcode: u8,
     request: &[u8],
+    #[cfg(target_os = "windows")] mut organization_observer: impl FnMut(
+        &str,
+        Option<&HumanCommitError>,
+    ) -> Result<(), Failure>,
 ) -> Option<Result<HumanResponse, Failure>> {
     if !matches!(opcode, 2..=13 | 15..=16 | 19..=30 | 33 | 35..=37 | 40..=41 | 43 | 45..=46 | 49..=61 | 64..=65)
     {
@@ -178,10 +182,21 @@ pub(crate) fn handle_request_slice(
                 tags.push(cursor.public_string()?);
             }
             cursor.finish()?;
-            let prepared = vault
-                .prepare_organize(item, tags, favorite)
-                .map_err(|_| Failure::Unavailable)?;
-            encode_prepared(vault, &prepared).map(HumanResponse::Protected)
+            let preparation = vault.prepare_organize(item, tags, favorite);
+            #[cfg(target_os = "windows")]
+            organization_observer("preparation", preparation.as_ref().err())?;
+            let prepared = preparation.map_err(|_| Failure::Unavailable)?;
+            let response = encode_prepared(vault, &prepared);
+            #[cfg(target_os = "windows")]
+            organization_observer(
+                if response.is_ok() {
+                    "frame-ready"
+                } else {
+                    "frame-failed"
+                },
+                None,
+            )?;
+            response.map(HumanResponse::Protected)
         }
         12 => {
             let mut cursor = Cursor::new(rest);
