@@ -502,6 +502,181 @@ fn exact_inventory_spans_multiple_pages_with_empty_attachment_chunks() {
     );
 }
 
+#[test]
+fn w7_organization_accepts_original_and_restored_password_attachments() {
+    w7_restored_password("organization", |vault, item, _| {
+        let prepared = vault
+            .prepare_organize(item, vec!["w7-tag".into()], false)
+            .unwrap();
+        commit(vault, &prepared);
+        let read = vault.read_record(item).unwrap();
+        assert_eq!(read.human().tags, ["w7-tag"]);
+        assert!(!read.human().favorite);
+    });
+}
+
+#[test]
+fn w7_rename_and_field_edit_accept_restored_stream_descriptors() {
+    w7_restored_password("edit", |vault, item, restored| {
+        let old = vault.read_record(item).unwrap();
+        let attachment = &old.attachments()[0];
+        let attachments = if restored {
+            vec![
+                Attachment::descriptor(
+                    *attachment.id(),
+                    attachment.name(),
+                    attachment.mime(),
+                    attachment.size(),
+                    *attachment.sha256(),
+                )
+                .unwrap(),
+            ]
+        } else {
+            vec![
+                Attachment::new(
+                    *attachment.id(),
+                    attachment.name(),
+                    attachment.mime(),
+                    attachment.content(),
+                )
+                .unwrap(),
+            ]
+        };
+        let mut human = metadata("w7-renamed");
+        human.notes = pm_crypto::ProtectedText::copy_from_str("synthetic w7 edited note").unwrap();
+        let auth = vec![AuthRecord::Password {
+            username: "w7-edited-user".into(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(b"synthetic w7 edited password")
+                .unwrap(),
+            destination_refs: vec![0],
+        }];
+        let record = if restored {
+            LogicalRecord::new_streaming(RecordKind::Password, human, auth, attachments).unwrap()
+        } else {
+            LogicalRecord::new(RecordKind::Password, human, auth, attachments).unwrap()
+        };
+        let prepared = vault.prepare_edit_record(item, &record).unwrap();
+        commit(vault, &prepared);
+        let read = vault.read_record(item).unwrap();
+        assert_eq!(read.human().title, "w7-renamed");
+        assert_eq!(&*read.human().notes, "synthetic w7 edited note");
+        assert!(read.auth().eq(record.auth()));
+    });
+}
+
+#[test]
+fn w7_trash_and_history_restore_accept_both_password_copies() {
+    w7_restored_password("history", |vault, item, _| {
+        let revision = *vault
+            .history(item)
+            .unwrap()
+            .entries()
+            .iter()
+            .find(|r| r.visible())
+            .unwrap()
+            .revision_id();
+        let deleted = vault.prepare_delete(item).unwrap();
+        commit(vault, &deleted);
+        assert_eq!(
+            vault.history(item).unwrap().lifecycle(),
+            pm_vault::ItemLifecycle::Trash
+        );
+        let restored = vault.prepare_restore(item, revision).unwrap();
+        commit(vault, &restored);
+        assert_eq!(
+            vault.history(item).unwrap().lifecycle(),
+            pm_vault::ItemLifecycle::Active
+        );
+        assert!(vault.read_revision(item, revision).is_ok());
+    });
+}
+
+// Same-vault restore yields two copies. Select each by its returned ID, never by
+// the random ordering of a search result (the Windows local-operations trigger).
+fn w7_restored_password(label: &str, operation: impl Fn(&mut HumanVault, [u8; 16], bool)) {
+    let custody = test_audit_custody();
+    let dir = TestDir::new(&format!("w7-{label}"));
+    let (path, _) = persist(&dir);
+    let (mut vault, _peer) = open_human(&path, &custody);
+    let record = LogicalRecord::new(
+        RecordKind::Password,
+        metadata("w7-password"),
+        vec![AuthRecord::Password {
+            username: "w7-user".into(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(b"synthetic w7 password").unwrap(),
+            destination_refs: vec![0],
+        }],
+        vec![
+            Attachment::new(
+                [0x77; 16],
+                "synthetic-w7.bin",
+                "application/octet-stream",
+                b"synthetic w7 attachment",
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let created = vault.prepare_create_record(&record).unwrap();
+    let original = *created.item_id();
+    commit(&mut vault, &created);
+    let mut archive = Vec::new();
+    vault.write_native_backup(&mut archive).unwrap();
+    let restore = vault
+        .prepare_native_restore(&mut Cursor::new(archive), MASTER)
+        .unwrap();
+    let copy = restore.item_ids()[0];
+    assert_ne!(original, copy);
+    commit(&mut vault, restore.prepared());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let snapshot = w7_stream_snapshot(&db);
+    for (item, restored) in [(original, false), (copy, true)] {
+        let read = vault.read_record(item).unwrap();
+        assert_eq!(read.attachments()[0].content().is_empty(), restored);
+        eprintln!(
+            "W7_COPY operation={label} representation={} phase=before",
+            if restored { "stream" } else { "inline" }
+        );
+        operation(&mut vault, item, restored);
+        eprintln!(
+            "W7_COPY operation={label} representation={} phase=after",
+            if restored { "stream" } else { "inline" }
+        );
+        let read = vault.read_record(item).unwrap();
+        assert_eq!(read.attachments()[0].content().is_empty(), restored);
+        if restored {
+            let mut output = HashingWriter::new();
+            vault
+                .read_attachment_to(item, *read.attachments()[0].id(), &mut output)
+                .unwrap();
+            assert_eq!(output.size, b"synthetic w7 attachment".len() as u64);
+            assert_eq!(
+                output.finish(),
+                pm_crypto::digest(b"synthetic w7 attachment")
+            );
+        } else {
+            assert_eq!(read.attachments()[0].content(), b"synthetic w7 attachment");
+        }
+    }
+    // Existing immutable streams and their headers/chunks must survive editing.
+    let after = w7_stream_snapshot(&db);
+    for row in snapshot {
+        assert!(after.contains(&row));
+    }
+    let reducer = pm_vault::CausalReducer::open(&path).unwrap();
+    for (index, event) in reducer.pending_outbox().unwrap().iter().enumerate() {
+        reducer
+            .export_ciphertext_graph(event, &dir.0.join(format!("w7-graph-{index}")))
+            .unwrap();
+    }
+}
+
+fn w7_stream_snapshot(db: &rusqlite::Connection) -> Vec<(Vec<u8>, Vec<u8>, i64, Vec<u8>)> {
+    db.prepare("SELECT s.revision_id,s.header,c.chunk_index,c.ciphertext FROM attachment_streams s JOIN attachment_stream_chunks c USING(attachment_id,revision_id) ORDER BY s.revision_id,c.chunk_index")
+        .unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))
+        .unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+}
+
 fn password_record(title: &str, password: &[u8]) -> LogicalRecord {
     LogicalRecord::new(
         RecordKind::Password,
