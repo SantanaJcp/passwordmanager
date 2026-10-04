@@ -1,6 +1,6 @@
 # W7 — organización/edición con adjuntos en streaming y diagnóstico de staging
 
-Estado actual: **fase 2 implementada; W7 16/16 y check.sh PASS; barrido/CI pendientes**.
+Estado actual: **fase 2 implementada; W7 16/16, check/clean y Windows local-operations PASS; macOS Intel PASS / ARM FAIL; barrido52 final 49 rc0 + tres RED conocidos; sin integración**.
 Recifrado autorizado el 2026-10-04, sin integración.
 El registro de fase 1 siguiente conserva su RED y diagnóstico originales. Base exacta
 `fdfc2230a3d80ad53fccd9bd86126e4ba14975ca`, worktree
@@ -321,3 +321,122 @@ RED ampliado final **sobre el mismo fixture de 16 tests**, producto exacto
 incluidas las cuatro rutas de edición en ambos tamaños. Se restauraron los
 dos archivos propios del producto y se compararon byte a byte con los archivos
 verificados por check.sh antes de continuar. No se tocó otro worktree.
+
+### CI fase 2 — dispatch y resultados
+
+Checkpoint publicado `2272a1f446fb80cf35566b2b4406338a61e4f1dd` (push normal;
+helper obsoleto falló, override gh explícitamente autorizado funcionó).
+Repo PUBLIC y workflows estándar/manuales verificados, sin cache/artifact/
+secrets; inputs Windows false/true/true/false, macOS false/false.
+Hipótesis Windows: recifrado cubre ambas coincidencias de catálogo tras restore,
+por lo que local-operations debe superar el fallo de edición W7 sin tocar sync.
+Hipótesis macOS: los cambios acotados de edición son compatibles con las dos
+CPU y la matriz normal, sin cambiar unlock ni presupuestos/plazos.
+
+- Windows1 [37191368827](https://github.com/SantanaJcp/passwordmanager/actions/runs/37191368827),
+  headSha exacto `2272a1f446fb80cf35566b2b4406338a61e4f1dd`, producto ARM64
+  job [111404081252](https://github.com/SantanaJcp/passwordmanager/actions/runs/37191368827/job/111404081252).
+- macOS1 [37191369928](https://github.com/SantanaJcp/passwordmanager/actions/runs/37191369928),
+  mismo SHA exacto, Intel job [111404083763](https://github.com/SantanaJcp/passwordmanager/actions/runs/37191369928/job/111404083763),
+  ARM job [111404083884](https://github.com/SantanaJcp/passwordmanager/actions/runs/37191369928/job/111404083884).
+  ARM **FAIL** antes de la edición W7: `TUI PTY screen observation timed out
+  mode=alternate render=password-prompt event=post-mark parser=ground child=alive`
+  y matriz independiente Full25 `human-streaming-file` TimeoutExpired30 s.
+  No se asigna causa al segundo timeout ni se afirma compatibilidad ARM.
+  Plazos/aserciones intactos; macOS 1/1 consumido, no se vuelve a despachar.
+  Log `/tmp/pmw7b-native-macos1-arm.log`.
+
+### Windows1 terminado — objetivo W7 observado
+
+`37191368827` **completed/failure**, SHA exacto2272a1f. Build/tests previos
+pasan, TUI sources/resize/clipboard/access/rotations/matrix/local-operations y
+device-pair PASS. Marcador explícito `TUI_CASE case=local-operations result=pass`
+y cambio de maestra old=denied/new=accepted. Sync después FAIL en plazo original;
+device-retire queda NOT_RUN por sync-failed y verificación durable/cleanup falla.
+El teardown informa staging de sync tras **operación fallida**, no residuo tras
+sync exitoso; conserva el oráculo y no corrige ese path. El residuo sintético de
+fase1 sigue clasificado no reproducido como incidente productivo tras éxito.
+Log `/tmp/pmw7b-native-windows1.log`, metadata `/tmp/pmw7b-native-windows1.json`.
+Windows1/2 consumido; no segunda corrida sin otra hipótesis/cambio: el objetivo
+local-operations ya está observado, aceptación Windows integral sigue FAIL.
+
+### Barrido52 inicial — resultados y desviación preservados
+
+Runner propio `/tmp/pmw7b-run-local.py` derivado del método pmint8, cwd W7,
+Wayland real `wayland-1`, artefactos absolutos del encargo, fuentes congeladas,
+flock por comando. **52 casos /50 rc0 /2 rc1 conocidos** en SHA2272a1f;
+summary `unexpected=[g7-extra-bootstrap]` (runner rc1, no se cambia expected).
+No falló ningún flujo esperado rc0; **no se acredita** la distribución49/3.
+`g7-matrix` conserva RED commit-outbox-audit EIO/ENOSPC/staging, `g7-extra-vault`
+conserva `authority or receipts changed across loss`, unchanged=(1,0,1,1,1).
+El diagnóstico bootstrap dio rc0, unchanged=(1,1,1,1,1), replacement0/closed1/
+provider-calls1/exact-restoration1/cleanup0. Una observación positiva no cierra
+su RED conocido. Se inspeccionó el fixture original (sin modificar): compara
+cuentas antes de pérdida y después del restart/estado público; la diferencia
+histórica está en auditoría. Repetición enfocada bajo método/plazos originales
+para distinguir no reproducción de desaparición del defecto, log propio
+`/tmp/pmw7b-bootstrap-diagnostic-repeat.log`. W4 sólo observación fuera de gates.
+Comandos/expected comparados contra pmint8: idénticos; logs/JSON
+`/tmp/pmw7b-gates-local-{results,summary}.json`, `/tmp/pmw7b-sweep.log`.
+Check del barrido rc0/41.917s y clean-offline rc0/50.864s (build49.84s).
+
+Repetición bootstrap: **rc1**, unchanged=(1,0,1,1,1), misma aserción histórica
+`authority or receipts changed across loss`, replacement0/closed1/cleanup0.
+El RED persiste y su no reproducción inicial es intermitencia del diagnóstico,
+no una corrección W7. Se repite el
+barrido completo por esta desviación para verificar la distribución sobre una corrida
+única, conservando íntegros los resultados iniciales: runner
+`/tmp/pmw7b-run-local2.py`, prefijo `pmw7b-gates2`, fuentes/método idénticos.
+
+### macOS1 terminado — Intel PASS / ARM FAIL
+
+Workflow **completed/failure**, headSha exacto2272a1f. **Intel success**,
+Full25 completo/import/offline+wrong-pin/local/sync y pruebas finales pasan;
+`PASS macos-full25` conserva `attachment=streamed-exact-16MiB+4096`,
+`restore=authority-preserved`, `sync=pair+native-pinned+status`,
+`restart=same-job`, `retire=signed-remote-history`, `cleanup=verified`.
+TUI core/clipboard AppKit/launchd/ACL/persistencia/native también PASS.
+Log `/tmp/pmw7b-native-macos1-intel.log`. Esto confirma no regresión observable
+Intel en esta corrida; **no** acredita ARM ni soporte/certificación completo.
+ARM conserva los dos errores previos a edición indicados arriba; budget1/1.
+Metadata final `/tmp/pmw7b-native-macos1.json`, jobs exactos enlazados arriba.
+Windows/macOS API artifacts final: ambos `total_count=0`, JSON
+`/tmp/pmw7b-native-{windows1,macos1}-artifacts.json`.
+No segunda Windows (local-operations observado) ni otra macOS (budget agotado).
+
+### Barrido52 final y entrega W7
+
+Segunda corrida completa: **runner rc0 /52 casos /49 rc0 /tres rc1 conocidos /
+unexpected=[] /source_unchanged=true**, producto exacto
+`2272a1f446fb80cf35566b2b4406338a61e4f1dd`. 570.524s sumados de casos.
+Los52 nombres/comandos/expected son idénticos al método pmint8; no se cambió
+ninguna aserción, KDF, presupuesto, límite, plazo ni fallback. Wayland real desde
+el inicio; artefactos Keycloak/CFT del encargo. W4 concurrency rc0 observado,
+**fuera de gates**, sin afirmar provider/multiagente de producción.
+
+- Check rc0/68.204s: `/tmp/pmw7b-gates2-final-check.log`.
+- Clean locked/offline rc0/49.085s: `/tmp/pmw7b-gates2-final-clean.log`.
+- Matriz G7 rc1: mismo RED commit-outbox-audit EIO/ENOSPC/staging.
+- Bootstrap/vault rc1: mismo RED audit counts, unchanged=(1,0,1,1,1),
+  replacement0/closed1/cleanup0. No se cierran esos diagnósticos.
+- Purge probe, E2EE/shared-purge y restore_graph_digest rc0; log de cada caso
+  en `/tmp/pmw7b-gates2-*.log`.
+- Inventario final `/tmp/pmw7b-gates2-local-results.json`, resumen
+  `/tmp/pmw7b-gates2-local-summary.json`, stdout `/tmp/pmw7b-sweep2.log`.
+  La primera corrida50/2 y la repetición enfocada bootstrap se conservan;
+  ninguna fila de la corrida final se sustituye por un resultado anterior.
+
+Archivos de producto/tests: `crates/pm-vault/src/human.rs`,
+`crates/pm-vault/src/content.rs`, `crates/pm-vault/tests/backup_lifecycle.rs`;
+este documento es el único cambio posterior al checkpoint de código2272a1f.
+Enlaces locales y diff-check verificados. Sin cambios de tickets, wire de sync,
+listener/admisión/proveedor, sync_stage ni política de recuperación G4.
+Sin integración ni merge de PR #1; push normal sólo rama W7.
+
+Siguiente acción del orquestador: revisar la candidata W7 y su evidencia para
+handoff al merger. No atribuir aceptación macOS ARM al PASS Intel: ARM quedó
+sin demostrar por unlock y timeout de streaming de la matriz independiente;
+Windows integral conserva FAIL de sync/plazo y cleanup tras sync fallido.
+Los presupuestos de CI usados son Windows1/2 y macOS1/1; no más dispatch W7
+sobre esta entrega. El incidente alegado de staging tras sync exitoso sigue
+**no reproducido**, con clasificación sintética original y límites anteriores.
