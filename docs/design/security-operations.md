@@ -33,6 +33,18 @@ Antes de abrir claves, el motor comprueba propietario/permisos de estado, bootst
 
 Presupuesto inicial de regiones propias bloqueadas: 32 MiB por proceso custodio/humano; si no cabe una operación, `RESOURCE_UNAVAILABLE`, nunca rebajar protección. El instalador configura límite suficiente para ese presupuesto y overhead de páginas; verifica el bloqueo real, no solo el número configurado. No reservar 32 MiB por conexión ni copiar todos los secretos al desbloquear. Adjuntos/backup se procesan por chunks G2; límites de concurrencia G4 siguen vigentes. Esta selección es un límite de recursos revisable con mediciones, no un permiso funcional.
 
+Concreción Windows aprobada para W5 (2026-10-04): antes de claves, solicitar
+working set mínimo64 MiB (32 de presupuesto +32 de margen), preservar límites
+previos mayores y usar máximo blando al menos igual al mínimo. Comprobar
+SetProcessWorkingSetSizeEx y releer valores efectivos; rechazo o cuota efectiva
+insuficiente hacen fallar explícitamente el arranque, sin otra política.
+Además del contador lógico32 MiB, Windows cobra por owner el payload más
+canario16 redondeado a página y dos páginas de guarda. Las guardas no-access
+se cobran conservadoramente; la metadata no bloqueada queda en el margen.
+La reserva atómica precede al allocator y al secreto; bloqueo comprobado
+cubre payload y canario. Linux/macOS conservan el contador lógico existente.
+Método y evidencia en [Windows G7 W5](../verification/ticket-28.md#windows-g7--w5-fase-2-cuota-y-presupuesto-por-páginas-2026-10-04).
+
 **Excepciones explícitas a “todo bloqueado”:** memoria interna de Argon2id (256 MiB por defecto, hasta 1 GiB admitido), stack/registros, expansiones criptográficas, TLS, `String`/buffers internos de russh y heap/DOM del browser no quedan cubiertos automáticamente por nuestras regiones. No se anuncia garantía “ningún byte jamás toca swap” ni zeroización de bibliotecas por usar Rust. Minimizar duración/copias y exigir prueba de extracción bajo el aislamiento G1; swap/hibernación protegidos cubren riesgo de persistencia, no procesos ya comprometidos. La protección de páginas Windows tiene límites reales y retorno verificable: [VirtualLock](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtuallock).
 
 TUI: desbloqueo humano expira por **5 minutos sin entrada humana**; bloquear limpia autoridad/raíces/cachés humanos, oculta revelados y cancela confirmaciones pendientes. La actividad de agente no reinicia ese plazo. Reveal dura máximo **15 segundos**, salvo volver a solicitarlo; navegación/bloqueo lo termina antes. Inputs secretos sin eco y sin persistencia de historial; pantallas en buffer alternativo, limpiar área al terminar. Restaurar modo terminal en salidas manejables; SIGKILL/corte de energía no garantizan limpieza. Buffer alternativo/raw mode existen en [Crossterm 0.29](https://docs.rs/crossterm/0.29.0/crossterm/terminal/index.html), pero no borran capturas o scrollback ya conservado por un terminal ajeno.

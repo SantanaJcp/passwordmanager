@@ -15,7 +15,7 @@ macos-ticket26-diagnostics = []
 libc.workspace = true
 libsodium-sys-stable.workspace = true
 minicbor.workspace = true
-windows-sys.workspace = true
+windows-sys = { workspace = true, features = ["Win32_System_Memory", "Win32_System_Threading", "Win32_System_SystemInformation"] }
 
 [lints]
 workspace = true

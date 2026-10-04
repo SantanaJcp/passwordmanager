@@ -4,9 +4,13 @@
 param(
     [switch]$EphemeralCI,
     [switch]$ServiceDiagnostics,
-    [switch]$TuiConPtyRed
+    [switch]$TuiConPtyRed,
+    [switch]$OnePuxMemoryDiagnostics
 )
 
+if ($OnePuxMemoryDiagnostics -and (-not $ServiceDiagnostics -or $TuiConPtyRed)) {
+    throw 'Focused memory diagnostics require ServiceDiagnostics and exclude TuiConPtyRed.'
+}
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -169,11 +173,42 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
         }
     }
     foreach ($line in $lines) {
-        Assert-True ($allowed -contains [string]$line) 'unexpected service diagnostic phase'
+        $memoryStatus = [string]$line -match '^phase=protected-memory-status live-capacity=[0-9]+ budget=33554432 live-payload-pages=[0-9]+ live-locked-pages=[0-9]+ live-budget-pages=[0-9]+ page-bytes=[0-9]+ live-regions=[0-9]+ working-set-min=[0-9]+ working-set-max=[0-9]+ working-set-flags=[0-9]+$'
+        $memoryFailure = [string]$line -match '^phase=protected-memory-failure category=(budget|page-budget|alloc|virtual-lock|working-set-query|working-set-set|working-set-effective) requested-capacity=[0-9]+ requested-payload-pages=[0-9]+ win32-error=[0-9]+$'
+        Assert-True (($allowed -contains [string]$line) -or $memoryStatus -or $memoryFailure) 'unexpected service diagnostic phase'
+        if ($memoryStatus) {
+            Assert-True ([string]$line -match 'working-set-min=([0-9]+) working-set-max=([0-9]+) working-set-flags=10$') 'working-set policy is not soft min/max'
+            Assert-True ([long]$Matches[1] -ge 67108864 -and [long]$Matches[2] -ge [long]$Matches[1]) 'effective service quota is insufficient'
+        }
         Write-Host "SERVICE_PHASE $line"
     }
     Assert-ServiceDiagnosticGenerations $lines
     Assert-HumanDiagnosticTrace $lines
+}
+
+function Write-ServiceDumpPolicyObservation {
+    # Read only fixed product keys. Never crash a process or create a dump.
+    foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+        try {
+            $wer = 'SOFTWARE\Microsoft\Windows\Windows Error Reporting'
+            $global = $base.OpenSubKey("$wer\LocalDumps", $false)
+            $service = $base.OpenSubKey("$wer\LocalDumps\pm-custody.exe", $false)
+            $exclusions = $base.OpenSubKey("$wer\ExcludedApplications", $false)
+            try {
+                $globalPresent = $null -ne $global
+                $servicePresent = $null -ne $service
+                $excluded = $null -ne $exclusions -and $null -ne $exclusions.GetValue('pm-custody.exe', $null)
+                Write-Host "WER_POLICY view=$view global-localdumps-key=$globalPresent service-localdumps-key=$servicePresent all-user-exclusion-value=$excluded scope=registry-only crash=not-run acceptance=not-demonstrated"
+            }
+            finally {
+                if ($null -ne $global) { $global.Dispose() }
+                if ($null -ne $service) { $service.Dispose() }
+                if ($null -ne $exclusions) { $exclusions.Dispose() }
+            }
+        }
+        finally { $base.Dispose() }
+    }
 }
 
 function Assert-ServiceDiagnosticGenerations([object[]]$Lines) {
@@ -587,6 +622,9 @@ try {
     }
 
     Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
+    if ($OnePuxMemoryDiagnostics) {
+        Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '--example', 'windows_onepux_memory_probe', '--locked', '--offline')
+    }
     if ($TuiConPtyRed) {
         Invoke-Checked 'cargo' @('build', '-p', 'pm-native-channel', '--example', 'windows_tui_conpty_fixture', '--locked', '--offline')
         Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '--example', 'windows_human_tui_seed', '--locked', '--offline')
@@ -633,11 +671,29 @@ try {
         Add-OwnedPath $ownedPaths $tuiCustody
     }
 
+    $memoryProbe = $null
+    $memorySource = $null
+    if ($OnePuxMemoryDiagnostics) {
+        $builtProbe = Join-Path $repo 'target\debug\examples\windows_onepux_memory_probe.exe'
+        Assert-NativeStaticMsvcBinary $dumpbin $builtProbe 'windows_onepux_memory_probe.exe'
+        $memoryProbe = Join-Path $humanDir 'windows_onepux_memory_probe.exe'
+        $memorySource = Join-Path $humanDir 'memory.1pux'
+        Copy-Item -LiteralPath $builtProbe -Destination $memoryProbe -ErrorAction Stop
+        Add-OwnedPath $ownedPaths $memoryProbe
+        Add-OwnedPath $ownedPaths $memorySource
+        New-SyntheticOnePux $memorySource
+    }
+
     $agentSid = Get-Sid "$env:COMPUTERNAME\$agentName"
     $humanSid = Get-Sid "$env:COMPUTERNAME\$humanName"
     if ($ServiceDiagnostics) {
         Add-OwnedPath $ownedPaths $diagnosticPath
         [IO.File]::WriteAllText($diagnosticPath, [string]::Empty)
+        if ($OnePuxMemoryDiagnostics) {
+            $quotaDeniedDiagnosticPath = Join-Path $diagnosticDir 'quota-denied.txt'
+            Add-OwnedPath $ownedPaths $quotaDeniedDiagnosticPath
+            [IO.File]::WriteAllText($quotaDeniedDiagnosticPath, [string]::Empty)
+        }
         Set-ExactTreeAcl $diagnosticDir @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
         Assert-ExactNodeAcl $diagnosticDir @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
         Assert-ExactNodeAcl $diagnosticPath @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
@@ -777,6 +833,44 @@ try {
     if ($ServiceDiagnostics) {
         $binPath += " --service-diagnostics `"$diagnosticPath`""
     }
+    if ($OnePuxMemoryDiagnostics) {
+        $deniedBinPath = $binPath.Replace($diagnosticPath, $quotaDeniedDiagnosticPath)
+        Invoke-Checked 'sc.exe' @('config', $serviceName, 'binPath=', $deniedBinPath)
+        $quotaNegativeFailure = $null
+        try {
+            & (Join-Path $repo 'scripts\test-windows-memory-quota-denial.ps1') -ServiceName $serviceName -DiagnosticPath $quotaDeniedDiagnosticPath
+        }
+        catch { $quotaNegativeFailure = $_ }
+        try {
+            # ChangeServiceConfig2 treats the original NULL privilege list as
+            # "unchanged", so remove the temporary negative record. Re-create
+            # the normal owned record with its original unset privileges.
+            $quotaRecord = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
+            Assert-True ($null -ne $quotaRecord) 'quota fixture record disappeared'
+            if ([string]$quotaRecord.State -eq 'Running') {
+                $quotaPid = Get-StoppableServicePid $serviceName
+                Stop-OwnedService $serviceName $quotaPid
+            }
+            $quotaRecord = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
+            Assert-True ($null -ne $quotaRecord -and [string]$quotaRecord.State -eq 'Stopped') 'quota fixture did not stop before removal'
+            Invoke-Checked 'sc.exe' @('delete', $serviceName)
+            Assert-True ($null -eq (Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop)) 'quota fixture SCM record survived deletion'
+            $serviceOwned = $false
+            Invoke-Checked 'sc.exe' @('create', $serviceName, 'type=', 'own', 'start=', 'demand', 'obj=', "NT SERVICE\$serviceName", 'binPath=', $binPath)
+            $serviceOwned = $true
+            Invoke-Checked 'sc.exe' @('sidtype', $serviceName, 'unrestricted')
+            Assert-True ((Get-Sid "NT SERVICE\$serviceName") -eq $serviceSid) 'normal service SID changed after quota fixture'
+            [W5QuotaDeniedService]::Run($serviceName, $false)
+            Write-Host 'PASS windows-quota-fixture-restored privileges=original-exact sid=same command=normal'
+        }
+        catch {
+            if ($null -ne $quotaNegativeFailure) {
+                throw [AggregateException]::new('Quota negative and fixture restoration failed', @($quotaNegativeFailure.Exception, $_.Exception))
+            }
+            throw
+        }
+        if ($null -ne $quotaNegativeFailure) { throw $quotaNegativeFailure }
+    }
     Invoke-Checked 'sc.exe' @('config', $serviceName, 'binPath=', $binPath)
     Write-ServiceDiagnostic 'before-start' $serviceName
     Invoke-Checked 'sc.exe' @('start', $serviceName)
@@ -801,6 +895,23 @@ try {
     $p = Start-AsUser $humanCredential $custody @('probe', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $emptyInput $humanOut $humanErr
     Assert-True ($p.ExitCode -eq 0) 'human RPK channel failed after SCM restart'
 
+    if ($OnePuxMemoryDiagnostics) {
+        Write-ServiceDumpPolicyObservation
+        $p = Start-AsUser $humanCredential $memoryProbe @($humanProfile, $humanPrivate, $vaultId, $memorySource) $humanInput $humanOut $humanErr
+        Write-Host (Get-Content $humanErr -Raw)
+        Write-Host (Get-Content $humanOut -Raw)
+        Write-ServiceSubphaseDiagnostics $diagnosticPath
+        $previewExit = $p.ExitCode
+        # Independent native budget evidence, even when the seed8 preview is RED.
+        & cargo test -p pm-crypto --lib windows_memory::tests:: --locked --offline -- --nocapture --test-threads=1
+        $quotaExit = $LASTEXITCODE
+        & cargo test -p pm-crypto --test windows_memory_budget --locked --offline -- --nocapture --test-threads=1
+        $budgetExit = $LASTEXITCODE
+        Assert-True ($previewExit -eq 0) 'focused seed8 1PUX preview failed'
+        Assert-True ((Get-Content $humanOut -Raw).Trim() -eq 'PASS w5-onepux-memory seed8=exact preview=2 prepared=validated lease=restored commit=not-sent') 'focused preview did not prove exact result'
+        Assert-True ($budgetExit -eq 0) 'native aggregate protected-memory budget failed'
+        Assert-True ($quotaExit -eq 0) 'native working-set quota denial failed'
+    }
     if ($TuiConPtyRed) {
         $p = Start-AsUser $agentCredential $identityFixture @('--peer-negative', $vaultId) $emptyInput $badOut $badErr
         Assert-True ($p.ExitCode -eq 0) ('native agent-to-human peer negative failed: ' + (Get-Content $badErr -Raw))

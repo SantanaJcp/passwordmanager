@@ -19,6 +19,12 @@ on:
         default: false
         type: boolean
 
+      onepux_memory_diagnostics:
+        description: Focused seed8 1PUX protected-memory probe without ConPTY (not full acceptance)
+        required: true
+        default: false
+        type: boolean
+
 permissions:
   contents: read
 
@@ -57,7 +63,13 @@ jobs:
       - name: Run native custody product lab
         shell: pwsh
         run: |
-          if ('${{ inputs.service_diagnostics }}' -eq 'true') {
+          if ('${{ inputs.onepux_memory_diagnostics }}' -eq 'true') {
+            if ('${{ inputs.service_diagnostics }}' -ne 'true' -or '${{ inputs.tui_conpty_red }}' -eq 'true') {
+              throw 'Focused memory diagnostics require service_diagnostics=true and tui_conpty_red=false'
+            }
+            ./scripts/test-windows-custody-lab.ps1 -EphemeralCI -ServiceDiagnostics -OnePuxMemoryDiagnostics
+          }
+          elseif ('${{ inputs.service_diagnostics }}' -eq 'true') {
             if ('${{ inputs.tui_conpty_red }}' -eq 'true') {
               ./scripts/test-windows-custody-lab.ps1 -EphemeralCI -ServiceDiagnostics -TuiConPtyRed
             }
