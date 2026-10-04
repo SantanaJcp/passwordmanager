@@ -296,9 +296,9 @@ El nuevo test de rechazo desmesurado pasa nativamente: ResourceUnavailable,
 category=budget, closure sin ejecutar, capacidad final cero y sin overflow.
 El test agregado falla de nuevo al primer MiB (no llega al límite ni a su
 rechazo), y el preview falla tras seed8 exacto, ack/duplicación y restauración
-de lease. GetLastError vuelve a ser1453, con 45 regiones/184320 bytes de
-payload y working set204800/1413120/flags10; esta vez la petición es32 bytes,
-capacidad vigente2431 bytes. La cuota por páginas se reproduce aunque varíe
+de lease. GetLastError vuelve a ser 1453, con 45 regiones/184320 bytes de
+payload y working set 204800/1413120/flags10; esta vez la petición es 32 bytes,
+capacidad vigente 2431 bytes. La cuota por páginas se reproduce aunque varíe
 la reserva puntual denegada, siempre muy por debajo del presupuesto lógico.
 No se atribuye esa variación a una causa de contenido no observada.
 
