@@ -184,6 +184,7 @@ const fn operation_help(menu: OperationMenu) -> &'static str {
 }
 
 struct App {
+    repaint_timing: Option<pm_crypto::phase_timing::PhaseTimer>,
     entries: Vec<CatalogEntry>,
     visible: Vec<usize>,
     selected: usize,
@@ -311,6 +312,7 @@ impl std::ops::Deref for ProtectedInput {
 impl App {
     fn new(idle: Duration, reveal_for: Duration, copy_for: Duration) -> Result<Self, Failure> {
         Ok(Self {
+            repaint_timing: None,
             entries: Vec::new(),
             visible: Vec::new(),
             selected: 0,
@@ -863,19 +865,24 @@ fn run_authenticated_session(
     let session = (|| {
         draw(terminal, app)?;
         let password = read_prompt(terminal, app, true)?;
+        let mut timing = pm_crypto::phase_timing::PhaseTimer::new("tui-unlock");
         let mut tls = Some(connect(profile, key, socket)?);
         let tls_ref = tls.as_mut().ok_or(Failure::Unavailable)?;
         tls_ref
             .write_all(HUMAN_MAGIC)
             .map_err(|_| Failure::Unavailable)?;
+        timing.phase("connected-magic-written");
         rpc_unlock(tls_ref, &password)?;
+        timing.phase("response-received");
         app.password = password;
         app.input.clear();
         write_frame(tls_ref, &[46])?;
         app.replace_catalog(decode_catalog(&read_frame(tls_ref)?)?);
+        timing.phase("catalog-received");
         app.mode = Mode::Browse;
         app.status = "Unlocked: selection never reveals secrets".into();
         app.idle_at = Instant::now();
+        app.repaint_timing = Some(timing);
         let outcome = (|| {
             loop {
                 event_loop(terminal, app, tls.as_mut().ok_or(Failure::Unavailable)?)?;
@@ -1718,12 +1725,19 @@ fn native_restore(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), 
         app.status = "Confirmation mismatch; vault unchanged".into();
         return Ok(());
     }
+    let mut timing = pm_crypto::phase_timing::PhaseTimer::new("tui-restore");
     let request = encode_secret_request(34, &app.password)?;
     write_frame(tls, &request)?;
+    timing.phase("frame-written");
     stream_file_to_server(tls, Path::new(&*path))?;
+    timing.phase("archive-sent");
     let prepared = decode_prepared_response(&read_frame(tls)?)?;
+    timing.phase("prepared-response");
     rpc_commit(tls, &prepared)?;
+    timing.phase("committed-response");
     refresh(app, tls)?;
+    timing.phase("catalog-refreshed");
+    app.repaint_timing = Some(timing);
     app.status = "Restore committed with new IDs/keys; current authority preserved and imported grants inactive".into();
     show_information(app, &app.status.clone());
     Ok(())
@@ -2848,6 +2862,10 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<File>>, app: &mut App) -> Resul
     }
     #[cfg(not(windows))]
     let _ = completed;
+    if let Some(mut timing) = app.repaint_timing.take() {
+        timing.phase("repainted");
+        timing.finish();
+    }
     Ok(())
 }
 

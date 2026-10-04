@@ -573,11 +573,13 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
             session.wait_information("Restore committed with new IDs/keys", since=mark)
         except BaseException as error:
             try:
+                m.w6_phase_timings()
                 m.sample_custody_failure(session, "restore")
                 diagnose_restore_wait(m, session, after, since=mark)
             except BaseException as diagnostic_error:
                 raise error from diagnostic_error
             raise
+        m.w6_phase_timings()
         restored = snapshot(m, session)
         assert restored["vault_items"] > before_count and restored["authority_events"] > authority
         assert restored["authority_state"] == authority_state, "restore changed current authority"

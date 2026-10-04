@@ -3877,7 +3877,10 @@ fn derive_password(
         .checked_mul(1024 * 1024)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or(CryptoError::InvalidKdf)?;
+    let mut timing = crate::phase_timing::PhaseTimer::new("kdf");
+    timing.kdf_profile(profile.memory_mib, profile.passes);
     let mut key = Secret::zeroed()?;
+    timing.phase("protected-output");
     // SAFETY: output, password, and salt point to valid buffers; limits were validated.
     let result = unsafe {
         libsodium_sys::crypto_pwhash(
@@ -3891,9 +3894,11 @@ fn derive_password(
             libsodium_sys::crypto_pwhash_ALG_ARGON2ID13.cast_signed(),
         )
     };
+    timing.phase("argon2id");
     if result != 0 {
         return Err(CryptoError::ResourceUnavailable);
     }
+    timing.finish();
     Ok(key)
 }
 

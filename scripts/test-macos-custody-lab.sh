@@ -115,7 +115,7 @@ main() {
   configure_ticket26_harness_command \
     "$mode" "$root" "$libsodium_out_dir/source/libsodium-stable/config.log" \
     "$final_phase_only"
-  "${harness_command[@]}"
+  PMW6_TIMING=1 "${harness_command[@]}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

@@ -2555,3 +2555,59 @@ Resultados, desglose por CPU, riesgos de pico de exportación y propietarios
 en [resultado W2 fase5](w2-purge-sync.md#resultado-final-de-fase-5-mejoras-verificadas-aceptación-conjunta-pendiente).
 Requiere revisar integración y autorizar el siguiente diagnóstico de
 cola/audit-unlock/catálogo/restore; no cambia el estado del ticket26.
+
+
+### W6 — método autorizado de diagnóstico unlock/restore (2026-10-04)
+
+Worktree `w6-macos-stability`, rama `codex/pm-w6-macos-stability`, base exacta
+W2 `b1d374c4c733715911600233d29334eba3bdbe52`. W6 implementa y publica sus
+checkpoints; no integra, no toca W1 Windows/W3/W4/W5 ni estados de tickets.
+Hasta tres runs diagnósticos y seis dispatches totales de aceptación normal
+Intel/ARM, sobre SHAs exactos y con hipótesis/cambio explícito por corrida.
+No cambiar KDF contractual (Argon2id13, 256 MiB/3 pasadas/p=1), límites,
+deadlines, aserciones, memoria protegida, transporte sync o staging.
+
+Diagnóstico opt-in `PMW6_TIMING=1`: relojes monotónicos por operación/fase y
+marca de reloj de pared para correlación entre procesos del mismo runner.
+Sólo categorías fijas, microsegundos y parámetros KDF efectivos validados;
+sin valores, longitudes de contraseña, salt, IDs de bóveda/transacción, rutas,
+PIDs ni payloads. Se mide recepción/dispatch humano, SQLite/configuración,
+root/KDF/protección de salida, audit-unlock/commit/cierre, respuesta,
+catálogo y repaint TUI. Restore: frame, envío del archivo, headers/KDF,
+procesado de registros/manifiesto, prepare/commit/audit, respuesta y repaint.
+Los scopes anidados no se suman; no se realizan derivaciones adicionales.
+El dispatcher W4 sólo admite agentes: la lane humana existente es serial.
+Se correlaciona el inicio TUI con dispatch/frame para discriminar su espera.
+
+El fixture conserva íntegros los waits8/20s y la petición única, escribe timings en archivos propios 0600 separados de stdout/stderr y
+la pantalla, y valida cada línea antes de mostrarla. El entorno de timing
+sólo alcanza TUI y launchd, no CLI de preparación. Los archivos existen
+antes de arrancar; apertura sin seguir symlinks y fallo explícito de logging.
+Ante FAIL, recoger timings al cutoff y luego los samples heredados, sin
+convertir finalización tardía en PASS; ante éxito, recoger fases terminadas.
+Limpieza estricta heredada y errores de captura propagados. La instrumentación
+se retira del entorno/plist para aceptación normal tras discriminar la causa.
+
+Local: método de W2 fase5 y de integración, 52 comandos exactos del manifest
+final W2 (49 rc0, g7-matrix y dos diagnósticos g7-extra rc1 conocidos),
+check y clean-offline incluidos; W4 concurrency sólo observación fuera de
+gates. Todo cargo/check/lab secuencial bajo `/tmp/pm-cargo-window.lock`, cwd
+W6, Keycloak26.7.3/CFT existentes, Wayland de sesión real si lo requiere el
+lab. Logs propios `/tmp/pmw6-*.log`; comparar rc y causas, no sólo cuenta.
+
+Fallback/política heredada encontrada: `linux::accept_one` descarta el error
+de `handle_connection` y continúa atendiendo la siguiente conexión, en lane
+humana y agentes; permanece intacta. No se introduce retry ni otra vía.
+
+Criterio de éxito: dos corridas consecutivas completas Intel+ARM con mismos
+oráculos/plazos/KDF, tras RED discriminante y corrección pertinente. Si KDF
+contractual y trabajo legítimo exceden8s en CI, entregar fases/opciones y
+recomendación, detenerse sin cambiar el plazo. FDE/reboot/firma y terminal
+humano siguen fuera de esta evidencia.
+
+Preflight local diagnóstico1: config/AST/gramática categórica y diff-check
+PASS; check completo rc0 `/tmp/pmw6-instrument-check2.log`. El primer
+check rc101 sólo por missing-panics-doc de la nueva instrumentación;
+no es RED del comportamiento. Se documenta el fallo explícito del log/clock
+opt-in, sin suprimir lint. Verificación Linux52 se ejecutará sobre este
+checkpoint congelado mientras CI usa runners separados.

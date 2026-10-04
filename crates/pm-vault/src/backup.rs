@@ -603,6 +603,7 @@ fn parse_backup(
     path: OpenPath<'_>,
     collector: Option<&mut dyn DataCollector>,
 ) -> Result<BackupSummary, HumanCommitError> {
+    let mut timing = pm_crypto::phase_timing::PhaseTimer::new("archive-parse");
     let (outer_bytes, outer) = read_outer(input)?;
     let pmf = read_pmf_header(input)?;
     let roots = BackupRootEnvelopes::from_parts(
@@ -611,6 +612,7 @@ fn parse_backup(
         &outer.password_envelope,
         &outer.recovery_envelope,
     )?;
+    timing.phase("headers-read");
     let mut opener = match path {
         OpenPath::Unlocked(root) => BackupOpener::with_unlocked_root(
             root,
@@ -634,6 +636,7 @@ fn parse_backup(
             recovery,
         )?,
     };
+    timing.phase("keys-opened");
     let mut parser = RecordVerifier::new(
         outer.backup_id,
         outer.vault,
@@ -652,7 +655,11 @@ fn parse_backup(
             break;
         }
     }
-    parser.finish()
+    timing.phase("records-processed");
+    let summary = parser.finish()?;
+    timing.phase("manifest-verified");
+    timing.finish();
+    Ok(summary)
 }
 
 #[derive(Default)]

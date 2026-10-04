@@ -1733,6 +1733,7 @@ pub(crate) fn handle_native_backup_restore<S: Read + Write>(
     tls: &mut S,
     request: &[u8],
 ) -> Result<(), Failure> {
+    let mut timing = pm_crypto::phase_timing::PhaseTimer::new("server-restore");
     let mut cursor = Cursor::new(request);
     let password = cursor.bytes()?;
     cursor.finish()?;
@@ -1745,11 +1746,17 @@ pub(crate) fn handle_native_backup_restore<S: Read + Write>(
         position: 0,
         ended: false,
     };
+    timing.phase("frame-decoded");
     let prepared = vault
         .prepare_native_restore(&mut reader, password)
         .map_err(|_| Failure::Unavailable)?;
+    timing.phase("prepared");
     let response = encode_prepared(vault, prepared.prepared())?;
-    write_frame(reader.tls, &response)
+    timing.phase("response-encoded");
+    write_frame(reader.tls, &response)?;
+    timing.phase("response-written");
+    timing.finish();
+    Ok(())
 }
 
 pub(crate) fn handle_native_recovery<S: Read + Write>(
