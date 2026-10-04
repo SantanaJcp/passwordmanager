@@ -6,6 +6,7 @@
 //! not claim later authority reducers, CRUD flows, backups, or native custody.
 
 mod native_stdin;
+pub mod phase_timing;
 mod protected_text;
 mod protected_writer;
 mod root;

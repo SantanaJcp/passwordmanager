@@ -324,13 +324,17 @@ fn load_and_validate_bundle(
 }
 
 fn unlock_root(connection: &Connection, password: &[u8]) -> Result<UnlockedRoot, VaultError> {
+    let mut timing = pm_crypto::phase_timing::PhaseTimer::new("root-open");
     let (bundle, trusted_root) = load_and_validate_bundle(connection)?;
+    timing.phase("bundle-loaded");
     let unlocked = open_human_root(&bundle, password)?;
+    timing.phase("keys-opened");
     if unlocked.vault_id() != trusted_root.vault_id()
         || unlocked.human_public_key() != trusted_root.public_key()
     {
         return Err(VaultError::InvalidFormat);
     }
+    timing.finish();
     Ok(unlocked)
 }
 

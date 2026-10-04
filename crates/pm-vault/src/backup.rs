@@ -358,6 +358,53 @@ impl<'a> RestoreCollector<'a> {
 }
 
 impl DataCollector for RestoreCollector<'_> {
+    fn revision(
+        &mut self,
+        id: [u8; 16],
+        source_item: [u8; 16],
+        modified_at: i64,
+        mut record: LogicalRecord,
+    ) -> Result<(), HumanCommitError> {
+        self.finish_active()?;
+        let item = self
+            .items
+            .get(&source_item)
+            .ok_or(HumanCommitError::Integrity)?;
+        let target_revision = random_id()?;
+        let mut replacements = BTreeMap::new();
+        for attachment in record.attachments() {
+            let target_attachment = random_id()?;
+            replacements.insert(*attachment.id(), target_attachment);
+            self.attachments
+                .insert((id, *attachment.id()), (target_revision, target_attachment));
+        }
+        record.remap_attachment_ids(&replacements)?;
+        let package = self
+            .root
+            .seal_revision_package(RevisionPackageInput {
+                item: item.target,
+                revision: target_revision,
+                issuer_device: self.device,
+                modified_at,
+                kind: record.kind().crypto(),
+                human_plaintext: &record.encode_human()?,
+                auth_plaintext: record.encode_auth()?.as_deref(),
+            })?
+            .to_bytes();
+        self.tx.execute(
+            "INSERT INTO backup_restore_revisions(transaction_id,source_revision,target_revision,target_item,modified_at_us,item_kind,package,object_digest) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![self.transaction_id.as_slice(), id.as_slice(), target_revision.as_slice(), item.target.as_slice(), modified_at, record.kind().name(), package, [0_u8;32].as_slice()],
+        )?;
+        if id == item.visible_source {
+            self.tx.execute(
+                "UPDATE backup_restore_items SET target_visible_revision=?3 WHERE transaction_id=?1 AND source_item=?2",
+                params![self.transaction_id.as_slice(), source_item.as_slice(), target_revision.as_slice()],
+            )?;
+        }
+        self.revisions.insert(id, target_revision);
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     fn data(
         &mut self,
@@ -388,47 +435,6 @@ impl DataCollector for RestoreCollector<'_> {
                     "INSERT INTO backup_restore_items(transaction_id,source_item,target_item,source_visible_revision,target_visible_revision,item_kind,status) VALUES(?1,?2,?3,?4,NULL,?5,?6)",
                     params![self.transaction_id.as_slice(), id.as_slice(), target.as_slice(), visible.as_slice(), item_kind, status],
                 )?;
-            }
-            "revision" => {
-                self.finish_active()?;
-                let (source_item, _source_issuer, modified_at, mut record) =
-                    decode_revision_full(payload)?;
-                let item = self
-                    .items
-                    .get(&source_item)
-                    .ok_or(HumanCommitError::Integrity)?;
-                let target_revision = random_id()?;
-                let mut replacements = BTreeMap::new();
-                for attachment in record.attachments() {
-                    let target_attachment = random_id()?;
-                    replacements.insert(*attachment.id(), target_attachment);
-                    self.attachments
-                        .insert((id, *attachment.id()), (target_revision, target_attachment));
-                }
-                record.remap_attachment_ids(&replacements)?;
-                let package = self
-                    .root
-                    .seal_revision_package(RevisionPackageInput {
-                        item: item.target,
-                        revision: target_revision,
-                        issuer_device: self.device,
-                        modified_at,
-                        kind: record.kind().crypto(),
-                        human_plaintext: &record.encode_human()?,
-                        auth_plaintext: record.encode_auth()?.as_deref(),
-                    })?
-                    .to_bytes();
-                self.tx.execute(
-                    "INSERT INTO backup_restore_revisions(transaction_id,source_revision,target_revision,target_item,modified_at_us,item_kind,package,object_digest) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-                    params![self.transaction_id.as_slice(), id.as_slice(), target_revision.as_slice(), item.target.as_slice(), modified_at, record.kind().name(), package, [0_u8;32].as_slice()],
-                )?;
-                if id == item.visible_source {
-                    self.tx.execute(
-                        "UPDATE backup_restore_items SET target_visible_revision=?3 WHERE transaction_id=?1 AND source_item=?2",
-                        params![self.transaction_id.as_slice(), source_item.as_slice(), target_revision.as_slice()],
-                    )?;
-                }
-                self.revisions.insert(id, target_revision);
             }
             "attachment" => {
                 self.finish_active()?;
@@ -585,6 +591,14 @@ fn verify(input: &mut dyn Read, path: OpenPath<'_>) -> Result<BackupSummary, Hum
 }
 
 trait DataCollector {
+    fn revision(
+        &mut self,
+        id: [u8; 16],
+        source_item: [u8; 16],
+        modified_at: i64,
+        record: LogicalRecord,
+    ) -> Result<(), HumanCommitError>;
+
     fn data(
         &mut self,
         opener: &BackupOpener,
@@ -603,6 +617,7 @@ fn parse_backup(
     path: OpenPath<'_>,
     collector: Option<&mut dyn DataCollector>,
 ) -> Result<BackupSummary, HumanCommitError> {
+    let mut timing = pm_crypto::phase_timing::PhaseTimer::new("archive-parse");
     let (outer_bytes, outer) = read_outer(input)?;
     let pmf = read_pmf_header(input)?;
     let roots = BackupRootEnvelopes::from_parts(
@@ -611,6 +626,7 @@ fn parse_backup(
         &outer.password_envelope,
         &outer.recovery_envelope,
     )?;
+    timing.phase("headers-read");
     let mut opener = match path {
         OpenPath::Unlocked(root) => BackupOpener::with_unlocked_root(
             root,
@@ -634,6 +650,7 @@ fn parse_backup(
             recovery,
         )?,
     };
+    timing.phase("keys-opened");
     let mut parser = RecordVerifier::new(
         outer.backup_id,
         outer.vault,
@@ -652,7 +669,11 @@ fn parse_backup(
             break;
         }
     }
-    parser.finish()
+    timing.phase("records-processed");
+    let summary = parser.finish()?;
+    timing.phase("manifest-verified");
+    timing.finish();
+    Ok(summary)
 }
 
 #[derive(Default)]
@@ -1606,7 +1627,7 @@ impl<'a> RecordVerifier<'a> {
                 }
             }
             "revision" => {
-                let (item, _, _, record) = decode_revision_full(payload)?;
+                let (item, _, modified_at, record) = decode_revision_full(payload)?;
                 if self
                     .revisions
                     .insert(id, (item, record.kind().name().to_owned()))
@@ -1626,6 +1647,12 @@ impl<'a> RecordVerifier<'a> {
                         return Err(HumanCommitError::Integrity);
                     }
                 }
+                // Transfer the already decoded logical record only after all
+                // verifier checks. Staging remaps it under fresh destination keys.
+                if let Some(collector) = &mut self.collector {
+                    collector.revision(id, item, modified_at, record)?;
+                }
+                return Ok(());
             }
             "attachment" => {
                 let (item, revision, attachment, size, hash, chunks) =
@@ -2176,6 +2203,7 @@ fn decode_item_full(bytes: &[u8]) -> Result<([u8; 16], String, String), HumanCom
 fn decode_revision_full(
     bytes: &[u8],
 ) -> Result<([u8; 16], [u8; 16], i64, LogicalRecord), HumanCommitError> {
+    let timing = pm_crypto::phase_timing::PhaseTimer::new("archive-revision-decode");
     let mut d = Decoder::new(bytes);
     expect_array(&mut d, 4)?;
     let item = decode_fixed(&mut d)?;
@@ -2186,6 +2214,7 @@ fn decode_revision_full(
     if d.position() != bytes.len() {
         return Err(HumanCommitError::InvalidInput);
     }
+    timing.finish();
     Ok((item, issuer, modified, record))
 }
 fn decode_attachment(bytes: &[u8]) -> Result<DecodedAttachment, HumanCommitError> {

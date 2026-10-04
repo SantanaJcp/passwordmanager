@@ -315,7 +315,7 @@ def sample_collision_process(m, session, label, pid, path):
 
 def expect_output_collision(session, kind, path, expected_digest, *, since, m):
     try:
-        session.wait_text("Operation failed explicitly; no success was recorded", since=since)
+        session.wait_information("Operation failed explicitly; no success was recorded (DESTINATION_EXISTS)", since=since)
     except BaseException as error:
         try:
             page = session._current_text_after(since)
@@ -341,6 +341,7 @@ def expect_output_collision(session, kind, path, expected_digest, *, since, m):
             raise error from diagnostic_error
         raise
     assert source_digest(path) == expected_digest, "collision changed the original output"
+    assert not path.with_suffix(".partial").exists(), "collision retained a temporary"
     print(f"PM26_OUTPUT_COLLISION kind={kind} result=rejected destination=same", flush=True)
 
 
@@ -569,15 +570,20 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         session.wait_text("Confirmation mismatch", since=mark)
         assert snapshot(m, session)["vault_items"] == before_count
         mark = operation(session, "b", "3", "Archive path|RESTORE (adds new IDs/keys; current authority is preserved):", f"{native}|RESTORE")
+        m.w6_observer("restore", "submitted")
         try:
             session.wait_information("Restore committed with new IDs/keys", since=mark)
         except BaseException as error:
+            m.w6_observer("restore", "failed")
             try:
+                m.w6_phase_timings()
                 m.sample_custody_failure(session, "restore")
                 diagnose_restore_wait(m, session, after, since=mark)
             except BaseException as diagnostic_error:
                 raise error from diagnostic_error
             raise
+        m.w6_observer("restore", "observed")
+        m.w6_phase_timings()
         restored = snapshot(m, session)
         assert restored["vault_items"] > before_count and restored["authority_events"] > authority
         assert restored["authority_state"] == authority_state, "restore changed current authority"
@@ -607,9 +613,8 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
 
         mark = operation(session, "b", "1", "New native backup path", native)
         expect_output_collision(session, "backup", native, native_digest, since=mark, m=m)
+        # Existing destinations are rejected before preparing the warning/RPC.
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
-        session.wait_information("PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:", since=mark)
-        submit(session, "EXPORT")
         expect_output_collision(session, "plaintext", plaintext, plaintext_digest, since=mark, m=m)
 
         session.w2_custodian_pid = m.running_launchd_pid(

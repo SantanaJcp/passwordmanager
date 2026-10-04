@@ -3415,9 +3415,11 @@ fn handle_human_rpc(
     service: &VaultService,
     channel: AuthenticatedHumanChannel,
 ) -> Result<(), Failure> {
+    let mut timing = pm_crypto::phase_timing::PhaseTimer::new("server-unlock");
     let unlock = read_human_unlock_frame(tls, service).inspect_err(|_| {
         ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockRead);
     })?;
+    timing.phase("frame-received");
     ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanUnlockFrame);
     let mut cursor = Cursor::new(&unlock);
     cursor.expect(&[1]).inspect_err(|_| {
@@ -3429,6 +3431,7 @@ fn handle_human_rpc(
     cursor.finish().inspect_err(|_| {
         ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockDecode);
     })?;
+    timing.phase("decoded-dispatched");
     let unlock_timer = ticket26_diagnostic_timer();
     let mut vault = HumanVault::unlock(
         &service.path,
@@ -3442,11 +3445,14 @@ fn handle_human_rpc(
         ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockVault);
         Failure::Unavailable
     })?;
+    timing.phase("vault-unlocked");
     ticket26_diagnostic_server_unlock(Ticket26ServerUnlockResult::Ok, unlock_timer);
     ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanUnlocked);
     write_frame(tls, &[0]).inspect_err(|_| {
         ticket26_diagnostic_error(Ticket26DiagnosticError::ServerHumanUnlockResponse);
     })?;
+    timing.phase("response-written");
+    timing.finish();
     ticket26_diagnostic(Ticket26DiagnosticPhase::ServerHumanUnlockResponse);
     let mut setup_completed = false;
     loop {
@@ -4192,6 +4198,8 @@ fn handle_connection(
     vault: Option<&VaultService>,
     peer_rpk: Option<&[u8]>,
 ) -> Result<(), Failure> {
+    let mut timing =
+        (role == Role::Human).then(|| pm_crypto::phase_timing::PhaseTimer::new("human-dispatch"));
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
         .map_err(|_| Failure::Unavailable)?;
@@ -4223,9 +4231,15 @@ fn handle_connection(
     if tls.conn.alpn_protocol() != Some(role.alpn()) {
         return Err(Failure::Unavailable);
     }
+    if let Some(timer) = timing.as_mut() {
+        timer.phase("tls-magic-received");
+    }
     ticket26_diagnostic(Ticket26DiagnosticPhase::ServerAlpn);
     if request == *HUMAN_MAGIC && role == Role::Human {
         let service = vault.ok_or(Failure::Unavailable)?;
+        if let Some(timer) = timing.take() {
+            timer.finish();
+        }
         return handle_human_rpc(
             &mut tls,
             service,

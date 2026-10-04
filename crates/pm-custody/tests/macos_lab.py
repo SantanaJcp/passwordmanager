@@ -84,6 +84,42 @@ TUI23_FIELD_CATALOG = {
 DIAGNOSTIC_ENV = "PM_MACOS_TICKET26_DIAGNOSTIC"
 DIAGNOSTIC_LOG = STATE / "ticket26-diagnostic.log"
 SYNC_TIMING_ENABLED = False
+W6_TIMING_ENABLED = os.environ.get("PMW6_TIMING") == "1"
+W6_UI_LOG = None
+W6_OFFSETS = {"custody": 0, "tui": 0}
+W6_LINE = re.compile(
+    rb"(?:PMW6_PHASE operation=(?:kdf|root-open|vault-unlock|restore-prepare|"
+    rb"archive-parse|archive-revision-decode|restore-commit|server-unlock|human-dispatch|server-restore|"
+    rb"tui-unlock|tui-restore|catalog) phase=(?:aborted|archive-sent|archive-staged|argon2id|audit-appended|audit-committed|audit-transaction|batch-verified|bundle-loaded|catalog-received|catalog-refreshed|challenge-staged|channel-verified|committed|committed-response|complete|connected-magic-written|decoded-dispatched|events-applied|frame-decoded|frame-received|frame-written|graphs-verified|headers-read|keys-opened|manifest-verified|prepared|prepared-response|protected-output|records-processed|repainted|response-encoded|response-received|response-written|revisions-verified|root-opened|rows-read|sqlite-closed|sqlite-configured|sqlite-opened|sqlite-transaction|staging-retired|start|state-digest|tls-magic-received|vault-unlocked) elapsed_us=[0-9]{1,20} "
+    rb"total_us=[0-9]{1,20} at_us=[0-9]{1,20}|"
+    rb"PMW6_KDF algorithm=argon2id13 memory_mib=[0-9]{1,4} "
+    rb"passes=[0-9]{1,2} parallelism=1 output_bytes=32)$"
+)
+
+
+def w6_observer(operation, result):
+    if W6_TIMING_ENABLED:
+        assert operation in {"unlock", "restore"}
+        assert result in {"submitted", "observed", "failed"}
+        print(f"PMW6_OBSERVER operation={operation} result={result} at_us={time.time_ns() // 1000}", flush=True)
+
+
+def w6_phase_timings():
+    if not W6_TIMING_ENABLED:
+        return
+    for label, path in (("custody", STATE / "w6-phase-timing.log"), ("tui", W6_UI_LOG)):
+        result = sudo(["cat", path])
+        assert result.returncode == 0, "W6 phase log unavailable"
+        data = result.stdout
+        offset = W6_OFFSETS[label]
+        assert len(data) >= offset, "W6 phase log truncated"
+        # A trailing partial line remains unread until the next collection.
+        end = data.rfind(b"\n") + 1
+        for line in data[offset:end].splitlines():
+            assert W6_LINE.fullmatch(line), "W6 noncategorical phase diagnostic"
+            print("PMW6_LOG source=" + label + " " + line.decode("ascii"), flush=True)
+        W6_OFFSETS[label] = end
+
 AGENT_MANAGER_COMMAND_TIMEOUT = 10
 AGENT_PASTEBOARD_PROBE_TIMEOUT = 30
 AGENT_LAUNCH_WAIT_TIMEOUT = (
@@ -789,6 +825,10 @@ class MacPtySession:
         if pid == 0:
             environment = os.environ.copy()
             environment["TERM"] = "xterm-256color"
+            if W6_TIMING_ENABLED:
+                assert W6_UI_LOG is not None
+                environment["PMW6_TIMING"] = "1"
+                environment["PMW6_TIMING_FILE"] = str(W6_UI_LOG)
             try:
                 os.execve(command[0], command, environment)
             except BaseException:
@@ -2839,16 +2879,21 @@ def start_macos_tui(binary, profile, private, endpoint, *, idle, reveal, copy, p
         )
         session.send_text(password.decode("ascii"), enter=True, hidden=True)
         submitted = time.monotonic()
+        w6_observer("unlock", "submitted")
         try:
             session.wait_text("Unlocked: selection never reveals secrets")
         except BaseException as primary:
+            w6_observer("unlock", "failed")
             print(f"PMW2_UNLOCK result=failed prompt_ms={round((prompted-started)*1000)} submit_ms={round((submitted-prompted)*1000)} wait_ms={round((time.monotonic()-submitted)*1000)}", flush=True)
             try:
+                w6_phase_timings()
                 sample_custody_failure(session, "unlock")
             except BaseException as diagnostic:
                 raise primary from diagnostic
             raise
+        w6_observer("unlock", "observed")
         print(f"PMW2_UNLOCK result=observed prompt_ms={round((prompted-started)*1000)} submit_ms={round((submitted-prompted)*1000)} wait_ms={round((time.monotonic()-submitted)*1000)}", flush=True)
+        w6_phase_timings()
         return session
     except BaseException:
         close_session_preserving_primary(session)
@@ -3695,6 +3740,8 @@ def main():
     lab_error = None
     tui_core_verified = False
     tui25_verified = False
+    if W6_TIMING_ENABLED:
+        del os.environ["PMW6_TIMING"]
     scratch = pathlib.Path("/private/var/tmp/passwordmanager-ticket26")
     require_owner_mode(scratch.parent, (0, 0o1777))
     assert not scratch.exists(), f"refusing to replace pre-existing scratch path: {scratch}"
@@ -3790,6 +3837,22 @@ def main():
             with open(diagnostic_plist, "wb") as destination:
                 plistlib.dump(launchd_config, destination)
             plist_to_install = diagnostic_plist
+        if W6_TIMING_ENABLED:
+            global W6_UI_LOG
+            W6_UI_LOG = scratch / "w6-tui-phase-timing.log"
+            with W6_UI_LOG.open("xb"):
+                pass
+            W6_UI_LOG.chmod(0o600)
+            w6_plist = scratch / "w6-phase-timing.plist"
+            custody_log = STATE / "w6-phase-timing.log"
+            sudo(["touch", custody_log], user=CUSTODIAN)
+            sudo(["chmod", "0600", custody_log])
+            launchd_config["EnvironmentVariables"] = {
+                "PMW6_TIMING": "1", "PMW6_TIMING_FILE": str(custody_log),
+            }
+            with w6_plist.open("xb") as destination:
+                plistlib.dump(launchd_config, destination)
+            plist_to_install = w6_plist
         # W2: inject only categorical sync timing into this owned service.
         global SYNC_TIMING_ENABLED
         SYNC_TIMING_ENABLED = (os.environ.get("PMW2_TIMING") == "1"
@@ -3948,6 +4011,14 @@ def main():
     except BaseException as error:
         lab_error = error
 
+    if W6_TIMING_ENABLED and bootstrapped:
+        try:
+            w6_phase_timings()
+        except BaseException as timing_error:
+            if lab_error is None:
+                lab_error = timing_error
+            else:
+                lab_error = BaseExceptionGroup("W6 timing collection and native failure", [lab_error, timing_error])
     finish_owned_resources(
         lab_error,
         bootstrapped, owned_paths, owned_empty_directories, owned_records,

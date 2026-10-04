@@ -2555,3 +2555,536 @@ Resultados, desglose por CPU, riesgos de pico de exportación y propietarios
 en [resultado W2 fase5](w2-purge-sync.md#resultado-final-de-fase-5-mejoras-verificadas-aceptación-conjunta-pendiente).
 Requiere revisar integración y autorizar el siguiente diagnóstico de
 cola/audit-unlock/catálogo/restore; no cambia el estado del ticket26.
+
+
+### W6 — método autorizado de diagnóstico unlock/restore (2026-10-04)
+
+Worktree `w6-macos-stability`, rama `codex/pm-w6-macos-stability`, base exacta
+W2 `b1d374c4c733715911600233d29334eba3bdbe52`. W6 implementa y publica sus
+checkpoints; no integra, no toca W1 Windows/W3/W4/W5 ni estados de tickets.
+Hasta tres runs diagnósticos y seis dispatches totales de aceptación normal
+Intel/ARM, sobre SHAs exactos y con hipótesis/cambio explícito por corrida.
+No cambiar KDF contractual (Argon2id13, 256 MiB/3 pasadas/p=1), límites,
+deadlines, aserciones, memoria protegida, transporte sync o staging.
+
+Diagnóstico opt-in `PMW6_TIMING=1`: relojes monotónicos por operación/fase y
+marca de reloj de pared para correlación entre procesos del mismo runner.
+Sólo categorías fijas, microsegundos y parámetros KDF efectivos validados;
+sin valores, longitudes de contraseña, salt, IDs de bóveda/transacción, rutas,
+PIDs ni payloads. Se mide recepción/dispatch humano, SQLite/configuración,
+root/KDF/protección de salida, audit-unlock/commit/cierre, respuesta,
+catálogo y repaint TUI. Restore: frame, envío del archivo, headers/KDF,
+procesado de registros/manifiesto, prepare/commit/audit, respuesta y repaint.
+Los scopes anidados no se suman; no se realizan derivaciones adicionales.
+El dispatcher W4 sólo admite agentes: la lane humana existente es serial.
+Se correlaciona el inicio TUI con dispatch/frame para discriminar su espera.
+
+El fixture conserva íntegros los waits8/20s y la petición única, escribe timings en archivos propios 0600 separados de stdout/stderr y
+la pantalla, y valida cada línea antes de mostrarla. El entorno de timing
+sólo alcanza TUI y launchd, no CLI de preparación. Los archivos existen
+antes de arrancar; apertura sin seguir symlinks y fallo explícito de logging.
+Ante FAIL, recoger timings al cutoff y luego los samples heredados, sin
+convertir finalización tardía en PASS; ante éxito, recoger fases terminadas.
+Limpieza estricta heredada y errores de captura propagados. La instrumentación
+se retira del entorno/plist para aceptación normal tras discriminar la causa.
+
+Local: método de W2 fase5 y de integración, 52 comandos exactos del manifest
+final W2 (49 rc0, g7-matrix y dos diagnósticos g7-extra rc1 conocidos),
+check y clean-offline incluidos; W4 concurrency sólo observación fuera de
+gates. Todo cargo/check/lab secuencial bajo `/tmp/pm-cargo-window.lock`, cwd
+W6, Keycloak26.7.3/CFT existentes, Wayland de sesión real si lo requiere el
+lab. Logs propios `/tmp/pmw6-*.log`; comparar rc y causas, no sólo cuenta.
+
+Fallback/política heredada encontrada: `linux::accept_one` descarta el error
+de `handle_connection` y continúa atendiendo la siguiente conexión, en lane
+humana y agentes; permanece intacta. No se introduce retry ni otra vía.
+
+Criterio de éxito: dos corridas consecutivas completas Intel+ARM con mismos
+oráculos/plazos/KDF, tras RED discriminante y corrección pertinente. Si KDF
+contractual y trabajo legítimo exceden8s en CI, entregar fases/opciones y
+recomendación, detenerse sin cambiar el plazo. FDE/reboot/firma y terminal
+humano siguen fuera de esta evidencia.
+
+Preflight local diagnóstico1: config/AST/gramática categórica y diff-check
+PASS; check completo rc0 `/tmp/pmw6-instrument-check2.log`. El primer
+check rc101 sólo por missing-panics-doc de la nueva instrumentación;
+no es RED del comportamiento. Se documenta el fallo explícito del log/clock
+opt-in, sin suprimir lint. Verificación Linux52 se ejecutará sobre este
+checkpoint congelado mientras CI usa runners separados.
+
+
+W6 diagnóstico1 [37180184678](https://github.com/SantanaJcp/passwordmanager/actions/runs/37180184678),
+SHA `e60b8dfa88c0b6e6f6cf7627b69c1ca12889bd58`, completed/failure, ambos jobs
+terminados, artifacts0. Intel: unlock observado1.565s, pero el recolector
+rechazó la categoría fija `argon2id` (regex sin dígitos), antes de core/Full25;
+**defecto de instrumentación W6**, no causa histórica ni aceptación.
+ARM: antes de TUI, test heredado
+`session_endpoint_failure_returns_explicit_ipc_error_and_failed_exit`
+falló en purge_sync.rs:1490 por BrokenPipe escribiendo stdin. El peer cerró
+el handshake sin esperar el envío único del fixture. W6 no modificó ese
+archivo ni transporte; test/observer race, no fallo de unlock/restore.
+Preparado `/tmp/pmw6-endpoint-order.patch`, sin aplicar, autorización de zona
+pendiente: ordenar el cierre después del envío, conservar rc4/frame IPC exacto,
+stderr vacío/roots0. No reintentar el envío ni ampliar espera.
+
+Intel sólo dejó SQLite4.184ms/protección de salida KDF0.186ms y parámetros
+256MiB/3/p1 antes del rechazo del recolector; duración Argon2/restore no
+recuperable porque cleanup elimina los logs privados propios. No inferir
+fases faltantes ni presentar la muestra parcial como tabla completa.
+Entorno: macOS15.7.9/kernel24.6.0, Rust1.98.1; Intel imagen20260824.0482.1,
+ARM20260907.0337.1, hosts/artefactos nativos comprobados. Workflow intacto,
+inputs false/false, sin cache/artifacts/secrets/larger. Repositorio público y
+[runners estándar gratuitos](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+verificados en vivo antes del dispatch. Logs `/tmp/pmw6-macos1-{intel,arm}.log`.
+
+Linux52 sobre e60b8df: `/tmp/pmw6-diag1-gates-results.json`, **49rc0, tresrc1
+esperados, cero regresiones**, manifest estable entre todos los casos,
+Wayland real desde inicio, flock por comando, W4 sólo observación. Check75.419s,
+clean47.302s (wall incluye espera de lock). REDs por las mismas causas:
+g7-matrix commit-outbox-audit EIO/ENOSPC staging retenido; g7-extra-bootstrap/
+vault autoridad/receipts cambiados tras pérdida. Cleanup errors0 en esos labs.
+Logs `/tmp/pmw6-diag1-gates-*.log`. No se renombra ningún RED como PASS.
+
+Corrección de instrumentación para diagnóstico2: lista explícita de las46
+fases fijas, incluido argon2id, sin permitir etiquetas arbitrarias. REDrc1
+`/tmp/pmw6-parser-red.log` → GREENrc0 `/tmp/pmw6-parser-green.log`; contenido
+extra/path/salt sigue rechazado. Config/AST/diff PASS
+`/tmp/pmw6-parser-config.log`. Se añaden marcas de envío/resultado/cutoff
+para filtrar por reloj las fases posteriores al gate; respuesta tardía no
+satisface el oráculo. Rust/producto/fixtures Linux idénticos a e60b8df.
+
+Hipótesis diagnóstico2: con captura válida y cutoff explícito, discriminar
+frame/espera humana, KDF, SQLite/audit, catálogo/repaint y restore. Misma
+operación y waits8/20s. El test compartido permanece intacto mientras su
+corrección siga fuera de autorización. Diagnóstico1 consumió1/3 diagnósticos
+(y1/6 dispatches), aunque no alcanzó el objetivo de reproducción.
+
+
+### W6 — resultado y punto de decisión contractual (2026-10-04)
+
+Diagnóstico2 [37181107807](https://github.com/SantanaJcp/passwordmanager/actions/runs/37181107807),
+SHA exacto `24dc0d338ed34e56dd75fab0b6dec6210238e4e2`, completed/failure;
+**Intel PASS completo, ARM FAIL unlock y colisión plaintext**. Ambos jobs
+terminados, artifacts0, workflow intacto, inputs false/false. Misma familia de
+OS/imágenes/hosts que diagnóstico1. Logs `/tmp/pmw6-macos2-{intel,arm}.log`,
+fases extraídas en `.phases.json`; no raw sample ni archivos de datos publicados.
+Se consumieron **2/3 diagnósticos y2/6 dispatches**, sin retries internos ni
+repeticiones del mismo SHA. Se detiene aquí por la condición explícita del
+usuario: KDF contractual más trabajo requerido no cabe en el fixture.
+No se ejecuta diagnóstico3 ni las cuatro corridas restantes para sustituir
+el FAIL por un PASS aleatorio. No integración ni cambio de estados de tickets.
+
+#### Unlock: fases medidas
+
+Muestras distintas del mismo run: apertura TUI más lenta observada en Intel
+(después de sync, PASS) y apertura que falló en ARM (core, FAIL). No comparar
+estas dos muestras como experimento controlado de rendimiento por CPU.
+Duraciones monotónicas en segundos, redondeadas; scopes anidados no se suman.
+La cola anterior a recepción se observa desde cliente y accept/TLS, sin
+cambiar el dispatcher de agentes W4 ni la serialización humana contractual.
+
+| Fase / ámbito | Intel, apertura PASS más lenta | ARM, apertura fallida |
+| --- | ---: | ---: |
+| TUI connect → HUMAN_MAGIC escrito | 0.113178 | 0.131902 |
+| Dispatch humano → magic TLS recibido (anidado en conexión) | 0.039766 | 0.001589 |
+| Recepción frame + decode/dispatch | 0.000375 | 0.000323 |
+| Verificar canal | 0.000073 | 0.000101 |
+| Apertura/configuración SQLite | 0.002263 | 0.002630 |
+| Bundle cargado | 0.000279 | 0.000243 |
+| Salida protegida KDF | 0.000130 | 0.000067 |
+| **Argon2id13 efectivo:256MiB/3/p1/32bytes** | **5.746094** | **7.708273** |
+| Abrir/verificar root (incluye KDF) | 5.747774 | 7.709223 |
+| Audit transaction + append | 0.003236 | 0.001170 |
+| Audit commit FULL | 0.053483 | 0.103702 |
+| Cerrar SQLite | 0.009235 | 0.075340 |
+| Escribir respuesta unlock | 0.000136 | 0.000852 |
+| TUI espera respuesta unlock (incluye trabajo del custodio) | 5.817821 | 7.894309 |
+| TUI catálogo recibido (incluye segundo audit y transporte) | 0.090093 | 0.518731 |
+| Catálogo en custodio, scope completo | 0.062626 | 0.005309 |
+| TUI catálogo → repaint | 0.008530 | 0.581416 |
+| Total scope TUI desde lectura de contraseña | 6.030045 | **9.126536** |
+
+El reloj de pared del mismo runner correlaciona el cutoff con los procesos;
+puede tener slew frente al reloj monotónico, por eso se usa para posición de
+fases, no como sustituto de sus duraciones. ARM desde envío del fixture:
+TUI empezó≈0.102s después; dispatch≈0.233s; frame/dispatch≈0.235s;
+KDF terminó≈7.950s; cutoff≈8.039s (wait monotónico8.035s); audit commit
+terminó≈8.056s; SQLite close≈8.131s; respuesta≈8.132s;
+catálogo≈8.651s; repaint≈9.233s. La respuesta es posterior al cutoff unos94ms.
+**No hay pantalla correcta anterior al plazo que el observer haya perdido.**
+
+La llamada Argon2id, sin logging ni trabajo adicional dentro de ella, consumió
+7.708s; preconexión, autenticación y audit/commit/cierre son requeridos.
+La preparación de salida protegida consumió67µs y no falló; no hay error de
+recursos observado. No se prueba por ello toda memoria ni W5. El dispatcher
+W4 no retuvo este unlock: el frame se recibió a≈0.235s y se despachó enseguida.
+KDF ya había terminado al cutoff; los samples posteriores sin KDF activo son
+compatibles con esta secuencia y no refutan su coste anterior.
+
+**Clasificación de esta reproducción: rendimiento del entorno ante el KDF
+contractual + trabajo requerido, no carrera del observer.** Es coste wall
+observado; no se distingue CPU/scheduling/contención/almacenamiento del host
+ni se afirma que ARM sea intrínsecamente más lento. No hay bloqueo prolongado
+de cola ni fallo de protección en esta muestra. No extrapolar como prueba
+retrospectiva de la fase exacta de cada run W2 histórico sin instrumentación.
+
+Redundancia estática confirmada, sin modificar: `HumanVault::unlock` registra
+HumanUnlock y la primera consulta TUI46 vuelve a hacerlo en
+`human_wire::handle_content_request`;49 consulta catálogo sin esa segunda
+escritura. El catálogo ARM en sí tomó5.309ms; la fase TUI de518.731ms incluye
+más trabajo/transporte, y no se ha separado experimentalmente cuánto es ese
+segundo audit. El repaint inicial también ocurre después del heartbeat del
+event_loop si wire_at ya venció; el scope581.416ms incluye esa espera/dibujo.
+Aunque se eliminara TODO trabajo posterior a la respuesta, ésta ya es tardía.
+No se modifica auditoría/heartbeat al activarse la parada contractual.
+
+#### Restore: fases medidas, ambos PASS
+
+| Fase / ámbito | Intel | ARM |
+| --- | ---: | ---: |
+| TUI frame restore escrito | 0.000587 | 0.000169 |
+| Server decode frame | 0.000139 | 0.000062 |
+| SQLite/transaction para prepare | 0.096250 | 0.001658 |
+| State digest | 0.000935 | 0.000125 |
+| Headers del archivo | 0.057002 | 0.003448 |
+| Argon2id13 del archivo,256MiB/3/p1 | 1.765969 | 1.197228 |
+| Claves del archivo abiertas (incluye KDF) | 1.767355 | 1.198770 |
+| Registros: lectura/validación/reencriptado/staging | 4.027530 | 1.456017 |
+| Manifiesto verificado | 0.211952 | 0.154296 |
+| Stage/challenge tras archivo | 0.000612 | 0.000330 |
+| Commit prepare FULL | 0.806456 | 0.127790 |
+| Server prepare completo, incluida clausura/encode previo | 6.976328 | 2.946811 |
+| Respuesta prepare encode + write | 0.000471 | 0.000321 |
+| Verificar batch + grafos al commit | 0.147013 | 0.106504 |
+| Aplicar eventos | 0.169216 | 0.086658 |
+| Audit append restore | 0.002057 | 0.002496 |
+| Retirar stage/challenge/receipt (sin alterar esta lógica) | 0.016015 | 0.006576 |
+| Commit restore FULL | 0.601590 | 0.072533 |
+| TUI envío archivo (se solapa con parse/KDF del servidor) | 5.658834 | 2.460727 |
+| TUI espera prepare después del envío | 1.318523 | 0.487306 |
+| TUI commit RPC completo | 0.947292 | 0.284526 |
+| Refresh catálogo | 0.038964 | 0.024475 |
+| Repaint | 0.005606 | 0.002723 |
+| **Total TUI restore** | **7.970014** | **3.260035** |
+
+Intel restore deja≈30ms frente a8s en el scope TUI; observer reporta éxito a
+≈7.976s desde envío por reloj de pared. ARM≈3.262s. Estado durable con nuevos
+IDs/revisiones y autoridad actual preservada comprobado por el fixture;
+ninguna finalización tardía se acepta como éxito. **Fallo histórico restore
+no reproducido en W6 y causa aún pendiente.** Los tiempos Intel de registros
+y fsync son una hipótesis concreta de sensibilidad al runner, no prueba de
+causa de los runs W2. No se modifica staging W3 ni memoria W5.
+
+#### Clasificación de fallos y límites
+
+| Fallo | Clasificación / evidencia |
+| --- | --- |
+| Diagnóstico1 Intel | Defecto del parser diagnóstico W6: rechazaba categoría fija argon2id. RED→GREEN corregido; sin cambio de oráculo de producto. |
+| Diagnóstico1 ARM | Carrera del fixture compartido de endpoint: peer cierra handshake antes de terminar stdin; BrokenPipe en1490. Parche de orden preparado, no aplicado por frontera de zona. En diagnóstico2 ese test pasó, lo que no demuestra su estabilidad ni corrige el fallo anterior. |
+| Diagnóstico2 ARM unlock | Presupuesto fixture insuficiente en esta muestra de KDF contractual + trabajo requerido; respuesta8.132s posterior al cutoff8.039s. No carrera del observer ni cola W4 bloqueada. |
+| Diagnóstico2 ARM plaintext collision | Destino intacto, parcial nonempty al cutoff, rechazo real sólo tras sample. Trabajo de export/download todavía activo; no se ha perfilado su causa interna. Gate8s FAIL preservado, sync/final Full25 NOT_RUN. Fuera de unlock/restore W6; sin cambios en zona TUI de W1. |
+| Restore histórico Intel/ARM | No reproducido aquí; no atribución definitiva. Intel actual7.970s con≈30ms de margen; ARM3.260s. |
+
+Intel sí completa core, Full25 normal, sync, fase final y cleanup: sync
+17.725s wait/19.176s total, backup1.738s. Ese PASS único no sustituye ARM ni
+corridas consecutivas. Estado de objetivo: **PASS estable conjunto NO
+DEMOSTRADO**. FDE/reboot/firma/aceptación de terminal humano siguen pendientes.
+
+#### Decisiones pendientes y recomendación
+
+1. **Fixture calibrado por runner (recomendado):** presupuesto explícito con
+   KDF contractual medido en el mismo runner más coste no-KDF y margen
+   acordado; techo finito y fallo explícito si el runner no satisface ese
+   techo. Nunca autotuning KDF, reautenticación ni alargar a mitad del wait.
+   Mantener separada la medición de rendimiento8s: su incumplimiento debe
+   seguir visible, aunque el fixture funcional espere el estado correcto bajo
+   otro presupuesto aprobado. Restore necesita además coste de archivo/fsync;
+   basarlo sólo en KDF no basta. Requiere decisión/método aprobado antes de CI.
+2. **Plazo fijo nuevo basado en evidencia:** más simple, pero una muestra no
+   fija un percentil seguro. ARM necesita al menos≈9.23s para esta apertura
+   completa, y restore Intel ya está al borde de8s. Elegir margen/techo
+   explícitos, sin prometer estabilidad futura por dos PASS.
+3. **Conservar8s como requisito de entorno:** rechazar runners que no puedan
+   cumplirlo y validar en hardware nativo adecuado/autorizado. Sin cambiar
+   label por una alternativa oculta ni introducir runners pagos.
+
+Recomendación1 preserva los oráculos funcionales/KDF y deja explícito el
+rendimiento observado; **no está implementada ni autorizada**. Se detiene
+W6 aquí como se pidió. Eliminar audit duplicado o reordenar repaint podría
+reducir trabajo, pero no rescata esta respuesta posterior al cutoff; no se
+presenta como arreglo ni como sustituto de la decisión.
+
+#### Checkpoint y siguiente acción
+
+Se devuelve el script a entorno normal: no fuerza PMW6_TIMING ni inyecta
+plist/logs salvo opt-in externo. La instrumentación queda disponible para
+fixtures sintéticos y los SHAs diagnósticos publicados permiten reproducir
+la captura exacta. Este ajuste final sólo afecta el launcher/macOS y el
+informe; Rust y fixtures Linux son byte-idénticos al checkpoint Linux52.
+No se afirma aceptación nativa del nuevo SHA documental/launcher.
+
+12 paths netos respecto a baseW2: pm-crypto/src/{lib.rs,root.rs,phase_timing.rs};
+pm-custody/src/{human_wire.rs,linux.rs,tui.rs};
+pm-custody/tests/{macos_lab.py,macos_tui_migration_lab.py};
+pm-vault/src/{backup.rs,human.rs,lib.rs}; este ticket26. El launcher
+scripts/test-macos-custody-lab.sh fue tocado temporalmente y se devuelve
+byte-idéntico a la base. Workflow, Cargo.lock, transporte sync/Windows, W3/W4/W5 y
+raíz ajena intactos. Posibles conflictos de integración en TUI/fixtures/doc26
+requieren unión revisada por el merger, que W6 no realiza.
+
+Siguiente acción del orquestador: decidir presupuesto/método de observación
+para unlock y restore manteniendo parámetros G2 y oráculos; asignar la carrera
+de endpoint y la colisión plaintext a sus propietarios. Después, nuevo
+checkpoint diagnóstico con timings si hace falta y dos PASS completos
+consecutivos en ambas CPU. Cuatro dispatches del presupuesto permanecen sin
+consumir; no usarlos sin resolver la condición de parada actual.
+
+Verificación del handoff final: config/AST/launcher/diff rc0
+`/tmp/pmw6-final-config.log`; diff respecto24dc0d3 sólo launcher e informe.
+SHA de producto Rust y fixtures Linux idénticos a Linux52 e60b8df; no se
+repite ese barrido sin cambios en ellos. Se comprobó que G2/spec/estados/
+workflow/Cargo.lock y todos los paths W1 Windows/W3/W4/W5 quedan fuera del
+diff. El trabajo queda en rama/worktree W6 para revisión del orquestador.
+
+
+### W6 fase 2 — método y autorización (2026-10-04)
+
+Continúa143a96b en el worktree W6. Autorizados endpoint del test compartido,
+rechazo temprano TUI de plaintext y análisis/optimización medible de restore.
+Plazos8/20s, KDF, oráculos unlock/restore y publicación exclusiva final intactos.
+No integración, cambios de tickets ni zona Windows de W1. Hasta cuatro nuevas
+corridas macOS sobre commits exactos, nunca repetir sin cambio/hipótesis.
+
+Endpoint RED discriminante: forzar el orden ya observado en ARM (peer cierra
+handshake y proceso sale antes de escribir stdin), sin cambiar producto.
+GREEN: mantener peer abierto hasta confirmar envío único completo del fixture;
+seguir exigiendo rc4, frame IPC unavailable exacto, stderr vacío y roots0.
+No aceptar BrokenPipe ni introducir replay. El código de orden RED es temporal
+y se conserva como patch propio; no es el fixture final.
+
+Plaintext: extender el lab de publicación según el método aprobado del backup.
+Pausar custodio propio antes del destino existente y exigir rechazo de panel
+sin RPC/temporal, destino intacto. Para carrera, preparar warning con custodio
+activo, pausarlo, confirmar EXPORT, observar temporal y crear destino adversario
+antes de reanudar. Exigir DestinationExists, destino intacto y sin temporal.
+RED con producto anterior; GREEN tras precheck symlink_metadata antes de prepare
+y nuevamente antes del download. Happy export y backup/attachment regresiones.
+
+Restore: examinar fases/lecturas/reencriptado/commits existentes; sólo aplicar
+optimización si se demuestra coste evitable con comparación medible conservando
+validación, integridad y durabilidad. Sin evidencia suficiente, informar ese
+límite para la decisión de plazos. Barrido52 del manifest W6 fase1 y check/clean,
+flock secuencial por comando y logs /tmp/pmw6b-*.log. W4 fuera de gates.
+
+
+#### Fase2 checkpoint diagnóstico de referencia
+
+Endpoint: client_session completa TLS antes de leer stdin. El peer cerraba
+después de un byte del handshake, dejando al scheduler ejecutar rc4 antes
+del write del fixture. RED forzado con stdin retenido antes del cierre:
+/tmp/pmw6b-endpoint-red2.log rc101 BrokenPipe; patch conservado en
+/tmp/pmw6b-endpoint-red.patch. El intento previo red.log falló por None tras
+child.wait (que toma stdin), no constituye RED del comportamiento. GREEN
+/tmp/pmw6b-endpoint-green.log rc0: canal explícito del fixture libera el peer
+sólo tras write_all completo y EOF de stdin. Producto/transporte intactos;
+frame exacto unavailable, rc4, stderr vacío, roots0 siguen exigidos.
+
+Plaintext RED rc1 /tmp/pmw6b-plaintext-red.log con custodio pausado y destino
+intacto, sin rechazo; GREEN rc0 /tmp/pmw6b-plaintext-green.log con happy export,
+rechazo temprano y carrera. Precheck antes del prepare33/0 y de download33/1,
+DestinationExists/panel público existente. No se modifica publish_new_file.
+Check completo rc0 /tmp/pmw6b-baseline-check.log; AST/shell/diff-check rc0.
+
+Restore: dos llamadas decode_revision_full por revisión en prepare (verifier
+y collector), frente a una suficiente si se transfiere el resultado ya
+validado. Referencia opt-in añade scope fijo archive-revision-decode y captura
+conteo/duración sólo sintéticos. Launcher fuerza PMW6_TIMING=1 exclusivamente
+en este checkpoint diagnóstico; se retirará para el checkpoint final normal.
+No eliminar revalidación de staged graphs/batch al commit: protege contra
+mutación entre prepare y commit. Los dos commits FULL corresponden a esas
+dos fronteras contractuales; no son fsync redundantes demostrados.
+
+Fallbacks heredados encontrados y preservados: linux::accept_one descarta
+error del handler y continúa; backup::RestoreCollector::finish sustituye
+error SQLite por false y retorna Integrity; export_attachments sustituye
+conversión fallida de chunk_count por i64::MAX. La rama que usa0 si
+stream está ausente es inalcanzable tras el guard de exclusividad inline/stream. TUI display_secret sustituye UTF8 inválido por etiqueta binaria
+con longitud. Ninguno cambia. No se añaden reintentos ni vías alternativas.
+
+Preflight de coste: repo PUBLIC comprobado por gh; runners estándar macos-15
+e Intel, manual, permissions contents:read, sin cache/artifacts/secrets/larger.
+[Facturación oficial](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+consultada2026-10-04: runners estándar públicos gratuitos.
+
+
+Restore RED local medible: siete tipos reales en backup_lifecycle,14 decodes
+frente al criterio de uno por revisión (7). /tmp/pmw6b-decode-red-measure.log
+test funcional rc0; oráculo de coste rc1 en decode-red-oracle.log.1.187ms
+acumulados. Tras transferir LogicalRecord ya validado del verifier al collector,
+GREEN siete decodes/0.671ms en decode-green-measure.log y green-oracle.log.
+Ganancia aislada0.516ms, no prueba de mejora del tiempo total ni del margen
+Intel. Instrumentación temporal Linux retirada, sin eprintln en producto.
+La nueva ruta revision es obligatoria del collector: ninguna segunda lectura
+ni decode alternativo; mismas comprobaciones de manifiesto/topología, IDs
+frescos/reencriptado y revalidación commit. Extensión del lab plaintext cubre
+además destino creado entre warning y EXPORT, custodio pausado y sin temporal.
+
+Diagnóstico de referencia despachado: run37182547706, SHA
+b9429d7d17b74619b97646e77bc65f1282ba16e3, inputs false/false; esperar ambos
+jobs antes de interpretar. Referencia mantiene los14/7 decodes según inventario
+y restore íntegro anterior para comparación con candidato optimizado.
+
+
+Corrida1 fase2: ARM terminó antes del harness por defecto del launcher W6: el
+export global de PMW6_TIMING llegó a los tests Cargo sin log privado, panic
+phase_timing.rs32 en backup_stream. No es RED productivo ni evidencia de
+unlock/restore. Corrección de launcher: variable sólo en invocación del
+harness, que prepara logs y retira el entorno de las CLI de setup. Intel
+sigue ejecutando a este corte; esperar terminación de ambos. El siguiente
+checkpoint publica sólo este ajuste y evidencia, manteniendo decoder anterior
+para una referencia válida. Candidato optimizado aún no publicado.
+
+
+#### Referencia nativa fase2: ambas CPU terminadas
+
+| Run / SHA / CPU | Resultado y frontera |
+| --- | --- |
+| [37182547706](https://github.com/SantanaJcp/passwordmanager/actions/runs/37182547706) / b9429d7d17b74619b97646e77bc65f1282ba16e3 / Intel y ARM | FAIL antes de harness por alcance incorrecto PMW6_TIMING; no aceptación ni medición restore. artifacts0. |
+| [37182840765](https://github.com/SantanaJcp/passwordmanager/actions/runs/37182840765) / 9a743870a1dba6388df2a37c33c1ba84f53fff87 / [Intel111378691284](https://github.com/SantanaJcp/passwordmanager/actions/runs/37182840765/job/111378691284) | FAIL: endpoint PASS, core/Full25 local y restore PASS; backup collision rechazado. Fixture esperaba PLAINTEXT WARNING después del destino existente, pero TUI ya daba operation-failure. Sync/final NOT_RUN. artifacts0. |
+| Mismo run/SHA / [ARM111378691315](https://github.com/SantanaJcp/passwordmanager/actions/runs/37182840765/job/111378691315) | Misma frontera FAIL de expectativa obsoleta plaintext; endpoint y restore PASS. Sync/final NOT_RUN. artifacts0. |
+
+Restore de referencia con17 revisiones reales: Intel TUI2.570260s, prepare
+2.146351s, commit0.386675s;34 decodes/10.956ms acumulados. ARM TUI3.429893s,
+prepare3.087762s, commit0.315793s;34 decodes/4.474ms. La diferencia frente al
+Intel fase1 de7.970014s ocurre **antes** de optimizar; demuestra variabilidad
+de runner, no ganancia atribuible al cambio. Captura con overhead de logging
+opt-in; scopes anidados no se suman. KDF efectivo256MiB/3/p1 preservado.
+
+El fixture de macOS se adaptará al rechazo temprano autorizado: eliminar
+espera de warning/EXPORT únicamente para destino existente; mantener warning
+y confirmación en happy export/cancelación. Exigir código DESTINATION_EXISTS
+completo en panel, hash intacto y temporal ausente con mismo wait8s. Sin
+aceptar alternativamente el flujo antiguo ni relajar errores. Patch preparado
+en /tmp/pmw6b-macos-early-fixture.py, pendiente de aplicar tras congelación
+del barrido52. Launcher/env corregido; no nuevos parámetros ni skips.
+
+Ambos runs: macOS15.7.9/kernel24.6.0, Rust1.98.1 y arquitectura nativa
+comprobada. Intel image_os macos15/image_version20260824.0482.1;
+ARM macos15/20260907.0337.1. Inputs false/false; dos corridas del presupuesto
+fase2 consumidas, quedan dos. Logs /tmp/pmw6b-macos{1,2}-*.log.
+
+
+#### Candidato optimizado: verificación local final
+
+Linux52 terminado:49rc0 + tresrc1 conocidos, cero regresiones; manifest
+congelado por caso y Wayland de sesión real. Check47.994s/clean98.504s
+(wall incluye espera del lock). /tmp/pmw6b-final-gates-results.json y
+summary.log; logs individuales final-gates-*.log. Mismas causas: g7-matrix
+stream staging retenido tras EIO/ENOSPC en commit-outbox-audit; g7-extra
+bootstrap/vault autoridad/receipts cambiados tras pérdida. W4 concurrency
+rc0 sólo observación fuera de gates. No se convirtió ningún RED en éxito.
+
+Happy plaintext + colisión temprana/confirmación/carrera, destino intacto y
+sin temporales, PASS también /tmp/pmw6b-plaintext-confirmation-green.log.
+Backup y attachment publicación PASS en barrido. Producto optimizado de
+restore comprobado por tests funcionales/corrupción/staging del check y
+digest de grafos; KDF/límites/commits FULL/oráculos existentes preservados.
+
+Tras terminar el snapshot52 sólo se adapta fixture nativo macOS (dos esperas
+obsoletas removidas y exigencia de código completo/temp ausente añadida).
+Rust y fixtures Linux byte-idénticos al snapshot52. AST/diff/config/shell
+locales validan este ajuste; la interfaz macOS requiere siguiente corrida
+nativa. Se mantiene timing opt-in forzado exclusivamente al harness en
+este candidato de comparación; todavía no se declara aceptación normal.
+
+
+#### Comparación optimizada: tercera corrida PASS completa
+
+[37183736170](https://github.com/SantanaJcp/passwordmanager/actions/runs/37183736170),
+SHA978bce806abc1312c64d57065f9650559dbc8575, completed/success,
+[Intel111381283720](https://github.com/SantanaJcp/passwordmanager/actions/runs/37183736170/job/111381283720)
+y [ARM111381283804](https://github.com/SantanaJcp/passwordmanager/actions/runs/37183736170/job/111381283804)
+PASS completos: endpoint, core, Full25, ambas colisiones con código de panel
+DESTINATION_EXISTS/hash intacto/temporal ausente, sync, fase final y cleanup.
+Inputs false/false; artifacts0; misma metadata de OS/imagen/host Rust que
+referencia2, arquitectura nativa comprobada. Timing sólo en harness sintético.
+
+| Restore / CPU | Referencia9a74387 | Optimizado978bce8 |
+| --- | ---: | ---: |
+| Intel total TUI (s) | 2.570260 | 2.773892 |
+| Intel prepare / commit (s) | 2.146351 / 0.386675 | 2.284844 / 0.439064 |
+| Intel decodes / coste acumulado (ms) | 34 / 10.956 | 17 / 5.362 |
+| ARM total TUI (s) | 3.429893 | 2.511333 |
+| ARM prepare / commit (s) | 3.087762 / 0.315793 | 2.230711 / 0.240595 |
+| ARM decodes / coste acumulado (ms) | 34 / 4.474 | 17 / 5.341 |
+
+RED→GREEN determinista de coste: dos decodes por revisión pasan a uno,17
+revisiones de igual inventario. Tiempo de decode local siete tipos1.187→0.671ms.
+CI no aísla ruido de runner/logging: Intel total aumenta0.204s pese a menos
+decodes; ARM total baja0.919s mientras decode acumulado aumenta0.867ms.
+**No se demuestra mejora del tiempo total nativo atribuible a este cambio.**
+Sí se elimina trabajo evitable sin retirar validación/reencriptado/durabilidad.
+Intel fase1 de7.970s no se reproduce; el margen actual no decide la política
+de plazos ni garantiza que otro runner cumpla8s. KDF256MiB/3/p1 intacto.
+
+Sync original20s: Intel wait11.902s/submit1.282s; ARM wait8.038s/submit1.056s.
+Las dos CPU terminan normal Full25 y final; no final_phase_only ni skip.
+Logs macos3-*.log/phases.json; sólo timings/categorías sintéticas.
+
+Siguiente checkpoint devuelve launcher byte-idéntico a143a96b: sin forzar
+PMW6_TIMING. Rust/fixtures Linux byte-idénticos al barrido52; única otra
+diferencia es el fixture macOS ya ejecutado en ambas CPU. Config/AST/shell/diff
+PASS al preparar launcher normal. Última corrida autorizada verifica ausencia
+de instrumentación forzada sobre el mismo producto, con los mismos límites.
+
+
+#### Cuarta corrida normal y handoff final — 2026-10-04
+
+[37184327084](https://github.com/SantanaJcp/passwordmanager/actions/runs/37184327084),
+SHA5f2f6a5980390d9f42aded57404e9ab804929b45, **completed/failure**.
+[Intel111383023865](https://github.com/SantanaJcp/passwordmanager/actions/runs/37184327084/job/111383023865)
+PASS completo: endpoint, core/Full25, colisiones backup/plaintext explícitas,
+hash intacto/temp ausente, sync (submit1.642s/wait15.603s), fase final y cleanup.
+[ARM111383023994](https://github.com/SantanaJcp/passwordmanager/actions/runs/37184327084/job/111383023994)
+FAIL antes de restore/colisiones/sync/final: endpoint PASS, negativa de contraseña
+incorrecta en run_tui_ticket23_matrix no termina dentro de wait_exit(8); luego
+la matriz independiente25 falla en start_macos_tui/rejected_source, esperando
+Unlocked dentro del wait8s. Estado observado: pantalla password-prompt, parser
+ground, child alive. Ambos errores se propagan; no éxito tardío ni retry.
+
+Normal4 no imprime PMW6_LOG/OBSERVER en ninguna CPU, comprobado en logs;
+launcher idéntico a143a96b, inputs false/false, artifacts0. Mismos OS/imagen/
+host Rust que referencia2/optimizado3; arquitectura nativa comprobada.
+Sin timings de fase en esta corrida, no atribuir definitivamente el FAIL
+a KDF, cola humana o I/O; es compatible con el límite histórico pendiente
+y conserva esa incertidumbre. Restore normal4 Intel pasó el oráculo8s pero
+no tiene medición por fase; ARM NOT_RUN. Logs /tmp/pmw6b-macos4-*.log y
+status.json. No se retoma instrumentación ni se consume una quinta corrida.
+
+**Estabilidad conjunta NO DEMOSTRADA:** diagnóstico3 pasó ambas CPU, pero
+normal4 falló ARM. No hay dos PASS completos consecutivos Intel+ARM. Los
+cuatro dispatches de fase2 se consumieron y terminaron; ninguno omitido del
+informe. KDF256MiB/3/p1, límites y plazos8/20s no cambiaron.
+
+Resultado acotado: endpoint fixture RED→GREEN sin cambiar transporte ni aceptar
+BrokenPipe; plaintext rechazo temprano/confirmación/carrera con destino intacto
+y sin temporales; restore elimina decode duplicado con17 frente a34 llamadas
+nativas y mantiene validación/reencriptado/commits. No se demuestra mejora
+estable del tiempo total ni se resuelve la política pendiente de plazos.
+
+Siete paths netos respecto143a96b: pm-custody/src/tui.rs; tests
+download_publication_lab.py, macos_lab.py, macos_tui_migration_lab.py;
+pm-sync/tests/e2ee_replication/purge_sync.rs; pm-vault/src/backup.rs;
+este ticket26. Launcher tocado en checkpoints diagnósticos y restaurado.
+Workflow, Cargo.lock, KDF, spec/estados de tickets, producción sync/Windows,
+W3/W4/W5 y raíz ajena fuera del diff. Sin integración ni merge de PR1.
+Windows y otras plataformas afectadas por código compartido no verificadas
+nativamente por W6; Linux x86_64/macOS Intel/ARM tienen la evidencia descrita.
+FDE/reboot, firma y terminal humano siguen pendientes de sus laboratorios.
+
+Siguiente acción del orquestador: decidir presupuesto/método para unlock y
+restore, incluyendo el rechazo con contraseña incorrecta que también usa KDF;
+revisar/componer candidatos por merger y autorizar nuevas corridas si procede.
+No implementar calibración, nuevos plazos ni cambios de KDF por inferencia.
+El último commit de evidencia no altera producto/fixtures/launcher del SHA
+normal4; se publica un checkpoint revisable, sin cerrar tickets.

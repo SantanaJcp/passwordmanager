@@ -580,8 +580,10 @@ impl HumanVault {
     /// # Errors
     /// Fails closed if any visible revision or lifecycle row is inconsistent.
     pub fn human_catalog(&self) -> Result<Vec<HumanCatalogEntry>, HumanCommitError> {
+        let mut timing = pm_crypto::phase_timing::PhaseTimer::new("catalog");
         self.channel.verify()?;
         let connection = open_connection(&self.path)?;
+        timing.phase("sqlite-opened");
         let mut statement = connection.prepare(
             "SELECT item_id,visible_revision,kind,status FROM vault_items ORDER BY item_id",
         )?;
@@ -596,6 +598,7 @@ impl HumanVault {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
+        timing.phase("rows-read");
         let mut entries = Vec::with_capacity(rows.len());
         for (item, revision, expected_kind, status) in rows {
             let item_id = bytes::<16>(&item)?;
@@ -616,6 +619,8 @@ impl HumanVault {
                 lifecycle,
             });
         }
+        timing.phase("revisions-verified");
+        timing.finish();
         Ok(entries)
     }
 
@@ -736,12 +741,15 @@ impl HumanVault {
         input: &mut dyn Read,
         source: BackupOpen<'_>,
     ) -> Result<crate::PreparedBackupRestore, HumanCommitError> {
+        let mut timing = pm_crypto::phase_timing::PhaseTimer::new("restore-prepare");
         self.channel.verify()?;
         let transaction_id = random_id()?;
         let challenge = random_challenge()?;
         let mut connection = open_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        timing.phase("sqlite-transaction");
         let expected_state = state_digest(&transaction, self.root.vault_id(), 1)?;
+        timing.phase("state-digest");
         let (summary, item_ids, object_digest) = match source {
             BackupOpen::Password(password) => crate::backup::prepare_restore(
                 &transaction,
@@ -760,6 +768,7 @@ impl HumanVault {
                 recovery,
             ),
         }?;
+        timing.phase("archive-staged");
         let manifest = encode_event_manifest(
             "backup-restore",
             *summary.backup_id(),
@@ -796,7 +805,10 @@ impl HumanVault {
             "INSERT INTO human_staging(transaction_id,operation,event_kind,item_id,revision_id,body,package,item_kind,attachments) VALUES(?1,'backup_restore','backup-restore',?2,NULL,?3,NULL,NULL,NULL)",
             params![transaction_id.as_slice(),summary.backup_id().as_slice(),body],
         )?;
+        timing.phase("challenge-staged");
         transaction.commit()?;
+        timing.phase("committed");
+        timing.finish();
         Ok(crate::PreparedBackupRestore::new(
             PreparedHumanCommand {
                 transaction_id,
@@ -1183,10 +1195,13 @@ impl HumanVault {
         channel: HumanChannel,
         audit_custody: Arc<AuditDeviceCustody>,
     ) -> Result<Self, HumanCommitError> {
+        let mut timing = pm_crypto::phase_timing::PhaseTimer::new("vault-unlock");
         let mut diagnostics = UnlockDiagnostics::new();
         channel.verify()?;
         diagnostics.phase(UnlockDiagnosticPhase::ChannelVerified);
+        timing.phase("channel-verified");
         let mut connection = open_connection_observed(path, &mut diagnostics)?;
+        timing.phase("sqlite-configured");
         #[cfg(feature = "macos-ticket26-diagnostics")]
         let root = crate::unlock_root_diagnostic(&connection, password, |boundary| {
             diagnostics.phase(match boundary {
@@ -1202,9 +1217,11 @@ impl HumanVault {
         })?;
         #[cfg(not(feature = "macos-ticket26-diagnostics"))]
         let root = unlock_root(&connection, password)?;
+        timing.phase("root-opened");
         let trusted_root = root.trusted_root();
         channel.verify()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        timing.phase("audit-transaction");
         let frontier = audit::current_frontier(&transaction)?;
         audit::append_event(
             &transaction,
@@ -1221,7 +1238,12 @@ impl HumanVault {
             now_us()?,
             frontier,
         )?;
+        timing.phase("audit-appended");
         transaction.commit()?;
+        timing.phase("audit-committed");
+        drop(connection);
+        timing.phase("sqlite-closed");
+        timing.finish();
         Ok(Self {
             path: path.to_owned(),
             device,
@@ -4321,6 +4343,7 @@ fn commit_backup_restore(
     body_hash: [u8; 32],
     committed_at_us: i64,
 ) -> Result<HumanReceipt, HumanCommitError> {
+    let mut timing = pm_crypto::phase_timing::PhaseTimer::new("restore-commit");
     let batch = load_backup_restore_batch(&transaction, body.transaction_id)?;
     let items = load_backup_restore_items(&transaction, body.transaction_id)?;
     if items.len() != batch.item_count
@@ -4330,6 +4353,7 @@ fn commit_backup_restore(
         return Err(HumanCommitError::BodyChanged);
     }
 
+    timing.phase("batch-verified");
     let mut revision_total = 0_usize;
     for item in &items {
         if transaction
@@ -4398,6 +4422,7 @@ fn commit_backup_restore(
     let mut final_digest = previous;
     let mut ordinal = 0_i64;
     let mut first_event = true;
+    timing.phase("graphs-verified");
     for item in &items {
         let revisions = load_backup_restore_revisions(&transaction, body.transaction_id, item)?;
         let mut item_revision_digests = Vec::with_capacity(revisions.len());
@@ -4575,6 +4600,7 @@ fn commit_backup_restore(
             batch.backup_id.as_slice()
         ],
     )?;
+    timing.phase("events-applied");
     audit::append_event(
         &transaction,
         trusted_root,
@@ -4591,6 +4617,7 @@ fn commit_backup_restore(
         committed_at_us,
         final_digest,
     )?;
+    timing.phase("audit-appended");
     transaction.execute(
         "UPDATE human_challenges SET consumed=1 WHERE transaction_id=?1 AND consumed=0",
         [body.transaction_id.as_slice()],
@@ -4622,7 +4649,10 @@ fn commit_backup_restore(
             committed_at_us
         ],
     )?;
+    timing.phase("staging-retired");
     transaction.commit()?;
+    timing.phase("committed");
+    timing.finish();
     Ok(HumanReceipt {
         transaction_id: body.transaction_id,
         body_hash,
