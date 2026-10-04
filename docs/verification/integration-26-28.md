@@ -1088,3 +1088,235 @@ Waits8/15/20/30 y Argon2id intactos; fallos por plazo siguen FAIL.
 Referencias: [W2 fase5](w2-purge-sync.md#resultado-final-de-fase-5-mejoras-verificadas-aceptación-conjunta-pendiente),
 [W1 fase8](ticket-27.md#w1-fase-8--método-autorizado-2026-10-04),
 [método CI](native-ci.md). Evidencia final se añade al terminar las corridas.
+
+### Resolución y commits pmint7
+
+| Orden | Candidata | Commit |
+| --- | --- | --- |
+| 1 | W2 b1d374c4c733715911600233d29334eba3bdbe52, sin conflictos | `21111176b9e47a023af98ae5604d3fcabb124a3a` |
+| 2 | W1 46f34648ee6f24653dc37bacee3c7856f9914b9b, dos conflictos pm-sync | `9254037e84f3dfd9a11dbaea546af7705d25b7be` |
+| 3 | Anotación de tipo mecánica tras composición | `07830a496bb64e5f5d8b495a8aa1d7305cf7e645` |
+
+Resolución archivo:símbolo:
+
+- `crates/pm-sync/src/lib.rs:SyncReplica::push`: conservar export_ciphertext_graphs
+  una vez por página y los stages de W2; incorporar event_total/event_puts/
+  event_started, framing_puts y graph_cleanup de W1 sin volver a exportar por
+  evento. Export/ledger compartidos en ambas plataformas; RPCs y fsync intactos.
+- `crates/pm-sync/src/lib.rs:{ProcessTlsTransport,OpaqueSyncStore::session_connection}`:
+  Session/finish comunes cfg(any(unix,windows)); ampliar el cfg de la conexión
+  W2 a Windows, sin transacción retenida ni autorización cacheada.
+- `crates/pm-sync/src/main.rs:{DispatchStore,dispatch_response,dispatch,serve_one}`:
+  un alias OpaqueSyncConnection y un dispatch para ambos transportes; helper W1
+  con el mismo mapeo de fallo heredado. Quitar ramas Windows inalcanzables del
+  handler ahora cfgUnix. El loop sin Ok terminal perdió inferencia: check
+  E0282 en main.rs:373. Añadir únicamente Result<(),()> en07830a4; logs
+  `/tmp/pmint7-merge-w1-check.log` y `…check2.log`. No defecto abierto corregido.
+- `crates/pm-sync/src/windows_session.rs:serve`: sustituir el keeper separado
+  por session_connection/close W2; dispatch común con ACL y autocommit por RPC.
+  Se conserva verificación del peer antes de TLS/peticiones en client y antes
+  de dispatch/commit/respuesta en serve, ALPN/RPK, framing/EOF y close_notify.
+- `crates/pm-sync/src/session.rs:Session`, `session/windows_io.rs:PipeIo`,
+  `main.rs:client_exchange` y `pm-custody/src/sync_job.rs:Manager::run_inner`:
+  código W1 conservado, un engine de sesión cliente con I/O por plataforma,
+  una petición ciphertext a la vez, abort/reap sin replay interno y finish
+  comprobado antes de éxito. No cambios de deadlines o backoff.
+- `crates/pm-sync/src/windows_pipe_tests.rs:real_session_rechecks_acl_between_rpcs_without_replay`:
+  adaptar al DispatchStore W2 y añadir observación RO independiente del primer
+  commit antes de respuesta/cierre; conservar segundo RPC rechazado y cleanup.
+
+No conflicto documental ni decisión de producto. Manifest
+`/tmp/pmint7-candidate-preservation.json`:18 paths exclusivos,16 byte-idénticos;
+los dos adaptados son windows_session/windows_pipe_tests descritos arriba.
+Los únicos paths compartidos son lib.rs/main.rs. Ambos candidatos en ascendencia,
+workflows sin cambios. `/tmp/pmint7-preservation-check.json` comprueba HEAD,
+diff/status y archivos ajenos de raíz, y SHAs candidatos intactos.
+
+### Gates locales pmint7
+
+Tras W2: check inicial rc0 y barrida completa52 sobre2111117,
+**48 rc0 + tres RED G7 conocidos + token exchange FAIL** (553.676s agregados).
+Token exchange: denied_audience start devuelve CUSTODY_UNAVAILABLE rc4,
+assert token_exchange_lab.py:478,27.686s. La categoría intermitente estaba
+reportada por W1 en hostile-start; este trigger denied-audience es distinto.
+**Causa y relación con composición no demostradas**; no se corrigió ni repitió.
+La barrida no se acepta como49/52. Log `/tmp/pmint7-w2-gates-lab-token-exchange.log`.
+
+Tras W1, check sobre9254037 rc101/E0282; se detuvo el barrido que había
+comenzado antes de conocer ese resultado. Sus logs son
+`/tmp/pmint7-assembly-attempt1-*`, no evidencia completa ni RED de producto.
+Anotación mecánica07830a4 y nuevo check completo rc0.
+
+Final sobre07830a4: **52 casos /49 rc0 /tres rc1 esperados /unexpected=[]**,
+fuentes congeladas,600.484s agregados (incluye build/lock, no benchmark).
+Check97.720s y clean48.363s rc0. Wayland real desde el inicio, sin retries ni
+skips de producto. Token exchange rc0/28.878s aquí no resuelve su intermitencia.
+TUI access/content/operations y26 wrappers base, tres publicaciones, canarios,
+inflight, purga y digest pasan. W4 concurrency rc0, sólo observación.
+Resultados `/tmp/pmint7-{w2,final}-gates-local-results.json`, resúmenes
+`…-local-summary.{json,log}`; logs individuales `…-<caso>.log`.
+
+Tests de sesión Unix W2 ejecutados:34 RPCs (16put/16get/publish/list),
+sqlite_opens1, commit visible por RO antes de cerrar TLS, ACL por cada RPC,
+framing/deadline y pérdida de conexión explícita sin replay. No se usan filtros
+con cero tests. Tests Windows quedan atribuidos a CI, no al PASS Linux.
+
+Los tres rc1 finales conservan causas del baseline: g7-matrix ProductRed
+commit-outbox-audit EIO+ENOSPC, stream staging retenido tras fallo/restart;
+g7-extra-bootstrap/vault AssertionError authority or receipts changed across
+loss. Son RED conocido y dos diagnósticos conocidos, no PASS integral G7.
+No cambios a aserciones, cleanup, estados de tickets ni límites.
+
+### Windows nativo pmint7 — terminado FAIL
+
+[Run37184712787](https://github.com/SantanaJcp/passwordmanager/actions/runs/37184712787),
+[job111384137113](https://github.com/SantanaJcp/passwordmanager/actions/runs/37184712787/job/111384137113),
+SHA exacto `07830a496bb64e5f5d8b495a8aa1d7305cf7e645`.
+Inputs diagnostic_only=false/service_diagnostics=true/tui_conpty_red=true/
+onepux_memory_diagnostics=false. Una de dos corridas posibles consumida.
+
+Build/PE estático,14 primitivas,1 pipe,24 observer,3 sync-lib y2 sync-bin PASS.
+Los dos tests bin son authenticated_response_survives_checked_server_close y
+real_session_rechecks_acl_between_rpcs_without_replay (RO/ACL compuestos).
+Fuentes/resize/clipboard/access/rotaciones/Matrix/PAIR PASS. Confirmado en
+job real:1process_started/1handshake, exportación compartida1 y
+store_sqlite_open1. No retorno del ERROR_BROKEN_PIPE ni backoff observado.
+
+El fallo previo de local-operations vuelve con CUSTODY_UNAVAILABLE y ausencia
+de Organization committed dentro15s. El workload resultante es **36 eventos**,
+no70 del último run W1;24 grafos exportados. El snapshot se toma después del
+cutoff TUI y es parcial. Scopes anidados, no sumar duraciones incluidas.
+
+| Fase / contador del job | Tiempo acumulado | Count / alcance |
+| --- | ---: | --- |
+| Preparación job |0.003219s |1 |
+| Export compartido |0.320536s |1 snapshot,24 grafos |
+| Put |6.281261s |154 RPCs completos |
+| Push |6.864544s |1 completo; incluye export/put/publish/ack |
+| Publish / ack |0.038327 /0.043152s |1/1 |
+| Get |2.711078s |70 RPCs completos al snapshot |
+| List |0.036146s |1 |
+| Pull |**NOT_MEASURED completo** |7 graph_download completos/8 iniciados |
+| Job total / cierre cliente |**NOT_MEASURED** |sin job_total/process_close/exit final |
+| Proceso / handshake |0.055506 /0.045303s |1/1 |
+| Apertura servidor SQLite |0.010904s |1server_sqlite_open/1store_sqlite_open |
+
+TUI: submit0.002s, wait**15.001s**, span externo15.356s,
+complete-panel=false; pushing first6.113s/observed6.656s/ended=true,
+pulling first12.769s/observed2.231s/ended=false. **FAIL por plazo**, margen
+contractual no positivo (-0.001s en la medición redondeada); no hay medición
+completa del job para atribuir cuánto falta. La comparación con W1 job36
+9.288192s y job70 parcial no es benchmark pareado ni prueba causal de regresión.
+
+Servidor snapshot255 dispatch/1.426682s,256 request_read/0.087334s,
+verify256/0.005391s,response_write255/0.020033s; conteos posteriores al snapshot
+del cliente, no un total sincronizado. SQLite por sesión y ACL/commit por RPC
+conservados. NATIVE_SYNC blocks154/roots1/close=checked **PASS durable de push**;
+SYNC TUI FAIL; RETIRE NOT_RUN por sync-failed y observer retire durable FAIL.
+No presentar persistencia de la raíz como pull completo o aceptación TUI.
+
+Cleanup estricto **FAIL conocido**: staging productivo no inventariado y raíz
+propia restante al interrumpir el worker. No ampliación de inventario ni limpieza
+remota adicional. Local-operations, deadline SYNC y staging ya aparecen en W1
+fase8; no se identifica una regresión semántica nueva de composición. Aceptación
+Windows integral sigue FAIL; job70/RETIRE y cliente legado integral pendientes.
+
+Metadata/logs `/tmp/pmint7-native-windows1{,-jobs,-artifacts,-dispatch}.json`,
+`…windows1.log`, log crudo `…windows1-111384137113.log` y resumen numérico
+`…windows1-metrics.json`. No segunda corrida idéntica sin discriminante/cambio.
+
+### macOS nativo pmint7 — ambas CPU PASS
+
+[Run37184713874](https://github.com/SantanaJcp/passwordmanager/actions/runs/37184713874),
+SHA exacto `07830a496bb64e5f5d8b495a8aa1d7305cf7e645`, completed/success.
+Intel [job111384140278](https://github.com/SantanaJcp/passwordmanager/actions/runs/37184713874/job/111384140278)
+y ARM [job111384140365](https://github.com/SantanaJcp/passwordmanager/actions/runs/37184713874/job/111384140365)
+terminados success. Inputs pasteboard_diagnostic=false/final_phase_only=false,
+plist/binarios normales; Full25, fase final y cleanup estricto completos.
+Una de dos corridas posibles consumida, sin W6 ni segunda idéntica.
+
+| CPU | Sync envío / espera / total | Margen real wait20 | Backup feliz | Resultado |
+| --- | --- | --- | --- | --- |
+| Intel |2.783 /17.447 /20.230s |2.553s /12.8% |5.387s |PASS completo |
+| Apple Silicon |0.823 /6.665 /7.488s |13.335s /66.7% |0.785s |PASS completo |
+
+Ambos: pushed59/pulled59, bloques287/root1, pantalla y durable=succeeded,
+PIDs custodio/servidor iguales, ambas colisiones rejected/destination=same.
+Panel Intel prefijo17.446s/completo17.447s; ARM ambos6.665s. Intel total20.230
+incluye envío2.783 y supera20: no ocultarlo ni confundirlo con el wait17.447
+que determina el gate. No scopes internos del job en modo normal; no inventar
+puts/gets/push/pull por fase a partir de estos timers externos.
+
+Referencia W2 final37178671730/ad3905d: Intel wait15.637s/margen4.363s21.8%,
+backup1.741s; ARM sync NOT_RUN por unlock8.083s. Intel actual espera1.810s
+más y margen1.810s menor; objetivo histórico30% **no alcanzado**. Es pérdida
+de margen observada, no experimento pareado ni causa atribuible a composición.
+Referencia ARM W2 diagnóstico37177948387/f553998: wait6.677s/margen13.323s66.6%;
+actual wait6.665s/margen13.335s. Las muestras previas ARM PASS siguen separadas
+por SHA/diagnóstico; el PASS actual conjunto no demuestra estabilidad futura
+de unlock/restore ni elimina sus fallos históricos. No regresión funcional
+observada en Full25/final; regresión causal de rendimiento **no demostrada**.
+
+Los tests Unix de sesión W2 pasan nativamente en ambas CPU, incluido
+PMW2_STORE puts16/gets16/publish1/list1/sqlite_opens1 y commit RO antes de cierre.
+Se conservan los oráculos de ACL/loss/framing/deadline. Unlocks observados:
+Intel1.003–3.034s, ARM0.567–2.682s; no timeout de unlock/restore en esta corrida.
+No es diagnóstico causal del fallo intermitente de W6.
+
+Metadata/logs `/tmp/pmint7-native-macos1{,-jobs,-artifacts,-dispatch}.json`,
+`…macos1.log`, `…macos1-{intel,arm}.log`. En ambos workflows artifacts total0
+comprobado por API; fuentes/workflows no contienen cambios de caches/upload/
+secrets ni runners pagos. Repositorio PUBLIC; gratuidad estándar verificada en
+[fuente primaria](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+
+Entorno observado: Mac15.7.9/kernel24.6.0, Intel x86_64-apple-darwin imagen
+20260824.0482.1 y ARM aarch64-apple-darwin imagen20260907.0337.1; Rust1.98.1
+48a229cea nativo. Windows11 Enterprise10.0.26200/build26200 ARM64,
+imagen20260924.168.1, Rust1.98.1-aarch64-pc-windows-msvc; libsodium1.0.22
+MSVC ARM64 estático/MT. Labels estándar verificados en metadata/workflow.
+Preflight no sustituye aceptación; Windows11 x64/Linux AArch64, reboot/FDE,
+firma/notarización y aceptación humana externa siguen sin demostrar.
+
+### Clasificación final y publicación pmint7
+
+| Hallazgo | Clasificación final |
+| --- | --- |
+| E0282 del loop Unix tras resolución |Error nuevo de compilación de composición, corregido mecánicamente en07830a4 y checks completos PASS; no RED de producto. |
+| g7-matrix y g7-extra-bootstrap/vault |Tres RED conocidos conservados: staging commit-outbox-audit EIO/ENOSPC y autoridad/receipts tras pérdida. |
+| Token exchange tras W2 |FAIL en trigger denied-audience, categoría intermitente conocida CUSTODY_UNAVAILABLE; causa nueva/regresión no demostrada. Final PASS sin cambiar código del flujo; no cierre de intermitencia. |
+| Windows local-operations |FAIL conocido/intermitente, CUSTODY_UNAVAILABLE/Organization committed15s. |
+| Windows SYNC |FAIL por plazo15.001s durante pull; push durable154blocks/root1. Job36, total/pull finales no medidos; no comparación causal con job70. |
+| Windows RETIRE /cleanup |RETIRE NOT_RUN; observer durable FAIL dependiente. Cleanup staging/raíz restante FAIL conocido, no convertido en éxito. |
+| macOS Intel margen |PASS contractual; margen12.8% inferior a21.8% W2 y objetivo30%. Pérdida de margen medida; causa de rendimiento no demostrada. |
+| macOS Full25/final Intel+ARM |PASS conjunto sobre07830a4; ninguna regresión funcional observada. |
+
+**Composición verificada localmente sin diferencias finales y macOS ambas CPU
+PASS; aceptación integral sigue FAIL por Windows y REDs G7.** No tickets cerrados,
+W6 no integrado, PR#1 sin fusionar, límites/deadlines/KDF intactos. No nueva
+función ni fallback, no cambio de políticas pendientes. Presupuesto1/2 Windows
+y1/2 Mac: no se consumen las segundas corridas sin discriminante/cambio concreto.
+
+Fallbacks heredados inspeccionados y conservados: `main.rs:dispatch_response`
+convierte error de parsing/dispatch en ok=false (mismo comportamiento previo);
+`lib.rs:retry` repite sólo Unavailable con backoff1/2/4/8/16/30, sin ruta
+recuperadora distinta; limpieza de stages/temporales best-effort e ignorada
+cuando falla; timing.rs:emit ignora error de stderr (el sink PMW1 seleccionado
+sí comunica PMW1_TIMING_FAILED). Los inventarios W1/W2 y G7 siguen aplicando.
+La apertura SQLite que recreaba vault y el kind .or_else históricos ya fueron
+corregidos por W3/W2 antes de esta tarea; no atribuirlos a este merger.
+
+Push normal de07830a4 únicamente a codex/pm-integration-26-28, SHA remoto/API
+exactos antes de dispatch. El helper configurado falló por ruta gh inexistente;
+se usó el override por comando explícitamente autorizado. El remoto anunció
+el bypass de regla previamente autorizado; no se editaron reglas/config ni
+se usó force. Commit posterior de este informe sólo documental, con árbol
+código/fixtures/workflows idéntico al SHA ejecutado. Raíz b3577d2 y archivos
+ajenos preservados mediante comparación de hashes/status; candidatos intactos.
+
+Siguiente acción: entregar a los dueños el FAIL Windows local-operations/
+staging y el job36 parcial; obtener decisión del usuario sobre política de
+plazos antes de cualquier cambio. W6 continúa su estabilidad macOS aislada;
+el margen Intel reducido y la intermitencia unlock/restore requieren su
+trabajo y evidencia, sin integrarlo desde este encargo. Revalidar Windows
+SYNC70/RETIRE y cliente legado integral en el siguiente ciclo autorizado,
+sin sustituir NOT_RUN por PASS ni cerrar G7/producto con estos resultados.
