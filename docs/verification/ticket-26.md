@@ -2907,8 +2907,8 @@ dos fronteras contractuales; no son fsync redundantes demostrados.
 Fallbacks heredados encontrados y preservados: linux::accept_one descarta
 error del handler y continúa; backup::RestoreCollector::finish sustituye
 error SQLite por false y retorna Integrity; export_attachments sustituye
-conversión fallida de chunk_count por i64::MAX (stream ausente por0, luego
-rechazado). TUI display_secret sustituye UTF8 inválido por etiqueta binaria
+conversión fallida de chunk_count por i64::MAX. La rama que usa0 si
+stream está ausente es inalcanzable tras el guard de exclusividad inline/stream. TUI display_secret sustituye UTF8 inválido por etiqueta binaria
 con longitud. Ninguno cambia. No se añaden reintentos ni vías alternativas.
 
 Preflight de coste: repo PUBLIC comprobado por gh; runners estándar macos-15
@@ -3036,3 +3036,55 @@ PMW6_TIMING. Rust/fixtures Linux byte-idénticos al barrido52; única otra
 diferencia es el fixture macOS ya ejecutado en ambas CPU. Config/AST/shell/diff
 PASS al preparar launcher normal. Última corrida autorizada verifica ausencia
 de instrumentación forzada sobre el mismo producto, con los mismos límites.
+
+
+#### Cuarta corrida normal y handoff final — 2026-10-04
+
+[37184327084](https://github.com/SantanaJcp/passwordmanager/actions/runs/37184327084),
+SHA5f2f6a5980390d9f42aded57404e9ab804929b45, **completed/failure**.
+[Intel111383023865](https://github.com/SantanaJcp/passwordmanager/actions/runs/37184327084/job/111383023865)
+PASS completo: endpoint, core/Full25, colisiones backup/plaintext explícitas,
+hash intacto/temp ausente, sync (submit1.642s/wait15.603s), fase final y cleanup.
+[ARM111383023994](https://github.com/SantanaJcp/passwordmanager/actions/runs/37184327084/job/111383023994)
+FAIL antes de restore/colisiones/sync/final: endpoint PASS, negativa de contraseña
+incorrecta en run_tui_ticket23_matrix no termina dentro de wait_exit(8); luego
+la matriz independiente25 falla en start_macos_tui/rejected_source, esperando
+Unlocked dentro del wait8s. Estado observado: pantalla password-prompt, parser
+ground, child alive. Ambos errores se propagan; no éxito tardío ni retry.
+
+Normal4 no imprime PMW6_LOG/OBSERVER en ninguna CPU, comprobado en logs;
+launcher idéntico a143a96b, inputs false/false, artifacts0. Mismos OS/imagen/
+host Rust que referencia2/optimizado3; arquitectura nativa comprobada.
+Sin timings de fase en esta corrida, no atribuir definitivamente el FAIL
+a KDF, cola humana o I/O; es compatible con el límite histórico pendiente
+y conserva esa incertidumbre. Restore normal4 Intel pasó el oráculo8s pero
+no tiene medición por fase; ARM NOT_RUN. Logs /tmp/pmw6b-macos4-*.log y
+status.json. No se retoma instrumentación ni se consume una quinta corrida.
+
+**Estabilidad conjunta NO DEMOSTRADA:** diagnóstico3 pasó ambas CPU, pero
+normal4 falló ARM. No hay dos PASS completos consecutivos Intel+ARM. Los
+cuatro dispatches de fase2 se consumieron y terminaron; ninguno omitido del
+informe. KDF256MiB/3/p1, límites y plazos8/20s no cambiaron.
+
+Resultado acotado: endpoint fixture RED→GREEN sin cambiar transporte ni aceptar
+BrokenPipe; plaintext rechazo temprano/confirmación/carrera con destino intacto
+y sin temporales; restore elimina decode duplicado con17 frente a34 llamadas
+nativas y mantiene validación/reencriptado/commits. No se demuestra mejora
+estable del tiempo total ni se resuelve la política pendiente de plazos.
+
+Siete paths netos respecto143a96b: pm-custody/src/tui.rs; tests
+download_publication_lab.py, macos_lab.py, macos_tui_migration_lab.py;
+pm-sync/tests/e2ee_replication/purge_sync.rs; pm-vault/src/backup.rs;
+este ticket26. Launcher tocado en checkpoints diagnósticos y restaurado.
+Workflow, Cargo.lock, KDF, spec/estados de tickets, producción sync/Windows,
+W3/W4/W5 y raíz ajena fuera del diff. Sin integración ni merge de PR1.
+Windows y otras plataformas afectadas por código compartido no verificadas
+nativamente por W6; Linux x86_64/macOS Intel/ARM tienen la evidencia descrita.
+FDE/reboot, firma y terminal humano siguen pendientes de sus laboratorios.
+
+Siguiente acción del orquestador: decidir presupuesto/método para unlock y
+restore, incluyendo el rechazo con contraseña incorrecta que también usa KDF;
+revisar/componer candidatos por merger y autorizar nuevas corridas si procede.
+No implementar calibración, nuevos plazos ni cambios de KDF por inferencia.
+El último commit de evidencia no altera producto/fixtures/launcher del SHA
+normal4; se publica un checkpoint revisable, sin cerrar tickets.
