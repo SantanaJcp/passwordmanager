@@ -47,6 +47,7 @@ function Get-StoppableServicePid([string]$Name) {
     Assert-True ([int]$record.ProcessId -gt 0) 'SCM did not expose service PID'
     $controller = Get-Service -Name $Name -ErrorAction Stop
     Assert-True $controller.CanStop 'RUNNING service did not advertise SERVICE_ACCEPT_STOP'
+    $ownedServicePids[[int]$record.ProcessId] = $true
     return [int]$record.ProcessId
 }
 
@@ -173,6 +174,11 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
             if ($stage -in @('preparation', 'frame-ready', 'frame-failed')) {
                 $allowed += "phase=organization-$stage category=$category"
             }
+        }
+    }
+    foreach ($stage in @('preparation', 'frame-ready', 'frame-failed', 'frame-sent', 'commit')) {
+        foreach ($category in @('ok', 'crypto-resource', 'crypto-other', 'invalid-input', 'io-permission', 'io-eof', 'io-input', 'io-other', 'storage', 'state-changed', 'wrong-channel', 'other', 'integrity', 'item-missing', 'invalid-command', 'vault', 'random', 'audit', 'body-changed', 'invalid-signature', 'expired', 'transaction-conflict')) {
+            $allowed += "phase=organization-$stage category=$category"
         }
     }
     foreach ($line in $lines) {
@@ -355,6 +361,73 @@ function Add-OwnedPath([hashtable]$Owned, [string]$Path) {
     $Owned[[IO.Path]::GetFullPath($Path)] = $true
 }
 
+# Inventory only the product's closed staging namespace, after SCM and every
+# recorded owner PID have stopped. Unknown nodes remain errors, never glob-deleted.
+function Register-StoppedSyncStages([string]$Directory, [hashtable]$Owned) {
+    $service = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
+    Assert-True ($null -eq $service -or ([string]$service.State -eq 'Stopped' -and [int]$service.ProcessId -eq 0)) 'cannot inventory staging while SCM is running'
+    foreach ($ownerPid in $ownedServicePids.Keys) {
+        Assert-True (@(Get-CimInstance Win32_Process -Filter "ProcessId=$ownerPid" -ErrorAction Stop).Count -eq 0) 'cannot inventory staging while an owned custodial PID is alive'
+    }
+    $stages = 0
+    $files = 0
+    foreach ($item in @(Get-ChildItem -LiteralPath $Directory -Force -ErrorAction Stop)) {
+        if ($Owned.ContainsKey([IO.Path]::GetFullPath($item.FullName))) { continue }
+        Assert-True ($item.PSIsContainer -and $item.Name -cmatch '^\.pm-sync-stage-([1-9][0-9]*)-[a-f0-9]{64}$') 'unexpected node in stopped service directory'
+        $ownerPid = [int]$Matches[1]
+        Assert-True ($ownedServicePids.ContainsKey($ownerPid)) 'staging owner PID is outside the owned SCM ledger'
+        Assert-True (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'staging directory is a reparse point'
+        $children = @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop)
+        foreach ($child in $children) {
+            Assert-True (-not $child.PSIsContainer -and ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'staging child is not a regular non-reparse file'
+            $pattern = '^(revision|attachment-[a-f0-9]{32}|joined-[a-f0-9]{32}|stream-[a-f0-9]{32}-(0|[1-9][0-9]*))(\.sync-part-' + $ownerPid + ')?$'
+            Assert-True ($child.Name -cmatch $pattern) 'unexpected staging child name'
+        }
+        # Validate the whole directory before granting removal authority.
+        Add-OwnedPath $Owned $item.FullName
+        foreach ($child in $children) { Add-OwnedPath $Owned $child.FullName }
+        $stages++
+        $files += $children.Count
+    }
+    Write-Host "WINDOWS_CLEANUP_STAGING directories=$stages files=$files owners=stopped namespace=checked"
+}
+
+function Test-StoppedSyncStageInventory([int]$StoppedPid) {
+    foreach ($case in @('owned', 'foreign-owner', 'unexpected-child')) {
+        $testPid = if ($case -eq 'foreign-owner') { 1 } else { $StoppedPid }
+        Assert-True ($case -ne 'foreign-owner' -or -not $ownedServicePids.ContainsKey(1)) 'negative staging PID collides with owned ledger'
+        $digest = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
+        $stage = Join-Path $serviceDir ".pm-sync-stage-$testPid-$digest"
+        Assert-True (-not (Test-Path -LiteralPath $stage)) 'synthetic staging fixture collision'
+        New-Item -ItemType Directory -Path $stage | Out-Null
+        $fileName = if ($case -eq 'unexpected-child') { 'unplanned.txt' } else { 'revision' }
+        $file = Join-Path $stage $fileName
+        [IO.File]::WriteAllText($file, 'synthetic-ticket27-stopped-staging')
+        $ledger = $ownedPaths.Clone()
+        $before = $ledger.Count
+        $errorMessage = $null
+        try { Register-StoppedSyncStages $serviceDir $ledger }
+        catch { $errorMessage = $_.Exception.Message }
+        if ($case -eq 'owned') {
+            Assert-True ($null -eq $errorMessage -and $ledger.ContainsKey($stage) -and $ledger.ContainsKey($file)) 'valid owned staging was not inventoried'
+            Repair-OwnedCleanupAcl $stage $installerName $ledger
+            Remove-OwnedTree $stage $ledger
+        }
+        else {
+            $expected = if ($case -eq 'foreign-owner') { 'staging owner PID is outside the owned SCM ledger' } else { 'unexpected staging child name' }
+            Assert-True ($errorMessage -ceq $expected -and $ledger.Count -eq $before) 'negative staging validation failed or granted removal authority'
+            # These two exact synthetic paths were created above, independently
+            # of rejected product inventory. Do not authorize other discovered nodes.
+            Add-OwnedPath $ownedPaths $stage
+            Add-OwnedPath $ownedPaths $file
+            Repair-OwnedCleanupAcl $stage $installerName $ownedPaths
+            Remove-OwnedTree $stage $ownedPaths
+        }
+        Assert-True (-not (Test-Path -LiteralPath $stage)) 'synthetic staging fixture remains'
+        Write-Host "WINDOWS_CLEANUP_TEST case=$case result=pass"
+    }
+}
+
 function Repair-OwnedCleanupAcl([string]$Path, [string]$Installer, [hashtable]$Owned) {
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     Assert-True ($Owned.ContainsKey([IO.Path]::GetFullPath($Path))) "refusing unplanned cleanup path: $Path"
@@ -365,6 +438,9 @@ function Repair-OwnedCleanupAcl([string]$Path, [string]$Installer, [hashtable]$O
     Invoke-Checked 'icacls.exe' @($Path, '/inheritance:r', '/grant:r', "${Installer}:$permission", "SYSTEM:$permission")
     Assert-ExactNodeAcl $Path @($Installer, 'SYSTEM')
     if ($item.PSIsContainer) {
+        if ([IO.Path]::GetFullPath($Path) -ceq [IO.Path]::GetFullPath($serviceDir)) {
+            Register-StoppedSyncStages $Path $Owned
+        }
         $children = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)
         foreach ($child in $children) {
             Repair-OwnedCleanupAcl $child.FullName $Installer $Owned
@@ -602,6 +678,7 @@ $locationPushed = $false
 $bodyError = $null
 $cleanupErrors = [System.Collections.Generic.List[string]]::new()
 $ownedPaths = @{}
+$ownedServicePids = @{}
 $passMessage = $null
 
 try {
@@ -1136,6 +1213,7 @@ try {
                 $installPid = Get-StoppableServicePid $serviceName
                 Stop-OwnedService $serviceName $installPid
                 Open-StoppedInstallerNode $serviceDir
+                Test-StoppedSyncStageInventory $installPid
                 Copy-Item -LiteralPath $builtSync -Destination $syncBinary -ErrorAction Stop
                 Set-ExactTreeAcl $syncBinary @('SYSTEM', "NT SERVICE\$serviceName")
                 Close-StoppedInstallerDirectory $serviceDir
@@ -1247,7 +1325,8 @@ finally {
         try {
             $installed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
             if ($null -ne $installed -and $installed.State -ne 'Stopped') {
-                Stop-Service -Name $serviceName -ErrorAction Stop
+                $cleanupPid = Get-StoppableServicePid $serviceName
+                Stop-OwnedService $serviceName $cleanupPid
             }
             Invoke-Checked 'sc.exe' @('delete', $serviceName)
         }

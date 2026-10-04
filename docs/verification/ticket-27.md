@@ -5215,3 +5215,58 @@ DestroyWindow; sync_stage recrea el mismo directorio tras AlreadyExists.
 No corregir estos mecanismos sin autorización ni confundirlos con la negativa
 explícita de inventario del harness. Medición posterior al cutoff se mantiene
 pendiente de acuerdo del método; no ampliar plazos por inferencia.
+
+### Método del cleanup acotado
+
+El rechazo del baseline es un inventario incompleto del harness tras interrumpir
+un worker: el directorio tiene la forma productiva PID+digest y sus hijos son
+revision/attachment/joined/stream, con posible temporal sync-part del mismo PID.
+Se conserva el residuo observado como evidencia; no se corrige staging productivo.
+El harness registra cada PID observado en SCM; al limpiar exige SCM detenido o
+eliminado y ausencia de todos los PIDs registrados. Sólo inventaría directorios
+inmediatos bajo service con PID propio+64hex, sin reparse ni subdirectorios,
+y valida todos los nombres de hijos antes de ampliar el ledger. Después aplica
+el mismo takeown/DACL exacto y borrado nodo a nodo, con verificación final de
+servicio, usuarios y raíz ausentes. Cualquier nodo fuera del namespace falla.
+La última parada de SCM también usa Stop-OwnedService y su comprobación PID.
+
+Antes del sync, con el custodio detenido, tres fixtures sintéticos comprueban:
+staging propio admitido/borrado; PID ajeno rechazado sin ampliar ledger; hijo
+inesperado rechazado sin ampliar ledger. Las dos negativas se limpian por sus
+rutas exactas creadas por el test, sin autorizar otros nodos. Éxito sólo después
+de ausencia de cada fixture. Son pruebas del harness, no aceptación del cleanup
+productivo ni resolución del RED de staging W3.
+
+Check diagnóstico rc0 `/tmp/pmw1h-diagnostic-check.log`; clean offline rc0
+44.08s `/tmp/pmw1h-diagnostic-clean.log`, ambos bajo flock. Diagnóstico nativo1:
+run37185956040, SHAa455c02b5254d08441097d4a4be4013a3730f9f7, todavía en curso.
+El dispatch por SHA fue rechazado422 antes de crear corrida; dispatch por rama
+resuelve exactamente ese SHA, comprobado por gh run view.
+
+Control estático adicional verify-windows-stop-contract.py falla en su conteo
+histórico de dos llamadas: la basea455c02 ya tiene siete y exige dos. No se
+modifica el checker ni se contabiliza ese fallo previo como PASS o regresión
+conductual del cleanup nuevo; la verificación relevante es el lab SCM real.
+
+### Corrida1 fase9 — diagnóstico sin reproducción local
+
+[37185956040](https://github.com/SantanaJcp/passwordmanager/actions/runs/37185956040),
+SHA `a455c02b5254d08441097d4a4be4013a3730f9f7`, completed/failure,1/4.
+Local-operations PASS; ambos prepare de organización/frame-ready son ok y
+completa sus rotaciones con master previo denegado/nuevo aceptado. Esto no
+corrige ni explica sus fallos anteriores. Build/primitivas/pipe/observer/sesión
+nativos PASS; SYNC70 FAIL15s, pushing first6.116s/observed8.888s/ended=false,
+63eventos completos de64 iniciados,286put completos de287 iniciados.
+Export compartido0.528595s/52grafos; put acumulado8.264494s. Push/pull/job
+completos no medidos; snapshot parcial conservado. RETIRE NOT_RUN.
+Cleanup vuelve a rechazar staging no inventariado, confirmando el RED del
+harness antes de aplicar la corrección. Log `/tmp/pmw1h-run1.log`.
+
+Discriminante2: namespace de cleanup con tres pruebas nativas descritas arriba;
+extender la traza organización a commit y respuesta enviada hasta catálogo,
+con clasificación fija de integrity/item-missing/invalid-command/vault/random/
+audit/body-changed/invalid-signature/expired/transaction-conflict, sin cambiar
+ningún resultado. Antes no se distinguía el fallo durante commit de uno durante
+prepare; sólo emite para la misma operación de organización Windows. No añadir
+código correctivo a local-operations por un PASS no discriminante. Plazos y
+oráculos permanecen idénticos; medición completa sigue pendiente del método.

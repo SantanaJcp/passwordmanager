@@ -290,6 +290,23 @@ impl ServiceDiagnostics {
             Some(HumanCommitError::WrongChannel) => "wrong-channel",
             Some(_) => "other",
         };
+        let category = if operation == "organization" && category == "other" {
+            match error {
+                Some(HumanCommitError::Integrity) => "integrity",
+                Some(HumanCommitError::ItemNotFound) => "item-missing",
+                Some(HumanCommitError::InvalidCommand) => "invalid-command",
+                Some(HumanCommitError::Vault(_)) => "vault",
+                Some(HumanCommitError::RandomUnavailable) => "random",
+                Some(HumanCommitError::AuditKeyUnavailable) => "audit",
+                Some(HumanCommitError::BodyChanged) => "body-changed",
+                Some(HumanCommitError::InvalidSignature) => "invalid-signature",
+                Some(HumanCommitError::ChallengeExpired) => "expired",
+                Some(HumanCommitError::TransactionConflict) => "transaction-conflict",
+                _ => category,
+            }
+        } else {
+            category
+        };
         let mut file = self.file.lock().map_err(|_| Failure::Unavailable)?;
         file.seek(SeekFrom::End(0))
             .map_err(|_| Failure::Unavailable)?;
@@ -990,12 +1007,16 @@ fn serve_human(
     if let Some(diagnostics) = service.diagnostics.as_ref() {
         diagnostics.record(ServiceDiagnosticPhase::HumanUnlockAck)?;
     }
+    let mut organization_active = false;
     loop {
         let request = read_frame(tls)?;
         if request.as_ref() == [14] {
             break;
         }
         let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
+        if opcode == 11 {
+            organization_active = true;
+        }
         match opcode {
             31 => {
                 write_frame(tls, &[0])?;
@@ -1093,7 +1114,7 @@ fn serve_human(
             opcode,
             rest,
             |stage, error| match service.diagnostics.as_ref() {
-                Some(diagnostics) => {
+                Some(diagnostics) if organization_active => {
                     diagnostics.record_human_result("organization", stage, error)?;
                     if error.is_some() || stage == "frame-failed" {
                         diagnostics.memory(
@@ -1103,7 +1124,7 @@ fn serve_human(
                     }
                     Ok(())
                 }
-                None => Ok(()),
+                _ => Ok(()),
             },
         )
         .or_else(|| {
@@ -1112,6 +1133,14 @@ fn serve_human(
         })
         .ok_or(Failure::Unavailable)??;
         write_frame(tls, response.as_ref())?;
+        if organization_active {
+            if let Some(diagnostics) = service.diagnostics.as_ref() {
+                diagnostics.record_human_result("organization", "frame-sent", None)?;
+            }
+            if opcode == 49 {
+                organization_active = false;
+            }
+        }
     }
     if let Some(diagnostics) = service.diagnostics.as_ref() {
         diagnostics.record(ServiceDiagnosticPhase::HumanLockRequest)?;

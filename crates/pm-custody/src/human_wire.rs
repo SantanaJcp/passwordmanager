@@ -104,7 +104,10 @@ pub(crate) fn handle_request_slice(
                 .map_err(|_| Failure::Unavailable)?;
             let body = cursor.bytes()?;
             cursor.finish()?;
-            match vault.commit(command, &signature, body) {
+            let committed = vault.commit(command, &signature, body);
+            #[cfg(target_os = "windows")]
+            organization_observer("commit", committed.as_ref().err())?;
+            match committed {
                 Ok(receipt) => {
                     let mut response = vec![0];
                     response.extend_from_slice(&receipt.to_bytes());
