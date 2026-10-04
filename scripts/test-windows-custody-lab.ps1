@@ -948,6 +948,7 @@ try {
         Open-StoppedInstallerNode $auditPath
         Assert-True (-not (Test-Path -LiteralPath $ownerAudit)) 'owner audit collision'
         Assert-True (-not (Test-Path -LiteralPath $remoteAudit)) 'remote audit collision'
+        $ownerAuditHash = (Get-FileHash -LiteralPath $auditPath -Algorithm SHA256 -ErrorAction Stop).Hash
         Move-Item -LiteralPath $auditPath -Destination $ownerAudit -ErrorAction Stop
         Set-ExactTreeAcl $ownerAudit @('SYSTEM', "NT SERVICE\$serviceName")
         Close-StoppedInstallerDirectory $serviceDir
@@ -966,17 +967,20 @@ try {
             Stop-OwnedService $serviceName $remotePid
             Open-StoppedInstallerNode $serviceDir
             Open-StoppedInstallerNode $auditPath
+            $remoteAuditHash = (Get-FileHash -LiteralPath $auditPath -Algorithm SHA256 -ErrorAction Stop).Hash
             Move-Item -LiteralPath $auditPath -Destination $remoteAudit -ErrorAction Stop
+            Assert-True ((Get-FileHash -LiteralPath $remoteAudit -Algorithm SHA256 -ErrorAction Stop).Hash -ceq $remoteAuditHash) 'remote audit bytes changed during preservation'
             Set-ExactTreeAcl $remoteAudit @('SYSTEM', "NT SERVICE\$serviceName")
             Open-StoppedInstallerNode $ownerAudit
             Move-Item -LiteralPath $ownerAudit -Destination $auditPath -ErrorAction Stop
+            Assert-True ((Get-FileHash -LiteralPath $auditPath -Algorithm SHA256 -ErrorAction Stop).Hash -ceq $ownerAuditHash) 'owner audit bytes changed during restoration'
             Set-ExactTreeAcl $auditPath @('SYSTEM', "NT SERVICE\$serviceName")
             Close-StoppedInstallerDirectory $serviceDir
             Invoke-Checked 'sc.exe' @('config', $serviceName, 'binPath=', $binPath)
             $postStopPid = Start-OwnedServiceWithNewPid $serviceName $remotePid
         }
         if ($null -ne $remotePrimary) { throw $remotePrimary }
-        Write-Host 'SECOND_DEVICE method=scm-alternated audit-owner=restored audit-remote=preserved second-agent=not-tested'
+        Write-Host 'SECOND_DEVICE method=scm-alternated audit-owner=restored audit-remote=preserved bytes=exact second-agent=not-tested'
         foreach ($deviceMode in @('pair', 'sync', 'retire')) {
             if ($deviceMode -eq 'sync') {
                 # Pairing does not require a running sync endpoint. Build the
@@ -991,10 +995,6 @@ try {
                 Set-ExactTreeAcl $syncBinary @('SYSTEM', "NT SERVICE\$serviceName")
                 Close-StoppedInstallerDirectory $serviceDir
                 $postStopPid = Start-OwnedServiceWithNewPid $serviceName $installPid
-                $p = Start-AsUser $humanCredential $tuiSeed @('--pair-namespace', $pairing) $emptyInput $humanOut $humanErr
-                Assert-True ($p.ExitCode -eq 0) 'protected pairing namespace unavailable'
-                $namespace = (Get-Content $humanOut -Raw).Trim()
-                Assert-True ($namespace -cmatch '^[a-f0-9]{64}$') 'pairing namespace not exact'
                 $syncArguments = @('serve', '--db', $syncDb, '--socket', $syncPipe, '--server-key', $syncServerKey, '--namespace', $namespace, '--server-sid', (Get-Sid $installerName), '--client-pub', $syncClientPublic, '--client-sid', $serviceSid)
                 $env:PMW2_TIMING = '1'
                 try { $syncProcess = Start-Process -FilePath $builtSync -ArgumentList $syncArguments -RedirectStandardOutput $syncOut -RedirectStandardError $syncErr -PassThru }
@@ -1008,7 +1008,14 @@ try {
             Write-Host (Get-Content $tuiErr -Raw)
             if ($p.ExitCode -eq 0) { Assert-TuiFixtureOutput $tuiOut $deviceMode; Write-Host "TUI_CASE case=device-$deviceMode result=pass" }
             else { $tuiCaseFailures.Add("device-$deviceMode"); Write-Host "TUI_CASE case=device-$deviceMode result=fail" }
-            if ($deviceMode -eq 'pair' -and $p.ExitCode -ne 0) { break }
+            if ($deviceMode -eq 'pair') {
+                if ($p.ExitCode -ne 0) { break }
+                $p = Start-AsUser $humanCredential $tuiSeed @('--pair-namespace', $pairing) $emptyInput $humanOut $humanErr
+                Assert-True ($p.ExitCode -eq 0) 'protected pairing namespace unavailable'
+                $namespace = (Get-Content $humanOut -Raw).Trim()
+                Assert-True ($namespace -cmatch '^[a-f0-9]{64}$') 'pairing namespace not exact'
+                Write-Host 'PAIR_NAMESPACE format=exact protected-file=1 close=checked'
+            }
         }
         if ($null -ne $syncProcess) {
             Write-SyncTimingSummary $syncErr

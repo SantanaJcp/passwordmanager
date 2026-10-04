@@ -4247,3 +4247,44 @@ idéntico. El bloqueo de tipo W2 sigue pendiente de autorización.
 Preflight de esa provisión rc0: check completo bajo flock,
 `/tmp/pmw1e-windows-fixtures-check5.log`; diff-check rc0. Guards genéricos
 intactos y sin cambios Linux adicionales al barrido52 verificado.
+
+Corrida4 Windows despachada sobre
+`dc791d897f8f78da471dbbd21fcfd444b15fe17c`,
+[37172559049](https://github.com/SantanaJcp/passwordmanager/actions/runs/37172559049),
+inputs false/true/true y headSha exacto por API. Hipótesis: preparar el nodo
+de auditoría con DACL explícita protegida, después de verificar trustees/derechos
+efectivos con SCM detenido, permite los movimientos sin aceptar herencia como
+gate ni tocar reemplazos de runtime. Al escribir este preflight sigue activa;
+presupuesto Windows4/6 y Mac1/2.
+
+Revisión de helpers nuevos: el lector parcial de namespace y las observaciones
+SQLite usaban cierres implícitos de File/Connection. La candidata siguiente
+comprueba CloseHandle y Connection::close aun si falla lectura/consulta, y
+emite PASS sólo después del cierre exitoso. No lee claves del pairing, no
+cambia el parser productivo, ni introduce resultados sustitutos o cleanup
+best-effort. Esta corrección propia conserva el método de cleanup estricto.
+
+Corrida4 terminada **FAIL global**: SCM alternado sí completa segundo ID,
+creación/readback exacto de la nota remota por wire ordinario, conservación
+remota/restauración local y PAIR por teclado con panel completo. Reparse/RPK/
+siete negativas wire y resize/clipboard/access/rotaciones/operaciones siguen
+PASS; matrix conserva seed8 crypto-resource W5. El build obligatorio sync
+vuelve a fallar E0282/E0283 antes de SYNC/RETIRE: no se miden sus tiempos ni se
+declara pair-sync-retire completo. No hay segundo agente simulado ni listener
+alternativo. Cleanup propio no reporta otro fallo; artifacts0, log/metadata
+`/tmp/pmw1e-windows4.{log,json}`. DACL observada antes de provisión en ambos
+paquetes: protected=False/entries3/inherited2, tres trustees exactos FullControl;
+después se exige el guard original explícito/protegido, sin tocar runtime.
+
+Antes de la candidata5, añadir comparaciones SHA256 de bytes de ambos paquetes
+detenidos durante los movimientos (sin imprimir digests/contenido), previas al
+sellado y arranque. Leer namespace después de PAIR, antes del build sync:
+validar formato CBOR parcial ordinario y cierre nativo explícito de este helper
+independiente. Sync sigue necesitando el binario normal; no se evita su gate.
+check7 del cierre rc0 bajo flock, `/tmp/pmw1e-windows-fixtures-check7.log`;
+los nuevos asserts de bytes/orden requieren su preflight y corrida5.
+
+Preflight candidata5 completo rc0 bajo flock,
+`/tmp/pmw1e-windows-fixtures-check8.log`; fmt/diff-check rc0 y enlaces nuevos
+de26/27 existentes. Observaciones/helpers son cfgWindows; barrido52 Linux y
+SHA de aceptación Mac mantienen sus árboles de producto respectivos.

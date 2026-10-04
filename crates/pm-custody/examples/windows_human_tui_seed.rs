@@ -619,11 +619,16 @@ mod fixture {
             return Ok(());
         }
         if args.len() == 2 && args[0] == "--pair-namespace" {
+            use std::os::windows::io::IntoRawHandle;
             let mut file = pm_native_channel::open_regular_file(Path::new(&args[1]))
                 .map_err(|_| Failure::Unavailable)?;
             let mut prefix = [0_u8; 71];
-            file.read_exact(&mut prefix)
-                .map_err(|_| Failure::Unavailable)?;
+            let read = file.read_exact(&mut prefix);
+            let closed =
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(file.into_raw_handle()) };
+            if read.is_err() || closed == 0 {
+                return Err(Failure::Unavailable);
+            }
             let header = b"\x86\x72pm/sync-pairing/v1\x50";
             if !prefix.starts_with(header)
                 || &prefix[header.len() + 16..header.len() + 18] != b"\x58\x20"
@@ -646,24 +651,36 @@ mod fixture {
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .map_err(|_| Failure::Unavailable)?;
-            if args[0] == "--sync-observe" {
-                let blocks: i64 = db
-                    .query_row("SELECT count(*) FROM blocks", [], |row| row.get(0))
-                    .map_err(|_| Failure::Unavailable)?;
-                let roots: i64 = db
-                    .query_row("SELECT count(*) FROM roots", [], |row| row.get(0))
-                    .map_err(|_| Failure::Unavailable)?;
-                println!("NATIVE_SYNC blocks={blocks} roots={roots}");
-                if blocks <= 0 || roots <= 0 {
-                    return Err(Failure::Unavailable);
+            let observation = (|| {
+                if args[0] == "--sync-observe" {
+                    let blocks: i64 = db
+                        .query_row("SELECT count(*) FROM blocks", [], |row| row.get(0))
+                        .map_err(|_| Failure::Unavailable)?;
+                    let roots: i64 = db
+                        .query_row("SELECT count(*) FROM roots", [], |row| row.get(0))
+                        .map_err(|_| Failure::Unavailable)?;
+                    if blocks <= 0 || roots <= 0 {
+                        return Err(Failure::Unavailable);
+                    }
+                    Ok(format!(
+                        "NATIVE_SYNC blocks={blocks} roots={roots} close=checked"
+                    ))
+                } else {
+                    let count: i64 = db.query_row("SELECT count(*) FROM authority_events WHERE kind='device-retire' AND subject=?1", [vec![0x28_u8;16]], |row| row.get(0)).map_err(|_| Failure::Unavailable)?;
+                    if count != 1 {
+                        return Err(Failure::Unavailable);
+                    }
+                    Ok(
+                        "PASS device-retire signed-event=1 subject=second-device close=checked"
+                            .to_owned(),
+                    )
                 }
-            } else {
-                let count: i64 = db.query_row("SELECT count(*) FROM authority_events WHERE kind='device-retire' AND subject=?1", [vec![0x28_u8;16]], |row| row.get(0)).map_err(|_| Failure::Unavailable)?;
-                if count != 1 {
-                    return Err(Failure::Unavailable);
-                }
-                println!("PASS device-retire signed-event=1 subject=second-device");
+            })();
+            let closed = db.close().map_err(|_| Failure::Unavailable);
+            if closed.is_err() {
+                return Err(Failure::Unavailable);
             }
+            println!("{}", observation?);
             return Ok(());
         }
         if args.len() == 2 && args[0] == "--peer-negative" {
