@@ -233,6 +233,19 @@ impl ProcessTlsTransport {
             .wait_with_output()
             .map_err(|_| SyncError::Unavailable)?;
         drop(waiting);
+        if timing::w1_enabled() {
+            timing::count(
+                match (output.status.success(), output.status.code()) {
+                    (true, _) => "process_exit_success",
+                    (false, Some(4)) => "process_exit_unavailable",
+                    (false, Some(5)) => "process_exit_missing",
+                    (false, Some(6)) => "process_exit_backpressure",
+                    (false, Some(7)) => "process_exit_integrity",
+                    (false, _) => "process_exit_other",
+                },
+                1,
+            );
+        }
         if timing::enabled() {
             for line in output.stderr.split(|byte| *byte == b'\n') {
                 if timing::valid_line(line) {
@@ -621,6 +634,9 @@ impl SyncReplica {
             for event in batch {
                 let _event = timing::Span::new("event_total");
                 let _event_puts = timing::EventPuts::default();
+                if timing::w1_enabled() {
+                    timing::count("event_started", 1);
+                }
                 let sealed = self.pairing.seal(&event.to_bytes())?;
                 let hash = digest(&sealed);
                 retry(|| server.put(namespace, hash, &sealed))?;

@@ -313,12 +313,32 @@ fn run_with_deadline(
         })
         .map_err(|_| ())?;
     let result = operation();
+    if timing::w1_enabled() {
+        timing::count(
+            if result.is_ok() {
+                "deadline_operation_ok"
+            } else {
+                "deadline_operation_failed"
+            },
+            1,
+        );
+    }
     let completion: Result<(), ()> = (|| {
         let (lock, changed) = &*completed;
         *lock.lock().map_err(|_| ())? = true;
         changed.notify_all();
         worker.join().map_err(|_| ())?
     })();
+    if timing::w1_enabled() {
+        timing::count(
+            if completion.is_ok() {
+                "deadline_completion_ok"
+            } else {
+                "deadline_completion_failed"
+            },
+            1,
+        );
+    }
     match (result, completion) {
         (Ok(()), Ok(())) => Ok(()),
         _ => Err(()),
@@ -734,15 +754,49 @@ fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Resul
         drop(writing);
         let reading = timing::Span::new("tls_response_read");
         response = Some(read_frame(&mut tls)?);
+        if timing::w1_enabled() {
+            timing::count(
+                if response
+                    .as_ref()
+                    .is_some_and(|bytes| bytes.starts_with(b"{\"ok\":true"))
+                {
+                    "response_ok_prefix"
+                } else {
+                    "response_other_prefix"
+                },
+                1,
+            );
+        }
         drop(reading);
         drop(exchange);
         let verifying = timing::Span::new("client_pipe_verify");
-        tls.sock.verify().map_err(|_| ())?;
+        let verified = tls.sock.verify().map_err(|_| ());
+        if timing::w1_enabled() {
+            timing::count(
+                if verified.is_ok() {
+                    "client_pipe_verify_ok"
+                } else {
+                    "client_pipe_verify_failed"
+                },
+                1,
+            );
+        }
+        verified?;
         drop(verifying);
         Ok(())
     });
     drop(deadline);
     let closed = stop.close().map_err(|_| ());
+    if timing::w1_enabled() {
+        timing::count(
+            if closed.is_ok() {
+                "client_stop_close_ok"
+            } else {
+                "client_stop_close_failed"
+            },
+            1,
+        );
+    }
     match (result, closed, response) {
         (Ok(()), Ok(()), Some(response)) => Ok(response),
         _ => Err(()),

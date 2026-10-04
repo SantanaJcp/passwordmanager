@@ -4610,3 +4610,44 @@ prepare45.231ms, handshake84.161ms, exchange407.637ms; temporal+fsync1.246ms.
 Scopes solapados y workload distinto: complemento de observabilidad/contrato,
 no proporción Windows ni estimación del happy job Windows. Sin logs de contenido.
 Todos los comandos Cargo anteriores bajo flock; sin dependencias instaladas.
+
+### Diagnóstico1 fase7 y discriminante de la segunda corrida
+
+Run [37176911110](https://github.com/SantanaJcp/passwordmanager/actions/runs/37176911110),
+SHA `18d306de753385199252aa73bfeafeaa3fd93d23`, completed/failure,
+artifact count0. Captura opt-in SCM/cliente funcional, formato estricto.
+Logs `/tmp/pmw1g-windows1.{log,json}`. PAIR PASS, SYNC wait15.014s FAIL,
+pushing a6.151s, RETIRE NOT_RUN. 36 eventos seleccionados, cero eventos
+completados/exportaciones y cuatro intentos put del primer bloque según
+orden de retry y fuente (sin registrar identificadores).
+
+Backoff completado1+2+4s=7.000653s frente a RPCs0.572327s y temporal/fsync
+0.018249s. La hipótesis de segundos consumidos principalmente en spawn/fsync
+queda refutada para esta muestra. Los cuatro reads de respuesta alcanzan
+post-response peer verification; no hay client_main completado. Falta
+clasificar el resultado de verify/deadline/close/exit: duraciones solas no
+prueban éxito. La segunda y última corrida añade sólo contadores de resultados
+fijos en esas fronteras; no cambia ninguna rama, retorno, I/O, retry o plazo.
+Hipótesis discriminante: fallo después de respuesta al comprobar pipe vivo,
+pues el servidor Windows devuelve tras un frame. Una respuesta no acredita
+liveness posterior, ni este indicio prueba por sí solo cuál llamada Win32
+falló. Sin remediación productiva en esta fase.
+
+Corrección del propio diagnóstico: PMW1 activo requiere archivo existente;
+su ausencia/apertura/escritura fallida emite PMW1_TIMING_FAILED, sin elegir
+stderr como destino alternativo. El modo PMW2 heredado conserva su destino.
+Check2 rc0 (`/tmp/pmw1g-check2.log`), antes de añadir contadores de resultado;
+los gates se repetirán sobre el código final antes de la segunda corrida.
+
+Precisión sobre (b), observada en el método W2 fase5 de su worktree activo:
+se agrupan verificación/exportaciones del DAG por página y se reutiliza
+SQLite, **no los puts ni sus commits**. G4 prohíbe batches y G5§9.5 mantiene
+un bloque por put. La estimación separará ese cambio de una hipotética
+reducción de RPCs, que no es la propuesta W2 vigente ni está autorizada aquí.
+
+Segundo preflight completo sobre los contadores finales: check3 rc0
+(`/tmp/pmw1g-check3.log`) y clean3 locked/offline rc0 (47.54s,
+`/tmp/pmw1g-clean3.log`), ambos bajo flock y cwd W1. Sin nuevo cambio de lógica
+ni dependencias. La segunda corrida distinguirá respuesta ok-prefix,
+verify posterior, operación/cierre de deadline, close del stop y exit del
+proceso; las categorías no incluyen PID, handle, ruta, código de payload o ID.

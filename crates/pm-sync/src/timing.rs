@@ -45,13 +45,16 @@ pub fn duration(category: &'static str, elapsed: std::time::Duration) {
 fn emit(category: &str, count: usize, us: u128) {
     // A selected measurement sink never falls back to another destination.
     // It must already exist; the native harness owns and validates its ACL.
-    if w1_enabled() && std::env::var_os("PMW1_TIMING_FILE").is_some() {
+    if w1_enabled() {
         static FILE: std::sync::OnceLock<Result<std::sync::Mutex<std::fs::File>, std::io::Error>> =
             std::sync::OnceLock::new();
         let file = FILE.get_or_init(|| {
+            let path = std::env::var_os("PMW1_TIMING_FILE").ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing timing sink")
+            })?;
             std::fs::OpenOptions::new()
                 .append(true)
-                .open(std::env::var_os("PMW1_TIMING_FILE").expect("selected timing sink"))
+                .open(path)
                 .map(std::sync::Mutex::new)
         });
         let line = format!("PMW2_TIMING category={category} count={count} us={us}\n");
