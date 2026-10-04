@@ -4077,3 +4077,40 @@ antes de RPC sin temporal y carrera después de comprobar ausencia, ambos
 DestinationExists con destino intacto y cleanup verificado. El rechazo se
 muestra en panel manteniendo el mismo status público. La publicación final
 compartida no cambia. Validadores CI/diff/AST rc0; Mac aún no ejecutado.
+
+Fixture Windows fase5: alias propio en directorio separado del árbol sellado,
+creado por instalador elevado después del sellado. Nunca se atraviesa durante
+ACL/cleanup genérico; se verifica atributo reparse/target exacto y se elimina
+explícitamente antes de recorrer el árbol. La TUI humana lo rechaza bajo
+Sampling(false), cero lease y DACL de proceso exacta. Se conserva el hash de
+la fuente regular real sin abrir el alias y se comprueba su identidad.
+
+Segundo ID: detener SCM propio, mover audit-custody local a un nombre propio,
+configurar el mismo servicio con ID remoto, crear una nota sintética por wire
+humano normal y parar SCM. Conservar su paquete remoto y restaurar el local,
+reseñar ACL exacta y volver a arrancar el mismo servicio con ID local.
+La elevación de ACL del instalador sólo ocurre con SCM detenido y se retira
+antes de cada arranque. Pairing/retire/sync por teclado en ConPTY independientes;
+servidor pm-sync ordinario con pipe nativo, TLS/RPK y ACL de SID real, sin lab
+listener. El oráculo de pantalla Windows conserva15s; Mac conserva20s para
+sync y8s para colisión. Logs del servidor emiten sólo tiempos categóricos
+PMW2_TIMING, agregados por fase/RPC; observer mide submit→panel. No se cambia
+ProcessTlsTransport ni se porta la sesión reutilizada Unix. Paquete firmado
+de retiro y raíces opacas se consultan por conexión SQLite viva readonly
+tras STOP, sin copiar DB/WAL. Fallos se agregan sin reemplazar los casos.
+
+Preflight del fixture Windows: primer check rc1, guard estático de SCM asumía
+una sola configuración y recibía tres números de línea. Se extiende el checker
+para exigir exactamente instalación+ID remoto+restauración, con sus STOP y
+movimientos de paquetes, conservando el orden original stage→seal→primer SCM.
+Segundo check rc0 `/tmp/pmw1e-windows-fixtures-check2.log`; fmt/diff rc0.
+No hay PowerShell/Windows local: compilación/ejecución cfgWindows sólo se
+acreditará por la corrida nativa, no por este check Linux.
+
+Mac fase5 corrida1 despachada sobre62cb53998d347cf41da686720cbf90dc053aae70,
+[37169986857](https://github.com/SantanaJcp/passwordmanager/actions/runs/37169986857),
+inputs false/false, ref exacto comprobado antes/después. Repo público,
+workflows manuales originales y gratuidad estándar verificadas en fuente
+[GitHub](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+Sin caches/artifacts/secrets ni lock local retenido esperando CI. Sigue activa
+al publicar este preflight; ningún PASS nativo se presume.

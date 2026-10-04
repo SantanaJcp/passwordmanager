@@ -532,6 +532,82 @@ mod fixture {
 
     pub(super) fn run() -> Result<(), Failure> {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
+        if args.len() == 3 && matches!(args[0].as_str(), "--installer-alias" | "--remove-alias") {
+            let alias = Path::new(&args[1]);
+            let target = Path::new(&args[2]);
+            if args[0] == "--installer-alias" {
+                match std::fs::symlink_metadata(alias) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return Err(Failure::Unavailable),
+                }
+                std::os::windows::fs::symlink_file(target, alias)
+                    .map_err(|_| Failure::Unavailable)?;
+            }
+            if !std::fs::symlink_metadata(alias)
+                .map_err(|_| Failure::Unavailable)?
+                .is_symlink()
+                || std::fs::read_link(alias).map_err(|_| Failure::Unavailable)? != target
+            {
+                return Err(Failure::Unavailable);
+            }
+            if args[0] == "--remove-alias" {
+                std::fs::remove_file(alias).map_err(|_| Failure::Unavailable)?;
+                match std::fs::symlink_metadata(alias) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return Err(Failure::Unavailable),
+                }
+            }
+            println!("PASS installer-alias operation={} no-traversal=1", args[0]);
+            return Ok(());
+        }
+        if args.len() == 2 && args[0] == "--pair-namespace" {
+            let mut file = pm_native_channel::open_regular_file(Path::new(&args[1]))
+                .map_err(|_| Failure::Unavailable)?;
+            let mut prefix = [0_u8; 71];
+            file.read_exact(&mut prefix)
+                .map_err(|_| Failure::Unavailable)?;
+            let header = b"\x86\x72pm/sync-pairing/v1\x50";
+            if !prefix.starts_with(header)
+                || &prefix[header.len() + 16..header.len() + 18] != b"\x58\x20"
+            {
+                return Err(Failure::Unavailable);
+            }
+            let namespace = &prefix[header.len() + 18..header.len() + 50];
+            println!(
+                "{}",
+                namespace
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+            return Ok(());
+        }
+        if args.len() == 2 && matches!(args[0].as_str(), "--sync-observe" | "--retire-observe") {
+            let db = rusqlite::Connection::open_with_flags(
+                &args[1],
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .map_err(|_| Failure::Unavailable)?;
+            if args[0] == "--sync-observe" {
+                let blocks: i64 = db
+                    .query_row("SELECT count(*) FROM blocks", [], |row| row.get(0))
+                    .map_err(|_| Failure::Unavailable)?;
+                let roots: i64 = db
+                    .query_row("SELECT count(*) FROM roots", [], |row| row.get(0))
+                    .map_err(|_| Failure::Unavailable)?;
+                println!("NATIVE_SYNC blocks={blocks} roots={roots}");
+                if blocks <= 0 || roots <= 0 {
+                    return Err(Failure::Unavailable);
+                }
+            } else {
+                let count: i64 = db.query_row("SELECT count(*) FROM authority_events WHERE kind='device-retire' AND subject=?1", [vec![0x28_u8;16]], |row| row.get(0)).map_err(|_| Failure::Unavailable)?;
+                if count != 1 {
+                    return Err(Failure::Unavailable);
+                }
+                println!("PASS device-retire signed-event=1 subject=second-device");
+            }
+            return Ok(());
+        }
         if args.len() == 2 && args[0] == "--peer-negative" {
             return reject_agent_on_human_pipe(&args[1]);
         }
@@ -542,7 +618,9 @@ mod fixture {
                 args[3].parse().map_err(|_| Failure::Unavailable)?,
             );
         }
+        let remote_seed = args.len() == 4 && args[3] == "--remote-seed";
         if !(args.len() == 3
+            || remote_seed
             || ((args.len() == 5 || args.len() == 6) && args[3] == "--transfer-negative"))
         {
             return Err(Failure::Unavailable);
@@ -637,7 +715,30 @@ mod fixture {
                 .map_err(|_| Failure::Unavailable)?;
                 return Ok(());
             }
-            let records = content_fixture_records()?;
+            let records = if remote_seed {
+                vec![
+                    LogicalRecord::new(
+                        RecordKind::Note,
+                        HumanMetadata {
+                            title: "Remote device item".into(),
+                            destinations: vec![],
+                            tags: vec![],
+                            favorite: false,
+                            notes: pm_crypto::ProtectedText::copy_from_str(
+                                "synthetic second-device note",
+                            )
+                            .map_err(|_| Failure::Unavailable)?,
+                            fields: vec![],
+                            source_fields: vec![],
+                        },
+                        vec![],
+                        vec![],
+                    )
+                    .map_err(|_| Failure::Unavailable)?,
+                ]
+            } else {
+                content_fixture_records()?
+            };
             for expected in records {
                 let encoded = expected.to_bytes().map_err(|_| Failure::Unavailable)?;
                 let mut request = vec![9];
@@ -683,6 +784,8 @@ mod fixture {
                 "PASS windows-transfer-negative case={} ack31=accepted peer-eof=1 dacl-before-during-after=exact",
                 args[4]
             );
+        } else if remote_seed {
+            println!("PASS windows-device-seed records=1 ordinary-human-wire=1 readback=exact");
         } else {
             println!("PASS windows-tui-seed types=7 ordinary-human-wire=1 readback=exact");
         }

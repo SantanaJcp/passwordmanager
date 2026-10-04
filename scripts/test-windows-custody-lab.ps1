@@ -369,6 +369,38 @@ function Start-AsUser(
     return Start-Process @parameters
 }
 
+function Open-StoppedInstallerNode([string]$Path) {
+    $record = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
+    Assert-True ($null -ne $record -and $record.State -eq 'Stopped' -and [int]$record.ProcessId -eq 0) 'device audit move requires stopped SCM'
+    Assert-True ($ownedPaths.ContainsKey([IO.Path]::GetFullPath($Path))) 'device node not in owned ledger'
+    Invoke-Checked 'takeown.exe' @('/F', $Path, '/A')
+    Invoke-Checked 'icacls.exe' @($Path, '/grant:r', "${installerName}:F")
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Assert-True (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'device move refuses reparse'
+    Assert-ExactNodeAcl $Path @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
+}
+
+function Close-StoppedInstallerDirectory([string]$Path) {
+    Invoke-Checked 'icacls.exe' @($Path, '/remove:g', $installerName)
+    Assert-ExactNodeAcl $Path @('SYSTEM', "NT SERVICE\$serviceName")
+}
+
+function Write-SyncTimingSummary([string]$Path) {
+    $totals = @{}
+    foreach ($line in @(Get-Content -LiteralPath $Path -ErrorAction Stop)) {
+        if ([string]::IsNullOrEmpty($line)) { continue }
+        Assert-True ($line -cmatch '^PMW2_TIMING category=([a-z_]+) count=([0-9]+) us=([0-9]+)$') 'sync server emitted unexpected diagnostics'
+        $category = $Matches[1]; $count = [long]$Matches[2]; $us = [long]$Matches[3]
+        if (-not $totals.ContainsKey($category)) { $totals[$category] = @{ Count = 0L; Us = 0L; Max = 0L } }
+        $totals[$category].Count += $count; $totals[$category].Us += $us
+        $totals[$category].Max = [Math]::Max($totals[$category].Max, $us)
+    }
+    foreach ($category in @($totals.Keys | Sort-Object)) {
+        $row = $totals[$category]
+        Write-Host "WINDOWS_SYNC_TIMING source=server category=$category count=$($row.Count) us=$($row.Us) max_us=$($row.Max)"
+    }
+}
+
 function Add-SyntheticZipEntry(
     [IO.Compression.ZipArchive]$Archive,
     [string]$Name,
@@ -473,6 +505,10 @@ $serviceDir = Join-Path $root 'service'
 $agentDir = Join-Path $root 'agent'
 $humanDir = Join-Path $root 'human'
 $harnessDir = Join-Path $root 'harness'
+$aliasDir = Join-Path $root 'reparse-fixture'
+$syncDir = Join-Path $root 'sync-fixture'
+$aliasOwned = $false
+$syncProcess = $null
 $diagnosticDir = Join-Path $root 'service-diagnostics'
 $diagnosticPath = Join-Path $diagnosticDir 'startup.phases'
 $agentName = 'pm27agent'
@@ -517,6 +553,7 @@ try {
     New-LocalUser -Name $humanName -Password $syntheticPassword -PasswordNeverExpires | Out-Null
     $humanOwned = $true
     Assert-True (-not ((Get-LocalGroupMember Administrators).Name -contains "$env:COMPUTERNAME\$agentName")) 'agent must not be administrator'
+    Assert-True (-not ((Get-LocalGroupMember Administrators).Name -contains "$env:COMPUTERNAME\$humanName")) 'human must not be administrator'
     New-Item -ItemType Directory -Path $serviceDir, $agentDir, $humanDir, $harnessDir | Out-Null
     foreach ($path in @($serviceDir, $agentDir, $humanDir, $harnessDir)) {
         Add-OwnedPath $ownedPaths $path
@@ -531,7 +568,7 @@ try {
         Set-ExactTreeAcl $diagnosticDir @('SYSTEM', $installerName)
     }
 
-    Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
+    Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '-p', 'pm-sync', '--locked', '--offline')
     if ($TuiConPtyRed) {
         Invoke-Checked 'cargo' @('build', '-p', 'pm-native-channel', '--example', 'windows_tui_conpty_fixture', '--locked', '--offline')
         Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '--example', 'windows_human_tui_seed', '--locked', '--offline')
@@ -612,6 +649,10 @@ try {
     # Create a synthetic vault without ever printing its recovery code.
     $vault = Join-Path $serviceDir 'vault.sqlite3'
     $auditPath = "${vault}.audit-custody"
+    $ownerAudit = Join-Path $serviceDir 'device-owner.audit-custody'
+    $remoteAudit = Join-Path $serviceDir 'device-remote.audit-custody'
+    Add-OwnedPath $ownedPaths $ownerAudit
+    Add-OwnedPath $ownedPaths $remoteAudit
     Add-OwnedPath $ownedPaths $vault
     Add-OwnedPath $ownedPaths $auditPath
     $master = 'synthetic ticket 27 master only'
@@ -636,6 +677,34 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
     New-SyntheticOnePux $tuiOnePux
+    $installerSeed = Join-Path $repo 'target\debug\examples\windows_human_tui_seed.exe'
+    $aliasPath = Join-Path $aliasDir 'installer-alias.1pux'
+    $deviceConfig = Join-Path $humanDir 'device-config.txt'
+    $pairing = Join-Path $humanDir 'device-pairing.cbor'
+    $syncBinary = Join-Path $serviceDir 'pm-sync.exe'
+    $syncServerKey = Join-Path $syncDir 'server.key'
+    $syncServerPublic = Join-Path $serviceDir 'sync-server.rpk'
+    $syncClientKey = Join-Path $serviceDir 'sync-client.key'
+    $syncClientPublic = Join-Path $syncDir 'client.rpk'
+    $syncDb = Join-Path $syncDir 'opaque.sqlite3'
+    $syncOut = Join-Path $harnessDir 'sync.out'
+    $syncErr = Join-Path $harnessDir 'sync.err'
+    $syncPipe = '\\.\pipe\passwordmanager.ticket27.sync'
+    $remoteDevice = '28282828282828282828282828282828'
+    foreach ($path in @($aliasDir, $aliasPath, $syncDir, $deviceConfig, $pairing, $syncBinary, $syncServerKey, $syncServerPublic, $syncClientKey, $syncClientPublic, $syncDb, "${syncDb}-wal", "${syncDb}-shm", $syncOut, $syncErr, "${vault}.sync-status", "${vault}.sync-job", "${vault}.sync-stage")) { Add-OwnedPath $ownedPaths $path }
+    if ($TuiConPtyRed) {
+        New-Item -ItemType Directory -Path $aliasDir, $syncDir | Out-Null
+        Set-ExactTreeAcl $aliasDir @('SYSTEM', $installerName, "$env:COMPUTERNAME\$humanName")
+        Set-ExactTreeAcl $syncDir @('SYSTEM', $installerName)
+        $builtSync = Join-Path $repo 'target\debug\pm-sync.exe'
+        Assert-NativeStaticMsvcBinary $dumpbin $builtSync 'pm-sync.exe'
+        Copy-Item -LiteralPath $builtSync -Destination $syncBinary -ErrorAction Stop
+        Invoke-Checked $custody @('keygen', '--private', $syncServerKey, '--public', $syncServerPublic)
+        Invoke-Checked $custody @('keygen', '--private', $syncClientKey, '--public', $syncClientPublic)
+        $pin = ([IO.File]::ReadAllBytes($syncServerPublic) | ForEach-Object { $_.ToString('x2') }) -join ''
+        Assert-True ($pin.Length -eq 88) 'sync RPK is not exactly 44 bytes'
+        [IO.File]::WriteAllLines($deviceConfig, @($pin, $pairing, $syncBinary, $syncPipe, $syncClientKey, $syncServerPublic, $remoteDevice), [Text.UTF8Encoding]::new($false))
+    }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = [Diagnostics.ProcessStartInfo]::new($cli, "vault create `"$vault`"")
     $process.StartInfo.UseShellExecute = $false
@@ -783,6 +852,14 @@ try {
             Assert-True ($p.ExitCode -eq 0) ('TUI encoding natural-exit scenario failed: ' + (Get-Content $tuiErr -Raw))
             Assert-TuiFixtureOutput $tuiOut 'encoding-exit'
         }
+        Invoke-Checked $installerSeed @('--installer-alias', $aliasPath, $tuiOnePux)
+        $aliasOwned = $true
+        $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, '--sources', $tuiCsv, $tuiOnePux, $aliasPath, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300') $humanInput $tuiOut $tuiErr
+        Write-Host (Get-Content $tuiErr -Raw)
+        if ($p.ExitCode -eq 0) { Assert-TuiFixtureOutput $tuiOut 'sources'; Write-Host 'TUI_CASE case=sources result=pass' }
+        else { $tuiCaseFailures.Add('sources'); Write-Host 'TUI_CASE case=sources result=fail' }
+        Invoke-Checked $installerSeed @('--remove-alias', $aliasPath, $tuiOnePux)
+        $aliasOwned = $false
         $matrixMode = if ($ServiceDiagnostics) { '--matrix-probe' } else { '--matrix' }
         # Each case starts a separate ordinary TUI/ConPTY session. Failure is
         # retained in the aggregate while independent cases remain observable;
@@ -833,6 +910,79 @@ try {
         }
     }
 
+    if ($TuiConPtyRed) {
+        $devicePid = Get-StoppableServicePid $serviceName
+        Stop-OwnedService $serviceName $devicePid
+        Open-StoppedInstallerNode $serviceDir
+        Open-StoppedInstallerNode $auditPath
+        Assert-True (-not (Test-Path -LiteralPath $ownerAudit)) 'owner audit collision'
+        Assert-True (-not (Test-Path -LiteralPath $remoteAudit)) 'remote audit collision'
+        Move-Item -LiteralPath $auditPath -Destination $ownerAudit -ErrorAction Stop
+        Set-ExactTreeAcl $ownerAudit @('SYSTEM', "NT SERVICE\$serviceName")
+        Close-StoppedInstallerDirectory $serviceDir
+        $remoteBinPath = $binPath.Replace("--device $device", "--device $remoteDevice")
+        Assert-True ($remoteBinPath -cne $binPath) 'second device did not change service ID'
+        Invoke-Checked 'sc.exe' @('config', $serviceName, 'binPath=', $remoteBinPath)
+        $remotePid = Start-OwnedServiceWithNewPid $serviceName $devicePid
+        $remotePrimary = $null
+        try {
+            $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId, '--remote-seed') $humanInput $humanOut $humanErr
+            Assert-True ($p.ExitCode -eq 0) 'second-device wire seed failed'
+            Assert-True ((Get-Content $humanOut -Raw).Trim() -eq 'PASS windows-device-seed records=1 ordinary-human-wire=1 readback=exact') 'second-device readback missing'
+            Write-Host (Get-Content $humanOut -Raw)
+        } catch { $remotePrimary = $_ }
+        finally {
+            Stop-OwnedService $serviceName $remotePid
+            Open-StoppedInstallerNode $serviceDir
+            Open-StoppedInstallerNode $auditPath
+            Move-Item -LiteralPath $auditPath -Destination $remoteAudit -ErrorAction Stop
+            Set-ExactTreeAcl $remoteAudit @('SYSTEM', "NT SERVICE\$serviceName")
+            Open-StoppedInstallerNode $ownerAudit
+            Move-Item -LiteralPath $ownerAudit -Destination $auditPath -ErrorAction Stop
+            Set-ExactTreeAcl $auditPath @('SYSTEM', "NT SERVICE\$serviceName")
+            Close-StoppedInstallerDirectory $serviceDir
+            Invoke-Checked 'sc.exe' @('config', $serviceName, 'binPath=', $binPath)
+            $postStopPid = Start-OwnedServiceWithNewPid $serviceName $remotePid
+        }
+        if ($null -ne $remotePrimary) { throw $remotePrimary }
+        Write-Host 'SECOND_DEVICE method=scm-alternated audit-owner=restored audit-remote=preserved second-agent=not-tested'
+        foreach ($deviceMode in @('pair', 'sync', 'retire')) {
+            if ($deviceMode -eq 'sync') {
+                $p = Start-AsUser $humanCredential $tuiSeed @('--pair-namespace', $pairing) $emptyInput $humanOut $humanErr
+                Assert-True ($p.ExitCode -eq 0) 'protected pairing namespace unavailable'
+                $namespace = (Get-Content $humanOut -Raw).Trim()
+                Assert-True ($namespace -cmatch '^[a-f0-9]{64}$') 'pairing namespace not exact'
+                $syncArguments = @('serve', '--db', $syncDb, '--socket', $syncPipe, '--server-key', $syncServerKey, '--namespace', $namespace, '--server-sid', (Get-Sid $installerName), '--client-pub', $syncClientPublic, '--client-sid', $serviceSid)
+                $env:PMW2_TIMING = '1'
+                try { $syncProcess = Start-Process -FilePath $builtSync -ArgumentList $syncArguments -RedirectStandardOutput $syncOut -RedirectStandardError $syncErr -PassThru }
+                finally { Remove-Item Env:PMW2_TIMING -ErrorAction Stop }
+                # Ordinary endpoint readiness is proved by the TUI result; this
+                # pause precedes submit and never replaces a screen assertion.
+                Start-Sleep -Seconds 1
+                Assert-True (-not $syncProcess.HasExited) 'ordinary sync server exited before TUI submit'
+            }
+            $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, "--$deviceMode", $deviceConfig, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300') $humanInput $tuiOut $tuiErr
+            Write-Host (Get-Content $tuiErr -Raw)
+            if ($p.ExitCode -eq 0) { Assert-TuiFixtureOutput $tuiOut $deviceMode; Write-Host "TUI_CASE case=device-$deviceMode result=pass" }
+            else { $tuiCaseFailures.Add("device-$deviceMode"); Write-Host "TUI_CASE case=device-$deviceMode result=fail" }
+            if ($deviceMode -eq 'pair' -and $p.ExitCode -ne 0) { break }
+        }
+        if ($null -ne $syncProcess) {
+            Write-SyncTimingSummary $syncErr
+            & $installerSeed '--sync-observe' $syncDb
+            if ($LASTEXITCODE -ne 0) { $tuiCaseFailures.Add('device-sync-durable') }
+        }
+        $devicePid = Get-StoppableServicePid $serviceName
+        Stop-OwnedService $serviceName $devicePid
+        Open-StoppedInstallerNode $serviceDir
+        Open-StoppedInstallerNode $vault
+        & $installerSeed '--retire-observe' $vault
+        if ($LASTEXITCODE -ne 0) { $tuiCaseFailures.Add('device-retire-durable') }
+        Set-ExactTreeAcl $vault @('SYSTEM', "NT SERVICE\$serviceName")
+        Close-StoppedInstallerDirectory $serviceDir
+        $postStopPid = Start-OwnedServiceWithNewPid $serviceName $devicePid
+    }
+
     $p = Start-AsUser $humanCredential $custody @('human-lock', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $humanInput $humanOut $humanErr
     Write-ServiceSubphaseDiagnostics $diagnosticPath
     Assert-True ($p.ExitCode -eq 0) ('human native channel failed: ' + (Get-Content $humanErr -Raw))
@@ -875,6 +1025,18 @@ catch {
     $bodyError = $_
 }
 finally {
+    if ($aliasOwned) {
+        try { Invoke-Checked $installerSeed @('--remove-alias', $aliasPath, $tuiOnePux); $aliasOwned = $false }
+        catch { $cleanupErrors.Add("alias cleanup failed: $($_.Exception.Message)") }
+    }
+    if ($null -ne $syncProcess) {
+        try {
+            Assert-True (-not $syncProcess.HasExited) 'owned sync server exited unexpectedly'
+            Stop-Process -Id $syncProcess.Id -ErrorAction Stop
+            $syncProcess.WaitForExit()
+            Assert-True ($syncProcess.HasExited) 'owned sync server remains after stop'
+        } catch { $cleanupErrors.Add("sync cleanup failed: $($_.Exception.Message)") }
+    }
     if ($serviceOwned) {
         try {
             $installed = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"

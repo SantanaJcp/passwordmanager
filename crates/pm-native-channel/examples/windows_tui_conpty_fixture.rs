@@ -1682,6 +1682,10 @@ mod windows_fixture {
         LocalOperations,
         Access,
         Rotations,
+        Sources,
+        Pair,
+        Sync,
+        Retire,
     }
 
     fn read_synthetic_password() -> io::Result<zeroize::Zeroizing<Vec<u8>>> {
@@ -1747,6 +1751,18 @@ mod windows_fixture {
             return Ok(());
         }
         match scenario {
+            Scenario::Sources => {
+                reject_invalid_local_sources(fixture, paths.onepux)?;
+                reject_multilink_source(fixture, paths.onepux)?;
+                reject_reparse_source(fixture, paths.onepux, paths.backup)?;
+                press(fixture, "q")?;
+                return require_tui_exit(fixture.process);
+            }
+            Scenario::Pair | Scenario::Sync | Scenario::Retire => {
+                exercise_device(fixture, paths.csv, scenario)?;
+                press(fixture, "q")?;
+                return require_tui_exit(fixture.process);
+            }
             Scenario::Resize => {
                 exercise_types(fixture)?;
                 exercise_resize(fixture, paths.geometry)?;
@@ -2454,6 +2470,108 @@ mod windows_fixture {
         }
     }
 
+    fn reject_reparse_source(fixture: &Fixture, source: &str, alias: &str) -> io::Result<()> {
+        use std::os::windows::fs::MetadataExt;
+        let before = std::fs::read(source)?;
+        let alias_metadata = std::fs::symlink_metadata(alias)?;
+        if alias_metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            == 0
+            || std::fs::read_link(alias)? != std::path::Path::new(source)
+        {
+            return Err(io::Error::other(
+                "installer alias lacks exact reparse witness",
+            ));
+        }
+        crate::acl::Sampling::observe(fixture.process, false, || {
+            open_menu(fixture, "m", "Migration:")?;
+            open_menu(fixture, "2", "1PUX source")?;
+            let request = format!("{}|keep", encode_operation_field(alias));
+            type_visible_and_submit(fixture, &request, "|keep")?;
+            fixture
+                .observer
+                .wait_for("Operation failed explicitly; no success was recorded")
+                .map_err(io::Error::other)
+        })?;
+        if std::fs::read(source)? != before
+            || std::fs::read_link(alias)? != std::path::Path::new(source)
+        {
+            return Err(io::Error::other(
+                "reparse rejection changed owned source or alias",
+            ));
+        }
+        eprintln!("TUI_STAGE stage=source-reparse-rejected-no-lease-dacl-exact result=pass");
+        Ok(())
+    }
+
+    fn exercise_device(
+        fixture: &Fixture,
+        configuration: &str,
+        scenario: Scenario,
+    ) -> io::Result<()> {
+        let config = std::fs::read_to_string(configuration)?;
+        let fields = config.lines().collect::<Vec<_>>();
+        if fields.len() != 7 || fields.iter().any(|s| s.is_empty()) {
+            return Err(io::Error::other(
+                "device fixture requires seven explicit fields",
+            ));
+        }
+        open_menu(fixture, "y", "Devices/sync:")?;
+        if scenario == Scenario::Pair {
+            open_menu(fixture, "1", "Observed server RPK")?;
+            let request = [fields[0], fields[1], "PAIR"]
+                .map(encode_operation_field)
+                .join("|");
+            type_visible_and_submit(fixture, &request, "|PAIR")?;
+            fixture.observer.wait_for_information("Protected pairing created for the exact observed RPK pin; transfer remains human custody").map_err(io::Error::other)?;
+            eprintln!("TUI_STAGE stage=device-pairing result=pass");
+        } else if scenario == Scenario::Retire {
+            open_menu(fixture, "3", "Exact device ID hex")?;
+            let request = format!("{}|RETIRE", fields[6]);
+            type_visible_and_submit(fixture, &request, "|RETIRE")?;
+            fixture
+                .observer
+                .wait_for_information("retired at every locally observed")
+                .map_err(io::Error::other)?;
+            eprintln!("TUI_STAGE stage=device-retire result=pass");
+        } else {
+            open_menu(fixture, "2", "pairing|pm-sync program")?;
+            let started = Instant::now();
+            let request = [
+                fields[1], fields[2], fields[3], fields[4], fields[5], fields[0], "SYNC",
+            ]
+            .map(encode_operation_field)
+            .join("|");
+            type_visible_and_submit(fixture, &request, "|SYNC")?;
+            let result = fixture.observer.wait_for_checked_matching(
+                "successful sync complete panel",
+                |state| {
+                    let Some(rows) = state.information_rows() else {
+                        return Ok(false);
+                    };
+                    let text = rows.join(" ");
+                    if text.contains("no success")
+                        || text.contains("no state was accepted")
+                        || text.contains("not declared successful")
+                    {
+                        return Err("sync reached an explicit failure panel".into());
+                    }
+                    Ok(text.contains("Sync complete through pinned TLS:")
+                        && text.contains("pushed=")
+                        && text.contains("pulled="))
+                },
+            );
+            eprintln!(
+                "TUI_SYNC elapsed_ms={} complete-panel={}",
+                started.elapsed().as_millis(),
+                result.is_ok()
+            );
+            result.map_err(io::Error::other)?;
+            eprintln!("TUI_STAGE stage=device-sync result=pass");
+        }
+        Ok(())
+    }
+
     fn reject_multilink_source(fixture: &Fixture, source: &str) -> io::Result<()> {
         let alias = std::path::Path::new(source).with_extension("negative-hardlink.1pux");
         if alias.try_exists()? {
@@ -2614,6 +2732,10 @@ mod windows_fixture {
                         | "--local-operations"
                         | "--access"
                         | "--rotations"
+                        | "--sources"
+                        | "--pair"
+                        | "--sync"
+                        | "--retire"
                 )
             )
             || args.get(8).map(String::as_str) != Some("--")
@@ -2633,6 +2755,10 @@ mod windows_fixture {
             "--local-operations" => Scenario::LocalOperations,
             "--access" => Scenario::Access,
             "--rotations" => Scenario::Rotations,
+            "--sources" => Scenario::Sources,
+            "--pair" => Scenario::Pair,
+            "--sync" => Scenario::Sync,
+            "--retire" => Scenario::Retire,
             _ => return Err(io::Error::other("unknown native TUI scenario")),
         };
         let diagnostic_path = std::path::Path::new(&args[4]).with_file_name(match scenario {

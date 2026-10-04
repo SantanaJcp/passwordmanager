@@ -461,7 +461,20 @@ service_final_line=$(grep -nF 'Set-ExactTreeAcl $serviceDir @(' "$lab" | grep -v
 agent_final_line=$(grep -nF 'Set-ExactTreeAcl $agentDir @(' "$lab" | grep -vF 'installerName' | cut -d: -f1 | tail -n1)
 human_final_line=$(grep -nF 'Set-ExactTreeAcl $humanDir @(' "$lab" | grep -vF 'installerName' | cut -d: -f1 | tail -n1)
 harness_file_line=$(grep -nF '[IO.File]::WriteAllBytes($emptyInput' "$lab" | cut -d: -f1)
-scm_config_line=$(grep -nF "Invoke-Checked 'sc.exe' @('config', \$serviceName" "$lab" | cut -d: -f1)
+scm_config_line=$(grep -nF "Invoke-Checked 'sc.exe' @('config', \$serviceName" "$lab" | cut -d: -f1 | head -n1)
+# Two stopped device transitions follow the initial sealed SCM configuration.
+# Keep the original order checks tied to the first installation and require
+# all three explicit configurations, rather than accepting an arbitrary first.
+test "$(grep -cF "Invoke-Checked 'sc.exe' @('config', \$serviceName" "$lab")" -eq 3 || {
+    echo 'Windows fixture requires initial, remote, and restored SCM configurations' >&2
+    exit 1
+}
+require_literal 'Stop-OwnedService $serviceName $devicePid' "$lab"
+require_literal 'Stop-OwnedService $serviceName $remotePid' "$lab"
+require_literal 'Close-StoppedInstallerDirectory $serviceDir' "$lab"
+require_literal 'Move-Item -LiteralPath $auditPath -Destination $ownerAudit' "$lab"
+require_literal 'Move-Item -LiteralPath $auditPath -Destination $remoteAudit' "$lab"
+require_literal 'Move-Item -LiteralPath $ownerAudit -Destination $auditPath' "$lab"
 test "$(grep -nF 'Set-ExactTreeAcl $serviceDir @(' "$lab" | grep -vF 'installerName' | wc -l)" -eq 1 &&
     test "$(grep -nF 'Set-ExactTreeAcl $agentDir @(' "$lab" | grep -vF 'installerName' | wc -l)" -eq 1 &&
     test "$(grep -nF 'Set-ExactTreeAcl $humanDir @(' "$lab" | grep -vF 'installerName' | wc -l)" -eq 1 || {
