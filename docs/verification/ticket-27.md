@@ -4651,3 +4651,199 @@ Segundo preflight completo sobre los contadores finales: check3 rc0
 ni dependencias. La segunda corrida distinguirá respuesta ok-prefix,
 verify posterior, operación/cierre de deadline, close del stop y exit del
 proceso; las categorías no incluyen PID, handle, ruta, código de payload o ID.
+
+### Diagnóstico2 fase7 — rechazo postrespuesta confirmado
+
+Run [37177593290](https://github.com/SantanaJcp/passwordmanager/actions/runs/37177593290),
+[job111363371513](https://github.com/SantanaJcp/passwordmanager/actions/runs/37177593290/job/111363371513),
+SHA exacto **947fbde64bf4134359a03083151eba3e17fb422f**, completed/failure,
+artifact count0. Diagnóstico1 corresponde al
+[job111361332844](https://github.com/SantanaJcp/passwordmanager/actions/runs/37176911110/job/111361332844).
+Presupuesto **2/2 consumido, ambas terminadas**, sin tercera corrida.
+Windows11 Enterprise ARM64, build26200, image_os win11-vs2026-arm64,
+image_version20260924.168.1, Rust1.98.1 aarch64-pc-windows-msvc; label estándar,
+repo público. Gratuidad revalidada en
+[GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+Sin caches/artifacts/secrets ni cambios de workflow, dependencias o reglas.
+Logs/metadata `/tmp/pmw1g-windows2.{log,json}`; resúmenes numéricos y muestras
+por RPC `/tmp/pmw1g-windows{1,2}-summary.json`.
+
+**Verificado:** cuatro procesos, cuatro lecturas de frame con prefijo
+`ok=true`, cuatro `client_pipe_verify_failed`, cuatro
+`deadline_operation_failed`, cuatro `deadline_completion_ok`, cuatro
+`client_stop_close_ok`, cuatro `process_exit_unavailable` (exit4).
+No hay exit exitoso. El retorno de verify se conserva sin reinterpretación;
+la instrumentación no acepta la respuesta tras ese error. Es el rechazo del
+peer posterior a la respuesta el que convierte cada intento en Unavailable y
+activa el retry/backoff heredado. No es timeout30s del cliente ni fallo de
+join del watchdog o close del evento de stop.
+
+**Inferencia acotada:** `serve_one` Windows devuelve después de un frame y
+su TLS/pipe se destruye; `WindowsClientPipe::verify` exige consulta de PID
+correcto y PeekNamedPipe exitoso. Ese orden explica un posible disconnect
+antes de la comprobación posterior. Se confirma la frontera que falla, **no
+cuál de las consultas Win32 ni un PID cambiado**: el error sigue siendo opaco.
+No se añade otro query Win32, wire/ACK, espera, validación sustitutiva o fix.
+Referencias de fuente: `crates/pm-sync/src/main.rs` (`serve_one`,
+`client_exchange` Windows), `crates/pm-native-channel/src/windows.rs`
+(`verify_server_pipe`), `crates/pm-sync/src/lib.rs` (`retry`, `call`).
+
+PAIR PASS en ambas; SYNC FAIL por wait15s y RETIRE NOT_RUN en ambas. Los
+observers durables siguen fallidos y no emiten conteos de blocks/roots:
+no se inventa su inventario. Primitives14, contrato pipe1, observer24 y
+sync-lib1 pasan; fuentes/resize/clipboard/access/rotations/Matrix pasan.
+**Otro FAIL conservado:** local-operations del run1 vence15s esperando
+`Organization committed`; run2 pasa ese mismo caso intacto. Sin diagnóstico
+causal o corrección de ese fallo fuera del alcance de medición.
+Así los grupos reales contienen36 y70 eventos; no son un benchmark pareado
+de preparación/exportación del job completo. La activación de PMW1 ocurre
+posteriormente, sólo al reiniciar el servicio para SYNC. No se atribuye el
+PASS local posterior a los contadores ni se descarta el FAIL anterior.
+
+### Tabla por fase — muestras Windows parciales
+
+Tiempos en **ms**, sumas de spans completados al retornar el fixture. El
+corte conserva la espera15s; la captura ocurre después de su cleanup y antes
+de detener el servicio propio, sin espera de éxito fuera del plazo. Nativos
+por proceso real, sin simulación. Las filas anidadas se solapan y **no se
+suman** como fases independientes. Los contadores/diagnósticos tienen sólo
+categorías fijas; no rutas privadas, IDs, PID, handles o payloads.
+
+| Fase/categoría | Run1: count / suma ms | Run2: count / suma ms | Alcance |
+| --- | --- | --- | --- |
+| Total del span TUI observado |1 /15036|1 /15033| No es job_total; incluye interacción y diagnóstico. |
+| Espera submit→panel final |1 /15014 FAIL|1 /15003 FAIL| Plazo original15s. |
+| Submit→primer pushing visible |1 /6151|1 /6120| Intervalo no descompuesto; no atribuirlo al worker/loader/KDF. |
+| Pushing visible hasta cutoff |1 /8863, ended=false|1 /8882, ended=false| Poll de pantalla; parcial. |
+| Preparación de submit en servidor |1 /12.444|1 /15.006| Decode/pairing/start; anida job_start. |
+| Persistir/lanzar job (`job_start`) |1 /12.074|1 /14.610| Anida fsync queued; puede solaparse con worker. |
+| Espera al thread (`job_spawn_wait`) |1 /0.214|1 /0.200| Desde spawn del worker. |
+| Preparación worker (`job_prepare`) |1 /3.516|1 /3.421| Programa/identidad/pairing/réplica. |
+| Preparación del grupo (`push_prepare`) |1 /48.260,36 eventos|1 /98.651,70 eventos| Ledger/outbox; escenarios efectivos distintos. |
+| Exportación y cleanup de grafos |NOT_RUN|NOT_RUN| El primer put no supera retry. |
+| Creación temporal put |4 /1.822|4 /1.900| Antes del RPC. |
+| Escritura temporal |4 /0.412|4 /0.485| Anidada en put_file_fsync. |
+| Fsync temporal aislado |4 /17.335|4 /24.698| No altera fsync durable. |
+| Temporal escritura+fsync+close |4 /18.249|4 /27.403| Incluye overhead de medición/cierre. |
+| Borrar temporal |4 /0.811|4 /0.714| Cleanup heredado intacto. |
+| Spawn proceso |4 /52.660|4 /107.510| CreateProcess; primer spawn frío. |
+| Spawn→main, carga aproximada |4 /168.282|4 /219.600| Incluye spawn/runtime/scheduling; no loader aislado. |
+| Preparación del cliente |4 /7.129|4 /7.041| Claves/args/JSON/config base. |
+| Apertura y pin inicial de pipe |4 /0.427|4 /0.419| connect_sync original. |
+| Crear ClientConnection |4 /165.042|4 /164.531| Setup TLS separado del handshake. |
+| Handshake TLS1.3/RPK + primera escritura |4 /53.555|4 /54.573| Cota superior: incluye primeros4bytes, sin nueva I/O. |
+| Escribir request TLS entero |4 /53.806|4 /54.836| Incluye la primera escritura/handshake. |
+| Leer respuesta TLS |4 /166.601|4 /288.898| En run2 cuatro frames ok-prefix; lectura no implica aceptación final. |
+| Intercambio TLS completo |4 /220.591|4 /343.787| Write+read, handshake incluido. |
+| Verificar pipe posterior |4 /0.066|4 /0.081,4 fallos| Frontera del rechazo; el tiempo no significa éxito. |
+| Scope deadline cliente |4 /387.587|4 /510.408| Config+pipe+exchange+verify+join. |
+| Esperar salida proceso |4 /519.280|4 /638.262| Incluye startup restante/cliente/exit; no sumar a startup. |
+| RPC put, sin temporal previo |4 /572.327|4 /746.224| Cuatro intentos; ningún put aceptado por el cliente. |
+| Backoff completado |3 /7000.653|3 /7000.873| Sleeps1+2+4; siguiente8s en curso al cutoff, no se inventa su duración parcial. |
+| Gap entre RPCs |3 /7015.249|3 /7021.391| Incluye backoff y temporales; no es inactividad pura. |
+| Fsync status job |2 /12.081|2 /17.807| Queued/pushing; no status terminal. |
+| SQLite open servidor |4 /8.327|4 /8.161| Media2.082/2.040; max2.139/2.094ms. |
+| Dispatch servidor |4 /22.023|4 /26.075| Media5.506/6.519; max15.296/19.540ms. |
+| RPC get/list/publish, pull/activación |NOT_RUN|NOT_RUN| No se alcanzan tras el primer put fallido. |
+| job_total/push/event_total completos |No medidos|No medidos| Ningún evento finalizado dentro del corte; no usar cero. |
+
+Número de procesos:4/4 (uno por intento RPC); puts:4/4 intentos del primer
+bloque del primer evento, por orden del retry que conserva bytes/hash.
+Run2 tiene event_started1, eventos seleccionados70, eventos completados0;
+no hay muestra de puts por evento completado ni de total de puts del job.
+Run1 confirma el mismo orden de fuente, aunque aún no tenía event_started.
+No dividir4 entre36/70 para inventar la densidad del workload. Root/page puts,
+gets/list, throughput de eventos y duración total siguen sin muestra nativa.
+
+### Tabla por RPC — sin identificadores
+
+Ordinal sólo de la muestra, no ID productivo; tiempos en ms. Total RPC
+anida spawn y wait; spawn→main se solapa con ambos. Handshake incluye la
+primera escritura4bytes. En run2 los cuatro resultados son verify-failed,
+exit4, respuesta ok-prefix, completion/stop-close ok.
+
+| Run / intento put | RPC total | Spawn | Spawn→main | Client prepare | ClientConnection | Pipe open | Handshake+4bytes | Leer respuesta |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+|1 /1|215.805|43.957|73.667|2.179|41.490|0.134|44.065|51.228|
+|1 /2|118.815|2.929|31.977|1.665|41.185|0.104|3.121|37.996|
+|1 /3|119.207|2.959|31.319|1.636|41.405|0.094|3.175|38.761|
+|1 /4|118.500|2.815|31.319|1.649|40.962|0.095|3.194|38.616|
+|2 /1|335.576|98.681|127.074|2.112|41.719|0.117|45.122|116.460|
+|2 /2|135.043|2.923|30.941|1.628|40.352|0.096|3.158|56.142|
+|2 /3|136.178|2.998|31.040|1.696|41.478|0.107|3.154|55.974|
+|2 /4|139.427|2.908|30.545|1.605|40.982|0.099|3.139|60.322|
+
+### Estimaciones y recomendación
+
+**(a) Sesión Windows reutilizada de W2:** ahorro mecánico aproximado de
+**0.254s /0.260s en los cuatro ciclos observados**, si se amortizan tres setups
+y se suprimen los cuatro temporales auxiliares como en la sesión Unix.
+Cálculo auditable: suma de spawn→main + client_prepare + pipe_open +
+ClientConnection + handshake/primera escritura de intentos2–4 =232.900/
+230.020ms; crear+escribir/fsync/close+borrar temporales de los cuatro =20.882/
+30.017ms. Son intervalos consecutivos dentro de cada intento; no se vuelve a
+sumar process_spawn ni wait. Los tres setups calientes promedian77.633/
+76.673ms cada uno; temporal por put5.221/7.504ms. Teardown no aislado y coste
+nuevo de IPC de sesión excluidos; la cota de handshake incluye4bytes que
+seguirían escribiéndose. **Estimación, no benchmark de una implementación.**
+
+No acredita ahorro de los≥7s de backoff: los cuatro ciclos son retries de un
+put rechazado, no cuatro puts exitosos reutilizables. La sesión W2 aborta
+ante error y no hace replay interno; no puede asumirse que errores de peer
+se convierten en éxito. Si mantener correctamente el pipe abierto resolviera
+ese rechazo, desaparecería ese retry por una corrección funcional distinta,
+que hay que verificar; no contabilizarlo aquí como efecto de amortización.
+No hay N completo de RPCs ni tiempo final del job para extrapolar al deadline15s.
+La sesión Windows requeriría cliente y servidor de frames sucesivos, mismo
+wire/límites/deadlines, verificación de peer y ACL por RPC, cierre comprobado.
+
+**(b) Agrupación vigente de W2:** agrupa verificación/exportación de grafos
+por página y conserva puts, commits y fsync; su reutilización de SQLite es
+otro coste del servidor. No existe ahorro nativo cuantificable del export en
+esta muestra: se detiene antes de exportar el primer grafo. Ninguna reducción
+de ese coste elimina el backoff observado. Si se contempla además reutilizar
+SQLite en Windows, la apertura medida de los cuatro RPCs sólo ofrece hasta
+8.327/8.161ms en esa categoría, antes de descontar la apertura necesaria de
+la sesión; dispatch completo22.023/26.075ms no es todo eliminable y conserva
+commit FULL. No sustituir esto por una estimación de batches de puts: G4/G5
+actuales no permiten agrupar múltiples bloques en un put y W2 conserva sus
+conteos. El ahorro completo de export debe medirse tras superar el rechazo.
+
+**Recomendación:** resolver primero, en trabajo posterior explícitamente
+autorizado, la vida del pipe/validación postrespuesta conservando la comprobación
+del peer; luego portar la sesión a Windows para amortizar los≈77ms de setup
+caliente por RPC más temporales, y medir el workload completo bajo el mismo
+plazo. Evaluar la exportación agrupada de W2 con eventos/grafos íntegros,
+sin atribuirle menos puts. La muestra refuta tratar estos15s como un problema
+principal de coste de spawn/fsync. No se optimiza ni se remedia el rechazo aquí.
+
+### Entrega y límites finales fase7
+
+Código diagnóstico en dos commits separados de cualquier optimización:
+`18d306de753385199252aa73bfeafeaa3fd93d23` (medición) y
+`947fbde64bf4134359a03083151eba3e17fb422f` (discriminante de resultados y guard
+del sink). Revertibles independientemente, sin reescribir historia. Este
+último es el SHA de código validado por check3/clean3 y el segundo run; el
+hijo de informe sólo cambia documentación. No integración ni merge PR1;
+ningún estado del tracker/spec modificado. Candidata sólo en rama W1.
+
+Archivos desde768881b: `crates/pm-sync/src/{timing.rs,lib.rs,main.rs}`,
+`crates/pm-custody/src/{sync_job.rs,windows.rs}`,
+`scripts/test-windows-custody-lab.ps1`, `docs/verification/ticket-27.md`.
+Código sólo spans/contadores/sink y forwarding del timing de spawn del worker;
+ningún cambio del flujo, wire, KDF, límites, retry, plazos, assertions, SQLite,
+listener/proveedor, memoria/custodia o selección cfgUnix de la sesión W2.
+Local check3 y clean3 PASS; Linux legacy TLS opt-in PASS como complemento,
+sin reproducir proporción Windows. Sin nuevo barrido52: no hay cambio de
+lógica y el alcance exige check/clean, no revalidación global de los ports.
+Windows11 ARM64 nativo compila/ejecuta ambos diagnósticos. Windowsx64/macOS,
+job completo, export/pull/convergencia/retire y aceptación global **no demostrados**.
+
+Fallbacks heredados adicionales observados, conservados y fuera de la causa
+medida: `sync_stage` recrea el staging calculado cuando existe, borrándolo
+antes, en vez de devolver colisión; `optional_field` devuelve None ante
+escape/newline/CR, y un cursor opcional inválido puede interpretarse como
+cursor ausente/inicio0 (inferencia de fuente). Cleanup de temporales/staging,
+write de diagnóstico y clasificación genérica exit→Unavailable conservados;
+server dispatch sigue sustituyendo error por ok=false. No usar esos caminos
+para aceptar el RPC. Root/integración y cambios ajenos preservados.
