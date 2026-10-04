@@ -89,7 +89,7 @@ W6_UI_LOG = None
 W6_OFFSETS = {"custody": 0, "tui": 0}
 W6_LINE = re.compile(
     rb"(?:PMW6_PHASE operation=(?:kdf|root-open|vault-unlock|restore-prepare|"
-    rb"archive-parse|restore-commit|server-unlock|human-dispatch|server-restore|"
+    rb"archive-parse|archive-revision-decode|restore-commit|server-unlock|human-dispatch|server-restore|"
     rb"tui-unlock|tui-restore|catalog) phase=(?:aborted|archive-sent|archive-staged|argon2id|audit-appended|audit-committed|audit-transaction|batch-verified|bundle-loaded|catalog-received|catalog-refreshed|challenge-staged|channel-verified|committed|committed-response|complete|connected-magic-written|decoded-dispatched|events-applied|frame-decoded|frame-received|frame-written|graphs-verified|headers-read|keys-opened|manifest-verified|prepared|prepared-response|protected-output|records-processed|repainted|response-encoded|response-received|response-written|revisions-verified|root-opened|rows-read|sqlite-closed|sqlite-configured|sqlite-opened|sqlite-transaction|staging-retired|start|state-digest|tls-magic-received|vault-unlocked) elapsed_us=[0-9]{1,20} "
     rb"total_us=[0-9]{1,20} at_us=[0-9]{1,20}|"
     rb"PMW6_KDF algorithm=argon2id13 memory_mib=[0-9]{1,4} "

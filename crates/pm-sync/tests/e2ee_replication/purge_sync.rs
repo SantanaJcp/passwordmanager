@@ -1463,10 +1463,13 @@ fn session_endpoint_failure_returns_explicit_ipc_error_and_failed_exit() {
     let server = TlsServer::start(&mut f);
     let closing = f.dir.path("closing-sync.sock");
     let listener = std::os::unix::net::UnixListener::bind(&closing).unwrap();
+    let (submitted, ready_to_fail) = std::sync::mpsc::channel();
     let peer = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         stream.read_exact(&mut [0; 1]).unwrap();
-        // Close during the real TLS handshake, as in the TUI negative.
+        // Keep the TLS peer until the fixture has submitted its single IPC
+        // request, then fail the same handshake without acknowledging it.
+        ready_to_fail.recv().unwrap();
     });
     let mut child = Command::new(env!("CARGO_BIN_EXE_pm-sync"))
         .arg("session")
@@ -1490,6 +1493,7 @@ fn session_endpoint_failure_returns_explicit_ipc_error_and_failed_exit() {
         .unwrap();
     input.write_all(request).unwrap();
     drop(input);
+    submitted.send(()).unwrap();
     let output = child.wait_with_output().unwrap();
     peer.join().unwrap();
     let error = br#"{"ok":false,"code":"unavailable"}"#;

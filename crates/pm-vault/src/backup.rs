@@ -2183,6 +2183,7 @@ fn decode_item_full(bytes: &[u8]) -> Result<([u8; 16], String, String), HumanCom
 fn decode_revision_full(
     bytes: &[u8],
 ) -> Result<([u8; 16], [u8; 16], i64, LogicalRecord), HumanCommitError> {
+    let timing = pm_crypto::phase_timing::PhaseTimer::new("archive-revision-decode");
     let mut d = Decoder::new(bytes);
     expect_array(&mut d, 4)?;
     let item = decode_fixed(&mut d)?;
@@ -2193,6 +2194,7 @@ fn decode_revision_full(
     if d.position() != bytes.len() {
         return Err(HumanCommitError::InvalidInput);
     }
+    timing.finish();
     Ok((item, issuer, modified, record))
 }
 fn decode_attachment(bytes: &[u8]) -> Result<DecodedAttachment, HumanCommitError> {

@@ -80,6 +80,8 @@ main() {
   local root
   root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
   cd "$root"
+  # W6 phase 2 diagnostic: measure duplicate revision decoding without changing gates.
+  export PMW6_TIMING=1
   configure_ticket26_build_commands "$mode" "$root"
   local libsodium_out_dir
   libsodium_out_dir=$("${build_command[@]}" |

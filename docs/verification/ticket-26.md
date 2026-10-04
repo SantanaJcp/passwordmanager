@@ -2845,3 +2845,73 @@ SHA de producto Rust y fixtures Linux idénticos a Linux52 e60b8df; no se
 repite ese barrido sin cambios en ellos. Se comprobó que G2/spec/estados/
 workflow/Cargo.lock y todos los paths W1 Windows/W3/W4/W5 quedan fuera del
 diff. El trabajo queda en rama/worktree W6 para revisión del orquestador.
+
+
+### W6 fase 2 — método y autorización (2026-10-04)
+
+Continúa143a96b en el worktree W6. Autorizados endpoint del test compartido,
+rechazo temprano TUI de plaintext y análisis/optimización medible de restore.
+Plazos8/20s, KDF, oráculos unlock/restore y publicación exclusiva final intactos.
+No integración, cambios de tickets ni zona Windows de W1. Hasta cuatro nuevas
+corridas macOS sobre commits exactos, nunca repetir sin cambio/hipótesis.
+
+Endpoint RED discriminante: forzar el orden ya observado en ARM (peer cierra
+handshake y proceso sale antes de escribir stdin), sin cambiar producto.
+GREEN: mantener peer abierto hasta confirmar envío único completo del fixture;
+seguir exigiendo rc4, frame IPC unavailable exacto, stderr vacío y roots0.
+No aceptar BrokenPipe ni introducir replay. El código de orden RED es temporal
+y se conserva como patch propio; no es el fixture final.
+
+Plaintext: extender el lab de publicación según el método aprobado del backup.
+Pausar custodio propio antes del destino existente y exigir rechazo de panel
+sin RPC/temporal, destino intacto. Para carrera, preparar warning con custodio
+activo, pausarlo, confirmar EXPORT, observar temporal y crear destino adversario
+antes de reanudar. Exigir DestinationExists, destino intacto y sin temporal.
+RED con producto anterior; GREEN tras precheck symlink_metadata antes de prepare
+y nuevamente antes del download. Happy export y backup/attachment regresiones.
+
+Restore: examinar fases/lecturas/reencriptado/commits existentes; sólo aplicar
+optimización si se demuestra coste evitable con comparación medible conservando
+validación, integridad y durabilidad. Sin evidencia suficiente, informar ese
+límite para la decisión de plazos. Barrido52 del manifest W6 fase1 y check/clean,
+flock secuencial por comando y logs /tmp/pmw6b-*.log. W4 fuera de gates.
+
+
+#### Fase2 checkpoint diagnóstico de referencia
+
+Endpoint: client_session completa TLS antes de leer stdin. El peer cerraba
+después de un byte del handshake, dejando al scheduler ejecutar rc4 antes
+del write del fixture. RED forzado con stdin retenido antes del cierre:
+/tmp/pmw6b-endpoint-red2.log rc101 BrokenPipe; patch conservado en
+/tmp/pmw6b-endpoint-red.patch. El intento previo red.log falló por None tras
+child.wait (que toma stdin), no constituye RED del comportamiento. GREEN
+/tmp/pmw6b-endpoint-green.log rc0: canal explícito del fixture libera el peer
+sólo tras write_all completo y EOF de stdin. Producto/transporte intactos;
+frame exacto unavailable, rc4, stderr vacío, roots0 siguen exigidos.
+
+Plaintext RED rc1 /tmp/pmw6b-plaintext-red.log con custodio pausado y destino
+intacto, sin rechazo; GREEN rc0 /tmp/pmw6b-plaintext-green.log con happy export,
+rechazo temprano y carrera. Precheck antes del prepare33/0 y de download33/1,
+DestinationExists/panel público existente. No se modifica publish_new_file.
+Check completo rc0 /tmp/pmw6b-baseline-check.log; AST/shell/diff-check rc0.
+
+Restore: dos llamadas decode_revision_full por revisión en prepare (verifier
+y collector), frente a una suficiente si se transfiere el resultado ya
+validado. Referencia opt-in añade scope fijo archive-revision-decode y captura
+conteo/duración sólo sintéticos. Launcher fuerza PMW6_TIMING=1 exclusivamente
+en este checkpoint diagnóstico; se retirará para el checkpoint final normal.
+No eliminar revalidación de staged graphs/batch al commit: protege contra
+mutación entre prepare y commit. Los dos commits FULL corresponden a esas
+dos fronteras contractuales; no son fsync redundantes demostrados.
+
+Fallbacks heredados encontrados y preservados: linux::accept_one descarta
+error del handler y continúa; backup::RestoreCollector::finish sustituye
+error SQLite por false y retorna Integrity; export_attachments sustituye
+conversión fallida de chunk_count por i64::MAX (stream ausente por0, luego
+rechazado). TUI display_secret sustituye UTF8 inválido por etiqueta binaria
+con longitud. Ninguno cambia. No se añaden reintentos ni vías alternativas.
+
+Preflight de coste: repo PUBLIC comprobado por gh; runners estándar macos-15
+e Intel, manual, permissions contents:read, sin cache/artifacts/secrets/larger.
+[Facturación oficial](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+consultada2026-10-04: runners estándar públicos gratuitos.

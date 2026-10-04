@@ -1666,6 +1666,7 @@ fn handle_access_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result
 }
 
 fn preview_plaintext_export(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    require_new_plaintext_destination(Path::new(value))?;
     write_frame(tls, &[33, 0])?;
     let prepared = decode_prepared_response(&read_frame(tls)?)?;
     app.operation = Some(PendingOperation::PlaintextExport {
@@ -1693,6 +1694,7 @@ fn confirm_plaintext_export(app: &mut App, tls: &mut HumanTls, value: &str) -> R
     else {
         return Err(Failure::Unavailable);
     };
+    require_new_plaintext_destination(&destination)?;
     let mut request = vec![33, 1];
     push_bytes(&mut request, &prepared.command)?;
     request.extend_from_slice(&prepared.signature);
@@ -1702,6 +1704,16 @@ fn confirm_plaintext_export(app: &mut App, tls: &mut HumanTls, value: &str) -> R
         format!("Plaintext export complete: {bytes} bytes; protect or remove it explicitly");
     show_information(app, &app.status.clone());
     Ok(())
+}
+
+fn require_new_plaintext_destination(destination: &Path) -> Result<(), Failure> {
+    // Reject the entry itself before either export RPC, including dangling
+    // aliases. Exclusive final publication still closes the subsequent race.
+    match fs::symlink_metadata(destination) {
+        Ok(_) => Err(Failure::DestinationExists),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(Failure::Unavailable),
+    }
 }
 
 fn stream_file_to_server(tls: &mut HumanTls, path: &Path) -> Result<(), Failure> {
