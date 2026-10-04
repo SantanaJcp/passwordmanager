@@ -483,8 +483,20 @@ mod fixture {
                                 "NATIVE_TRANSFER stage=peer-read category={}",
                                 io_category(&error)
                             );
-                            if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                                Ok(())
+                            use windows_sys::Win32::{
+                                Foundation::{ERROR_BROKEN_PIPE, GetLastError},
+                                System::Pipes::PeekNamedPipe,
+                            };
+                            let native_broken = error.kind() == std::io::ErrorKind::BrokenPipe
+                                && error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32);
+                            if error.kind() == std::io::ErrorKind::UnexpectedEof || native_broken {
+                                // Corroborate transport EOF with the native pipe state:
+                                // https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-peeknamedpipe
+                                let peer_closed = unsafe {
+                                    PeekNamedPipe(tls.sock.raw_handle(), std::ptr::null_mut(), 0, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
+                                } == 0 && unsafe { GetLastError() } == ERROR_BROKEN_PIPE;
+                                eprintln!("NATIVE_TRANSFER stage=peer-closure native-confirmed={peer_closed}");
+                                if peer_closed { Ok(()) } else { Err(std::io::Error::other("native pipe did not confirm peer closure")) }
                             } else {
                                 Err(std::io::Error::other(
                                     "negative transfer failed outside peer EOF",

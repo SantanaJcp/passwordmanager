@@ -1,11 +1,12 @@
 # Ticket 27 — evidencia Windows parcial y matriz pendiente
 
-Corte actual: 2026-10-02. Estado: **checkpoint parcial Win11 ARM64, no candidato
-aceptado**; ticket `claimed`. El primer prompt/input oculto/unlock pasan en
-modo normal; fase 2 verifica el scroll del footer común en Linux y Win11 ARM64. La matriz se
-detiene ahora porque el status recortado oculta datos del resumen de importación;
-su ubicación completa requiere decisión del usuario. Los métodos y runs exactos del corte
-están al final. No acredita soporte completo, x64/reboot ni resuelve el ticket.
+Corte actual: 2026-10-03, **W1 fase 4 en verificación; aceptación integral
+pendiente**, ticket `claimed`. Composición c8325fb y gates registrados en
+82075cd; se aplican las dos propuestas aprobadas CUP/HVP y cierre nativo.
+Su GREEN nativo, reparse integral y pair/sync/retire siguen pendientes en este
+checkpoint; preview 1PUX seed8 `crypto-resource` pertenece a W5. Los métodos y
+runs exactos del corte están al final. No acredita soporte completo, x64/reboot
+ni resuelve el ticket.
 Las entradas desde 2026-09-13 se conservan como cronología de checkpoints,
 no como declaraciones simultáneas sobre el candidato actual.
 
@@ -3792,3 +3793,36 @@ humano/agente; segundo ID mediante servicio SCM normal alternado y paquetes
 de auditoría conservados/restaurados, equivalente al método Mac. Mientras no
 haya respuesta, estos casos no se implementan ni ejecutan. Es un pendiente
 de método, no una autorización para modificar W2/W4. Tickets sin cambios.
+
+### Reanudación después del reinicio y checkpoint de propuestas
+
+Se inspeccionaron status/log5/diff y runs de la rama antes de editar.
+HEAD local=origin82075cd; los únicos dos archivos pendientes eran las
+propuestas aprobadas. No se descarta su trabajo. API de Actions no encuentra
+corridas de fase4 lanzadas por el agente anterior: presupuesto consumido en
+esta fase, antes del nuevo dispatch, **Windows0/6, Mac0/2**. Las corridas
+anteriores listadas pertenecen a fase3 y conservan su presupuesto histórico.
+
+Los archivos temporales pmw1c/pmw1d y los drivers anteriores no sobrevivieron
+al reinicio. Su evidencia documental se conserva como histórica, pero no se
+afirma disponibilidad de esos logs ni se reutilizan resultados como una nueva
+corrida. Se reconstruye la lista de52 comandos desde los métodos de
+[integración](integration-26-28.md#remediación-de-composición--método-pmint5-2026-10-03),
+W2 y28, con nombres/argumentos y rc esperados explícitos.
+
+Aplicación revisada: CUP/HVP cuenta cada secuencia clampada (no cada eje),
+rechaza32768 y overflow, conserva CHA/VPA/CSI desconocido estrictos. El
+repaint exige cobertura nueva de todas las celdas, parser completo y contorno
+exacto; incluye controles de frame100×30 recortado y repaint parcial. Fuente
+Microsoft citada en código y en el método anterior, revalidada al reanudar.
+Cierre nativo conserva las cuatro negativas y exige PeekNamedPipe retorno0
+con ERROR_BROKEN_PIPE además de EOF o BrokenPipe raw109, rechazo del servicio
+y DACL exacta. Otra respuesta/error/estado del pipe falla.
+
+Verificación local previa: `flock /tmp/pm-cargo-window.lock
+./scripts/cargo-local.sh fmt --all` rc0; `flock /tmp/pm-cargo-window.lock
+./scripts/check.sh` rc0, log `/tmp/pmw1d-resume-proposals-check.log`.
+`git diff --check` rc0. Este host sólo ejecuta cfgLinux: los dos controles
+nuevos del observer y la rama de cierre Windows requieren CI nativa.
+No se cambia memoria protegida, listener/admisión/proveedor, sync, workflows,
+dependencias ni estados de tickets; no se integra en la rama unificada.

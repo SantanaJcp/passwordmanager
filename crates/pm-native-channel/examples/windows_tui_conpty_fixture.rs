@@ -117,6 +117,7 @@ mod windows_fixture {
         columns: usize,
         rows: usize,
         cells: Vec<ScreenCell>,
+        repainted: Vec<bool>,
         row: usize,
         column: usize,
         saved_row: usize,
@@ -126,6 +127,7 @@ mod windows_fixture {
         focus_reporting: bool,
         window_title_updates: u64,
         cursor_positions: u64,
+        clamped_cup_hvp: u64,
         resize_reports: u64,
         line_feeds: u64,
         delayed_wraps: u64,
@@ -163,6 +165,7 @@ mod windows_fixture {
                 columns: SCREEN_COLUMNS,
                 rows: SCREEN_ROWS,
                 cells: vec![ScreenCell::Empty; SCREEN_COLUMNS * SCREEN_ROWS],
+                repainted: vec![false; SCREEN_COLUMNS * SCREEN_ROWS],
                 row: 0,
                 column: 0,
                 saved_row: 0,
@@ -172,6 +175,7 @@ mod windows_fixture {
                 focus_reporting: false,
                 window_title_updates: 0,
                 cursor_positions: 0,
+                clamped_cup_hvp: 0,
                 resize_reports: 0,
                 line_feeds: 0,
                 delayed_wraps: 0,
@@ -193,6 +197,28 @@ mod windows_fixture {
                 error: None,
                 closed: false,
             }
+        }
+
+        // Every cell must have been painted/erased by new output, and the
+        // complete frame border must fit this geometry. A clipped old frame
+        // or a fresh title alone cannot satisfy the resize oracle.
+        fn complete_repaint(&self) -> bool {
+            if !matches!(self.parse, ParseState::Ground)
+                || !self.utf8.is_empty()
+                || !self.repainted.iter().all(|cell| *cell)
+            {
+                return false;
+            }
+            let glyph = |cell: &ScreenCell, expected: &str| matches!(cell, ScreenCell::Glyph(value) if value == expected);
+            let edge = |cell: &ScreenCell, allowed: &[&str]| matches!(cell, ScreenCell::Glyph(value) if allowed.contains(&value.as_str()));
+            glyph(&self.cells[0], "┌")
+                && glyph(&self.cells[self.columns - 1], "┐")
+                && glyph(&self.cells[(self.rows - 1) * self.columns], "└")
+                && glyph(&self.cells[self.cells.len() - 1], "┘")
+                && self.cells.chunks(self.columns).all(|row| {
+                    edge(&row[0], &["┌", "│", "└"])
+                        && edge(&row[self.columns - 1], &["┐", "│", "┘"])
+                })
         }
 
         fn contains(&self, expected: &str) -> bool {
@@ -512,6 +538,7 @@ mod windows_fixture {
                 self.cells[index + 1] = ScreenCell::Empty;
             }
             self.cells[index] = ScreenCell::Empty;
+            self.repainted[index] = true;
         }
 
         fn advance_row(&mut self) {
@@ -522,6 +549,8 @@ mod windows_fixture {
                 };
                 self.bottom_scrolls = next;
                 self.cells.rotate_left(self.columns);
+                self.repainted.rotate_left(self.columns);
+                self.repainted[(self.rows - 1) * self.columns..].fill(true);
                 self.cells[(self.rows - 1) * self.columns..].fill(ScreenCell::Empty);
             } else {
                 self.row += 1;
@@ -574,6 +603,7 @@ mod windows_fixture {
                     ));
                 } else if command == b'h' && parameters.contains(&1049) {
                     self.cells.fill(ScreenCell::Empty);
+                    self.repainted.fill(true);
                     self.row = 0;
                     self.column = 0;
                     self.wrap_pending = false;
@@ -600,16 +630,26 @@ mod windows_fixture {
                 b'H' | b'f' if parameters.len() <= 2 => {
                     let row = parameters.first().copied().unwrap_or(1).max(1) - 1;
                     let column = parameters.get(1).copied().unwrap_or(1).max(1) - 1;
-                    if row >= self.rows || column >= self.columns {
-                        self.fail("ConPTY absolute cursor position outside screen");
+                    // Microsoft bounds CUP/HVP by the viewport and limits
+                    // their one-based parameters to 32767:
+                    // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences#cursor-positioning
+                    if row >= 32767 || column >= 32767 {
+                        self.fail("ConPTY absolute cursor parameter exceeds Microsoft limit");
                     } else {
                         let Some(next) = self.cursor_positions.checked_add(1) else {
                             self.fail("ConPTY cursor-position counter overflow");
                             return;
                         };
                         self.cursor_positions = next;
-                        self.row = row;
-                        self.column = column;
+                        if row >= self.rows || column >= self.columns {
+                            let Some(next) = self.clamped_cup_hvp.checked_add(1) else {
+                                self.fail("ConPTY CUP/HVP clamp counter overflow");
+                                return;
+                            };
+                            self.clamped_cup_hvp = next;
+                        }
+                        self.row = row.min(self.rows - 1);
+                        self.column = column.min(self.columns - 1);
                         self.wrap_pending = false;
                     }
                 }
@@ -651,7 +691,9 @@ mod windows_fixture {
                     self.wrap_pending = false;
                     if first == 2 || first == 3 {
                         self.cells.fill(ScreenCell::Empty);
+                        self.repainted.fill(true);
                     } else {
+                        self.repainted[self.row * self.columns + self.column..].fill(true);
                         for cell in &mut self.cells[self.row * self.columns + self.column..] {
                             *cell = ScreenCell::Empty;
                         }
@@ -667,6 +709,7 @@ mod windows_fixture {
                         _ => unreachable!(),
                     };
                     self.cells[from..through].fill(ScreenCell::Empty);
+                    self.repainted[from..through].fill(true);
                 }
                 b'X' if parameters.len() <= 1 => {
                     self.wrap_pending = false;
@@ -886,7 +929,7 @@ mod windows_fixture {
                 })
                 .collect::<Vec<_>>();
             Ok(format!(
-                "observer parser={parser} row={} column={} wrap={} nonblank={nonblank} title-updates={} escapes={} csi={} osc={} cursor-positions={} line-feeds={} delayed-wraps={} bottom-scrolls={} row-nonblank={row_counts:?} markers=manager:{}/flat:{}/raw:{},rpk:{}/flat:{}/raw:{},password:{}/flat:{}/raw:{},unavailable:{}/raw:{}",
+                "observer parser={parser} row={} column={} wrap={} nonblank={nonblank} title-updates={} escapes={} csi={} osc={} cursor-positions={} cup-hvp-clamped={} line-feeds={} delayed-wraps={} bottom-scrolls={} row-nonblank={row_counts:?} markers=manager:{}/flat:{}/raw:{},rpk:{}/flat:{}/raw:{},password:{}/flat:{}/raw:{},unavailable:{}/raw:{}",
                 state.row,
                 state.column,
                 state.wrap_pending,
@@ -895,6 +938,7 @@ mod windows_fixture {
                 state.csi_sequences,
                 state.osc_sequences,
                 state.cursor_positions,
+                state.clamped_cup_hvp,
                 state.line_feeds,
                 state.delayed_wraps,
                 state.bottom_scrolls,
@@ -2295,6 +2339,7 @@ mod windows_fixture {
                 state.rows = rows as usize;
                 // No inferred reflow content: demand new native output at this geometry.
                 state.cells = vec![ScreenCell::Empty; state.columns * state.rows];
+                state.repainted = vec![false; state.columns * state.rows];
                 state.row = 0;
                 state.column = 0;
                 state.saved_row = 0;
@@ -2308,6 +2353,7 @@ mod windows_fixture {
                     let native = read_geometry_report(geometry).map_err(|_| "child native geometry read failed".to_owned())?;
                     Ok(state.cursor_positions > previous_positions
                         && state.contains(expected)
+                        && state.complete_repaint()
                         && state.columns == columns as usize && state.rows == rows as usize
                         && native.is_some_and(|native| native.sequence > previous_native
                             && native.buffer == (columns as u16, rows as u16)
@@ -2316,11 +2362,13 @@ mod windows_fixture {
                 })
                 .map_err(|primary| {
                     let discriminants = fixture.observer.state.lock().map(|state| format!(
-                        "report-fresh={} cursor-fresh={} expected-present={} geometry-matches={} child-witness-valid={}",
+                        "report-fresh={} cursor-fresh={} expected-present={} geometry-matches={} complete-repaint={} cup-hvp-clamped={} child-witness-valid={}",
                         state.resize_reports > previous_reports,
                         state.cursor_positions > previous_positions,
                         state.contains(expected),
                         state.columns == columns as usize && state.rows == rows as usize,
+                        state.complete_repaint(),
+                        state.clamped_cup_hvp,
                         read_geometry_report(geometry).is_ok_and(|native| native.is_some_and(|native| native.sequence > previous_native && native.buffer == (columns as u16, rows as u16) && native.viewport == (columns as u16, rows as u16) && native.frame == (columns as u16, rows as u16))),
                     ));
                     io::Error::other(format!(
@@ -2329,6 +2377,16 @@ mod windows_fixture {
                         fixture.observer.diagnostic(),
                     ))
                 })?;
+            let state = fixture
+                .observer
+                .state
+                .lock()
+                .map_err(|_| io::Error::other("resize observer poisoned"))?;
+            eprintln!(
+                "TUI_RESIZE geometry={columns}x{rows} complete-repaint={} cup-hvp-clamped={}",
+                state.complete_repaint(),
+                state.clamped_cup_hvp
+            );
         }
         eprintln!("TUI_STAGE stage=resize-native-100x30-42x12-80x24 result=pass");
         Ok(())
@@ -2689,6 +2747,65 @@ mod windows_fixture {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn observer_clamps_only_documented_cup_hvp_and_counts_them() {
+            for command in ['H', 'f'] {
+                let observer = TerminalObserver::new();
+                observer
+                    .feed(format!("\x1b[32767;32767{command}").as_bytes())
+                    .unwrap();
+                let state = observer.state.lock().unwrap();
+                assert_eq!((state.row, state.column), (23, 79));
+                assert_eq!(state.clamped_cup_hvp, 1);
+                assert!(!state.complete_repaint());
+                drop(state);
+                assert!(
+                    observer
+                        .feed(format!("\x1b[32768;1{command}").as_bytes())
+                        .is_err()
+                );
+            }
+        }
+
+        fn painted_box(state: &mut ScreenState, columns: usize, rows: usize) {
+            for row in 0..rows {
+                let (left, middle, right) = if row == 0 {
+                    ("┌", "─", "┐")
+                } else if row == rows - 1 {
+                    ("└", "─", "┘")
+                } else {
+                    ("│", " ", "│")
+                };
+                state.feed(
+                    format!(
+                        "\x1b[{};1H{left}{}{right}",
+                        row + 1,
+                        middle.repeat(columns - 2)
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+
+        #[test]
+        fn resize_repaint_rejects_a_clipped_old_frame_and_partial_new_frame() {
+            let mut state = ScreenState::new();
+            state.columns = 42;
+            state.rows = 12;
+            state.cells = vec![ScreenCell::Empty; 42 * 12];
+            state.repainted = vec![false; 42 * 12];
+            painted_box(&mut state, 100, 30);
+            assert!(state.error.is_none());
+            assert!(state.clamped_cup_hvp > 0);
+            assert!(!state.complete_repaint());
+            state.cells.fill(ScreenCell::Empty);
+            state.repainted.fill(false);
+            state.feed(b"\x1b[1;1HPassword Manager");
+            assert!(!state.complete_repaint());
+            painted_box(&mut state, 42, 12);
+            assert!(state.complete_repaint());
+        }
 
         #[test]
         fn observer_validates_resize_reports_without_inventing_repaint() {
