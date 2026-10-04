@@ -2792,17 +2792,63 @@ def agent_attempt_state(binary, profile, private, endpoint, attempt):
     return match.group(1), output
 
 
+def sample_custody_failure(session, operation):
+    """Observe owned processes only after the original operation gate has failed."""
+    assert operation in {"unlock", "restore"}
+    result = session.run_sudo_while_draining(["launchctl", "print", "system/" + LABEL])
+    custodian = running_launchd_pid(result)
+    assert custodian is not None, "unlock custodian not running"
+    markers = {
+        "kdf": ("argon2", "derive_password", "crypto_pwhash"),
+        "unlock": ("HumanVault::unlock", "handle_human_rpc", "rpc_unlock"),
+        "restore": ("prepare_native_restore", "prepare_restore", "RecordReader"),
+        "backup": ("backup::verify", "start_backup", "write_backup", "NativeBackup"),
+        "prompt": ("read_prompt", "crossterm::event::read"),
+        "catalog": ("decode_catalog", "replace_catalog", "catalog"),
+        "protected": ("sodium_mlock", "mlock", "ProtectedBytes"),
+        "file_sync": ("fsync", "F_FULLFSYNC"),
+        "sqlite": ("sqlite3",),
+        "socket_read": ("__recvfrom", "read_frame"),
+    }
+    for category, pid in (("tui", session.pid), ("custodian", custodian)):
+        report = STATE.parent / ("w2-" + operation + "-" + category + ".sample")
+        assert not report.exists(), "operation sample destination exists"
+        try:
+            sampled = session.run_sudo_while_draining(
+                ["sample", str(pid), "1", "1", "-file", report], check=False, timeout=8)
+            assert sampled.returncode == 0, "owned operation process sample failed"
+            value = session.run_sudo_while_draining(["cat", report]).stdout.decode()
+            flags = " ".join(f"{name}={int(any(marker in value for marker in symbols))}"
+                             for name, symbols in markers.items())
+            print(f"PMW2_SAMPLE operation={operation} process={category} {flags}", flush=True)
+        finally:
+            removed = session.run_sudo_while_draining(["rm", "-f", report], check=False)
+            assert removed.returncode == 0, "owned operation sample cleanup failed"
+
+
 def start_macos_tui(binary, profile, private, endpoint, *, idle, reveal, copy, password=PASSWORD):
     session = MacPtySession.start(
         binary, profile, private, endpoint, idle=idle, reveal=reveal, copy=copy,
     )
+    started = time.monotonic()
     try:
         session.wait_text("Password required")
+        prompted = time.monotonic()
         assert b"\x1b[6n" not in bytes(session.output), (
             "TUI PTY startup must not require a terminal-emulator cursor response"
         )
         session.send_text(password.decode("ascii"), enter=True, hidden=True)
-        session.wait_text("Unlocked: selection never reveals secrets")
+        submitted = time.monotonic()
+        try:
+            session.wait_text("Unlocked: selection never reveals secrets")
+        except BaseException as primary:
+            print(f"PMW2_UNLOCK result=failed prompt_ms={round((prompted-started)*1000)} submit_ms={round((submitted-prompted)*1000)} wait_ms={round((time.monotonic()-submitted)*1000)}", flush=True)
+            try:
+                sample_custody_failure(session, "unlock")
+            except BaseException as diagnostic:
+                raise primary from diagnostic
+            raise
+        print(f"PMW2_UNLOCK result=observed prompt_ms={round((prompted-started)*1000)} submit_ms={round((submitted-prompted)*1000)} wait_ms={round((time.monotonic()-submitted)*1000)}", flush=True)
         return session
     except BaseException:
         close_session_preserving_primary(session)

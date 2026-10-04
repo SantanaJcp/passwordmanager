@@ -573,6 +573,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
             session.wait_information("Restore committed with new IDs/keys", since=mark)
         except BaseException as error:
             try:
+                m.sample_custody_failure(session, "restore")
                 diagnose_restore_wait(m, session, after, since=mark)
             except BaseException as diagnostic_error:
                 raise error from diagnostic_error

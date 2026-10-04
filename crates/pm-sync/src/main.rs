@@ -356,19 +356,7 @@ fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) ->
     let opening = timing::Span::new("server_sqlite_open");
     let store = OpaqueSyncStore::create(db).map_err(|_| ())?;
     #[cfg(unix)]
-    let database = {
-        // Keep the WAL attached between RPCs. Each store mutation still commits
-        // durably; closing its short-lived connection is no longer the last
-        // close/checkpoint. No read transaction or altered PRAGMA is retained.
-        let connection = rusqlite::Connection::open(db).map_err(|_| ())?;
-        connection
-            .execute_batch("PRAGMA trusted_schema=OFF")
-            .map_err(|_| ())?;
-        connection
-            .query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))
-            .map_err(|_| ())?;
-        connection
-    };
+    let store = store.session_connection().map_err(|_| ())?;
     drop(opening);
     let result = (|| loop {
         let dispatching = timing::Span::new("server_dispatch");
@@ -390,14 +378,19 @@ fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) ->
     })();
     #[cfg(unix)]
     {
-        let closed = database.close().map_err(|_| ());
+        let closed = store.close().map_err(|_| ());
         result.and(closed)
     }
     #[cfg(windows)]
     result
 }
 
-fn dispatch(store: &OpaqueSyncStore, rpk: &[u8], json: &str) -> Result<String, ()> {
+#[cfg(unix)]
+type DispatchStore = pm_sync::OpaqueSyncConnection;
+#[cfg(windows)]
+type DispatchStore = OpaqueSyncStore;
+
+fn dispatch(store: &DispatchStore, rpk: &[u8], json: &str) -> Result<String, ()> {
     let method = field(json, "method")?;
     let ns = hex32s(&field(json, "namespace")?)?;
     match method.as_str() {

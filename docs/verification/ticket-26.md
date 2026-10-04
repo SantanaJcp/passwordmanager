@@ -2492,3 +2492,66 @@ fase4:17.671 s y2.329 s conservadores; esta muestra tiene0.316 s menos de
 margen conservador. No repetir un SHA idéntico por variabilidad ni cambiar
 el oráculo. FDE/reboot/firma/terminal humano siguen sin acreditarse;26 no cambia
 estado ni se integra en la rama unificada.
+
+### W2 fase 5 — diagnóstico y rendimiento (2026-10-04)
+
+Base W2 actualizada por fast-forward a `1d270ad`; no se toca rama unificada,
+W1 Windows ni estados de tickets. Método, RED/GREEN, matriz y runs están en
+[W2 fase5](w2-purge-sync.md#fase-5--método-autorizado-y-discriminantes).
+El cambio verifica una snapshot completa del DAG/purgas por página de
+exportación en vez de por revisión; conserva fsync, wire, límites, KDF,
+publicación y ack. No añade batching, prohibido por el wire vigente.
+
+Diagnóstico
+[37175725951](https://github.com/SantanaJcp/passwordmanager/actions/runs/37175725951),
+SHA `aac3d4429ea68c4758d23d97aee0bcb66baa9376`, ARM terminado FAIL en restore
+antes de sync. Nueve unlocks observados: KDF0.820–5.415s, wait1.084–5.772s;
+entrada Full25 wait4.927s/KDF4.707s. Unlock intermitente **no reproducido**,
+causa histórica pendiente. Backup6.883s, restore no acreditado dentro8s,
+sync/final NOT_RUN. Intel aún pendiente en esta anotación; no aceptación
+ambas CPU. Siguiente discriminante: retirar perfil unlock y feature de
+instrumentación, manteniendo Full25 y plazos completos.
+
+W2 verificación1
+[37176973454](https://github.com/SantanaJcp/passwordmanager/actions/runs/37176973454),
+`d199ada5ce33002742c878052f1d58702aa22f45`: ARM **PASS completo**,
+Intel **FAIL restore8s**, sync Intel NOT_RUN, workflow FAIL. ARM happy sync
+wait7.390s (margen12.610s/63.1%), total8.259s; backup0.912s. Apertura SQLite
+una por576 RPCs, commits y ACL por RPC. Unlock no falla; ninguna causa
+histórica confirmada. Linux52:49 rc0/tres RED conocidos/cero regresiones,
+check y clean offline PASS, W4 fuera de gates. Pendiente última evidencia
+Intel del producto actual y confirmación plist normal en ambas CPU.
+
+W2 diagnóstico2
+[37177948387](https://github.com/SantanaJcp/passwordmanager/actions/runs/37177948387),
+`f5539986214e52602e646ec2155ec83896796fdf`: ARM PASS completo,
+sync wait6.677s/margen13.323s (66.6%); Intel FAIL core-unlock8.032s y
+restore8s, sync/final NOT_RUN. Síntoma unlock observado también en Intel;
+samples posteriores RPC/SQLite/sockets, sin KDF activo en esa muestra;
+no demuestra qué ocurrió al cutoff ni la causa histórica ARM. Restore
+terminó después del wait con16 elementos nuevos/autoridad preservada,
+sin convertir FAIL en PASS. Última corrida pendiente con plist normal.
+
+W2 evidencia final
+[37178671730](https://github.com/SantanaJcp/passwordmanager/actions/runs/37178671730),
+`ad3905d7c0b18aa57dd8a3812ddfe3863dd8eab2`: ambos jobs terminados,
+Intel PASS completo/ARM FAIL unlock, workflow FAIL, artifacts0, plist normal.
+Intel sync envío2.009s/espera15.637s/total17.645s; margen4.363s (21.8%,
+objetivo30% pendiente), backup1.741s, pushed59/pulled59, bloques287/root1,
+PIDs estables, final/cleanup completos. ARM unlock8.083s, prompt15ms/envío1ms,
+TUI viva/password-prompt; Full25 backup/sync/final NOT_RUN. Samples posteriores
+RPC/SQLite/socket-read sin KDF detectado no prueban la fase al cutoff.
+Causa histórica pendiente; el síntoma no es exclusivo ARM.
+
+Cinco dispatches consumidos, incluida la cancelación inicial por compilación
+de un test; no sexta corrida ni PASS conjunto demostrado. Los PASS ARM de
+los dos checkpoints anteriores conservan márgenes63.1%/66.6%, sin suplir
+esta aceptación. Linux final52/49 rc0/tres RED conocidos/cero regresiones;
+check y clean offline PASS, W4 fuera de gates, Wayland real, fuente congelada.
+RED/GREEN: verificaciones ledger4→1 para cuatro grafos, aperturas SQLite34→1
+para34 RPCs con durabilidad independiente RO antes del cierre. RPC/fsync
+conservados. Batches prohibidos por wire; sin cambios KDF/plazos/límites.
+Resultados, desglose por CPU, riesgos de pico de exportación y propietarios
+en [resultado W2 fase5](w2-purge-sync.md#resultado-final-de-fase-5-mejoras-verificadas-aceptación-conjunta-pendiente).
+Requiere revisar integración y autorizar el siguiente diagnóstico de
+cola/audit-unlock/catálogo/restore; no cambia el estado del ticket26.

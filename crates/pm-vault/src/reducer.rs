@@ -781,6 +781,39 @@ impl CausalReducer {
         Ok((ordered, pending))
     }
 
+    /// Exports one bounded page of local ciphertext graphs in event order.
+    ///
+    /// # Errors
+    /// Rejects oversized pages and the same invalid ledger/payloads as the
+    /// single-event exporter. No transport operation occurs in this method.
+    pub fn export_ciphertext_graphs(
+        &self,
+        events: &[SignedCausalEvent],
+        directories: &[PathBuf],
+    ) -> Result<Vec<Option<ReceivedCiphertextGraph>>, ReductionError> {
+        if events.len() > 256 || events.len() != directories.len() {
+            return Err(ReductionError::ResourceLimit);
+        }
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut connection = open_connection(&self.path)?;
+        let snapshot = connection.transaction()?;
+        let all = parsed_events(&snapshot)?;
+        let view = view_connection(&snapshot, &self.trusted)?;
+        let purges = verified_purges(&all, &view, &structural_events(&all))?;
+        let graphs = events
+            .iter()
+            .zip(directories)
+            .map(|(event, directory)| {
+                export_graph_in_snapshot(&snapshot, event, directory, &purges)
+            })
+            .collect::<Result<_, _>>()?;
+        // Release the read snapshot before any network RPC or outbox ack.
+        snapshot.commit()?;
+        Ok(graphs)
+    }
+
     /// Exports the ciphertext graph cryptographically bound by one local revision event.
     ///
     /// # Errors
@@ -790,76 +823,12 @@ impl CausalReducer {
         event: &SignedCausalEvent,
         directory: &Path,
     ) -> Result<Option<ReceivedCiphertextGraph>, ReductionError> {
-        let parsed = decode_event(&event.event)?;
-        if !parsed.bound_graph {
+        if !decode_event(&event.event)?.bound_graph {
             return Ok(None);
         }
-        let CausalEventBody::Revision {
-            revision_id: revision,
-            manifest_digest: expected,
-            ..
-        } = parsed.body
-        else {
-            return Err(ReductionError::InvalidEvent);
-        };
-        let c = open_connection(&self.path)?;
-        let all = parsed_events(&c)?;
-        let view = self.view()?;
-        let structural = structural_events(&all);
-        if verified_purges(&all, &view, &structural)?.covers(parsed.subject, revision) {
-            return Ok(None);
-        }
-        fs::create_dir_all(directory).map_err(|_| ReductionError::Integrity)?;
-        let (kind,package):(String,Vec<u8>)=c.query_row("SELECT i.kind,r.package FROM revision_parts r JOIN vault_items i ON i.item_id=r.item_id WHERE r.item_id=?1 AND r.revision_id=?2",params![parsed.subject.as_slice(),revision.as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        let package_path = write_stage(directory, "revision", &package)?;
-        let mut attachments = Vec::new();
-        let mut statement=c.prepare("SELECT attachment_id,package FROM attachment_parts WHERE revision_id=?1 ORDER BY attachment_id")?;
-        let rows = statement.query_map([revision.as_slice()], |r| {
-            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
-        })?;
-        for row in rows {
-            let (id, bytes) = row?;
-            let id: [u8; 16] = id.try_into().map_err(|_| ReductionError::Integrity)?;
-            attachments.push(ReceivedCiphertextAttachment {
-                id,
-                package: write_stage(directory, &format!("attachment-{}", hex_id(&id)), &bytes)?,
-            });
-        }
-        let mut streams = Vec::new();
-        let mut statement=c.prepare("SELECT attachment_id,header,chunk_count FROM attachment_streams WHERE revision_id=?1 ORDER BY attachment_id")?;
-        let rows = statement.query_map([revision.as_slice()], |r| {
-            Ok((
-                r.get::<_, Vec<u8>>(0)?,
-                r.get::<_, Vec<u8>>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (id, header, count) = row?;
-            let id: [u8; 16] = id.try_into().map_err(|_| ReductionError::Integrity)?;
-            let mut chunks = Vec::new();
-            for index in 0..count {
-                let bytes:Vec<u8>=c.query_row("SELECT ciphertext FROM attachment_stream_chunks WHERE attachment_id=?1 AND revision_id=?2 AND chunk_index=?3",params![id.as_slice(),revision.as_slice(),index],|r|r.get(0))?;
-                chunks.push(write_stage(
-                    directory,
-                    &format!("stream-{}-{index}", hex_id(&id)),
-                    &bytes,
-                )?);
-            }
-            streams.push(ReceivedCiphertextStream { id, header, chunks });
-        }
-        let graph = ReceivedCiphertextGraph {
-            item: parsed.subject,
-            revision,
-            kind,
-            package: package_path,
-            attachments,
-            streams,
-        };
-        if graph_digest(&graph)? != expected {
-            return Err(ReductionError::Integrity);
-        }
-        Ok(Some(graph))
+        self.export_ciphertext_graphs(std::slice::from_ref(event), &[directory.to_owned()])?
+            .pop()
+            .ok_or(ReductionError::Integrity)
     }
 
     /// Removes only remotely published event digests from the durable outbox.
@@ -885,10 +854,86 @@ impl CausalReducer {
         view_connection(&connection, &self.trusted)
     }
 }
+fn export_graph_in_snapshot(
+    c: &rusqlite::Connection,
+    event: &SignedCausalEvent,
+    directory: &Path,
+    purges: &PurgeProof,
+) -> Result<Option<ReceivedCiphertextGraph>, ReductionError> {
+    let parsed = decode_event(&event.event)?;
+    if !parsed.bound_graph {
+        return Ok(None);
+    }
+    let CausalEventBody::Revision {
+        revision_id: revision,
+        manifest_digest: expected,
+        ..
+    } = parsed.body
+    else {
+        return Err(ReductionError::InvalidEvent);
+    };
+    if purges.covers(parsed.subject, revision) {
+        return Ok(None);
+    }
+    fs::create_dir_all(directory).map_err(|_| ReductionError::Integrity)?;
+    let (kind,package):(String,Vec<u8>)=c.query_row("SELECT i.kind,r.package FROM revision_parts r JOIN vault_items i ON i.item_id=r.item_id WHERE r.item_id=?1 AND r.revision_id=?2",params![parsed.subject.as_slice(),revision.as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let package_path = write_stage(directory, "revision", &package)?;
+    let mut attachments = Vec::new();
+    let mut statement=c.prepare("SELECT attachment_id,package FROM attachment_parts WHERE revision_id=?1 ORDER BY attachment_id")?;
+    let rows = statement.query_map([revision.as_slice()], |r| {
+        Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+    })?;
+    for row in rows {
+        let (id, bytes) = row?;
+        let id: [u8; 16] = id.try_into().map_err(|_| ReductionError::Integrity)?;
+        attachments.push(ReceivedCiphertextAttachment {
+            id,
+            package: write_stage(directory, &format!("attachment-{}", hex_id(&id)), &bytes)?,
+        });
+    }
+    let mut streams = Vec::new();
+    let mut statement=c.prepare("SELECT attachment_id,header,chunk_count FROM attachment_streams WHERE revision_id=?1 ORDER BY attachment_id")?;
+    let rows = statement.query_map([revision.as_slice()], |r| {
+        Ok((
+            r.get::<_, Vec<u8>>(0)?,
+            r.get::<_, Vec<u8>>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, header, count) = row?;
+        let id: [u8; 16] = id.try_into().map_err(|_| ReductionError::Integrity)?;
+        let mut chunks = Vec::new();
+        for index in 0..count {
+            let bytes:Vec<u8>=c.query_row("SELECT ciphertext FROM attachment_stream_chunks WHERE attachment_id=?1 AND revision_id=?2 AND chunk_index=?3",params![id.as_slice(),revision.as_slice(),index],|r|r.get(0))?;
+            chunks.push(write_stage(
+                directory,
+                &format!("stream-{}-{index}", hex_id(&id)),
+                &bytes,
+            )?);
+        }
+        streams.push(ReceivedCiphertextStream { id, header, chunks });
+    }
+    let graph = ReceivedCiphertextGraph {
+        item: parsed.subject,
+        revision,
+        kind,
+        package: package_path,
+        attachments,
+        streams,
+    };
+    if graph_digest(&graph)? != expected {
+        return Err(ReductionError::Integrity);
+    }
+    Ok(Some(graph))
+}
+
 fn view_connection(
     connection: &rusqlite::Connection,
     trusted: &TrustedRoot,
 ) -> Result<ReducedView, ReductionError> {
+    #[cfg(test)]
+    LEDGER_VERIFICATIONS.with(|count| count.set(count.get() + 1));
     let mut statement = connection.prepare(
         "SELECT event,human_signature,device_signature FROM authority_events ORDER BY event_digest",
     )?;
@@ -2499,10 +2544,10 @@ fn encode_ids32_value(values: &[[u8; 32]]) -> Vec<u8> {
 mod restore_digest_tests {
     use super::*;
 
-    struct Fixture(PathBuf);
+    pub(super) struct Fixture(pub(super) PathBuf);
 
     impl Fixture {
-        fn new(name: &str) -> Self {
+        pub(super) fn new(name: &str) -> Self {
             let directory = std::env::temp_dir().join(format!(
                 "pmw2c-restore-digest-{}-{name}",
                 std::process::id()
@@ -2614,6 +2659,148 @@ mod restore_digest_tests {
         assert_eq!(
             crate::backup::restore_graph_digest(&tx, [3; 16], [4; 16], package).unwrap(),
             graph_digest(&graph).unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static LEDGER_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, unix))]
+mod export_page_tests {
+    use super::*;
+    use crate::{AuditDeviceCustody, HumanChannel, HumanVault, PasswordRecord, PendingVault};
+    use std::{os::unix::net::UnixStream, sync::Arc};
+
+    #[test]
+    fn ciphertext_export_page_verifies_ledger_once_and_preserves_graphs() {
+        let fixture = super::restore_digest_tests::Fixture::new("export-page");
+        let path = fixture.0.join("vault.sqlite3");
+        let password = b"PMW2_SYNTHETIC_EXPORT_PAGE_MASTER";
+        let pending =
+            PendingVault::new(password, pm_crypto::KdfProfile::confirmed(64, 3).unwrap()).unwrap();
+        let recovery = pending.recovery_code().to_string().parse().unwrap();
+        pending.persist(&path, &recovery).unwrap();
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let channel = HumanChannel::authenticate(socket, unsafe { libc::geteuid() }).unwrap();
+        let mut human = HumanVault::unlock(
+            &path,
+            password,
+            [0x65; 16],
+            channel,
+            Arc::new(AuditDeviceCustody::generate().unwrap()),
+        )
+        .unwrap();
+        for _ in 0..4 {
+            let record = PasswordRecord::new(
+                "PMW2_SYNTHETIC_NOTE",
+                "synthetic-user",
+                b"PMW2_SYNTHETIC_VALUE",
+                "https://synthetic.invalid",
+                "synthetic",
+            )
+            .unwrap();
+            let prepared = human.prepare_create(&record).unwrap();
+            human
+                .commit(
+                    prepared.command(),
+                    &human.sign(&prepared).unwrap(),
+                    prepared.body(),
+                )
+                .unwrap();
+        }
+        let reducer = CausalReducer::open(&path).unwrap();
+        let events = reducer.pending_sync_group().unwrap().0;
+        assert_eq!(events.len(), 4);
+        let directories: Vec<_> = (0..4)
+            .map(|i| fixture.0.join(format!("graph-{i}")))
+            .collect();
+        LEDGER_VERIFICATIONS.with(|count| count.set(0));
+        let graphs = reducer
+            .export_ciphertext_graphs(&events, &directories)
+            .unwrap();
+        let checks = LEDGER_VERIFICATIONS.with(std::cell::Cell::get);
+        println!(
+            "PMW2_EXPORT events=4 graphs={} ledger_verifications={checks}",
+            graphs.iter().flatten().count()
+        );
+        assert_eq!(graphs.iter().flatten().count(), 4);
+        for (event, graph) in events.iter().zip(&graphs) {
+            let CausalEventBody::Revision {
+                manifest_digest, ..
+            } = decode_event(&event.event).unwrap().body
+            else {
+                panic!("revision expected")
+            };
+            assert_eq!(
+                graph_digest(graph.as_ref().unwrap()).unwrap(),
+                manifest_digest
+            );
+        }
+        assert_eq!(
+            checks, 1,
+            "one complete ledger verification per export page"
+        );
+        reject_corrupt_export_page(&reducer, &path, &fixture.0, &events);
+    }
+
+    fn reject_corrupt_export_page(
+        reducer: &CausalReducer,
+        path: &Path,
+        directory: &Path,
+        events: &[SignedCausalEvent],
+    ) {
+        let db = rusqlite::Connection::open(path).unwrap();
+        let signature: Vec<u8> = db
+            .query_row(
+                "SELECT device_signature FROM authority_events WHERE event_digest=?1",
+                [events[0].digest().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        db.execute(
+            "UPDATE authority_events SET device_signature=zeroblob(64) WHERE event_digest=?1",
+            [events[0].digest().as_slice()],
+        )
+        .unwrap();
+        let bad_directories: Vec<_> = (0..4).map(|i| directory.join(format!("bad-{i}"))).collect();
+        assert!(
+            reducer
+                .export_ciphertext_graphs(events, &bad_directories)
+                .is_err()
+        );
+        assert!(
+            bad_directories.iter().all(|path| !path.exists()),
+            "verify ledger before materializing any payload"
+        );
+        db.execute(
+            "UPDATE authority_events SET device_signature=?1 WHERE event_digest=?2",
+            params![signature, events[0].digest().as_slice()],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE revision_parts SET package=?1",
+            [b"PMW2_SYNTHETIC_CORRUPTION".as_slice()],
+        )
+        .unwrap();
+        assert!(
+            reducer
+                .export_ciphertext_graphs(events, &bad_directories)
+                .is_err(),
+            "every graph digest remains mandatory"
+        );
+        assert!(
+            reducer
+                .export_ciphertext_graphs(
+                    &(0..257).map(|_| events[0].clone()).collect::<Vec<_>>(),
+                    &(0..257)
+                        .map(|i| directory.join(format!("oversized-{i}")))
+                        .collect::<Vec<_>>()
+                )
+                .is_err(),
+            "unchanged 256-event page bound"
         );
     }
 }
