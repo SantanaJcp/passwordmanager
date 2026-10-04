@@ -14,7 +14,9 @@ mod windows_memory;
 
 #[cfg(windows)]
 pub use windows_memory::{
-    WindowsMemoryFailure, WindowsMemoryStatus, windows_memory_failure, windows_memory_status,
+    WINDOWS_PROTECTED_WORKING_SET_MIN, WindowsMemoryFailure, WindowsMemoryQuotaError,
+    WindowsMemoryStatus, prepare_windows_protected_memory, windows_memory_failure,
+    windows_memory_status,
 };
 
 use std::ffi::CStr;

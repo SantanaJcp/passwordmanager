@@ -258,7 +258,7 @@ impl ServiceDiagnostics {
         if let Some(failure) = failure {
             writeln!(file, "phase=protected-memory-failure category={} requested-capacity={} requested-payload-pages={} win32-error={}", failure.category, failure.requested_capacity_bytes, failure.requested_payload_page_bytes, failure.win32_error).map_err(|_| Failure::Unavailable)?;
         }
-        writeln!(file, "phase=protected-memory-status live-capacity={} budget={} live-payload-pages={} live-regions={} working-set-min={} working-set-max={} working-set-flags={}", status.live_capacity_bytes, status.budget_bytes, status.live_payload_page_bytes, status.live_regions, status.working_set_min_bytes, status.working_set_max_bytes, status.working_set_flags).map_err(|_| Failure::Unavailable)?;
+        writeln!(file, "phase=protected-memory-status live-capacity={} budget={} live-payload-pages={} live-locked-pages={} live-budget-pages={} page-bytes={} live-regions={} working-set-min={} working-set-max={} working-set-flags={}", status.live_capacity_bytes, status.budget_bytes, status.live_payload_page_bytes, status.live_locked_page_bytes, status.live_budget_page_bytes, status.page_bytes, status.live_regions, status.working_set_min_bytes, status.working_set_max_bytes, status.working_set_flags).map_err(|_| Failure::Unavailable)?;
         file.sync_all().map_err(|_| Failure::Unavailable)
     }
 }
@@ -560,6 +560,13 @@ fn serve_vault(
             .map_err(|_| Failure::Unavailable)?;
         if let Some(diagnostics) = diagnostics.as_ref() {
             diagnostics.record(ServiceDiagnosticPhase::ArgsOk)?;
+        }
+        // Establish the quota before DPAPI/bootstrap/audit can place a secret.
+        if pm_crypto::prepare_windows_protected_memory().is_err() {
+            eprintln!("PROTECTED_MEMORY_QUOTA_UNAVAILABLE");
+            return Err(Failure::Unavailable);
+        }
+        if let Some(diagnostics) = diagnostics.as_ref() {
             diagnostics.memory(None)?;
         }
         let bootstrap = Arc::new(read_bootstrap(&bootstrap_path)?);

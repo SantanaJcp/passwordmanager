@@ -197,6 +197,12 @@ impl ProtectedBytes {
             crate::windows_memory::failed("budget", len, 0)?;
             return Err(CryptoError::ResourceUnavailable);
         }
+        #[cfg(windows)]
+        if let Err(error) = crate::prepare_windows_protected_memory() {
+            LOCKED_SECRET_BYTES.fetch_sub(len, Ordering::AcqRel);
+            crate::windows_memory::failed(error.category, len, error.win32_error)?;
+            return Err(CryptoError::ResourceUnavailable);
+        }
         // SAFETY: sodium is initialized; a non-null allocation is owned here
         // until freed on failure or transferred into `Self`.
         let pointer = unsafe { libsodium_sys::sodium_malloc(len) }.cast::<u8>();

@@ -1,5 +1,77 @@
 # Ticket 28 — método de fallos operativos, canarios y crash safety
 
+## Windows G7 — W5 fase 2: cuota y presupuesto por páginas (2026-10-04)
+
+Decisión explícita del orquestador: mínimo de working set de **64 MiB**
+(32 MiB de presupuesto + 32 MiB de margen), máximo coherente blando, lectura
+posterior de valores efectivos y rechazo explícito de arranque; sin reducir
+cuota ni usar memoria sin bloqueo. Se conserva un mínimo/máximo previo mayor.
+Se usan `QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE`
+(flags10), no hard minimum ni hard maximum. Microsoft distingue esos límites
+blandos de páginas realmente fijadas por VirtualLock; cada lock sigue siendo
+obligatorio. Fuentes primarias:
+[SetProcessWorkingSetSizeEx](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-setprocessworkingsetsizeex),
+[VirtualLock](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtuallock)
+y [libsodium1.0.22 utils.c](https://github.com/jedisct1/libsodium/blob/1.0.22/src/libsodium/sodium/utils.c).
+
+Método acotado, dentro de los tests autorizados: servicio normal en SCM y
+probe seed8 existente, sin ConPTY ni modificación de transferencia/lease.
+La cuota se prepara antes de DPAPI/bootstrap/auditoría, y también antes del
+primer owner en cualquier proceso humano/test; tanto éxito como fallo se
+conservan sin reintento con otra política. Fallo de arranque publica
+`PROTECTED_MEMORY_QUOTA_UNAVAILABLE` y termina con error.
+
+Para Windows, mantener el límite lógico y cobrar adicionalmente
+`ceil((capacidad + 16) / página) * página + 2 * página`: canario16 de libsodium
+más dos guardas no-access. Las guardas no están bloqueadas; se incluyen
+conservadoramente por la decisión del despacho. La página de metadata no se
+bloquea y queda en el margen de cuota. Distinguir payload, bytes realmente
+bloqueados del owner (payload+canario) y cargo total con guardas. No confundir
+estos contadores con mediciones de todo el working set. Linux/macOS no reciben
+esta nueva regla y conservan su contador lógico; no se optimizan owners1PUX.
+
+Pruebas nativas del contador en proceso serial independiente: acepta31 MiB
+lógicos por chunks, ajusta el último owner hasta32 MiB cobrados, rechaza una
+reserva adicional con `ResourceUnavailable/category=page-budget/win32=0`
+antes de ejecutar la closure del secreto, conserva cargo al truncar, libera
+y reutiliza exactamente, y termina con todos los contadores cero. Segundo
+caso agota páginas con owners de1 byte: capacidad lógica de pocos KiB,
+rechazo de nueva región antes de escritura; no error1453. La denegación de
+`usize::MAX/category=budget` conserva su GREEN anterior.
+
+Prueba nativa de cuota denegada: abrir un handle real del proceso actual con
+`PROCESS_QUERY_LIMITED_INFORMATION`, ejecutar la misma configuración, exigir
+`working-set-set/ERROR_ACCESS_DENIED=5` y valores efectivos sin cambio. No se
+inyecta un éxito ni se usa otro mínimo. Este seam demuestra propagación del
+fallo real de SetProcessWorkingSetSizeEx; no reproduce todavía un fallo del
+SCM por presión del SO/privilegio retirado al token de servicio. Para ese
+caso, un laboratorio humano debe retirar `SeIncreaseWorkingSetPrivilege`
+a la identidad sintética del servicio o imponer un límite de job inferior,
+reiniciar, exigir STOPPED/no endpoints y categoría pública de cuota, sin
+secretos ni dumps. No ejecutar esa política global en CI.
+
+Secuencia RED/GREEN: checkpoint sólo de cuota y tests nuevos, esperando GREEN
+de preview y RED del presupuesto por páginas; después enforcement Windows y
+misma prueba. Referencias causales previas: runs37167921060 (`26f0e24`) y
+37169119293 (`19e4771`), VirtualLock1453. Hasta cinco corridas autorizadas en
+esta fase, sobre SHAs distintos y con hipótesis concreta; soltar flock mientras
+se espera. Los gates locales se ejecutan de nuevo: check, clean y52 casos,
+con artefactos fijados, sesión Wayland explícita y logs `/tmp/pmw5b-*.log`.
+El fallo histórico token-exchange sigue sin causa demostrada: conservar su
+observación y repetir el wrapper sin alterar oráculos/plazos/KDF.
+
+Primer checkpoint: `check.sh` rc0 (`/tmp/pmw5b-quota-check.log`) y clean
+locked/offline rc0 (`/tmp/pmw5b-quota-clean.log`), cada uno bajo flock, cwdW5.
+Sólo cfgLinux: los tests nuevos Windows todavía requieren corrida nativa.
+Workflow manual/free/ARM64/contents:read comprobado sin caches/artifacts/secrets;
+no se modificó el workflow. No se altera ningún ticket ni rama ajena.
+El opt-in leerá claves LocalDumps global/pm-custody.exe y la presencia del
+valor de exclusión para todos los usuarios, vistas Registry64/Registry32.
+Esa observación no modifica políticas ni genera dumps, y no acredita exclusión
+por usuario del servicio ni crash-safety. Fuente:
+[LocalDumps independiente de WER](https://learn.microsoft.com/en-us/windows/win32/wer/collecting-user-mode-dumps).
+Windows11x64, reboot/FDE y crash/extracción siguen no demostrados.
+
 ## Windows G7 — W5: diagnóstico nativo de cuota (2026-10-03)
 
 Worktree aislado `w5-win-memory`, rama `codex/pm-w5-win-memory`, base

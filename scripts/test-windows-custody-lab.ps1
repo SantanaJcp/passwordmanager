@@ -168,13 +168,42 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
         'phase=service-failed'
     )
     foreach ($line in $lines) {
-        $memoryStatus = [string]$line -match '^phase=protected-memory-status live-capacity=[0-9]+ budget=33554432 live-payload-pages=[0-9]+ live-regions=[0-9]+ working-set-min=[0-9]+ working-set-max=[0-9]+ working-set-flags=[0-9]+$'
-        $memoryFailure = [string]$line -match '^phase=protected-memory-failure category=(budget|alloc|virtual-lock) requested-capacity=[0-9]+ requested-payload-pages=[0-9]+ win32-error=[0-9]+$'
+        $memoryStatus = [string]$line -match '^phase=protected-memory-status live-capacity=[0-9]+ budget=33554432 live-payload-pages=[0-9]+ live-locked-pages=[0-9]+ live-budget-pages=[0-9]+ page-bytes=[0-9]+ live-regions=[0-9]+ working-set-min=[0-9]+ working-set-max=[0-9]+ working-set-flags=[0-9]+$'
+        $memoryFailure = [string]$line -match '^phase=protected-memory-failure category=(budget|page-budget|alloc|virtual-lock|working-set-query|working-set-set|working-set-effective) requested-capacity=[0-9]+ requested-payload-pages=[0-9]+ win32-error=[0-9]+$'
         Assert-True (($allowed -contains [string]$line) -or $memoryStatus -or $memoryFailure) 'unexpected service diagnostic phase'
+        if ($memoryStatus) {
+            Assert-True ([string]$line -match 'working-set-min=([0-9]+) working-set-max=([0-9]+) working-set-flags=10$') 'working-set policy is not soft min/max'
+            Assert-True ([long]$Matches[1] -ge 67108864 -and [long]$Matches[2] -ge [long]$Matches[1]) 'effective service quota is insufficient'
+        }
         Write-Host "SERVICE_PHASE $line"
     }
     Assert-ServiceDiagnosticGenerations $lines
     Assert-HumanDiagnosticTrace $lines
+}
+
+function Write-ServiceDumpPolicyObservation {
+    # Read only fixed product keys. Never crash a process or create a dump.
+    foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+        try {
+            $wer = 'SOFTWARE\Microsoft\Windows\Windows Error Reporting'
+            $global = $base.OpenSubKey("$wer\LocalDumps", $false)
+            $service = $base.OpenSubKey("$wer\LocalDumps\pm-custody.exe", $false)
+            $exclusions = $base.OpenSubKey("$wer\ExcludedApplications", $false)
+            try {
+                $globalPresent = $null -ne $global
+                $servicePresent = $null -ne $service
+                $excluded = $null -ne $exclusions -and $null -ne $exclusions.GetValue('pm-custody.exe', $null)
+                Write-Host "WER_POLICY view=$view global-localdumps-key=$globalPresent service-localdumps-key=$servicePresent all-user-exclusion-value=$excluded scope=registry-only crash=not-run acceptance=not-demonstrated"
+            }
+            finally {
+                if ($null -ne $global) { $global.Dispose() }
+                if ($null -ne $service) { $service.Dispose() }
+                if ($null -ne $exclusions) { $exclusions.Dispose() }
+            }
+        }
+        finally { $base.Dispose() }
+    }
 }
 
 function Assert-ServiceDiagnosticGenerations([object[]]$Lines) {
@@ -714,17 +743,21 @@ try {
     Assert-True ($p.ExitCode -eq 0) 'human RPK channel failed after SCM restart'
 
     if ($OnePuxMemoryDiagnostics) {
+        Write-ServiceDumpPolicyObservation
         $p = Start-AsUser $humanCredential $memoryProbe @($humanProfile, $humanPrivate, $vaultId, $memorySource) $humanInput $humanOut $humanErr
         Write-Host (Get-Content $humanErr -Raw)
         Write-Host (Get-Content $humanOut -Raw)
         Write-ServiceSubphaseDiagnostics $diagnosticPath
         $previewExit = $p.ExitCode
         # Independent native budget evidence, even when the seed8 preview is RED.
+        & cargo test -p pm-crypto --lib windows_memory::tests:: --locked --offline -- --nocapture --test-threads=1
+        $quotaExit = $LASTEXITCODE
         & cargo test -p pm-crypto --test windows_memory_budget --locked --offline -- --nocapture --test-threads=1
         $budgetExit = $LASTEXITCODE
         Assert-True ($previewExit -eq 0) 'focused seed8 1PUX preview failed'
         Assert-True ((Get-Content $humanOut -Raw).Trim() -eq 'PASS w5-onepux-memory seed8=exact preview=2 prepared=validated lease=restored commit=not-sent') 'focused preview did not prove exact result'
         Assert-True ($budgetExit -eq 0) 'native aggregate protected-memory budget failed'
+        Assert-True ($quotaExit -eq 0) 'native working-set quota denial failed'
     }
     if ($TuiConPtyRed) {
         $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId) $humanInput $humanOut $humanErr
