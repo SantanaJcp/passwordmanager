@@ -166,8 +166,8 @@ Logs: `/tmp/pmw5-native1.log` y metadata completa
 imagen `win11-vs2026-arm64/20260924.168.1`, Rust1.98.1
 `aarch64-pc-windows-msvc`, libsodium1.0.22 autenticado/nativo/static MSVC.
 El build Windows, probe y test nuevos compilan; preflight no se confunde con
-producto. Cleanup estricto concluye sin error adicional. Se consumió **1/5**
-corridas W5; no hay otra propia activa.
+producto. Cleanup estricto concluye sin error adicional. Al concluir la
+corrida 1 se había consumido **1/5**; la segunda se registra abajo.
 
 ### Decisión requerida antes de corregir
 
@@ -273,8 +273,8 @@ Los tests con snapshot global se ejecutan serialmente en su proceso separado.
 
 Es una corrección de instrumentación, independiente de la política de cuota
 pendiente; no configura working set ni aumenta el presupuesto. La verificación
-nativa de esta regresión aún está pendiente del siguiente checkpoint/run; el
-test de 31/32 MiB y el preview seed8 siguen deliberadamente RED por la cuota.
+nativa de esta regresión pasa en la corrida 2; el test de 31/32 MiB y el
+preview seed8 siguen RED por la cuota.
 
 Gates locales del contador corregido: fmt + `check.sh` rc0,
 `/tmp/pmw5-diagnostic-final-check.log`; clean locked/offline rc0 (build
@@ -284,10 +284,73 @@ son `windows_memory.rs`, su test cfg Windows y el argumento serial del test
 PowerShell opt-in. Ningún cuerpo Linux ni código compartido del allocator
 cambió después del barrido, por lo que no se repiten los 52 casos.
 
-Corrida 2 prevista: mismo modo enfocado sobre el nuevo SHA exacto publicado,
+Corrida 2: [37169119293](https://github.com/SantanaJcp/passwordmanager/actions/runs/37169119293),
+SHA publicado `19e47717df647d811162c1b6c163b6c0cd5f3cc4`, mismo modo enfocado;
 cambio único de comportamiento diagnóstico: una petición desmesurada debe
 ser rechazada sin overflow/panic. La cuota no se toca; se espera conservar
-el RED causal seed8/32 MiB. No se lanzará una corrida idéntica como reintento.
+el RED causal seed8/32 MiB. No se lanzó una corrida idéntica como reintento.
+Terminó **failure**. Logs `/tmp/pmw5-native2.log`, metadata
+`/tmp/pmw5-native2.json`; **2/5** dispatches consumidos, ninguno propio activo.
+
+El nuevo test de rechazo desmesurado pasa nativamente: ResourceUnavailable,
+category=budget, closure sin ejecutar, capacidad final cero y sin overflow.
+El test agregado falla de nuevo al primer MiB (no llega al límite ni a su
+rechazo), y el preview falla tras seed8 exacto, ack/duplicación y restauración
+de lease. GetLastError vuelve a ser1453, con 45 regiones/184320 bytes de
+payload y working set204800/1413120/flags10; esta vez la petición es32 bytes,
+capacidad vigente2431 bytes. La cuota por páginas se reproduce aunque varíe
+la reserva puntual denegada, siempre muy por debajo del presupuesto lógico.
+No se atribuye esa variación a una causa de contenido no observada.
+
+Las 14 primitivas, pipe1, observer20 y sync-lib1 pasan en ambas corridas;
+build/static MSVC ARM64, libsodium autenticado y cleanup estricto sin error
+adicional se conservan. No se ejecuta la matriz TUI ni se omite un paso del
+modo normal. El único GREEN nuevo Windows es la denegación desmesurada del
+contador; **GREEN de preview/32 MiB y corrección de cuota siguen pendientes**.
+
+Este checkpoint final sólo añade evidencia documental a `19e4771`. Su código,
+workflow, script y tests son los observados en run2; no se atribuye una corrida
+diferente al SHA documental ni se exige otro dispatch sin cambio.
+
+### Archivos, integración y siguiente acción
+
+Diez archivos tocados desde la base, con estas responsabilidades:
+
+- `crates/pm-crypto/Cargo.toml`: features Win32 existentes, sin versión ni
+  dependencia nueva; Cargo.lock intacto.
+- `crates/pm-crypto/src/lib.rs`: exports diagnósticos sólo cfg Windows.
+- `crates/pm-crypto/src/root.rs`: reserva/contador originales, registro seguro
+  de los fallos Windows y contabilización de páginas/regiones.
+- `crates/pm-crypto/src/windows_memory.rs`: consultas de quota y snapshots,
+  nunca cambia el working set.
+- `crates/pm-crypto/tests/windows_memory_budget.rs`: aceptación nativa 31/32
+  MiB y rechazo previo a escritura, más el rechazo desmesurado sin overflow.
+- `crates/pm-custody/src/windows.rs`: sólo observación de memoria inicial y
+  del fallo de preview en el opt-in ya existente. No cambia SCM, transferencia,
+  lease, listeners, dispatcher, admisión ni proveedor.
+- `crates/pm-custody/examples/windows_onepux_memory_probe.rs`: probe separado
+  con seed8 congelado, wire humano real y conteos exactos; sin ConPTY/TUI.
+- `.github/workflows/ticket-27-windows.yml`: input opt-in separado, normal
+  intacto, mismas prohibiciones CI.
+- `scripts/test-windows-custody-lab.ps1`: construcción/invocación del probe,
+  categorías/contadores autorizados y test serial sólo en el opt-in nuevo.
+- `docs/verification/ticket-28.md`: método, evidencia, decisiones pendientes.
+
+Conflictos previsibles con W1: workflow/input, harness PowerShell, registro
+diagnóstico vecino al preview en windows.rs y documentación compartida.
+Preservar el método normal y las modificaciones W1 del resize/transferencia;
+no tomar el modo enfocado como aceptación TUI. El archivo de probe y backend
+son propios W5. No se toca la TUI/observer ni se integra esta rama.
+
+`codex/implement-passwordmanager` se comprobó en b3577d2; nunca se modificó
+el checkout raíz ni integration-26-28. Estados de tickets intactos; PR#1
+sigue fuera de este despacho, sin merge ni cambio de reglas.
+
+Siguiente acción tras esta entrega: decidir A/B para el margen de working set.
+Sólo después implementar inicialización comprobada antes de secretos, repetir
+seed8 y los 31/32 MiB, y demostrar rechazo explícito del arranque cuando el
+SO no admite la configuración. Quedan tres corridas del presupuesto W5.
+No se declara listo para integración ni resuelto 28/G7.
 
 ## Frontera y prerrequisitos
 
