@@ -737,6 +737,23 @@ fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Resul
         let opening = timing::Span::new("client_pipe_open");
         let pipe = WindowsClientPipe::connect_sync(name, &stop).map_err(|_| ())?;
         drop(opening);
+        // Check the pinned kernel peer before any TLS or request bytes. A
+        // complete authenticated reply may outlive the server's pipe handle;
+        // requiring pipe liveness after that reply races its normal close.
+        let verifying = timing::Span::new("client_pipe_verify");
+        let verified = pipe.verify().map_err(|_| ());
+        if timing::w1_enabled() {
+            timing::count(
+                if verified.is_ok() {
+                    "client_pipe_verify_ok"
+                } else {
+                    "client_pipe_verify_failed"
+                },
+                1,
+            );
+        }
+        verified?;
+        drop(verifying);
         let configuring = timing::Span::new("client_tls_config");
         let conn = ClientConnection::new(
             Arc::new(config),
@@ -774,20 +791,6 @@ fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Resul
         windows_pipe_tests::after_response(tls.sock.raw_handle());
         drop(reading);
         drop(exchange);
-        let verifying = timing::Span::new("client_pipe_verify");
-        let verified = tls.sock.verify().map_err(|_| ());
-        if timing::w1_enabled() {
-            timing::count(
-                if verified.is_ok() {
-                    "client_pipe_verify_ok"
-                } else {
-                    "client_pipe_verify_failed"
-                },
-                1,
-            );
-        }
-        verified?;
-        drop(verifying);
         Ok(())
     });
     drop(deadline);

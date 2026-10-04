@@ -4880,3 +4880,42 @@ Gates locales: check, clean offline y los 52 comandos de fase6, bajo flock
 individual /tmp/pm-cargo-window.lock, cwd W1, artefactos absolutos indicados y
 sesión Wayland real. Esperados49 rc0 + matrix y dos extras rc1 conocidos;
 W4 fuera de gates. Logs nuevos /tmp/pmw1g-phase8-*.log, sin borrar ajenos.
+
+### Fase8 corrida1 — RED conductual y causa exacta
+
+[37178810073](https://github.com/SantanaJcp/passwordmanager/actions/runs/37178810073),
+[job111366970448](https://github.com/SantanaJcp/passwordmanager/actions/runs/37178810073/job/111366970448),
+SHA `5fbf09401179338dac9639eaf92dd0fdd32be931`, completed/failure;
+1/6 corridas Windows consumida, artifact count0. Compila el test real nativo,
+14 primitivas/1 contrato pipe/24 observer/1 sync-lib pasan. La única regresión
+binaria falla en el resultado final Err vs respuesta autenticada esperada.
+
+`PIPE_LIFECYCLE closed=checked pid_query_ok=true pid_query_error=0
+pid_same=true peek_ok=false peek_error=109`. **Causa aislada:** la consulta
+PID conserva el servidor original; PeekNamedPipe exige vitalidad después del
+cierre y devuelve ERROR_BROKEN_PIPE. No SID/PID cambiado, timeout ni Drop
+fallido: el test cierra el handle servidor con CloseHandle comprobado.
+Referencias Win32: [GetNamedPipeServerProcessId](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeserverprocessid)
+y [PeekNamedPipe](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-peeknamedpipe).
+
+Corrección acotada: mover la comprobación adicional `pipe.verify()` desde
+postrespuesta hasta inmediatamente después de connect_sync, antes de construir
+TLS y enviar cualquier frame. Constructor y verify conservan PID/pin/liveness;
+DACL/SID del servidor y cliente, TLS1.3/RPK, límites y watchdog quedan intactos.
+Un handle conectado vincula su instancia; TLS conserva identidad del contenido.
+No aceptar fallos ni recuperar con otra ruta. Mismo test/hook/oráculo RED para
+GREEN. Sin tocar sesión Unix/engine ni server Drop.
+
+Preflight del RED: check completo rc0 /tmp/pmw1g-phase8-red-check.log; clean
+locked/offline rc0 (47.70s) /tmp/pmw1g-phase8-red-clean.log, flock individual.
+Helper Git heredado apunta a gh ausente; push normal con override autorizado,
+sin force ni cambiar reglas. GitHub informa bypass de regla por permisos
+preexistentes del actor; no se alteró ninguna configuración.
+
+Clasificación de local-operations histórico: log refrescado de37176911110
+contiene CUSTODY_UNAVAILABLE tras unlock/búsqueda y vence esperando
+Organization committed. Pertenece al canal humano de organización, antes de
+PMW1/SYNC. No hay prueba de fallo de commit ni de mera carrera del observer.
+transfer-duplicate-failed es historial reimpreso, no atribución causal válida.
+37177593290 pasa el mismo caso intacto: intermitencia confirmada, causa raíz
+pendiente; el FAIL se conserva, no se declara corregido por este cambio.
