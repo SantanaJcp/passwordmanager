@@ -311,7 +311,7 @@ fn run_with_deadline(
         })
         .map_err(|_| ())?;
     let result = operation();
-    let completion = (|| {
+    let completion: Result<(), ()> = (|| {
         let (lock, changed) = &*completed;
         *lock.lock().map_err(|_| ())? = true;
         changed.notify_all();
