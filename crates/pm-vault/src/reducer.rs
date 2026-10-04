@@ -2784,7 +2784,12 @@ mod export_page_tests {
         );
         assert!(
             reducer
-                .export_ciphertext_graphs(&events.repeat(65), &directories)
+                .export_ciphertext_graphs(
+                    &(0..257).map(|_| events[0].clone()).collect::<Vec<_>>(),
+                    &(0..257)
+                        .map(|i| fixture.0.join(format!("oversized-{i}")))
+                        .collect::<Vec<_>>()
+                )
                 .is_err(),
             "unchanged 256-event page bound"
         );
