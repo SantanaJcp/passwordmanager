@@ -1,14 +1,15 @@
 # Ticket 27 — evidencia Windows parcial y matriz pendiente
 
-Corte actual: 2026-10-03, **W1 fase 4 checkpoint parcial; aceptación integral
-pendiente**, ticket `claimed`. Composición c8325fb y gates registrados en
-82075cd; se aplican las dos propuestas aprobadas CUP/HVP y cierre nativo.
-Las dos propuestas tienen GREEN nativo acotado; reparse integral y
-pair/sync/retire siguen pendientes de método. Preview 1PUX seed8
-`crypto-resource` pertenece a W5; Mac Intel PASS completo, ARM FAIL de colisión
-de backup. Los métodos y
-runs exactos del corte están al final. No acredita soporte completo, x64/reboot
-ni resuelve el ticket.
+Corte actual: 2026-10-04, **W1 fase 6: fixtures Windows GREEN; SYNC FAIL
+por plazo original y RETIRE NOT_RUN**; ticket `claimed`, sin cierre integral.
+[Resultado y tiempos](#corrida1-fase6--green-de-fixtures-límite-de-sync-alcanzado)
+en código `a58bbe7`: matriz1PUX seed8/resize/operaciones locales y PAIR pasan
+tras componer W5; el servidor sync permanece vivo y ejecuta RPC, pero no hay
+panel completo dentro de15s. Gates Linux52=49rc0+3RED conocidos. No se amplían
+plazos ni se porta sesión Unix; se detiene sync para entregar medición/propuesta.
+Los cortes Mac anteriores son históricos: W2 trabaja en su propia rama y esta
+fase no ejecuta ni modifica Mac. No acredita soporte completo, x64/reboot ni
+resuelve el ticket.
 Las entradas desde 2026-09-13 se conservan como cronología de checkpoints,
 no como declaraciones simultáneas sobre el candidato actual.
 
@@ -4504,3 +4505,56 @@ aceptación asíncrona del mismo job con observación completa, que también
 requiere aprobación previa del plazo/método. Ninguna propuesta aplicada.
 Se detiene toda modificación/CI de sync en esta frontera solicitada; sólo
 continúan el barrido local pendiente y el cierre documental.
+
+### Gates finales y criterios27 — fase6
+
+Barrido único terminado sobre el código exacto a58bbe7: **52 casos /49rc0 /
+tres rc1 esperados /cero regresiones**; fuente estable antes/después de cada
+invocación. Coincidencia exacta de los52 nombres/comandos/expected/rc frente a
+pmint6 código0d8c57d, comprobada programáticamente, no sólo por el total.
+Check rc0 en61.447s, clean locked/offline rc0 en79.321s;973.733s agregados
+incluyen reconstrucción después de clean y esperas de flock (W2 incluido),
+no son benchmark. Sin fallos Wayland ni repeticiones: sesión real wayland-1.
+
+Resultados `/tmp/pmw1f-gates-local-results.json`, resumen
+`/tmp/pmw1f-gates-local-summary.{json,log}`, comparación
+`/tmp/pmw1f-baseline-comparison.json`; driver `/tmp/pmw1f-run-local.py`.
+Cada invocation/check/build/lab bajo flock individual, artefactos absolutos
+Keycloak26.7.3/CFT. Labs26/26, publicación3/3, custody-audit/sqlite-sync/
+bootstrap-completed, inflight result-sync/bootstrap/audit/crash/canaries,
+extras positivos y concurrency/purge/digest rc0. Multiagente W4 fuera de gates.
+
+G7-matrix conserva exactamente ProductRed commit-outbox-audit EIO y ENOSPC
+por staging que sobrevive fallo/restart, sin relajar atomicidad/autoridad.
+Los dos extras bootstrap/vault conservan `authority or receipts changed
+across loss`, rc1, replacement0/closed1 y cleanup errors0. No se reclasifican
+como PASS ni se cambian sus aserciones. Las últimas pruebas e2ee_replication/
+shared_purge y restore_graph_digest rc0; sin ampliar pruebas tras estos gates.
+
+Esta tabla sustituye el corte vigente de fase5, conservando la cronología y
+los estados del tracker/especificación:
+
+| Criterio27 | Resultado fase6 | Evidencia y límite |
+| --- | --- | --- |
+| Servicio virtual/DACL/DPAPI y peer bilateral G1 por proceso real | PASS parcial | SCM ordinario, SID/PID/TLS-RPK, segundo ID y paquetes byte-exactos; Win11 ARM64. G1 integral, x64 y reboot pendientes. |
+| Sustitución/impersonación/dump/lectura y fallos de custodia rechazados | PASS parcial | Reparse sin lease/DACL intacta, RPK impostor UnknownCA, siete wire negativos y fuentes inválidas. Dump/lectura y matriz Win32/custodia completa no demostrados; fallbacks heredados intactos. |
+| ConPTY/clipboard/persistencia nativos sin admin del agente | PASS parcial; SYNC FAIL; RETIRE NOT_RUN | Matrix seed8 integral, resize fresco completo/clamp0, clipboard/access/rotaciones/local-operations y PAIR PASS. Sync excede wait15s; no convergencia/retire acreditados, adjunto grande integral pendiente. |
+| TDD RED/GREEN y comandos exactos, sin skip/stubs | PASS acotado | RED nativo previo de nombres/panel del fixture→GREEN, no defecto productivo inventado. Check/clean/barrido52 sin regresión; tres RED conocidos explícitos. |
+| Revisión contractual e integración por merger antes de resolver | Pendiente | Candidata W1 publicada aislada; ninguna integración en rama unificada ni merge PR1. Plazos/KDF/DACL/parser/fallbacks y tickets preservados. |
+
+Archivos propios desde1d270ad: `scripts/test-windows-custody-lab.ps1`,
+`crates/pm-native-channel/examples/windows_tui_conpty_fixture.rs`, este informe.
+Cero edición propia de pm-sync, TUI productiva, memoria W5, listener/proveedor
+W4, custodia/staging W3, macOS/W2, Cargo.lock/workflows/dependencias o tickets.
+La publicación de evidencia cambia sólo documentación respecto de a58bbe7;
+no atribuir otra corrida nativa a su SHA documental. Baseline de fast-forward
+publicado1d270ad; checkpoint de código publicado a58bbe7; primer checkpoint de
+evidencia27ba112. SHA final de evidencia se entrega en el informe externo.
+Raíz b3577d2 con `.gitignore`/`.pi/`/`odd/` ajenos intactos; integration-26-28
+sin cambios propios. Sin force, cambios de reglas, publicación de credenciales,
+borrado global de temporales ni cambios de estados.
+
+Siguiente acción: revisar la candidata por el merger y decidir el diagnóstico
+de rendimiento Windows propuesto arriba. La parada por wait15s es explícita;
+aceptación integral de27 sigue pendiente y no se promete una duración final
+ni cierre de retiro. Ninguna corrida pendiente, Windows1/6 consumida.
