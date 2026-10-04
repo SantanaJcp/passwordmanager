@@ -899,7 +899,8 @@ Método siguiente: TLS/RPK real, secuencia16 puts+16 gets+publish+list,
 cerrar TLS. Contar aperturas SQLite del dispatch; RED34 frente a1.
 GREEN reutiliza sólo la conexión propia de cada TLS, sin transacción retenida
 ni agrupar commits; ACL/hash/límites por RPC, FULL/WAL/autocheckpoint y cierre
-comprobado intactos. El camino Windows no cambia. Repetir los52 casos tras
+comprobado intactos. Windows conserva el transporte y el modo por llamada;
+el SQL compartido se refactoriza preservando su comportamiento. Repetir los52 casos tras
 el nuevo cambio productivo, logs `/tmp/pmw2e-session-*`.
 
 SQLite RED `/tmp/pmw2e-sqlite-red.log` rc101: secuencia real intacta,
@@ -1005,3 +1006,131 @@ Root cause adicional precisa requiere tiempos de cola, commit de audit/unlock,
 catálogo y fases restore en sus propietarios; no se modifica custodia/W3/W4,
 TUI/W1 o protección/W5. Último run normal; el presupuesto total incluirá
 la cancelación inicial y no admite sexta corrida.
+
+### Resultado final de fase 5: mejoras verificadas, aceptación conjunta pendiente
+
+Código y fixtures finales: `ad3905d7c0b18aa57dd8a3812ddfe3863dd8eab2`.
+[37178671730](https://github.com/SantanaJcp/passwordmanager/actions/runs/37178671730)
+terminó **completed/failure**: Intel **PASS completo**, ARM **FAIL unlock**.
+Se esperó la terminación de ambos jobs; presupuesto cinco dispatches agotado.
+No se integra en la rama unificada ni se cambia el estado de26.
+
+Intel normal: happy sync envío2.009s/espera15.637s/total17.645s;
+margen contractual4.363s/**21.8%**, menor que el objetivo30%.
+Backup1.741s. Unlocks observados0.880–2.356s; Full25, fase final y cleanup
+estricto completos. Estado durable y pantalla succeeded, pushed59/pulled59,
+bloques287/root1, PIDs de custodio/servidor iguales. Plist normal sin
+PMW2_TIMING; no hay desglose de fases del job en esta corrida. Control TLS39:
+publicación15.950s/convergencia20.577s; no sustituye el workload TUI59.
+
+ARM normal: seis unlocks observados1.109–7.230s; luego FAIL8.083s al
+iniciar el caso de importación rechazada de Full25. Prompt15ms/envío1ms,
+TUI viva en password-prompt. Samples después del gate: TUI SQLite=1/
+socket-read=1/unlock=0; custodio unlock=1/SQLite=1/socket-read=1;
+KDF=0/protección=0 ambos. Terminan unos2.0/3.3s después del fallo;
+categorías de presencia de símbolos, sin prueba de actividad al cutoff.
+Backup/sync/final de Full25 **NOT_RUN**. Control TLS39 sí pasa:
+publicación6.607s/convergencia8.958s. No se convierte en aceptación TUI.
+
+Entorno final verificado: macOS15.7.9/kernel24.6.0, Rust1.98.1
+(48a229cea,2026-09-01); Intel x86_64-apple-darwin/X64 imagen20260824.0482.1,
+ARM aarch64-apple-darwin/ARM64 imagen20260907.0337.1. Labels estándar
+macos-15-intel/macos-15, repositorio público, inputs false/false en las cinco
+corridas, workflow sin cambios, sin caches/artifacts/secrets. Consulta API
+final: artifacts0 en cada run. FDE/reboot/firma/terminal humano no acreditados.
+
+| Run exacto | SHA | Intel | ARM |
+| --- | --- | --- | --- |
+| [37175688148](https://github.com/SantanaJcp/passwordmanager/actions/runs/37175688148) | `7f4709687ff85f36c7a8e7937781472f493fa89c` | Cancelado: compilación del test | Cancelado |
+| [37175725951](https://github.com/SantanaJcp/passwordmanager/actions/runs/37175725951) | `aac3d4429ea68c4758d23d97aee0bcb66baa9376` | PASS completo; margen23.2% | FAIL restore8s; sync NOT_RUN |
+| [37176973454](https://github.com/SantanaJcp/passwordmanager/actions/runs/37176973454) | `d199ada5ce33002742c878052f1d58702aa22f45` | FAIL restore8s; sync NOT_RUN | PASS completo; margen63.1% |
+| [37177948387](https://github.com/SantanaJcp/passwordmanager/actions/runs/37177948387) | `f5539986214e52602e646ec2155ec83896796fdf` | FAIL unlock y restore; sync NOT_RUN | PASS completo; margen66.6% |
+| [37178671730](https://github.com/SantanaJcp/passwordmanager/actions/runs/37178671730) | `ad3905d7c0b18aa57dd8a3812ddfe3863dd8eab2` | PASS completo; margen21.8% | FAIL unlock; sync NOT_RUN |
+
+Evidencia exacta: `/tmp/pmw2e-native-final-evidence.json`,
+`/tmp/pmw2e-macos{1,2,3,4}-{arm,intel}.log`, metadata por run.
+La primera cancelación no acredita RED del producto. Los PASS separados por
+CPU no acreditan PASS conjunto ni estabilidad del unlock/restore.
+
+Comparación de trabajo: RED/GREEN local de cuatro grafos reales reduce
+verificaciones completas del ledger4→1 conservando cuatro grafos válidos.
+RED/GREEN real TLS/RPK de34 RPCs reduce aperturas SQLite34→1;16 bloques y
+una raíz comprometidos visibles por una conexión independiente realmente RO
+antes del cierre TLS, que también se comprueba. La conexión Unix antes
+retenida como keeper ahora sirve los RPCs. ACL/hash por operación,
+autocommit/durabilidad/close conservados; no autorización cacheada.
+
+| Fase TUI59 | Intel fase4, referencia | Intel fase5, exportación compartida | ARM fase5, conexión reutilizada (diag2) |
+| --- | --- | --- | --- |
+| Exportaciones, scopes / tiempo | 59 /4.518s | 1 /0.888s | 1 /0.228s |
+| Push | 12.971s | 10.725s | 4.870s |
+| Pull | 2.633s | 4.191s | 1.617s |
+| Job | 15.725s | 15.049s | 6.584s |
+| Put / get | 287 /287 | 287 /287 | 287 /287 |
+| Put / get acumulados | 7.247 /1.049s | 8.271 /1.490s | 4.052 /0.580s |
+| Dispatch, count / tiempo | 576 /6.666s | 576 /7.630s | 576 /3.795s |
+| Fsync download, count / tiempo | 36 /0.210s | 36 /0.586s | 36 /0.032s |
+| Fsync status, count / tiempo | 4 /0.106s | 4 /0.128s | 4 /0.043s |
+
+ARM diag2 joined fsync5/0.096s y store_sqlite_open1 real para576 RPCs.
+Scopes anidados; no sumar con las fases que los incluyen. Son muestras
+diferentes, no un experimento aislado entre CPU. Intel persistente final
+tiene tiempo externo y control TLS, pero no scopes de job; no extrapolar
+el desglose ARM ni atribuir variaciones de backup al cambio (backup intacto).
+
+RPCs y fsync no se reducen: control Linux39 conserva271 puts/272 gets,
+TUI59 conserva287 puts/287 gets más publish/list. Interposición local
+conserva426 fsync/0 fdatasync en el proceso de prueba, incluido setup/receive;
+no mide el total del servidor. Control local publicación/convergencia:
+3.462/4.341s antes, 2.914/3.785s tras página, 2.851/3.729s tras conexión.
+El wire vigente prohíbe batches y admite un bloque por put. Agrupar RPCs
+requeriría otro contrato; no se implementó. El coste eliminado es la
+verificación/apertura repetida, no commits ni validaciones por bloque.
+
+Barrido final sobre código/fixtures `ad3905d`:
+`/tmp/pmw2e-final-gates-results.json`, **52 casos/49 rc0/tres RED conocidos/
+cero regresiones**, fuente congelada y manifest comprobado entre casos.
+`check.sh` rc0 (161.635s wall), clean-offline-build rc0 (47.560s wall),
+incluidos en52; tiempos pueden incluir espera del flock. Wayland real
+wayland-1 desde el inicio; sin repetición por entorno. W4 concurrency sólo
+observación, fuera de gates. Logs `/tmp/pmw2e-final-gates-*.log`.
+Los RED mantienen sus causas: g7-matrix staging retenido tras
+commit-outbox-audit EIO/ENOSPC; g7-extra-bootstrap/vault authority/receipts
+cambiados tras pérdida. No se relajan ni se renombran como PASS.
+
+**Causa unlock: pendiente.** KDF domina varios unlocks exitosos ARM
+(4.707s de4.927s en una entrada Full25), pero también varía en Intel;
+no prueba que ARM sea intrínsecamente más lento ni que cause el timeout.
+El fallo también ocurre en Intel; el render password-prompt y los samples
+posteriores no discriminan cola/lane, KDF previo, commit de auditoría,
+catálogo o repaint. No hay error memlock observado, ni prueba que lo descarte.
+Restore tardío Intel con16 elementos nuevos tampoco demuestra cuál fase
+consumió el plazo. No se amplían8/20s ni se cambia Argon2id.
+
+Riesgo adicional revisable: la exportación ahora materializa los grafos de
+una página (máximo256 eventos) antes del transporte, en lugar de uno por
+evento; puede aumentar pico de disco y duración de la snapshot de lectura.
+El escenario grande existente pasa, pero no se midió una página con muchos
+adjuntos máximos. No se altera el cleanup/staging heredado ni se introduce
+una reducción de límites. El retry/backoff heredado de `retry` sigue sólo
+ante Unavailable; no se añade replay ni se observó backoff en los jobs
+perfilados. Los fallbacks/errores secundarios ignorados del informe siguen
+intactos, incluido cleanup de stages, parser optional_field y estado de
+emergencia del sync job.
+
+Entrega: ocho archivos respecto de1d270ad: pm-sync/src/lib.rs y main.rs,
+pm-sync/tests/e2ee_replication/purge_sync.rs, pm-vault/src/reducer.rs,
+pm-custody/tests/macos_lab.py y macos_tui_migration_lab.py, este informe y
+ticket-26.md. Script y workflow finales idénticos a la base. No TUI,
+fixtures Windows, W3/W4/W5 ni cambios ajenos de raíz. Windows nativo del
+SQL compartido queda para W1; Linux/macOS no acreditan ese target.
+Conflictos previsibles: integración de W1 en pm-sync/lib/main y documentos
+ticket26; fixtures Mac compartidos requieren revisar la unión de diffs.
+
+Siguiente acción propuesta al orquestador: revisar estos checkpoints antes
+de integrar, autorizar el diagnóstico de tiempos de cola/audit-unlock/
+catálogo/restore en los propietarios correspondientes y un nuevo presupuesto
+CI. Mantener desbloqueo intermitente y margen Intel<30% como pendientes.
+Para rendimiento adicional, evaluar pipelining dentro del límite vigente
+de solicitudes pendientes o proponer un batch explícito con decisión de
+contrato; ninguna de esas opciones se implementó en fase5.

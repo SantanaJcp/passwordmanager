@@ -2531,3 +2531,27 @@ samples posteriores RPC/SQLite/sockets, sin KDF activo en esa muestra;
 no demuestra qué ocurrió al cutoff ni la causa histórica ARM. Restore
 terminó después del wait con16 elementos nuevos/autoridad preservada,
 sin convertir FAIL en PASS. Última corrida pendiente con plist normal.
+
+W2 evidencia final
+[37178671730](https://github.com/SantanaJcp/passwordmanager/actions/runs/37178671730),
+`ad3905d7c0b18aa57dd8a3812ddfe3863dd8eab2`: ambos jobs terminados,
+Intel PASS completo/ARM FAIL unlock, workflow FAIL, artifacts0, plist normal.
+Intel sync envío2.009s/espera15.637s/total17.645s; margen4.363s (21.8%,
+objetivo30% pendiente), backup1.741s, pushed59/pulled59, bloques287/root1,
+PIDs estables, final/cleanup completos. ARM unlock8.083s, prompt15ms/envío1ms,
+TUI viva/password-prompt; Full25 backup/sync/final NOT_RUN. Samples posteriores
+RPC/SQLite/socket-read sin KDF detectado no prueban la fase al cutoff.
+Causa histórica pendiente; el síntoma no es exclusivo ARM.
+
+Cinco dispatches consumidos, incluida la cancelación inicial por compilación
+de un test; no sexta corrida ni PASS conjunto demostrado. Los PASS ARM de
+los dos checkpoints anteriores conservan márgenes63.1%/66.6%, sin suplir
+esta aceptación. Linux final52/49 rc0/tres RED conocidos/cero regresiones;
+check y clean offline PASS, W4 fuera de gates, Wayland real, fuente congelada.
+RED/GREEN: verificaciones ledger4→1 para cuatro grafos, aperturas SQLite34→1
+para34 RPCs con durabilidad independiente RO antes del cierre. RPC/fsync
+conservados. Batches prohibidos por wire; sin cambios KDF/plazos/límites.
+Resultados, desglose por CPU, riesgos de pico de exportación y propietarios
+en [resultado W2 fase5](w2-purge-sync.md#resultado-final-de-fase-5-mejoras-verificadas-aceptación-conjunta-pendiente).
+Requiere revisar integración y autorizar el siguiente diagnóstico de
+cola/audit-unlock/catálogo/restore; no cambia el estado del ticket26.
