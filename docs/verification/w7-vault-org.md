@@ -1,10 +1,12 @@
 # W7 — organización/edición con adjuntos en streaming y diagnóstico de staging
 
-Estado: **RED determinista confirmado; corrección pendiente de aclaración del
-requisito de ciphertext**. No es una candidata GREEN ni integración. Base exacta
+Estado actual: **fase 2 implementada; W7 16/16 y check.sh PASS; barrido/CI pendientes**.
+Recifrado autorizado el 2026-10-04, sin integración.
+El registro de fase 1 siguiente conserva su RED y diagnóstico originales. Base exacta
 `fdfc2230a3d80ad53fccd9bd86126e4ba14975ca`, worktree
 `.worktrees/w7-vault-org`, rama `codex/pm-w7-vault-org`.
-Sólo tests de `pm-vault` y este documento; producto y tickets sin cambios.
+Zona fase 2: edición/organización/streams en `pm-vault`, sus tests y este
+documento. Tickets sin cambios.
 
 ## Contrato y método
 
@@ -195,7 +197,7 @@ Opciones para el diagnóstico/correctivo posterior, **ninguna ejecutada**:
 4. Mantener staging humano como asunto separado sujeto al punto 10 del usuario;
    no inferir política replay/abort desde este archivo de sync.
 
-## Gates y entrega
+## Gates y entrega — fase 1 histórica
 
 Gates ejecutados en W7, todos bajo flock:
 
@@ -222,6 +224,100 @@ Windows completo y macOS normal, conforme [native-ci](native-ci.md), público/
 estándar/sintético, sin caches/artifacts/secrets. No tocar FAIL conocidos de
 unlock/sync, límites/KDF/plazos ni integración/PR #1.
 
-Siguiente acción: resolver si «conservar streams existentes» permite recifrado
+Siguiente acción al cerrar fase 1 (resuelta por el encargo de fase 2): aclarar si «conservar streams existentes» permite recifrado
 protegido de la revisión **nueva** manteniendo inmutables las anteriores. Después
 implementar, obtener GREEN de los RED nuevos y ejecutar la verificación completa.
+
+## Fase 2 — método autorizado (2026-10-04)
+
+Decisión del orquestador: recifrar streams bajo el AAD de la revisión nueva,
+conservar los históricos byte a byte y mantener formato/G2/presupuesto/plazos.
+Verificar primero el RED anterior y los nuevos tests `w7_large_stream_*`:
+organización, rename y campos por separado, sobre copias PMB1 restauradas con
+2 MiB +73 bytes y 31 MiB +73 bytes. Generación/lectura sintética acotada;
+plaintext recifrado sólo en `ProtectedBytes`, chunks <=1 MiB. Medir prepare y
+prepare+commit; el tamaño del archivo no equivale a memoria plaintext viva.
+Comparar headers/chunks históricos y autenticar cada chunk bajo su AAD original.
+Exportar y aplicar el grafo nuevo a una réplica sembrada antes de editar, leer
+metadata y digest exactos, y volver a comprobar papelera/history/restore.
+Fuente corrupta a mitad de stream debe rechazar prepare sin nuevos staging,
+challenges, revisiones, outbox, eventos ni auditoría. La firma/digest de staging
+impide confirmar un grafo alterado después de prepare. Mantener controles de
+inline, creación/reemplazo/eliminación de adjuntos y fuentes inexistentes.
+
+Comandos enfocados: `cargo-local.sh test -p pm-vault --test backup_lifecycle
+w7_ --locked --offline -- --nocapture --test-threads=1`; test del contrato AAD;
+regresión pm-vault/history; E2EE existente de pm-sync. Todos bajo flock, logs
+`/tmp/pmw7b-*.log`. Gates y CI conservan el método anterior y el presupuesto
+máximo del encargo (2 Windows, 1 macOS); sin tocar sync ni staging humano G4.
+
+La ruta legacy `prepare_edit(PasswordRecord)` también produce revisión nueva;
+`PasswordRecord` no expresa adjuntos. La prueba exige conservarlos en original
+inline y copia streaming, además de tamaños grande/cerca del presupuesto y
+lectura replicada. Recifrado de esa ruta dentro de pm-vault, sin cambiar el wire.
+
+### Evidencia fase 2 local
+
+- `/tmp/pmw7b-red-original.log`: HEAD 11cfd5b, 1 PASS/2 FAIL conductuales.
+- `/tmp/pmw7b-red-final.log`: producto exacto 11cfd5b con fixture ampliado,
+  13 casos, 1 PASS/12 FAIL, rc101. Incluye cada operación/tamaño por separado.
+- `/tmp/pmw7b-red-password.log`: ruta legacy pierde el adjunto inline, rc101.
+- `/tmp/pmw7b-green-final.log`: 16/16 PASS, rc0; mismas aserciones de integridad,
+  contenido, históricos, réplica y atomicidad. Los tamaños son 2.097.225 y
+  32.505.929 bytes; 3 y 32 chunks respectivamente (último de 73 bytes).
+- `/tmp/pmw7b-check-initial.log`: todos los tests pasan; rc101 al llegar a
+  clippy por `type_complexity` del snapshot heredado de fase 1. Corregido con
+  `W7StreamRow`, sin suprimir el lint ni cambiar la aserción.
+
+Garantía: prepare autentica fuente/propiedad/índices/FINAL/tamaño/hash y recifra
+cada chunk mediante `FileOpener -> ProtectedBytes -> FileSealer` con nueva clave,
+nonce/header y revisión propia; sin plaintext ordinario/disco ni cambio de AAD.
+Si falla fuente o staging, rollback antes de crear challenge/publicar revisión.
+El commit verifica de nuevo `pm/staged-stream/v1` contra el cuerpo firmado;
+alteración de chunk posterior a prepare falla sin cambiar efectos durables.
+No se copian streams viejos a la nueva revisión; los históricos no se escriben.
+La ruta legacy conserva adjuntos moviendo sus owners, sin `Clone` de secretos.
+Reemplazo/eliminación explícita por `prepare_edit_record` sigue disponible,
+incluida sustitución por archivo vacío y conservación de stream vacío/FINAL.
+
+Lectura cruzada: el fixture replica **sólo** el evento nuevo y su grafo cifrado
+mediante `export_ciphertext_graph -> apply_received_package` del receptor real
+pm-vault, sobre seed previo a la edición. Autentica metadata y todos los bytes
+por digest/longitud en la réplica. No copia SQLite después de editar, no altera
+wire/servidor/proveedor y no sustituye las pruebas E2EE de transporte pm-sync.
+
+Coste Linux debug, prepare exclusivo de la operación (fixture/hash de entrada
+preparados antes del cronómetro), `/tmp/pmw7b-green-final.log`:
+
+| Operación | 2 MiB+73 prepare / prepare+commit s | 31 MiB+73 prepare / prepare+commit s |
+| --- | --- | --- |
+| organización | 0.017767 / 0.027248 | 0.225763 / 0.351163 |
+| rename | 0.017104 / 0.026577 | 0.227384 / 0.339475 |
+| campos | 0.017516 / 0.027122 | 0.236635 / 0.357285 |
+| PasswordRecord legacy | 0.017830 / 0.027297 | 0.224283 / 0.334825 |
+
+Memoria: cada plaintext recifrado <=1 MiB, liberado al finalizar ese chunk;
+header/ciphertext/snapshots del fixture son ciphertext ordinario. Muestreo de
+`/proc/PID/status` cada 5 ms, dos tests aislados bajo flock, rc0:
+`/tmp/pmw7b-memory{.log,-summary.json}` y logs `…-w7_*rename_and_replica.log`.
+Pico **observado**, no cota formal, VmLck=1.092 KiB en ambos tamaños; VmRSS
+97.644/300.084 KiB incluye KDF, SQLite y snapshots/backup cifrados del fixture,
+no significa 31 MiB de plaintext protegido. El sampler es observacional,
+no cambia límites, presupuesto ni mlock. No acredita extracción/dumps nativos.
+
+Comportamientos heredados adicionales inspeccionados y sin cambiar:
+`TestDir::drop` de backup_lifecycle descarta error de `remove_dir_all` (teardown
+puede ocultar residuos de fixture). `prepare_create_record_streaming` y
+`prepare_1pux_import` usan buffers propios `Zeroizing<Vec<u8>>` para entrada;
+no son el camino nuevo de recifrado y zeroizar no equivale a memoria bloqueada.
+Los fallbacks de cleanup/retry de sync documentados arriba siguen intactos.
+
+`./scripts/check.sh` final: **rc0**, `/tmp/pmw7b-check-final.log`;
+configuración, fmt, check, tests completos (incluidos AAD/history/E2EE existente)
+y clippy pasan. El digest snapshot y las aserciones no se relajaron.
+
+RED ampliado final **sobre el mismo fixture de 16 tests**, producto exacto
+11cfd5b: `/tmp/pmw7b-red-complete.log`, rc101, 1 PASS/15 FAIL conductuales,
+incluidas las cuatro rutas de edición en ambos tamaños. Se restauraron los
+dos archivos propios del producto y se compararon byte a byte con los archivos
+verificados por check.sh antes de continuar. No se tocó otro worktree.

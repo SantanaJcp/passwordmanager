@@ -671,10 +671,463 @@ fn w7_restored_password(label: &str, operation: impl Fn(&mut HumanVault, [u8; 16
     }
 }
 
-fn w7_stream_snapshot(db: &rusqlite::Connection) -> Vec<(Vec<u8>, Vec<u8>, i64, Vec<u8>)> {
+type W7StreamRow = (Vec<u8>, Vec<u8>, i64, Vec<u8>);
+
+fn w7_stream_snapshot(db: &rusqlite::Connection) -> Vec<W7StreamRow> {
     db.prepare("SELECT s.revision_id,s.header,c.chunk_index,c.ciphertext FROM attachment_streams s JOIN attachment_stream_chunks c USING(attachment_id,revision_id) ORDER BY s.revision_id,c.chunk_index")
         .unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))
         .unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+}
+
+#[test]
+fn w7_large_stream_organization_and_replica() {
+    w7_large_edits("organization", LARGE);
+}
+
+#[test]
+fn w7_large_stream_rename_and_replica() {
+    w7_large_edits("rename", LARGE);
+}
+
+#[test]
+fn w7_large_stream_field_edit_and_replica() {
+    w7_large_edits("fields", LARGE);
+}
+
+#[test]
+fn w7_near_budget_stream_organization_and_replica() {
+    w7_large_edits("organization", 31 * 1024 * 1024 + 73);
+}
+#[test]
+fn w7_near_budget_stream_rename_and_replica() {
+    w7_large_edits("rename", 31 * 1024 * 1024 + 73);
+}
+#[test]
+fn w7_near_budget_stream_field_edit_and_replica() {
+    w7_large_edits("fields", 31 * 1024 * 1024 + 73);
+}
+
+#[test]
+fn w7_large_stream_password_edit_and_replica() {
+    w7_large_edits("password", LARGE);
+}
+#[test]
+fn w7_near_budget_stream_password_edit_and_replica() {
+    w7_large_edits("password", 31 * 1024 * 1024 + 73);
+}
+#[test]
+fn w7_password_edit_preserves_both_attachment_copies() {
+    w7_restored_password("password", |vault, item, _| {
+        let replacement = pm_vault::PasswordRecord::new(
+            "w7-password-edited",
+            "w7-user",
+            b"synthetic w7 edited password",
+            "https://synthetic.invalid",
+            "synthetic edited note",
+        )
+        .unwrap();
+        let prepared = vault.prepare_edit(item, &replacement).unwrap();
+        commit(vault, &prepared);
+        assert_eq!(
+            vault.read_record(item).unwrap().human().title,
+            "w7-password-edited"
+        );
+    });
+}
+
+// Use bounded synthetic readers/writers throughout; the 31 MiB case approaches
+// the 32 MiB protected-owner budget without allocating the file as plaintext.
+#[allow(clippy::too_many_lines)]
+fn w7_large_edits(operation: &str, size: u64) {
+    {
+        let custody = test_audit_custody();
+        let dir = TestDir::new(&format!("w7-{operation}-{size}"));
+        let (path, _) = persist(&dir);
+        let (mut vault, _peer) = open_human(&path, &custody);
+        let record = w7_pattern_record(size, "w7-large", false, false, [0x77; 16]);
+        let mut input = PatternReader::new(size);
+        let created = vault
+            .prepare_create_record_streaming(
+                &record,
+                &mut [AttachmentReader::new([0x77; 16], &mut input)],
+            )
+            .unwrap();
+        commit(&mut vault, &created);
+        let mut archive = Vec::new(); // ciphertext only
+        vault.write_native_backup(&mut archive).unwrap();
+        let restored = vault
+            .prepare_native_restore(&mut Cursor::new(archive), MASTER)
+            .unwrap();
+        let item = restored.item_ids()[0];
+        commit(&mut vault, restored.prepared());
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let attachment_id = *vault.read_record(item).unwrap().attachments()[0].id();
+        let historical = *vault.history(item).unwrap().entries()[0].revision_id();
+        let snapshot = w7_stream_snapshot(&db);
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        let replica = dir.0.join("replica.sqlite3");
+        fs::copy(&path, &replica).unwrap(); // paired seed, before the new revision
+        let outbox_before = pm_vault::CausalReducer::open(&path)
+            .unwrap()
+            .pending_outbox()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.digest())
+            .collect::<Vec<_>>();
+        let replacement = match operation {
+            "rename" => Some(w7_pattern_record(
+                size,
+                "w7-renamed",
+                false,
+                false,
+                attachment_id,
+            )),
+            "fields" => Some(w7_pattern_record(
+                size,
+                "w7-large",
+                true,
+                false,
+                attachment_id,
+            )),
+            _ => None,
+        };
+        let password = pm_vault::PasswordRecord::new(
+            "w7-password-edited",
+            "w7-user",
+            b"synthetic w7 edited password",
+            "https://synthetic.invalid",
+            "synthetic edited note",
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let edited = match operation {
+            "organization" => vault.prepare_organize(item, vec!["w7-tag".into()], true),
+            "rename" | "fields" => vault.prepare_edit_record(item, replacement.as_ref().unwrap()),
+            "password" => vault.prepare_edit(item, &password),
+            _ => unreachable!(),
+        }
+        .unwrap();
+        let prepare_seconds = started.elapsed().as_secs_f64();
+        commit(&mut vault, &edited);
+        eprintln!(
+            "W7_COST operation={operation} bytes={size} prepare_seconds={prepare_seconds:.6} prepare_commit_seconds={:.6}",
+            started.elapsed().as_secs_f64()
+        );
+        let read = vault.read_record(item).unwrap();
+        match operation {
+            "organization" => {
+                assert!(read.human().favorite);
+                assert_eq!(read.human().tags, ["w7-tag"]);
+            }
+            "rename" => assert_eq!(read.human().title, "w7-renamed"),
+            "fields" => assert_eq!(&*read.human().notes, "synthetic w7 edited note"),
+            "password" => assert_eq!(read.human().title, "w7-password-edited"),
+            _ => unreachable!(),
+        }
+        w7_assert_pattern(&vault, item, size);
+        assert!(vault.read_revision(item, historical).is_ok());
+        let after = w7_stream_snapshot(&db);
+        for row in &snapshot {
+            assert!(after.contains(row));
+        }
+        let reducer = pm_vault::CausalReducer::open(&path).unwrap();
+        let events = reducer.pending_outbox().unwrap();
+        let new_events = events
+            .into_iter()
+            .filter(|e| !outbox_before.contains(&e.digest()))
+            .collect::<Vec<_>>();
+        assert_eq!(new_events.len(), 1);
+        let graph = reducer
+            .export_ciphertext_graph(&new_events[0], &dir.0.join("edited-graph"))
+            .unwrap()
+            .unwrap();
+        assert!(graph.attachments.is_empty());
+        assert_eq!(graph.streams.len(), 1);
+        assert_eq!(
+            graph.streams[0].chunks.len() as u64,
+            size.div_ceil(1024 * 1024)
+        );
+        pm_vault::CausalReducer::open(&replica)
+            .unwrap()
+            .apply_received_package(&new_events, &[graph])
+            .unwrap();
+        let (replica_reader, _replica_peer) = open_human(&replica, &custody);
+        assert!(replica_reader.read_record(item).unwrap().human() == read.human());
+        w7_assert_pattern(&replica_reader, item, size);
+        let deleted = vault.prepare_delete(item).unwrap();
+        commit(&mut vault, &deleted);
+        let restored = vault.prepare_restore(item, historical).unwrap();
+        commit(&mut vault, &restored);
+        w7_assert_pattern(&vault, item, size);
+    }
+}
+
+fn w7_pattern_record(
+    size: u64,
+    title: &str,
+    fields: bool,
+    added: bool,
+    id: [u8; 16],
+) -> LogicalRecord {
+    let mut human = metadata(title);
+    if fields {
+        human.notes = pm_crypto::ProtectedText::copy_from_str("synthetic w7 edited note").unwrap();
+    }
+    let mut attachments = vec![
+        Attachment::descriptor(
+            id,
+            "synthetic-w7.bin",
+            "application/octet-stream",
+            size,
+            pattern_hash(size),
+        )
+        .unwrap(),
+    ];
+    if added {
+        attachments.push(
+            Attachment::descriptor(
+                [0x78; 16],
+                "synthetic-added.bin",
+                "application/octet-stream",
+                73,
+                pattern_hash(73),
+            )
+            .unwrap(),
+        );
+    }
+    LogicalRecord::new_streaming(
+        RecordKind::Password,
+        human,
+        vec![AuthRecord::Password {
+            username: if fields { "w7-edited-user" } else { "w7-user" }.into(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(if fields {
+                b"synthetic w7 edited password"
+            } else {
+                b"synthetic w7 password"
+            })
+            .unwrap(),
+            destination_refs: vec![0],
+        }],
+        attachments,
+    )
+    .unwrap()
+}
+
+fn w7_assert_pattern(vault: &HumanVault, item: [u8; 16], size: u64) {
+    let mut output = HashingWriter::new();
+    vault
+        .read_attachment_to(
+            item,
+            *vault.read_record(item).unwrap().attachments()[0].id(),
+            &mut output,
+        )
+        .unwrap();
+    assert_eq!(output.size, size);
+    assert_eq!(output.finish(), pattern_hash(size));
+}
+
+#[test]
+fn w7_stream_edit_rejects_corrupt_source_without_effects() {
+    let custody = test_audit_custody();
+    let dir = TestDir::new("w7-corrupt");
+    let (path, _) = persist(&dir);
+    let (mut vault, _peer) = open_human(&path, &custody);
+    let record = w7_pattern_record(LARGE, "w7-large", false, false, [0x77; 16]);
+    let mut input = PatternReader::new(LARGE);
+    let created = vault
+        .prepare_create_record_streaming(
+            &record,
+            &mut [AttachmentReader::new([0x77; 16], &mut input)],
+        )
+        .unwrap();
+    let item = *created.item_id();
+    commit(&mut vault, &created);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute("UPDATE attachment_stream_chunks SET ciphertext=zeroblob(length(ciphertext)) WHERE chunk_index=1", []).unwrap();
+    let before = w7_effect_counts(&db);
+    assert!(vault.prepare_edit_record(item, &record).is_err());
+    assert_eq!(w7_effect_counts(&db), before);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn w7_stream_edit_attachment_changes_and_atomic_rejections() {
+    let custody = test_audit_custody();
+    let dir = TestDir::new("w7-attachments");
+    let (path, _) = persist(&dir);
+    let (mut vault, _peer) = open_human(&path, &custody);
+    let record = w7_pattern_record(LARGE, "w7-large", false, true, [0x77; 16]);
+    let mut input = PatternReader::new(LARGE);
+    let mut second = PatternReader::new(73);
+    let created = vault
+        .prepare_create_record_streaming(
+            &record,
+            &mut [
+                AttachmentReader::new([0x77; 16], &mut input),
+                AttachmentReader::new([0x78; 16], &mut second),
+            ],
+        )
+        .unwrap();
+    let item = *created.item_id();
+    commit(&mut vault, &created);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let snapshot = w7_stream_snapshot(&db);
+    let before = w7_effect_counts(&db);
+    for bad in [
+        w7_pattern_record(LARGE + 1, "bad-size", false, false, [0x77; 16]),
+        w7_pattern_record(LARGE, "bad-id", false, false, [0x79; 16]),
+    ] {
+        assert!(vault.prepare_edit_record(item, &bad).is_err());
+        assert_eq!(w7_effect_counts(&db), before);
+    }
+    assert!(vault.prepare_create_record(&record).is_err());
+    assert_eq!(w7_effect_counts(&db), before);
+    // Retain a descriptor while removing the second stream from the new graph.
+    let prepared = vault
+        .prepare_edit_record(
+            item,
+            &w7_pattern_record(LARGE, "w7-retained", false, false, [0x77; 16]),
+        )
+        .unwrap();
+    commit(&mut vault, &prepared);
+    w7_assert_pattern(&vault, item, LARGE);
+    let reducer = pm_vault::CausalReducer::open(&path).unwrap();
+    for (index, event) in reducer.pending_outbox().unwrap().iter().enumerate() {
+        reducer
+            .export_ciphertext_graph(event, &dir.0.join(format!("retained-graph-{index}")))
+            .unwrap();
+    }
+    // Replace one former stream body and remove the other, preserving history.
+    let replacement = LogicalRecord::new(
+        RecordKind::Password,
+        metadata("w7-replaced"),
+        vec![AuthRecord::Password {
+            username: "w7-user".into(),
+            password: pm_crypto::ProtectedBytes::copy_from_slice(b"synthetic w7 password").unwrap(),
+            destination_refs: vec![0],
+        }],
+        vec![
+            Attachment::new(
+                [0x77; 16],
+                "replacement.bin",
+                "application/octet-stream",
+                b"synthetic replacement body",
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let prepared = vault.prepare_edit_record(item, &replacement).unwrap();
+    commit(&mut vault, &prepared);
+    let read = vault.read_record(item).unwrap();
+    assert_eq!(read.attachments().len(), 1);
+    assert_eq!(
+        read.attachments()[0].content(),
+        b"synthetic replacement body"
+    );
+    for row in snapshot {
+        assert!(w7_stream_snapshot(&db).contains(&row));
+    }
+    let no_files = password_record("w7-no-files", b"synthetic w7 password");
+    let prepared = vault.prepare_edit_record(item, &no_files).unwrap();
+    commit(&mut vault, &prepared);
+    assert!(vault.read_record(item).unwrap().attachments().is_empty());
+}
+
+#[test]
+fn w7_stream_edit_rejects_staging_tamper_at_commit() {
+    let custody = test_audit_custody();
+    let dir = TestDir::new("w7-staged-tamper");
+    let (path, _) = persist(&dir);
+    let (mut vault, _peer) = open_human(&path, &custody);
+    let record = w7_pattern_record(LARGE, "w7-large", false, false, [0x77; 16]);
+    let mut input = PatternReader::new(LARGE);
+    let created = vault
+        .prepare_create_record_streaming(
+            &record,
+            &mut [AttachmentReader::new([0x77; 16], &mut input)],
+        )
+        .unwrap();
+    let item = *created.item_id();
+    commit(&mut vault, &created);
+    let prepared = vault.prepare_edit_record(item, &record).unwrap();
+    let signature = vault.sign(&prepared).unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    // The baseline incorrectly stages this edit as an empty inline body;
+    // demand the intended new stream graph before injecting the alteration.
+    let chunks: i64 = db
+        .query_row(
+            "SELECT count(*) FROM human_staging_stream_chunks",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(chunks, 3);
+    db.execute("UPDATE human_staging_stream_chunks SET ciphertext=zeroblob(length(ciphertext)) WHERE chunk_index=1", []).unwrap();
+    let before = w7_effect_counts(&db);
+    assert!(
+        vault
+            .commit(prepared.command(), &signature, prepared.body())
+            .is_err()
+    );
+    assert_eq!(w7_effect_counts(&db), before);
+    w7_assert_pattern(&vault, item, LARGE);
+}
+
+#[test]
+fn w7_empty_stream_organization_and_empty_replacement() {
+    let custody = test_audit_custody();
+    let dir = TestDir::new("w7-empty");
+    let (path, _) = persist(&dir);
+    let (mut vault, _peer) = open_human(&path, &custody);
+    let record = w7_pattern_record(0, "w7-empty", false, false, [0x77; 16]);
+    let mut input = PatternReader::new(0);
+    let created = vault
+        .prepare_create_record_streaming(
+            &record,
+            &mut [AttachmentReader::new([0x77; 16], &mut input)],
+        )
+        .unwrap();
+    let item = *created.item_id();
+    commit(&mut vault, &created);
+    let organized = vault.prepare_organize(item, vec![], true).unwrap();
+    commit(&mut vault, &organized);
+    w7_assert_pattern(&vault, item, 0);
+    // Replace an existing nonempty stream with a complete, empty inline body.
+    let record = w7_pattern_record(73, "w7-nonempty", false, false, [0x77; 16]);
+    let mut input = PatternReader::new(73);
+    let created = vault
+        .prepare_create_record_streaming(
+            &record,
+            &mut [AttachmentReader::new([0x77; 16], &mut input)],
+        )
+        .unwrap();
+    let item = *created.item_id();
+    commit(&mut vault, &created);
+    let empty = w7_pattern_record(0, "w7-replaced-empty", false, false, [0x77; 16]);
+    let prepared = vault.prepare_edit_record(item, &empty).unwrap();
+    commit(&mut vault, &prepared);
+    assert_eq!(vault.read_record(item).unwrap().attachments()[0].size(), 0);
+    w7_assert_pattern(&vault, item, 0);
+}
+
+fn w7_effect_counts(db: &rusqlite::Connection) -> Vec<i64> {
+    [
+        "human_staging",
+        "human_staging_streams",
+        "human_staging_stream_chunks",
+        "human_challenges",
+        "revision_parts",
+        "authority_events",
+        "outbox",
+        "encrypted_audit_records",
+    ]
+    .iter()
+    .map(|table| {
+        db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    })
+    .collect()
 }
 
 fn password_record(title: &str, password: &[u8]) -> LogicalRecord {

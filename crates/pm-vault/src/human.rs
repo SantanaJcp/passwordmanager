@@ -1549,7 +1549,9 @@ impl HumanVault {
         record: &PasswordRecord,
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
         self.require_active(item)?;
-        self.prepare_write(item, record)
+        let mut logical = logical_from_password(record)?;
+        logical.retain_attachments_from(self.read_record(item)?)?;
+        self.prepare_record_write(item, &logical)
     }
 
     /// Stages a signed lifecycle withdrawal; plaintext is never staged.
@@ -3225,31 +3227,50 @@ impl HumanVault {
         target_revision: [u8; 16],
         record: &LogicalRecord,
     ) -> Result<usize, HumanCommitError> {
-        let mut statement = transaction.prepare(
-            "SELECT attachment_id,header,chunk_count FROM attachment_streams
-             WHERE revision_id=?1 ORDER BY attachment_id",
-        )?;
-        let streams = statement
-            .query_map([source_revision.as_slice()], |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
-        for (id, header, count) in &streams {
-            let id = bytes::<16>(id)?;
-            if *count <= 0 {
+        let mut stream_count = 0;
+        for descriptor in record.attachments() {
+            // A replacement body is supplied by the human. Only descriptors
+            // retain a source stream; removed attachments are not carried over.
+            if !descriptor.content().is_empty() {
+                continue;
+            }
+            let id = *descriptor.id();
+            let source: Option<(Vec<u8>, i64)> = transaction
+                .query_row(
+                    "SELECT header,chunk_count FROM attachment_streams
+                 WHERE attachment_id=?1 AND revision_id=?2",
+                    params![id.as_slice(), source_revision.as_slice()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((header, count)) = source else {
+                continue;
+            };
+            if count <= 0 {
                 return Err(HumanCommitError::InvalidCommand);
             }
-            let descriptor = record
-                .attachments()
-                .iter()
-                .find(|attachment| attachment.id() == &id)
-                .ok_or(HumanCommitError::InvalidCommand)?;
-            let mut opener = root.start_file_open(id, source_revision, header)?;
+            // An explicitly supplied empty file may replace a nonempty stream.
+            // Empty historical streams still retain their stream representation.
+            if descriptor.size() == 0 && *descriptor.sha256() == digest(&[]) {
+                let package: Vec<u8> = transaction.query_row(
+                    "SELECT package FROM revision_parts WHERE revision_id=?1",
+                    [source_revision.as_slice()],
+                    |row| row.get(0),
+                )?;
+                let opened = root.open_revision_package(&package)?;
+                let source =
+                    LogicalRecord::decode_parts(opened.human_plaintext(), opened.auth_plaintext())?;
+                let original = source
+                    .attachments()
+                    .iter()
+                    .find(|a| a.id() == &id)
+                    .ok_or(HumanCommitError::InvalidCommand)?;
+                if original.size() != 0 || original.sha256() != descriptor.sha256() {
+                    continue;
+                }
+            }
+            stream_count += 1;
+            let mut opener = root.start_file_open(id, source_revision, &header)?;
             let mut sealer = root.start_file(id, target_revision)?;
             let mut digest_state = DigestState::new()?;
             let mut total = 0_u64;
@@ -3265,7 +3286,7 @@ impl HumanVault {
                 if index != seen {
                     return Err(HumanCommitError::InvalidCommand);
                 }
-                let final_chunk = seen + 1 == *count;
+                let final_chunk = seen + 1 == count;
                 let plaintext = opener.open_chunk(&ciphertext, final_chunk)?;
                 total = total
                     .checked_add(
@@ -3285,7 +3306,7 @@ impl HumanVault {
             }
             drop(rows);
             drop(chunks);
-            if seen != *count
+            if seen != count
                 || total != descriptor.size()
                 || digest_state.finish() != *descriptor.sha256()
             {
@@ -3302,7 +3323,7 @@ impl HumanVault {
                 ],
             )?;
         }
-        Ok(streams.len())
+        Ok(stream_count)
     }
 
     fn prepare_write(
@@ -3319,6 +3340,35 @@ impl HumanVault {
         item: [u8; 16],
         record: &LogicalRecord,
     ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        self.channel.verify()?;
+        record.validate_descriptors()?;
+        let connection = open_connection(&self.path)?;
+        let source: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT visible_revision FROM vault_items WHERE item_id=?1 AND status='active'",
+                [item.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let has_descriptors = record.attachments().iter().any(|attachment| {
+            usize::try_from(attachment.size()).ok() != Some(attachment.content().len())
+                || digest(attachment.content()) != *attachment.sha256()
+        });
+        let retain_empty_stream = if let Some(source) = &source {
+            record.attachments().iter().filter(|a| a.content().is_empty()).try_fold(false, |found, a| {
+                connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attachment_streams WHERE attachment_id=?1 AND revision_id=?2)",
+                    params![a.id().as_slice(), source], |row| row.get::<_,bool>(0),
+                ).map(|exists| found || exists)
+            })?
+        } else {
+            false
+        };
+        if has_descriptors || retain_empty_stream {
+            let source = source.ok_or(HumanCommitError::InvalidInput)?;
+            return self.prepare_record_stream_write(item, bytes::<16>(&source)?, record);
+        }
+        record.validate_complete()?;
         let revision = random_id()?;
         let human = record.encode_human()?;
         let auth = record.encode_auth()?;
@@ -3353,6 +3403,134 @@ impl HumanVault {
             None,
             None,
         )
+    }
+
+    /// Build the entire graph under the new revision's AAD before exposing a
+    /// signed challenge. The SQL transaction rolls back all chunks on failure.
+    #[allow(clippy::too_many_lines)]
+    fn prepare_record_stream_write(
+        &mut self,
+        item: [u8; 16],
+        source_revision: [u8; 16],
+        record: &LogicalRecord,
+    ) -> Result<PreparedHumanCommand, HumanCommitError> {
+        let revision = random_id()?;
+        let transaction_id = random_id()?;
+        let challenge = random_challenge()?;
+        let package = self
+            .root
+            .seal_revision_package(RevisionPackageInput {
+                item,
+                revision,
+                issuer_device: self.device,
+                modified_at: now_us()?,
+                kind: record.kind().crypto(),
+                human_plaintext: &record.encode_human()?,
+                auth_plaintext: record.encode_auth()?.as_deref(),
+            })?
+            .to_bytes();
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Vec<u8> = transaction
+            .query_row(
+                "SELECT visible_revision FROM vault_items WHERE item_id=?1 AND status='active'",
+                [item.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(HumanCommitError::ItemNotFound)?;
+        if current.as_slice() != source_revision {
+            return Err(HumanCommitError::StateChanged);
+        }
+        // Authenticate the source revision's metadata and object ownership too.
+        self.read_revision_from(&transaction, item, source_revision, None)?;
+        Self::stage_restored_streams(
+            &transaction,
+            &self.root,
+            transaction_id,
+            source_revision,
+            revision,
+            record,
+        )?;
+        for attachment in record.attachments() {
+            let retained: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM human_staging_streams WHERE transaction_id=?1 AND attachment_id=?2)",
+                params![transaction_id.as_slice(), attachment.id().as_slice()], |row| row.get(0),
+            )?;
+            if retained {
+                continue;
+            }
+            let plaintext = attachment.content();
+            if usize::try_from(attachment.size()).ok() != Some(plaintext.len())
+                || digest(plaintext) != *attachment.sha256()
+            {
+                return Err(HumanCommitError::InvalidInput);
+            }
+            // Put supplied inline bodies in streams as well so the signed
+            // pm/staged-stream/v1 digest covers every attachment in the graph.
+            let mut sealer = self.root.start_file(*attachment.id(), revision)?;
+            let count = plaintext.len().max(1).div_ceil(1024 * 1024);
+            for index in 0..count {
+                let start = index * 1024 * 1024;
+                let end = (start + 1024 * 1024).min(plaintext.len());
+                let ciphertext = sealer.seal_chunk(&plaintext[start..end], index + 1 == count)?;
+                transaction.execute(
+                    "INSERT INTO human_staging_stream_chunks(transaction_id,attachment_id,chunk_index,ciphertext) VALUES(?1,?2,?3,?4)",
+                    params![transaction_id.as_slice(), attachment.id().as_slice(), to_i64(index)?, ciphertext],
+                )?;
+            }
+            transaction.execute(
+                "INSERT INTO human_staging_streams(transaction_id,attachment_id,header,chunk_count) VALUES(?1,?2,?3,?4)",
+                params![transaction_id.as_slice(), attachment.id().as_slice(), sealer.header(), to_i64(count)?],
+            )?;
+        }
+        let expected_state = state_digest(&transaction, self.root.vault_id(), 1)?;
+        let object_digest = Some(stream_object_digest(
+            &transaction,
+            transaction_id,
+            &package,
+        )?);
+        let manifest = encode_event_manifest(
+            "item-revision",
+            item,
+            Some(revision),
+            object_digest,
+            None,
+            None,
+            None,
+        );
+        let body = encode_body(&Body {
+            transaction_id,
+            events_manifest_digest: digest(&manifest),
+            event_count: 1,
+            object_manifest_digest: object_digest,
+        });
+        let expires_at_us = now_us()?
+            .checked_add(CHALLENGE_LIFETIME_US)
+            .ok_or(HumanCommitError::InvalidCommand)?;
+        let command = encode_command(&CommandFields {
+            vault: *self.root.vault_id(),
+            challenge,
+            expected_state,
+            operation: "item_write",
+            body_hash: digest(&body),
+            expires_at_us,
+        });
+        transaction.execute(
+            "INSERT INTO human_challenges(challenge,transaction_id,command,body_hash,expected_state,expires_at_us,consumed) VALUES(?1,?2,?3,?4,?5,?6,0)",
+            params![challenge.as_slice(), transaction_id.as_slice(), command, digest(&body).as_slice(), expected_state.as_slice(), expires_at_us],
+        )?;
+        transaction.execute(
+            "INSERT INTO human_staging(transaction_id,operation,event_kind,item_id,revision_id,body,package,item_kind,attachments) VALUES(?1,'item_write','item-revision',?2,?3,?4,?5,?6,NULL)",
+            params![transaction_id.as_slice(), item.as_slice(), revision.as_slice(), body, package, record.kind().name()],
+        )?;
+        transaction.commit()?;
+        Ok(PreparedHumanCommand {
+            transaction_id,
+            item_id: item,
+            command,
+            body,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

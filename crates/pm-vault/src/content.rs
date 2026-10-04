@@ -663,6 +663,11 @@ impl LogicalRecord {
         Ok(record)
     }
 
+    pub(crate) fn retain_attachments_from(&mut self, source: Self) -> Result<(), HumanCommitError> {
+        self.attachments = source.attachments;
+        self.validate_descriptors()
+    }
+
     pub(crate) fn set_organization(
         &mut self,
         tags: Vec<String>,
@@ -670,7 +675,7 @@ impl LogicalRecord {
     ) -> Result<(), HumanCommitError> {
         self.human.tags = tags;
         self.human.favorite = favorite;
-        self.validate()
+        self.validate_descriptors()
     }
 
     pub(crate) fn matches(&self, query: &SearchQuery) -> bool {
