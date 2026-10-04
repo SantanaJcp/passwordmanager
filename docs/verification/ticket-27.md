@@ -1,6 +1,6 @@
 # Ticket 27 — evidencia Windows parcial y matriz pendiente
 
-Corte actual: 2026-10-03, **W1 fase 4 en verificación; aceptación integral
+Corte actual: 2026-10-03, **W1 fase 4 checkpoint parcial; aceptación integral
 pendiente**, ticket `claimed`. Composición c8325fb y gates registrados en
 82075cd; se aplican las dos propuestas aprobadas CUP/HVP y cierre nativo.
 Las dos propuestas tienen GREEN nativo acotado; reparse integral y
@@ -3971,3 +3971,77 @@ Preflight de los tres casos wire nuevos: `flock /tmp/pm-cargo-window.lock
 bash -c './scripts/cargo-local.sh fmt --all && ./scripts/check.sh'` rc0,
 `/tmp/pmw1d-live-handle-check.log`; diff-check rc0. Native cfgWindows y
 PowerShell requieren la siguiente corrida; no se les atribuye este PASS Linux.
+
+### Cobertura de27 al entregar fase4
+
+Esta tabla sustituye el corte actual de las tablas históricas; no cambia
+`claimed`, aceptación integral ni la sección15 de acuerdos de la spec.
+
+| Criterio de27 | Resultado | Evidencia y frontera pendiente |
+| --- | --- | --- |
+| Servicio virtual/DACL/DPAPI y peer bilateral G1 por proceso real | PASS parcial | Win11 ARM64/SCM/TLS-RPK/humano real, peer SID y PID servidor impostor. Falta matriz G1 integral; x64/reboot pertenecen a32. |
+| Sustitución/impersonación/dump/lectura y fallos de custodia rechazados | PASS parcial | Siete negativas wire con cierre nativo y DACL exacta, incluidos tres handles vivos con witness/close/cleanup exactos; empty/directory/multilink TUI sin lease; primitives de lease única/null/cambio visible. Reparse integral, PID cliente cambiado/RPK impostor y fallos Win32 completos no demostrados. |
+| ConPTY/clipboard/persistencia nativos sin admin del agente | PASS parcial | Resize100×30→42×12→80×24 GREEN estricto, tipos7/CSV/reveal/expiry, clipboard propietario/nuevo/empty, access y operaciones/restore/rotaciones PASS. 1PUX seed8 bloqueado W5; pair-sync-retire y adjunto grande integral no demostrados. |
+| TDD RED→GREEN/comandos exactos; sin skip/stubs | PASS de cambios acotados | RED de cierre y resize fase3 conservados; propuestas GREEN sobre6aeaf1a.52 casos locales más repeat de entorno, sin regresión observada; no convertir sus3 RED conocidos en aceptación. |
+| Revisión contractual e integración del merger antes de resolver | pendiente | Cambios de W1 revisados en su scope y publicados sólo en esta rama; no integración en rama unificada ni merge PR1 ni resolución de ticket. |
+
+Archivos acumulados desde82075cd: `pm-custody/examples/windows_human_tui_seed.rs`,
+`pm-native-channel/examples/windows_tui_conpty_fixture.rs`,
+`scripts/test-windows-custody-lab.ps1` y este informe. No se tocan memoria
+protegida/custodia W3/W5, listener/admisión/proveedor W4, protocolo sync W2,
+workflows, dependencias ni cambios ajenos de la raíz/integración. Rama unificada
+verificada en b3577d2. Fallbacks heredados inventariados permanecen intactos;
+se añade el reporte del fallback externo wl-paste observado al faltar entorno.
+
+Pendientes de método: el encargo retoma la matriz, pero el acuerdo anterior
+de reparse instalador y segundo device SCM seguía explícitamente sin respuesta.
+Se solicitó conjuntamente confirmación al reanudar conforme a las instrucciones
+de verificación; sin respuesta, no se crean esos fixtures ni se ejecutan sus
+casos. Recomendación: confirmar ambos métodos acotados, conservando privilegios,
+DACLs y cleanup estricto. La decisión nueva de rechazo temprano de colisión Mac
+también requiere acuerdo; no se corrige desde custodia/backup ni ampliando plazos.
+
+### Corrida2 Windows y checkpoint final de fase4
+
+[Windows37169049767](https://github.com/SantanaJcp/passwordmanager/actions/runs/37169049767),
+[job111338061919](https://github.com/SantanaJcp/passwordmanager/actions/runs/37169049767/job/111338061919),
+SHA exacto publicado
+`055bda30b17eec06e2f1d8fbfe6222937f60eb36`, termina **FAIL global: sólo matrix**.
+Inputs false/true/true, ref comprobado por API antes/después del dispatch y
+headSha coincidente. Nueva hipótesis/frontera: rechazo del servicio sobre
+handles vivos con tipos/size/links probados, sin cambios en producto. Los
+cuatro negativos originales y los tres nuevos tienen PASS; no hay repeat
+idéntico ni cambio de workflow. API artifacts total0. Presupuesto final
+**Windows2/6, Mac1/2**; todos los runs/jobs propios terminaron, ninguno activo.
+
+File-empty: witness regular/no-reparse/size0/link1; directory-handle: directorio
+real/no-reparse; file-multilink: regular/no-reparse/size>frame/link2. Cada uno
+con handle abierto propio, ack31/token y una transfer-duplicate-failed del
+servicio, cero transfer-duplicated/parser, `native-confirmed=true`, DACL exacta
+y `handle-closed=true source-cleaned=true`. Se ejecutan cleanup y close aunque
+falle la operación; no se descarta su error ni se atraviesa un alias. No se
+concede admin ni privilegio de symlink al humano/agente.
+
+Build/static y primitives14/pipe1/observer24/sync-lib1 siguen PASS. Resize
+estricto completo vuelve a pasar100×30→42×12→80×24, con CUP/HVP clampados
+**0/0/0 acumulados**. Peer SID/PID servidor, encoding, seed tipos7, CSV,
+negativas locales, clipboard, access, rotaciones, local-operations y los
+gates SCM posteriores conservan PASS. Sólo matrix retiene el mismo fallo
+1PUX seed8 `crypto-resource`, lease restaurada/hijo4; ninguna nueva regresión
+observada. El bloqueo de W5 y todos los grupos no ejecutados siguen abiertos.
+
+Logs `/tmp/pmw1d-windows2.log` y metadata `/tmp/pmw1d-windows2.json`. Imagen,
+OS/CPU/toolchain coinciden con corrida1. No se repite Mac por los cambios
+exclusivamente Windows: sus resultados finales son los registrados sobre
+6aeaf1a (Intel completo/margen2.329s; ARM colisión). El hijo documental de
+055bda3 conserva exactamente su árbol de código/fixtures/workflows; no se
+le atribuye otra ejecución nativa. Los enlaces locales y estados del informe,
+diff/alcance y ausencia de cambios en tickets/rama unificada se comprueban
+antes de publicar ese hijo.
+
+Siguiente acción del orquestador: confirmar los métodos pendientes de
+reparse instalador y segundo dispositivo SCM para preparar/ejecutar esos
+verticales, manteniendo la matriz de fracaso integral abierta; acordar la
+decisión de colisión Mac sin ampliar8/20s. W5 continúa en su rama con el
+preview1PUX; sólo el merger integrará candidatos autorizados y verificará la
+composición. W1 no integra ni fusiona PR1 ni cambia tickets/protecciones.
