@@ -2658,3 +2658,190 @@ frame/espera humana, KDF, SQLite/audit, catálogo/repaint y restore. Misma
 operación y waits8/20s. El test compartido permanece intacto mientras su
 corrección siga fuera de autorización. Diagnóstico1 consumió1/3 diagnósticos
 (y1/6 dispatches), aunque no alcanzó el objetivo de reproducción.
+
+
+### W6 — resultado y punto de decisión contractual (2026-10-04)
+
+Diagnóstico2 [37181107807](https://github.com/SantanaJcp/passwordmanager/actions/runs/37181107807),
+SHA exacto `24dc0d338ed34e56dd75fab0b6dec6210238e4e2`, completed/failure;
+**Intel PASS completo, ARM FAIL unlock y colisión plaintext**. Ambos jobs
+terminados, artifacts0, workflow intacto, inputs false/false. Misma familia de
+OS/imágenes/hosts que diagnóstico1. Logs `/tmp/pmw6-macos2-{intel,arm}.log`,
+fases extraídas en `.phases.json`; no raw sample ni archivos de datos publicados.
+Se consumieron **2/3 diagnósticos y2/6 dispatches**, sin retries internos ni
+repeticiones del mismo SHA. Se detiene aquí por la condición explícita del
+usuario: KDF contractual más trabajo requerido no cabe en el fixture.
+No se ejecuta diagnóstico3 ni las cuatro corridas restantes para sustituir
+el FAIL por un PASS aleatorio. No integración ni cambio de estados de tickets.
+
+#### Unlock: fases medidas
+
+Muestras distintas del mismo run: apertura TUI más lenta observada en Intel
+(después de sync, PASS) y apertura que falló en ARM (core, FAIL). No comparar
+estas dos muestras como experimento controlado de rendimiento por CPU.
+Duraciones monotónicas en segundos, redondeadas; scopes anidados no se suman.
+La cola anterior a recepción se observa desde cliente y accept/TLS, sin
+cambiar el dispatcher de agentes W4 ni la serialización humana contractual.
+
+| Fase / ámbito | Intel, apertura PASS más lenta | ARM, apertura fallida |
+| --- | ---: | ---: |
+| TUI connect → HUMAN_MAGIC escrito | 0.113178 | 0.131902 |
+| Dispatch humano → magic TLS recibido (anidado en conexión) | 0.039766 | 0.001589 |
+| Recepción frame + decode/dispatch | 0.000375 | 0.000323 |
+| Verificar canal | 0.000073 | 0.000101 |
+| Apertura/configuración SQLite | 0.002263 | 0.002630 |
+| Bundle cargado | 0.000279 | 0.000243 |
+| Salida protegida KDF | 0.000130 | 0.000067 |
+| **Argon2id13 efectivo:256MiB/3/p1/32bytes** | **5.746094** | **7.708273** |
+| Abrir/verificar root (incluye KDF) | 5.747774 | 7.709223 |
+| Audit transaction + append | 0.003236 | 0.001170 |
+| Audit commit FULL | 0.053483 | 0.103702 |
+| Cerrar SQLite | 0.009235 | 0.075340 |
+| Escribir respuesta unlock | 0.000136 | 0.000852 |
+| TUI espera respuesta unlock (incluye trabajo del custodio) | 5.817821 | 7.894309 |
+| TUI catálogo recibido (incluye segundo audit y transporte) | 0.090093 | 0.518731 |
+| Catálogo en custodio, scope completo | 0.062626 | 0.005309 |
+| TUI catálogo → repaint | 0.008530 | 0.581416 |
+| Total scope TUI desde lectura de contraseña | 6.030045 | **9.126536** |
+
+El reloj de pared del mismo runner correlaciona el cutoff con los procesos;
+puede tener slew frente al reloj monotónico, por eso se usa para posición de
+fases, no como sustituto de sus duraciones. ARM desde envío del fixture:
+TUI empezó≈0.102s después; dispatch≈0.233s; frame/dispatch≈0.235s;
+KDF terminó≈7.950s; cutoff≈8.039s (wait monotónico8.035s); audit commit
+terminó≈8.056s; SQLite close≈8.131s; respuesta≈8.132s;
+catálogo≈8.651s; repaint≈9.233s. La respuesta es posterior al cutoff unos94ms.
+**No hay pantalla correcta anterior al plazo que el observer haya perdido.**
+
+La llamada Argon2id, sin logging ni trabajo adicional dentro de ella, consumió
+7.708s; preconexión, autenticación y audit/commit/cierre son requeridos.
+La preparación de salida protegida consumió67µs y no falló; no hay error de
+recursos observado. No se prueba por ello toda memoria ni W5. El dispatcher
+W4 no retuvo este unlock: el frame se recibió a≈0.235s y se despachó enseguida.
+KDF ya había terminado al cutoff; los samples posteriores sin KDF activo son
+compatibles con esta secuencia y no refutan su coste anterior.
+
+**Clasificación de esta reproducción: rendimiento del entorno ante el KDF
+contractual + trabajo requerido, no carrera del observer.** Es coste wall
+observado; no se distingue CPU/scheduling/contención/almacenamiento del host
+ni se afirma que ARM sea intrínsecamente más lento. No hay bloqueo prolongado
+de cola ni fallo de protección en esta muestra. No extrapolar como prueba
+retrospectiva de la fase exacta de cada run W2 histórico sin instrumentación.
+
+Redundancia estática confirmada, sin modificar: `HumanVault::unlock` registra
+HumanUnlock y la primera consulta TUI46 vuelve a hacerlo en
+`human_wire::handle_content_request`;49 consulta catálogo sin esa segunda
+escritura. El catálogo ARM en sí tomó5.309ms; la fase TUI de518.731ms incluye
+más trabajo/transporte, y no se ha separado experimentalmente cuánto es ese
+segundo audit. El repaint inicial también ocurre después del heartbeat del
+event_loop si wire_at ya venció; el scope581.416ms incluye esa espera/dibujo.
+Aunque se eliminara TODO trabajo posterior a la respuesta, ésta ya es tardía.
+No se modifica auditoría/heartbeat al activarse la parada contractual.
+
+#### Restore: fases medidas, ambos PASS
+
+| Fase / ámbito | Intel | ARM |
+| --- | ---: | ---: |
+| TUI frame restore escrito | 0.000587 | 0.000169 |
+| Server decode frame | 0.000139 | 0.000062 |
+| SQLite/transaction para prepare | 0.096250 | 0.001658 |
+| State digest | 0.000935 | 0.000125 |
+| Headers del archivo | 0.057002 | 0.003448 |
+| Argon2id13 del archivo,256MiB/3/p1 | 1.765969 | 1.197228 |
+| Claves del archivo abiertas (incluye KDF) | 1.767355 | 1.198770 |
+| Registros: lectura/validación/reencriptado/staging | 4.027530 | 1.456017 |
+| Manifiesto verificado | 0.211952 | 0.154296 |
+| Stage/challenge tras archivo | 0.000612 | 0.000330 |
+| Commit prepare FULL | 0.806456 | 0.127790 |
+| Server prepare completo, incluida clausura/encode previo | 6.976328 | 2.946811 |
+| Respuesta prepare encode + write | 0.000471 | 0.000321 |
+| Verificar batch + grafos al commit | 0.147013 | 0.106504 |
+| Aplicar eventos | 0.169216 | 0.086658 |
+| Audit append restore | 0.002057 | 0.002496 |
+| Retirar stage/challenge/receipt (sin alterar esta lógica) | 0.016015 | 0.006576 |
+| Commit restore FULL | 0.601590 | 0.072533 |
+| TUI envío archivo (se solapa con parse/KDF del servidor) | 5.658834 | 2.460727 |
+| TUI espera prepare después del envío | 1.318523 | 0.487306 |
+| TUI commit RPC completo | 0.947292 | 0.284526 |
+| Refresh catálogo | 0.038964 | 0.024475 |
+| Repaint | 0.005606 | 0.002723 |
+| **Total TUI restore** | **7.970014** | **3.260035** |
+
+Intel restore deja≈30ms frente a8s en el scope TUI; observer reporta éxito a
+≈7.976s desde envío por reloj de pared. ARM≈3.262s. Estado durable con nuevos
+IDs/revisiones y autoridad actual preservada comprobado por el fixture;
+ninguna finalización tardía se acepta como éxito. **Fallo histórico restore
+no reproducido en W6 y causa aún pendiente.** Los tiempos Intel de registros
+y fsync son una hipótesis concreta de sensibilidad al runner, no prueba de
+causa de los runs W2. No se modifica staging W3 ni memoria W5.
+
+#### Clasificación de fallos y límites
+
+| Fallo | Clasificación / evidencia |
+| --- | --- |
+| Diagnóstico1 Intel | Defecto del parser diagnóstico W6: rechazaba categoría fija argon2id. RED→GREEN corregido; sin cambio de oráculo de producto. |
+| Diagnóstico1 ARM | Carrera del fixture compartido de endpoint: peer cierra handshake antes de terminar stdin; BrokenPipe en1490. Parche de orden preparado, no aplicado por frontera de zona. En diagnóstico2 ese test pasó, lo que no demuestra su estabilidad ni corrige el fallo anterior. |
+| Diagnóstico2 ARM unlock | Presupuesto fixture insuficiente en esta muestra de KDF contractual + trabajo requerido; respuesta8.132s posterior al cutoff8.039s. No carrera del observer ni cola W4 bloqueada. |
+| Diagnóstico2 ARM plaintext collision | Destino intacto, parcial nonempty al cutoff, rechazo real sólo tras sample. Trabajo de export/download todavía activo; no se ha perfilado su causa interna. Gate8s FAIL preservado, sync/final Full25 NOT_RUN. Fuera de unlock/restore W6; sin cambios en zona TUI de W1. |
+| Restore histórico Intel/ARM | No reproducido aquí; no atribución definitiva. Intel actual7.970s con≈30ms de margen; ARM3.260s. |
+
+Intel sí completa core, Full25 normal, sync, fase final y cleanup: sync
+17.725s wait/19.176s total, backup1.738s. Ese PASS único no sustituye ARM ni
+corridas consecutivas. Estado de objetivo: **PASS estable conjunto NO
+DEMOSTRADO**. FDE/reboot/firma/aceptación de terminal humano siguen pendientes.
+
+#### Decisiones pendientes y recomendación
+
+1. **Fixture calibrado por runner (recomendado):** presupuesto explícito con
+   KDF contractual medido en el mismo runner más coste no-KDF y margen
+   acordado; techo finito y fallo explícito si el runner no satisface ese
+   techo. Nunca autotuning KDF, reautenticación ni alargar a mitad del wait.
+   Mantener separada la medición de rendimiento8s: su incumplimiento debe
+   seguir visible, aunque el fixture funcional espere el estado correcto bajo
+   otro presupuesto aprobado. Restore necesita además coste de archivo/fsync;
+   basarlo sólo en KDF no basta. Requiere decisión/método aprobado antes de CI.
+2. **Plazo fijo nuevo basado en evidencia:** más simple, pero una muestra no
+   fija un percentil seguro. ARM necesita al menos≈9.23s para esta apertura
+   completa, y restore Intel ya está al borde de8s. Elegir margen/techo
+   explícitos, sin prometer estabilidad futura por dos PASS.
+3. **Conservar8s como requisito de entorno:** rechazar runners que no puedan
+   cumplirlo y validar en hardware nativo adecuado/autorizado. Sin cambiar
+   label por una alternativa oculta ni introducir runners pagos.
+
+Recomendación1 preserva los oráculos funcionales/KDF y deja explícito el
+rendimiento observado; **no está implementada ni autorizada**. Se detiene
+W6 aquí como se pidió. Eliminar audit duplicado o reordenar repaint podría
+reducir trabajo, pero no rescata esta respuesta posterior al cutoff; no se
+presenta como arreglo ni como sustituto de la decisión.
+
+#### Checkpoint y siguiente acción
+
+Se devuelve el script a entorno normal: no fuerza PMW6_TIMING ni inyecta
+plist/logs salvo opt-in externo. La instrumentación queda disponible para
+fixtures sintéticos y los SHAs diagnósticos publicados permiten reproducir
+la captura exacta. Este ajuste final sólo afecta el launcher/macOS y el
+informe; Rust y fixtures Linux son byte-idénticos al checkpoint Linux52.
+No se afirma aceptación nativa del nuevo SHA documental/launcher.
+
+12 paths netos respecto a baseW2: pm-crypto/src/{lib.rs,root.rs,phase_timing.rs};
+pm-custody/src/{human_wire.rs,linux.rs,tui.rs};
+pm-custody/tests/{macos_lab.py,macos_tui_migration_lab.py};
+pm-vault/src/{backup.rs,human.rs,lib.rs}; este ticket26. El launcher
+scripts/test-macos-custody-lab.sh fue tocado temporalmente y se devuelve
+byte-idéntico a la base. Workflow, Cargo.lock, transporte sync/Windows, W3/W4/W5 y
+raíz ajena intactos. Posibles conflictos de integración en TUI/fixtures/doc26
+requieren unión revisada por el merger, que W6 no realiza.
+
+Siguiente acción del orquestador: decidir presupuesto/método de observación
+para unlock y restore manteniendo parámetros G2 y oráculos; asignar la carrera
+de endpoint y la colisión plaintext a sus propietarios. Después, nuevo
+checkpoint diagnóstico con timings si hace falta y dos PASS completos
+consecutivos en ambas CPU. Cuatro dispatches del presupuesto permanecen sin
+consumir; no usarlos sin resolver la condición de parada actual.
+
+Verificación del handoff final: config/AST/launcher/diff rc0
+`/tmp/pmw6-final-config.log`; diff respecto24dc0d3 sólo launcher e informe.
+SHA de producto Rust y fixtures Linux idénticos a Linux52 e60b8df; no se
+repite ese barrido sin cambios en ellos. Se comprobó que G2/spec/estados/
+workflow/Cargo.lock y todos los paths W1 Windows/W3/W4/W5 quedan fuera del
+diff. El trabajo queda en rama/worktree W6 para revisión del orquestador.
