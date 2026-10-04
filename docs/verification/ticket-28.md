@@ -2,6 +2,12 @@
 
 ## Windows G7 — W5 fase 2: cuota y presupuesto por páginas (2026-10-04)
 
+Entrega actual: **candidato Windows ARM64 GREEN acotado**, código ec18dec
+(run37172258017), quota64 MiB y rechazo por páginas antes del secreto;52 casos
+Linux con49 rc0 y tres RED conocidos. Los bloques de fase1 y del tracer
+original se conservan como baselines históricos; no son cierre integral de G7
+ni de tickets, y WER sigue sin aceptación demostrada.
+
 Decisión explícita del orquestador: mínimo de working set de **64 MiB**
 (32 MiB de presupuesto + 32 MiB de margen), máximo coherente blando, lectura
 posterior de valores efectivos y rechazo explícito de arranque; sin reducir
@@ -186,6 +192,89 @@ ACL/PE comprobado. Comparación de hashes con el barrido52: sólo cambian los
 tres scripts Windows (harness, quota-denial y verifier). Los dos ProductRed
 matrix EIO/ENOSPC son idénticos al baseline; los dos diagnósticos conservan
 closed1/replacement0/cleanup0. Sin regresiones Linux observadas.
+
+### Corrida fase 2 C — GREEN nativo y entrega
+
+[Run37172258017](https://github.com/SantanaJcp/passwordmanager/actions/runs/37172258017),
+SHA **`ec18decb3f7ba3e74430bda2b24e79ea9fd8e4db`**, terminado **success**;
+[job ARM64](https://github.com/SantanaJcp/passwordmanager/actions/runs/37172258017/job/111347447802). Tercera corrida de esta fase (3/5 autorizadas aquí;
+cinco observaciones W5 contando las dos históricas de fase1). Sin repetición
+idéntica, integración, force-push, merge PR ni cambios de reglas/tickets.
+Logs `/tmp/pmw5b-native-final.log`, metadata `/tmp/pmw5b-native-final.json`.
+Windows11 Enterprise10.0.26200/build26200, imagen
+`win11-vs2026-arm64/20260924.168.1`, Rust1.98.1
+`aarch64-pc-windows-msvc`, libsodium1.0.22 autenticado/static MSVC nativo.
+
+| Caso comprobado | Resultado nativo |
+| --- | --- |
+| Cuota efectiva al arrancar/reiniciar servicio y en el proceso del test | Mínimo67108864, máximo67108864 bytes, flags10 blandos; reread positivo antes de bootstrap. |
+| Cuota rechazada, servicio real SCM con privilegio retirado | PASS `PROTECTED_MEMORY_QUOTA_UNAVAILABLE`, Win321314, SCM-exit1816, STOPPED/PID0; log exacto args/quota-failure/service-failed, sin abrir bootstrap ni crear endpoints. |
+| Restauración del fixture | PASS registro negativo eliminado/ausencia comprobada, normal creado, mismo SID, privilegios originales exactamente iguales por API, command normal; negativa no se convierte en bypass del arranque. |
+| Preview seed8 | PASS ocho registros exactos, preview2 con conteos exactos, preparado validado, lease restaurada, commit no enviado. |
+| Frontera grande | Acepta31 MiB lógicos;32 MiB cobrados exactos (`33554432`), capacidad útil33165296, payload+canario bloqueados33292288, guardas262144. Reserva adicional: ResourceUnavailable/page-budget/Win320 antes de la closure del secreto; truncate conserva cargo, drop/reutilización exactos, contadores finales0. |
+| Regiones pequeñas |2730 owners de1 byte, cargo33546240; nueva región rechazada antes de secreto con Win320, contadores finales0. |
+| Concurrencia de reservas |8 allocators, cargo33546240 compartido, rechazo page-budget/Win320 y liberación final0. |
+| Petición usize::MAX | PASS rechazo lógico budget sin ejecutar la closure ni overflow. |
+| API quota denegada con query-only handle | PASS error5 y cuota efectiva sin cambio, sin reintento. |
+| Regresiones nativas del harness | Primitivas14, pipe1, observer20 y sync-lib1 PASS; servicio normal, canales peer/RPK, unlock-lock, STOP/restart/crash y cleanup/ausencia propios PASS. |
+
+Cinco tests del presupuesto y el test independiente de la API, todos PASS.
+No se observó1453 en la corrida ni se ocultó con un reintento. La presión
+física extrema del SO no fue inyectada y conserva su fallo explícito antes
+de colocar el secreto; no se promete disponibilidad en cualquier host.
+El modo enfocado no acredita la matriz TUI/ConPTY de W1 ni import commit.
+
+**Efecto por plataforma:** Windows añade32 MiB de cargo por páginas/canario/
+guardas y conserva32 MiB de capacidad lógica; por tanto una región lógica
+exacta32 MiB o muchos campos pequeños pueden rechazarse antes. Linux conserva
+su contador lógico y su comportamiento observado en52 casos; no se intenta
+bloquear32 MiB físicos en este host con memlock8 MiB. macOS conserva el mismo
+contador lógico; no se ejecuta nuevo CI macOS ni se aplica la regla de páginas
+sin autorización/evidencia. Windows11x64 continúa no demostrado.
+
+**WER:** Registry64 y Registry32 de esta VM muestran ausencia de LocalDumps
+global/pm-custody.exe y del valor de exclusión para todos los usuarios.
+Se revisó sólo esa política de registro. Exclusión WER efectiva del servicio,
+dumps/crash, extracción, reboot/FDE y perfiles fuera de ARM64 siguen **no
+demostrados**; no se invocaron operaciones para generar dumps ni se modificó la política del SO;
+no se comprobó la ausencia de diagnósticos producidos por el SO.
+
+**Revisión de owners1PUX:** `onepux.rs::JsonParser::string/number` crea un
+ProtectedText por valor; el mapeo añade copias protegidas de notas/passwords,
+raw-item/provenance canónicos y campos lógicos mientras el AST existe.
+Una arena con owner único y rangos podría ahorrar regiones pequeñas, pero exigiría
+revisar lifetimes/ownership del parser y modelo y un RED/GREEN específico.
+Se difiere esa optimización opcional: preview GREEN con los owners vigentes,
+sin Debug/Clone de secretos ni copias en Vec ordinarios nuevas. Adjuntos
+siguen por chunks; no se toca lease/transferencia.
+
+Defaults/fallbacks heredados adicionales vistos en esa revisión, conservados:
+`onepux.rs` mapea favIndex ausente/no entero a0 (no favorito), y notesPlain
+ausente/no string a texto vacío; el raw_item se preserva separadamente.
+Los defaults de nombre de fichero, el primer mlock/guard/free no comprobados
+dentro de libsodium y los errores descartados de listener/liberación descritos
+en fase1 siguen intactos. El nuevo lock explícito incluye el canario y no
+convierte el mlock ignorado de libsodium en garantía suficiente.
+
+**Archivos de fase2 desde8994e14:** pm-crypto `src/lib.rs`, `src/root.rs`,
+`src/windows_memory.rs`, `tests/windows_memory_budget.rs`; pm-custody
+`src/windows.rs` sólo quota/diagnóstico de arranque; scripts
+`test-windows-custody-lab.ps1`, `test-windows-memory-quota-denial.ps1` y
+`verify-windows-libsodium-build.sh`; docs `design/security-operations.md` y
+`verification/ticket-28.md`. Cargo.lock/dependencias, TUI, observer, lease/
+transferencia, listeners/admisión/proveedor y protocolo sync sin cambios
+propios de esta fase. No se modifica el checkout raíz ni integration-26-28.
+
+Conflictos previsibles con W1: windows.rs en logger/startup y el harness/
+checker compartidos; el workflow opt-in heredado de fase1 también deberá
+componerse con W1. Preservar sus zonas y el método normal. Siguiente acción:
+el orquestador/merger puede componer este candidato y repetir la matriz real
+Windows de W1 sobre el resultado integrado. W5 no integra ni cierra tickets;
+WER/x64/reboot y aceptación integral siguen pendientes.
+
+La publicación final posterior sólo añade esta evidencia documental al código
+exacto observado en ec18dec. No se despacha otra corrida por documentación ni
+se atribuye un run distinto al SHA documental.
 
 ## Windows G7 — W5: diagnóstico nativo de cuota (2026-10-03)
 
