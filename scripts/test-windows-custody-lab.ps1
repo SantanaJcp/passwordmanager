@@ -720,7 +720,7 @@ try {
         Write-ServiceSubphaseDiagnostics $diagnosticPath
         $previewExit = $p.ExitCode
         # Independent native budget evidence, even when the seed8 preview is RED.
-        & cargo test -p pm-crypto --test windows_memory_budget --locked --offline -- --nocapture
+        & cargo test -p pm-crypto --test windows_memory_budget --locked --offline -- --nocapture --test-threads=1
         $budgetExit = $LASTEXITCODE
         Assert-True ($previewExit -eq 0) 'focused seed8 1PUX preview failed'
         Assert-True ((Get-Content $humanOut -Raw).Trim() -eq 'PASS w5-onepux-memory seed8=exact preview=2 prepared=validated lease=restored commit=not-sent') 'focused preview did not prove exact result'

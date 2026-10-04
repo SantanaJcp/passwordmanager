@@ -92,6 +92,203 @@ fijado de sodium_mlock Windows devuelve directamente el resultado de
 VirtualLock: GetLastError se captura antes de cleanup. Las páginas de canario
 que bloquea internamente sodium_malloc siguen fuera del contador de payload.
 
+Checkpoint publicado: `26f0e241197fa672daeabe03ece6f0badc4bd70b`, push
+normal sólo a W5. El helper instalado de Git apuntaba a un gh inexistente;
+se usó el override por comando autorizado, sin cambiar configuración ni
+reglas. GitHub anunció el bypass ya autorizado para crear esta rama.
+
+Corrida 1/5: [37167921060](https://github.com/SantanaJcp/passwordmanager/actions/runs/37167921060),
+SHA exacto del checkpoint, inputs `diagnostic_only=false`,
+`service_diagnostics=true`, `tui_conpty_red=false`,
+`onepux_memory_diagnostics=true`. Hipótesis: discriminar el primer fallo
+protegido del preview seed8 entre presupuesto, alloc y cuota VirtualLock.
+Terminó **failure / RED nativo**, sin cambio de cuota ni política de memoria.
+
+Revisión estática del ownership: `onepux.rs::open_source/inspect_archive`
+recorre archivo y entradas en chunks de 1 MiB; sólo captura atributos/JSON,
+no el adjunto completo. `human.rs::prepare_1pux_import` consume adjuntos por
+chunks de hasta 1 MiB para cifrarlos en staging; `plaintext.rs::encode` mide
+la longitud antes de reservar el destino protegido exacto. Todos esos destinos
+usan el presupuesto agregado existente. Los buffers ordinarios Zeroizing de
+ZIP/entrada y staging son pendientes heredados del inventario G7, no protección
+adicional acreditada ni owners nuevos de W5. No hay evidencia todavía de
+agotamiento de los 32 MiB que autorice modificar los owners de preview.
+
+Otros fallbacks inspeccionados y conservados: `onepux.rs::preview_source`
+sustituye el nombre de un archivo no referenciado sin separador `___` por el
+nombre restante tras `files/` (y en última instancia "unreferenced"); no
+interviene en el fixture positivo. libsodium 1.0.22 también ignora resultados
+internos de protecciones de guard/metadata y de VirtualFree al liberar; su
+API sodium_free no expone un resultado que este owner pueda comprobar.
+El listener que descarta fallos de conexión conserva exactamente esa conducta.
+
+El reinicio eliminó los resultados pmint5 de /tmp: se reconstruyeron sus
+52 invocaciones a partir del método versionado de integración, sin fabricar
+comparaciones con logs ausentes. Driver propio `/tmp/pmw5-run-linux-gates.py`,
+manifiesto de fuentes `/tmp/pmw5-source-manifest.json`, resultados por comando
+`/tmp/pmw5-linux-results.json` y resumen `/tmp/pmw5-linux-summary.log`.
+Los dos gates recién ejecutados de checkpoint son las dos primeras filas;
+los otros 50 comandos usan logs nuevos, cwd W5 y un flock por caso. Se exige
+el baseline documentado 52/49, tres rc1 conocidos y fuentes sin cambios;
+además se revisa la causa de esos tres RED, no sólo su rc.
+
+### Causa demostrada por la corrida 1
+
+El mismo seed8 pasa con lectura exacta de los ocho registros; después hay
+ack31, token y duplicación positiva del handle. El preview falla y la lease
+se restaura. Snapshot capturado antes de devolver el error y después de
+retirar la reserva fallida:
+
+| Categoría/contador | Observado nativamente |
+| --- | ---: |
+| Fallo comprobado de sodium_mlock/VirtualLock | `virtual-lock` |
+| GetLastError inmediato | `1453` |
+| Capacidad solicitada | 174 bytes |
+| Páginas solicitadas del payload | 4096 bytes |
+| Capacidad vigente | 2118 bytes |
+| Páginas vigentes del payload | 184320 bytes |
+| Regiones vigentes | 45 |
+| Presupuesto lógico agregado | 33554432 bytes |
+| Working set mínimo / máximo / flags | 204800 / 1413120 / 10 |
+
+Windows identifica 1453 como
+[ERROR_WORKING_SET_QUOTA](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--1300-1699-).
+Por tanto, el fallo comprobado es la cuota nativa de páginas, **no** el
+presupuesto lógico de 32 MiB ni una asignación nula. El mínimo queda en sus
+50 páginas predeterminadas; 45 páginas de payload más overhead nativo/canarios
+ya están cerca de ese límite. No se mide aquí la cifra total del overhead.
+El RED del test agregado también es válido: no puede ni bloquear el primer
+MiB. Todavía no llega a sus aserciones de 31/32 MiB, rechazo sobre el límite
+y ausencia de escritura del secreto; no se anuncian verdes.
+
+Logs: `/tmp/pmw5-native1.log` y metadata completa
+`/tmp/pmw5-native1.json`. Entorno: Windows11 Enterprise 10.0.26200/build26200,
+imagen `win11-vs2026-arm64/20260924.168.1`, Rust1.98.1
+`aarch64-pc-windows-msvc`, libsodium1.0.22 autenticado/nativo/static MSVC.
+El build Windows, probe y test nuevos compilan; preflight no se confunde con
+producto. Cleanup estricto concluye sin error adicional. Se consumió **1/5**
+corridas W5; no hay otra propia activa.
+
+### Decisión requerida antes de corregir
+
+El despacho exige detenerse si el margen/política no está fijado. G7 manda
+32 MiB de capacidad propia y overhead suficiente, pero no fija un working set
+mínimo concreto. Se detiene la corrección de cuota, conservando allocator y
+presupuesto. Opciones para aprobación del coordinador/usuario:
+
+| Opción | Política propuesta | Consecuencia |
+| --- | --- | --- |
+| A, recomendada | Mínimo `max(actual,64 MiB)`, máximo `max(actual,mínimo nuevo)`, conservar flags10 (mínimo/máximo blandos observados). | 32 MiB de presupuesto más 32 MiB de margen; mayor holgura para regiones pequeñas/páginas/canarios, mayor working set solicitado. |
+| B | Igual política, mínimo de 40 MiB (32+8 MiB). | Menor solicitud al SO; admite antes rechazo de operaciones con muchos owners pequeños. No hay evidencia que acredite 8 MiB de margen. |
+
+Ambas opciones mantendrían el presupuesto lógico de 32 MiB, sin hard cap para
+Argon2id/TLS ni reserva por conexión. Configurar y consultar de nuevo la cuota
+antes de claves/bootstrap del servicio, comprobar retornos y fallo explícito
+del arranque si Windows rechaza o devuelve un mínimo insuficiente. No volver
+a intentar con otra política ni usar memoria sin bloquear. La inicialización
+del backend tendría que cubrir también los procesos humanos que usan esas
+regiones conforme al contrato por proceso; no basta habilitar sólo el servicio
+para acreditar el test en su proceso independiente.
+
+Un margen fijo no garantiza encajar cualquier fragmentación posible: bajo
+presión o al superar páginas disponibles, VirtualLock sigue denegando antes
+de colocar secretos. No se añade un límite de regiones ni se reduce
+funcionalidad. El GREEN pendiente debe repetir el mismo probe seed8 y exigir
+31/32 MiB realmente bloqueados, rechazo de la siguiente reserva antes de su
+closure de escritura, reutilización tras liberar y contadores finales cero.
+Se debe agregar el rechazo del arranque por cuota no establecida; el seam y
+método concretos se fijarán al aprobar esta política, antes de ejecutarlos.
+WER/crash/dumps, Windows11 x64, reboot/FDE y aceptación humana siguen sin
+evidencia en este despacho. No se presenta RED→GREEN aún.
+
+### Barrido local y diagnóstico tras el reinicio
+
+El barrido conserva dos fallos iniciales inesperados (no se borran ni
+reclasifican como éxitos):
+
+- `token-exchange-lab`, rc1 en `token_exchange_lab.py:492`, Start del caso
+  sin worker previo a cancelar; no registró el código público. Un probe en
+  `/tmp/pmw5-token-exchange-diagnostic.py` conserva todas las aserciones y
+  añade sólo rc y booleanos de códigos en esa fase. Misma fixture/binarios,
+  bajo flock; terminó rc0, Start rc0 y cancelación terminal verificada,
+  `/tmp/pmw5-token-exchange-diagnostic.log`. La causa del primer fallo sigue
+  sin atribuir; un PASS posterior no demuestra una corrección de W5.
+- `tui-content-lab`, rc1 en lectura real de clipboard: wl-paste no conecta
+  porque `WAYLAND_DISPLAY` está ausente, intenta su `wayland-0` heredado y
+  sólo existe `wayland-1` owned del UID1000. Es un prerrequisito del método
+  [23](ticket-23.md), no RED de memoria. Se selecciona explícitamente la
+  sesión existente con `WAYLAND_DISPLAY=wayland-1` sólo en el entorno de
+  verificación; sin cambios de escritorio/configuración ni aserciones.
+
+Ambos wrappers originales tienen rechecks separados con logs nuevos
+`/tmp/pmw5-recheck-{token-exchange,tui-content}.log`; ambos terminaron rc0.
+TUI content prueba clipboard/race/denegación agente y resize completos con
+Wayland explícito. Token exchange conserva todos sus controles, incluido
+cancel. Las filas iniciales se conservan en `/tmp/pmw5-linux-results.json`.
+Los restantes casos se reanudan a partir de su siguiente comando, nunca
+duplicando uno activo ni dando por pasado uno que no se ejecutó. Fuentes
+congeladas por el manifiesto; el mismo flock impide dos labs simultáneos.
+
+Fallbacks heredados en este diagnóstico local, sin modificar:
+`wl-paste` usa wayland-0 al faltar WAYLAND_DISPLAY (y falla aquí);
+`test-linux-token-exchange-lab.sh` selecciona el Java de PATH al faltar
+PM_JAVA_HOME, y su Keycloak local por defecto al faltar PM_KEYCLOAK_DIST.
+Keycloak se proporciona explícitamente según el despacho. No se añaden
+reintentos al producto ni se atribuye un fallo Linux al código cfg Windows.
+
+Barrido completo concluido sobre código `26f0e24`, fuentes congeladas:
+52/47 en la primera observación (tres RED conocidos y dos fallos iniciales).
+Los dos rechecks originales rc0 están separados en
+`/tmp/pmw5-linux-rechecks.json`; la vista de resultados vigentes es
+`/tmp/pmw5-linux-latest-results.json`: **52 casos / 49 rc0**, coincidente con
+el baseline documentado. El primer resultado permanece íntegro, no se anuncia
+que toda la primera corrida pasó ni que se demostró la causa del fallo token.
+
+| Grupo | Resultado vigente |
+| --- | --- |
+| Check / clean offline | rc0 / rc0 |
+| 26 wrappers Linux / tres publicaciones | 26/26 y 3/3 rc0, con los dos rechecks explicitados |
+| Audit, SQLite sync, bootstrap completed | 3/3 rc0 |
+| G7 canaries, cinco inflight, tres inflight-live, vault completed, matrix trace | rc0, control/cleanup conservados |
+| Concurrencia, purge probe, E2EE/shared-purge, restore digest | rc0; los tests no se aceptaron con cero casos |
+| G7 matrix | rc1 conocido: sólo staging superviviente de commit-outbox-audit EIO y ENOSPC; cleanup errors=0 |
+| Bootstrap / vault ambiguos sin completed | mismos rc1 diagnósticos: authority/receipts changed; replacement=0, closed=1, cleanup errors=0 |
+
+Los 52 casos se reanudaron entre comandos; no se canceló ningún lab propio
+activo ni se tocó un proceso ajeno. No hay cambios en fuentes Linux durante
+el barrido. Las dos comparaciones de digest y el grupo E2EE/shared-purge se
+ejecutaron con sus filtros reales. No se rebajaron oráculos, deadlines, KDF,
+presupuesto, ni se corrigieron G7 staging/W1/W2/W4.
+
+### Robustez del propio contador diagnóstico
+
+La revisión final detectó que el campo de páginas solicitado, de tipo usize,
+podía desbordar al redondear un rechazo de `usize::MAX`. Eso habría sustituido
+el ResourceUnavailable esperado por un panic del diagnóstico. Se amplía sólo
+ese campo a u128, dejando intactos presupuesto y contadores de regiones
+válidas. El test nativo adicional pide esa reserva desmesurada: debe obtener
+ResourceUnavailable/category=budget sin ejecutar la closure que coloca el
+secreto ni incrementar capacidad. No pretende asignar ni bloquear ese tamaño.
+Los tests con snapshot global se ejecutan serialmente en su proceso separado.
+
+Es una corrección de instrumentación, independiente de la política de cuota
+pendiente; no configura working set ni aumenta el presupuesto. La verificación
+nativa de esta regresión aún está pendiente del siguiente checkpoint/run; el
+test de 31/32 MiB y el preview seed8 siguen deliberadamente RED por la cuota.
+
+Gates locales del contador corregido: fmt + `check.sh` rc0,
+`/tmp/pmw5-diagnostic-final-check.log`; clean locked/offline rc0 (build
+47.50 s), `/tmp/pmw5-diagnostic-final-clean.log`, ambos bajo el flock.
+Comparación con el manifiesto de los 52 casos: los únicos cambios posteriores
+son `windows_memory.rs`, su test cfg Windows y el argumento serial del test
+PowerShell opt-in. Ningún cuerpo Linux ni código compartido del allocator
+cambió después del barrido, por lo que no se repiten los 52 casos.
+
+Corrida 2 prevista: mismo modo enfocado sobre el nuevo SHA exacto publicado,
+cambio único de comportamiento diagnóstico: una petición desmesurada debe
+ser rechazada sin overflow/panic. La cuota no se toca; se espera conservar
+el RED causal seed8/32 MiB. No se lanzará una corrida idéntica como reintento.
+
 ## Frontera y prerrequisitos
 
 Este método prueba Linux x86_64 en un `user namespace` desechable con UIDs

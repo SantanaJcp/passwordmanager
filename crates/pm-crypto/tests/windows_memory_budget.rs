@@ -5,6 +5,28 @@ use pm_crypto::{
     CryptoError, ProtectedBytes, ProtectedWriter, windows_memory_failure, windows_memory_status,
 };
 
+#[test]
+fn native_oversized_request_is_resource_unavailable_without_secret_write_or_counter_overflow() {
+    let mut placed_secret = false;
+    let rejected = ProtectedWriter::new(usize::MAX).and_then(|mut writer| {
+        writer.put_with(1, |destination| {
+            placed_secret = true;
+            destination[0] = b'S';
+            Ok(())
+        })
+    });
+    assert_eq!(rejected, Err(CryptoError::ResourceUnavailable));
+    assert!(!placed_secret);
+    let failure = windows_memory_failure()
+        .unwrap()
+        .expect("explicit oversized rejection");
+    assert_eq!(failure.category, "budget");
+    assert_eq!(failure.win32_error, 0);
+    assert_eq!(failure.requested_capacity_bytes, usize::MAX);
+    assert!(failure.requested_payload_page_bytes > usize::MAX as u128);
+    assert_eq!(windows_memory_status().unwrap().live_capacity_bytes, 0);
+}
+
 /// Runs in its own integration-test process, with no concurrent secret owners.
 /// The production quota must be prepared before this acceptance case can pass.
 #[test]

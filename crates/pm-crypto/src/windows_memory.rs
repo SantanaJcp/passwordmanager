@@ -37,7 +37,7 @@ pub struct WindowsMemoryStatus {
 pub struct WindowsMemoryFailure {
     pub category: &'static str,
     pub requested_capacity_bytes: usize,
-    pub requested_payload_page_bytes: usize,
+    pub requested_payload_page_bytes: u128,
     /// Captured immediately after sodium_mlock/VirtualLock, before cleanup or
     /// any other Windows call. Zero for aggregate-budget rejection.
     pub win32_error: u32,
@@ -86,15 +86,20 @@ pub fn windows_memory_failure() -> Result<Option<WindowsMemoryFailure>, CryptoEr
         .map_err(|_| CryptoError::ResourceUnavailable)
 }
 
-fn payload_page_bytes(len: usize) -> usize {
+fn page_size() -> usize {
     static PAGE_SIZE: OnceLock<usize> = OnceLock::new();
-    let page = *PAGE_SIZE.get_or_init(|| {
+    *PAGE_SIZE.get_or_init(|| {
         let mut info = SYSTEM_INFO::default();
         // SAFETY: documented infallible system query writes this structure.
         unsafe { GetSystemInfo(&raw mut info) };
         info.dwPageSize as usize
-    });
+    })
+}
+
+fn payload_page_bytes(len: usize) -> usize {
+    let page = page_size();
     // libsodium places each payload at the end of a page-aligned region.
+    // Successful reservations are bounded to 32 MiB, so this cannot overflow.
     len.div_ceil(page) * page
 }
 
@@ -119,7 +124,10 @@ pub(crate) fn failed(
         .map_err(|_| CryptoError::ResourceUnavailable)? = Some(WindowsMemoryFailure {
         category,
         requested_capacity_bytes: len,
-        requested_payload_page_bytes: payload_page_bytes(len),
+        // A rejected request can be usize::MAX: its rounded page count can
+        // exceed usize even though it never reaches sodium_malloc.
+        requested_payload_page_bytes: (len as u128).div_ceil(page_size() as u128)
+            * page_size() as u128,
         win32_error,
         status,
     });
