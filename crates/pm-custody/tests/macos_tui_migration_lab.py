@@ -521,6 +521,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
         assert snapshot(m, session)["vault_items"] == negative_count
         print("PM26_MATRIX full25-offline+wrong-pin=observed", flush=True)
 
+        backup_started = m.time.monotonic()
         mark = operation(session, "b", "1", "New native backup path", native)
         try:
             session.wait_information("Native encrypted backup complete", since=mark)
@@ -531,6 +532,7 @@ def run_tui_ticket25_matrix(m, binary, profile, private, endpoint, scratch, labe
             print(f"PM26_BACKUP_WAIT destination={size} mode={mode}", flush=True)
             raise
         assert native.stat().st_mode & 0o777 == 0o600 and native.stat().st_size > 0
+        print(f"PMW1_BACKUP elapsed_ms={round((m.time.monotonic() - backup_started) * 1000)} complete-panel=1", flush=True)
         native_digest = source_digest(native)
         mark = operation(session, "b", "2", "New plaintext export path", plaintext)
         session.wait_information("PLAINTEXT WARNING: persistent readable copy outside vault custody; type EXPORT:", since=mark)

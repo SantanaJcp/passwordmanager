@@ -995,6 +995,7 @@ fn event_loop(
                         app.status = "Operation failed explicitly; no success was recorded".into();
                         if error.primary() == crate::failure::PrimaryFailure::DestinationExists {
                             app.status.push_str(" (DESTINATION_EXISTS)");
+                            show_information(app, &app.status.clone());
                         }
                     }
                 }
@@ -1580,7 +1581,15 @@ fn confirm_import(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), 
 }
 
 fn native_backup(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
-    let bytes = rpc_download_atomic(tls, &[32], Path::new(value))?;
+    let destination = Path::new(value);
+    // Check the directory entry itself, including dangling aliases. The final
+    // exclusive publication still rejects a destination created during download.
+    match fs::symlink_metadata(destination) {
+        Ok(_) => return Err(Failure::DestinationExists),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(Failure::Unavailable),
+    }
+    let bytes = rpc_download_atomic(tls, &[32], destination)?;
     app.status = format!(
         "Native encrypted backup complete: {bytes} bytes; existing exposed copies are unchanged"
     );

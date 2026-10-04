@@ -5,6 +5,8 @@
 import hashlib
 import os
 import pathlib
+import signal
+import time
 import sys
 import tempfile
 
@@ -60,17 +62,42 @@ def main():
         original = (digest(destination), destination.stat().st_size, destination.stat().st_mode,
                     destination.stat().st_ino)
         assert destination.stat().st_mode & 0o777 == 0o600
-        request(root, kind, destination)
+        if kind == "backup":
+            os.kill(daemon.pid, signal.SIGSTOP)
         try:
+            request(root, kind, destination)
             failed = wait_text(root, "Operation failed explicitly; no success was recorded (DESTINATION_EXISTS)")
         except AssertionError:
             print(f"RED shared-download kind={kind} unexpected-success={success in screen(root)} "
                   f"destination-changed={digest(destination) != original[0]}", flush=True)
             raise AssertionError(f"{kind}: existing destination was not rejected") from None
+        finally:
+            if kind == "backup":
+                os.kill(daemon.pid, signal.SIGCONT)
         assert success not in failed
         assert (digest(destination), destination.stat().st_size, destination.stat().st_mode,
                 destination.stat().st_ino) == original
         assert not destination.with_suffix(".partial").exists()
+        if kind == "backup":
+            print("PASS backup-early collision=DestinationExists server=paused partial=absent", flush=True)
+            raced = destination.with_name("raced-backup.output")
+            assert not raced.exists() and not raced.with_suffix(".partial").exists()
+            os.kill(daemon.pid, signal.SIGSTOP)
+            try:
+                request(root, kind, raced)
+                deadline = time.monotonic() + 8
+                while not raced.with_suffix(".partial").exists():
+                    assert time.monotonic() < deadline, "backup request did not create its own temporary"
+                    time.sleep(.05)
+                as_uid(HUMAN, [sys.executable, "-c",
+                    "import os,sys;fd=os.open(sys.argv[1],os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600);os.write(fd,b'synthetic-race-destination');os.close(fd)", raced])
+                original_race = (digest(raced), raced.stat())
+            finally:
+                os.kill(daemon.pid, signal.SIGCONT)
+            wait_text(root, "Operation failed explicitly; no success was recorded (DESTINATION_EXISTS)")
+            assert (digest(raced), raced.stat()) == original_race
+            assert not raced.with_suffix(".partial").exists()
+            print("PASS backup-race collision=DestinationExists destination=unchanged partial=absent", flush=True)
     finally:
         finish_owned_resources(root, daemon, None, None)
     print(f"PASS shared-download kind={kind} collision=error digest=unchanged mode=0600 "

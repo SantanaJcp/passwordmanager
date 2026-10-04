@@ -4045,3 +4045,35 @@ verticales, manteniendo la matriz de fracaso integral abierta; acordar la
 decisión de colisión Mac sin ampliar8/20s. W5 continúa en su rama con el
 preview1PUX; sólo el merger integrará candidatos autorizados y verificará la
 composición. W1 no integra ni fusiona PR1 ni cambia tickets/protecciones.
+
+## W1 fase 5 — método aprobado (2026-10-04)
+
+El encargo autoriza las tres decisiones pendientes: alias reparse creado por
+el instalador y eliminado explícitamente sin traversal; segundo dispositivo
+con SCM ordinario alternado y conservación/restauración de ambos paquetes
+de auditoría; rechazo temprano TUI de backup con DestinationExists y
+publicación exclusiva final preservada. No representa segundo agente W4.
+Presupuesto nuevo: hasta seis Windows y dos macOS, SHAs exactos de W1.
+
+Regresión discriminante del backup: extender el lab de publicación existente.
+Con destino existente, pausar exclusivamente el custodio propio y exigir
+rechazo por teclado/panel dentro del plazo original, destino intacto y ningún
+temporal: el servidor no puede responder. Reanudarlo incluso ante fallo.
+Para la carrera, usar otro destino inicialmente ausente, pausar custodio,
+solicitar backup y observar el temporal creado por el cliente antes de crear
+el destino adversario con identidad humana. Reanudar y exigir el mismo
+DestinationExists, archivo adversario intacto y temporal ausente. Conserva
+TLS/RPK, servicio real y todos los límites; RED antes del producto y GREEN
+después. Medir en Mac desde submit hasta panel completo del backup feliz,
+sin ampliar el plazo original. La negativa de colisión conserva sus ocho
+segundos; happy sync conserva veinte.
+
+Checkpoint del rechazo temprano: RED conductual en producto84af9d4, lab nuevo,
+`flock /tmp/pm-cargo-window.lock ./scripts/test-linux-download-publication-lab.sh backup`,
+rc1 `/tmp/pmw1e-backup-red.log`: backup feliz completo, destino intacto,
+pero custodio pausado impide observar rechazo. GREEN mismo comando tras el
+cambio TUI, más check.sh, rc0 `/tmp/pmw1e-backup-green-check.log`: rechazo
+antes de RPC sin temporal y carrera después de comprobar ausencia, ambos
+DestinationExists con destino intacto y cleanup verificado. El rechazo se
+muestra en panel manteniendo el mismo status público. La publicación final
+compartida no cambia. Validadores CI/diff/AST rc0; Mac aún no ejecutado.
