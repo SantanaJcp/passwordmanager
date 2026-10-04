@@ -42,6 +42,11 @@ use std::{
     time::Duration,
 };
 
+#[cfg(all(test, windows))]
+mod windows_pipe_tests;
+#[cfg(windows)]
+mod windows_session;
+
 const MAGIC: &[u8] = b"PMK1";
 const ALPN: &[u8] = b"pm-sync/1";
 const MAX_FRAME: usize = 1024 * 1024;
@@ -51,6 +56,8 @@ struct Key {
 }
 
 fn main() {
+    timing::process_entry();
+    let _main = timing::Span::new("client_main");
     if run().is_err() {
         eprintln!("SYNC_UNAVAILABLE");
         std::process::exit(4)
@@ -99,7 +106,6 @@ fn run() -> Result<(), ()> {
                 )
             }
         }
-        #[cfg(unix)]
         Some("session") => {
             if client_session(&mut a).is_err() {
                 // This owned client's result channel is framed IPC. Report the
@@ -239,9 +245,7 @@ fn serve(
                     eprintln!("SYNC_REQUEST_FAILED");
                     return;
                 };
-                let result = run_with_deadline(&stop, || {
-                    serve_one_windows(pipe, &store_path, worker_config)
-                });
+                let result = windows_session::serve(pipe, &store_path, worker_config, &stop);
                 let closed = stop.close().map_err(|_| ());
                 if result.is_err() || closed.is_err() {
                     eprintln!("SYNC_REQUEST_FAILED");
@@ -274,21 +278,6 @@ fn create_sync_listener(
 }
 
 #[cfg(windows)]
-fn serve_one_windows(
-    mut pipe: WindowsServerPipe,
-    db: &Path,
-    config: Arc<ServerConfig>,
-) -> Result<(), ()> {
-    pipe.verify().map_err(|_| ())?;
-    let result = serve_one(&mut pipe, db, config);
-    let peer = pipe.verify().map_err(|_| ());
-    match (result, peer) {
-        (Ok(()), Ok(())) => Ok(()),
-        _ => Err(()),
-    }
-}
-
-#[cfg(windows)]
 fn run_with_deadline(
     stop: &WindowsStopEvent,
     operation: impl FnOnce() -> Result<(), ()>,
@@ -296,6 +285,7 @@ fn run_with_deadline(
     let completed = Arc::new((Mutex::new(false), Condvar::new()));
     let waiter = Arc::clone(&completed);
     let signal = stop.clone();
+    let spawning = timing::Span::new("deadline_spawn");
     let worker = std::thread::Builder::new()
         .name("pm-sync-request-deadline".to_owned())
         .spawn(move || {
@@ -310,13 +300,36 @@ fn run_with_deadline(
             Ok(())
         })
         .map_err(|_| ())?;
+    drop(spawning);
     let result = operation();
+    if timing::w1_enabled() {
+        timing::count(
+            if result.is_ok() {
+                "deadline_operation_ok"
+            } else {
+                "deadline_operation_failed"
+            },
+            1,
+        );
+    }
+    let joining = timing::Span::new("deadline_join");
     let completion: Result<(), ()> = (|| {
         let (lock, changed) = &*completed;
         *lock.lock().map_err(|_| ())? = true;
         changed.notify_all();
         worker.join().map_err(|_| ())?
     })();
+    drop(joining);
+    if timing::w1_enabled() {
+        timing::count(
+            if completion.is_ok() {
+                "deadline_completion_ok"
+            } else {
+                "deadline_completion_failed"
+            },
+            1,
+        );
+    }
     match (result, completion) {
         (Ok(()), Ok(())) => Ok(()),
         _ => Err(()),
@@ -338,10 +351,10 @@ fn serve_one_unix(stream: UnixStream, db: &Path, config: Arc<ServerConfig>) -> R
     serve_one(stream, db, config)
 }
 
+#[cfg(unix)]
 fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) -> Result<(), ()> {
     let conn = ServerConnection::new(config).map_err(|_| ())?;
     let mut tls = rustls::StreamOwned::new(conn, stream);
-    #[allow(unused_mut)]
     let mut request = read_frame(&mut tls)?;
     let peer = tls
         .conn
@@ -355,40 +368,28 @@ fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) ->
     }
     let opening = timing::Span::new("server_sqlite_open");
     let store = OpaqueSyncStore::create(db).map_err(|_| ())?;
-    #[cfg(unix)]
     let store = store.session_connection().map_err(|_| ())?;
     drop(opening);
     let result = (|| loop {
         let dispatching = timing::Span::new("server_dispatch");
-        let response = dispatch(
-            &store,
-            &peer,
-            std::str::from_utf8(&request).map_err(|_| ())?,
-        )
-        .unwrap_or_else(|()| "{\"ok\":false}".to_owned());
+        let response = dispatch_response(&store, &peer, &request)?;
         drop(dispatching);
         write_frame(&mut tls, response.as_bytes())?;
-        if cfg!(windows) {
-            return Ok(());
-        }
-        #[cfg(unix)]
-        {
-            request = read_frame(&mut tls)?;
-        }
+        request = read_frame(&mut tls)?;
     })();
-    #[cfg(unix)]
-    {
-        let closed = store.close().map_err(|_| ());
-        result.and(closed)
-    }
-    #[cfg(windows)]
-    result
+    let closed = store.close().map_err(|_| ());
+    result.and(closed)
 }
 
-#[cfg(unix)]
 type DispatchStore = pm_sync::OpaqueSyncConnection;
-#[cfg(windows)]
-type DispatchStore = OpaqueSyncStore;
+
+// Retain the existing server failure mapping in one place for both transports.
+fn dispatch_response(store: &DispatchStore, peer: &[u8], request: &[u8]) -> Result<String, ()> {
+    Ok(
+        dispatch(store, peer, std::str::from_utf8(request).map_err(|_| ())?)
+            .unwrap_or_else(|()| "{\"ok\":false}".to_owned()),
+    )
+}
 
 fn dispatch(store: &DispatchStore, rpk: &[u8], json: &str) -> Result<String, ()> {
     let method = field(json, "method")?;
@@ -617,6 +618,11 @@ fn client(method: &str, a: &mut impl Iterator<Item = std::ffi::OsString>) -> Res
     Ok(())
 }
 
+#[cfg(windows)]
+fn client_session(a: &mut impl Iterator<Item = std::ffi::OsString>) -> Result<(), ()> {
+    windows_session::client(a)
+}
+
 #[cfg(unix)]
 fn client_session(a: &mut impl Iterator<Item = std::ffi::OsString>) -> Result<(), ()> {
     let preparing = timing::Span::new("client_prepare");
@@ -700,20 +706,79 @@ fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Resul
     let name = socket.to_str().ok_or(())?;
     let stop = WindowsStopEvent::create().map_err(|_| ())?;
     let mut response = None;
+    let deadline = timing::Span::new("client_deadline_scope");
     let result = run_with_deadline(&stop, || {
+        let opening = timing::Span::new("client_pipe_open");
         let pipe = WindowsClientPipe::connect_sync(name, &stop).map_err(|_| ())?;
+        drop(opening);
+        // Check the pinned kernel peer before any TLS or request bytes. A
+        // complete authenticated reply may outlive the server's pipe handle;
+        // requiring pipe liveness after that reply races its normal close.
+        let verifying = timing::Span::new("client_pipe_verify");
+        let verified = pipe.verify().map_err(|_| ());
+        if timing::w1_enabled() {
+            timing::count(
+                if verified.is_ok() {
+                    "client_pipe_verify_ok"
+                } else {
+                    "client_pipe_verify_failed"
+                },
+                1,
+            );
+        }
+        verified?;
+        drop(verifying);
+        let configuring = timing::Span::new("client_tls_config");
         let conn = ClientConnection::new(
             Arc::new(config),
             ServerName::try_from("passwordmanager.invalid").map_err(|_| ())?,
         )
         .map_err(|_| ())?;
         let mut tls = rustls::StreamOwned::new(conn, pipe);
-        write_frame(&mut tls, request)?;
+        drop(configuring);
+        let exchange = timing::Span::new("tls_exchange");
+        let writing = timing::Span::new("tls_request_write");
+        write_frame(
+            &mut timing::FirstWrite {
+                writer: &mut tls,
+                first: true,
+            },
+            request,
+        )?;
+        drop(writing);
+        let reading = timing::Span::new("tls_response_read");
         response = Some(read_frame(&mut tls)?);
-        tls.sock.verify().map_err(|_| ())?;
+        if timing::w1_enabled() {
+            timing::count(
+                if response
+                    .as_ref()
+                    .is_some_and(|bytes| bytes.starts_with(b"{\"ok\":true"))
+                {
+                    "response_ok_prefix"
+                } else {
+                    "response_other_prefix"
+                },
+                1,
+            );
+        }
+        #[cfg(test)]
+        windows_pipe_tests::after_response(tls.sock.raw_handle());
+        drop(reading);
+        drop(exchange);
         Ok(())
     });
+    drop(deadline);
     let closed = stop.close().map_err(|_| ());
+    if timing::w1_enabled() {
+        timing::count(
+            if closed.is_ok() {
+                "client_stop_close_ok"
+            } else {
+                "client_stop_close_failed"
+            },
+            1,
+        );
+    }
     match (result, closed, response) {
         (Ok(()), Ok(()), Some(response)) => Ok(response),
         _ => Err(()),

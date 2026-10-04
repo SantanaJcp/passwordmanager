@@ -1133,6 +1133,7 @@ fn handle_sync_request(
     }
     Some((|| match opcode {
         63 => {
+            let _preparing = pm_sync::timing::Span::new("sync_submit_prepare");
             let mut cursor = Cursor::new(request);
             let protected = protected_copy(cursor.bytes()?)?;
             let program = PathBuf::from(cursor.public_string()?);

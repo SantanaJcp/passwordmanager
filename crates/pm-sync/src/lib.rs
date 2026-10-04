@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod session;
 pub mod timing;
 
@@ -82,7 +82,7 @@ pub struct ProcessTlsTransport {
     socket: PathBuf,
     client_key: PathBuf,
     server_public: PathBuf,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     session: Option<std::sync::Mutex<Option<session::Session>>>,
 }
 impl ProcessTlsTransport {
@@ -93,13 +93,13 @@ impl ProcessTlsTransport {
             socket: socket.to_owned(),
             client_key: client_key.to_owned(),
             server_public: server_public.to_owned(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             session: None,
         }
     }
     /// Reuse one mutually authenticated TLS connection for sequential sync RPCs.
     /// Request/frame/block limits and replica-level retry policy remain unchanged.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[must_use]
     pub fn authenticated_session(
         program: &Path,
@@ -116,7 +116,7 @@ impl ProcessTlsTransport {
     ///
     /// # Errors
     /// Reports a failed client exit, deadline or cleanup explicitly.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub fn finish(&self) -> Result<(), SyncError> {
         if let Some(state) = &self.session
             && let Some(session) = state.lock().map_err(|_| SyncError::Unavailable)?.take()
@@ -126,7 +126,7 @@ impl ProcessTlsTransport {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn session_call(&self, request: &str) -> Result<String, SyncError> {
         let mut state = self
             .session
@@ -182,6 +182,7 @@ impl ProcessTlsTransport {
         namespace: [u8; 32],
         extra: &[(&str, String)],
     ) -> Result<String, SyncError> {
+        let _gap = timing::RpcGap::default();
         let mut command = Command::new(&self.program);
         command
             .arg(method)
@@ -206,14 +207,45 @@ impl ProcessTlsTransport {
         command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        if timing::w1_enabled() {
+            timing::count(
+                match method {
+                    "put" => "rpc_started_put",
+                    "get" => "rpc_started_get",
+                    "publish" => "rpc_started_publish",
+                    "list" => "rpc_started_list",
+                    _ => "rpc_started_other",
+                },
+                1,
+            );
+            if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                command.env("PMW1_SPAWN_US", now.as_micros().to_string());
+            }
+        }
         let started = timing::Span::new("process_spawn");
         let child = command.spawn().map_err(|_| SyncError::Unavailable)?;
         drop(started);
+        if timing::w1_enabled() {
+            timing::count("process_started", 1);
+        }
         let waiting = timing::Span::new("process_wait");
         let output = child
             .wait_with_output()
             .map_err(|_| SyncError::Unavailable)?;
         drop(waiting);
+        if timing::w1_enabled() {
+            timing::count(
+                match (output.status.success(), output.status.code()) {
+                    (true, _) => "process_exit_success",
+                    (false, Some(4)) => "process_exit_unavailable",
+                    (false, Some(5)) => "process_exit_missing",
+                    (false, Some(6)) => "process_exit_backpressure",
+                    (false, Some(7)) => "process_exit_integrity",
+                    (false, _) => "process_exit_other",
+                },
+                1,
+            );
+        }
         if timing::enabled() {
             for line in output.stderr.split(|byte| *byte == b'\n') {
                 if timing::valid_line(line) {
@@ -235,7 +267,8 @@ impl ProcessTlsTransport {
 }
 impl SyncTransport for ProcessTlsTransport {
     fn put(&self, n: [u8; 32], h: [u8; 32], b: &[u8]) -> Result<(), SyncError> {
-        #[cfg(unix)]
+        timing::put_started();
+        #[cfg(any(unix, windows))]
         if self.session.is_some() {
             let _rpc = timing::Span::new("rpc_put");
             if b.is_empty() || b.len() > MAX_BLOCK_BYTES || digest(b) != h {
@@ -245,11 +278,18 @@ impl SyncTransport for ProcessTlsTransport {
         }
         let parent = self.client_key.parent().ok_or(SyncError::Unavailable)?;
         let temporary = parent.join(format!(".pm-sync-put-{}-{}", std::process::id(), hex(&h)));
+        let creating = timing::Span::new("put_file_create");
         let mut file = pm_native_channel::create_private_file(&temporary, false, true)
             .map_err(|_| SyncError::Unavailable)?;
+        drop(creating);
         let writing = timing::Span::new("put_file_fsync");
+        let writing_only = timing::Span::new("put_file_write");
         file.write_all(b)
-            .and_then(|()| file.sync_all())
+            .and_then(|()| {
+                drop(writing_only);
+                let _syncing = timing::Span::new("put_file_sync");
+                file.sync_all()
+            })
             .map_err(|_| SyncError::Unavailable)?;
         drop(file);
         drop(writing);
@@ -261,11 +301,13 @@ impl SyncTransport for ProcessTlsTransport {
                 ("--input", temporary.display().to_string()),
             ],
         );
+        let removing = timing::Span::new("put_file_remove");
         let _ = std::fs::remove_file(temporary);
+        drop(removing);
         result.map(drop)
     }
     fn get(&self, n: [u8; 32], h: [u8; 32]) -> Result<Vec<u8>, SyncError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let response = if self.session.is_some() {
             let _rpc = timing::Span::new("rpc_get");
             self.session_call(&format!(
@@ -276,7 +318,7 @@ impl SyncTransport for ProcessTlsTransport {
         } else {
             self.call("get", n, &[("--hash", hex(&h))])?
         };
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         let response = self.call("get", n, &[("--hash", hex(&h))])?;
         let encoded = json_string(&response, "bytes").ok_or(SyncError::Integrity)?;
         let bytes = STANDARD.decode(encoded).map_err(|_| SyncError::Integrity)?;
@@ -285,7 +327,7 @@ impl SyncTransport for ProcessTlsTransport {
             .ok_or(SyncError::Integrity)
     }
     fn publish(&self, n: [u8; 32], h: [u8; 32]) -> Result<(), SyncError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.session.is_some() {
             let _rpc = timing::Span::new("rpc_publish");
             return self
@@ -304,7 +346,7 @@ impl SyncTransport for ProcessTlsTransport {
         c: Option<u64>,
         l: usize,
     ) -> Result<Vec<(u64, [u8; 32])>, SyncError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.session.is_some() {
             let _rpc = timing::Span::new("rpc_list");
             let cursor = c
@@ -429,12 +471,12 @@ impl OpaqueSyncStore {
         })
     }
 
-    /// Opens the connection owned by one Unix TLS session, without a retained
+    /// Opens the connection owned by one native TLS session, without a retained
     /// read/write transaction or cached namespace authorization.
     ///
     /// # Errors
     /// Propagates opening/schema errors; never chooses another execution mode.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub fn session_connection(&self) -> Result<OpaqueSyncConnection, SyncError> {
         let session = self.rpc_connection()?;
         {
@@ -500,7 +542,7 @@ impl OpaqueSyncStore {
 }
 
 /// One database connection with independently committed and authorized RPCs.
-/// The Unix server owns it for exactly one TLS connection; single-RPC callers
+/// The native server owns it for exactly one TLS connection; single-RPC callers
 /// still create a short-lived connection through `OpaqueSyncStore`.
 pub struct OpaqueSyncConnection {
     connection: std::cell::RefCell<Connection>,
@@ -701,6 +743,11 @@ impl SyncReplica {
             drop(exporting);
             timing::count("exported_graphs", graphs.iter().flatten().count());
             for ((event, graph), stage) in batch.iter().zip(graphs).zip(stages) {
+                let _event = timing::Span::new("event_total");
+                let _event_puts = timing::EventPuts::default();
+                if timing::w1_enabled() {
+                    timing::count("event_started", 1);
+                }
                 let sealed = self.pairing.seal(&event.to_bytes())?;
                 let hash = digest(&sealed);
                 retry(|| server.put(namespace, hash, &sealed))?;
@@ -709,7 +756,9 @@ impl SyncReplica {
                 if let Some(graph) = graph {
                     graph_hashes.push(self.upload_graph(server, &graph)?);
                 }
+                let cleanup = timing::Span::new("graph_cleanup");
                 let _ = std::fs::remove_dir_all(stage);
+                drop(cleanup);
             }
             hashes.sort_unstable();
             graph_hashes.sort_unstable();
@@ -719,6 +768,9 @@ impl SyncReplica {
             }
             let sealed = self.pairing.seal(&descriptor)?;
             let hash = digest(&sealed);
+            if timing::w1_enabled() {
+                timing::count("framing_puts", 1);
+            }
             retry(|| server.put(namespace, hash, &sealed))?;
             pages.push(hash);
         }
@@ -729,6 +781,9 @@ impl SyncReplica {
         }
         let sealed = self.pairing.seal(&descriptor)?;
         let root = digest(&sealed);
+        if timing::w1_enabled() {
+            timing::count("framing_puts", 1);
+        }
         retry(|| server.put(namespace, root, &sealed))?;
         retry(|| server.publish(namespace, root))?;
         let _ack = timing::Span::new("outbox_ack");

@@ -1,6 +1,6 @@
 # Integración 26–28 — composición y evidencia
 
-Fecha: 2026-10-03. Rol: merger de candidatas publicadas. El corte vigente está en [Composición W1/W5 pmint6](#composicion-w1-w5-pmint6); las secciones anteriores conservan la integración y remediación históricas. Esta composición no corrige defectos abiertos ni cambia estados de tickets.
+Fecha: 2026-10-03. Rol: merger de candidatas publicadas. El corte vigente está en [Composición W2/W1 pmint7](#composicion-w2-w1-pmint7); las secciones anteriores conservan la integración y remediación históricas. Esta composición no corrige defectos abiertos ni cambia estados de tickets.
 
 ## Identidad y alcance
 
@@ -1048,3 +1048,43 @@ una candidata corregida/autorizada, conservando los FAIL anteriores. El
 merger no corrige estos defectos abiertos ni consume los runs restantes con
 SHA/hipótesis idénticos. G7 staging EIO/ENOSPC y diagnósticos de autoridad siguen
 conocidos; W4 multiagente continúa fuera de gates.
+
+
+<a id="composicion-w2-w1-pmint7"></a>
+
+## Composición W2 → W1 — método pmint7 (2026-10-04)
+
+Encargo explícito del merger: base limpia local/origin `1d270ad1d727a38836ed0430d1d9d0c814c5c0a8`,
+W2 `b1d374c4c733715911600233d29334eba3bdbe52` y W1
+`46f34648ee6f24653dc37bacee3c7856f9914b9b`, ambas local=origin por ls-remote.
+Orden W2 → W1, merges explícitos con SHA, sin rebase/squash. W6 queda fuera.
+No corregir defectos abiertos, alterar plazos/KDF/ACL/commits/aserciones,
+estados de tickets, reglas, raíz b3577d2 ni PR borrador #1.
+
+Método local: tras cada merge check.sh, clean-offline-build y los 52 casos
+congelados de pmint6, secuenciales bajo flock /tmp/pm-cargo-window.lock, cwd
+este worktree. Wayland real wayland-1 y artefactos absolutos Keycloak26.7.3/CFT
+indicados por el usuario. Concurrency W4 sólo observación, fuera de gates;
+g7-extra-bootstrap/vault son diagnósticos RED, no aceptación.
+Logs /tmp/pmint7-*.log; no limpieza de recursos ajenos ni reintentos de producto.
+La barrida tras W1 es también la barrida final, sin cambios de fuente entre ambas.
+
+Método de sesión: conservar los tests Unix W2 (34 RPCs/una conexión, commit
+visible por RO independiente antes del cierre, ACL por RPC y pérdida explícita),
+y los tests Windows W1 (peer previo y respuesta autenticada tras cierre del
+servidor; sesión real con revocación entre RPCs; IPC malformed/deadline).
+El fixture Windows de revocación usa ahora el mismo DispatchStore persistente
+y exige que una conexión independiente SQLITE_OPEN_READ_ONLY vea el primer
+put antes de responder/cerrar TLS. Cierre SQLite comprobado; rechazo del
+segundo RPC tras revocación y abort/reap sin replay conservados.
+
+CI: máximo dos Windows y dos macOS, workflow público/manual estándar,
+sintético sin caches/artifacts/secrets. Primera Windows con sesión unificada y
+PMW1_TIMING existente del harness; primera Mac binarios/plist normales,
+inputs false/false, Full25 y ambas CPU. Publicar SHA exacto antes de dispatch;
+conservar metadata/logs por run. No repetir mismo SHA/hipótesis. Cualquier
+segunda corrida requiere un discriminante concreto y se registra antes.
+Waits8/15/20/30 y Argon2id intactos; fallos por plazo siguen FAIL.
+Referencias: [W2 fase5](w2-purge-sync.md#resultado-final-de-fase-5-mejoras-verificadas-aceptación-conjunta-pendiente),
+[W1 fase8](ticket-27.md#w1-fase-8--método-autorizado-2026-10-04),
+[método CI](native-ci.md). Evidencia final se añade al terminar las corridas.

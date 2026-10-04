@@ -1774,10 +1774,18 @@ mod windows_fixture {
             | Scenario::Access
             | Scenario::Rotations => {
                 search(fixture, "Password")?;
+                // Matrix restores its backup under new IDs while preserving
+                // the originals. This later case must observe both exact hits.
+                let expected_items = if scenario == Scenario::LocalOperations {
+                    2
+                } else {
+                    1
+                };
                 fixture
                     .observer
-                    .wait_for("Search returned 1 active items")
+                    .wait_for(&format!("Search returned {expected_items} active items"))
                     .map_err(io::Error::other)?;
+                eprintln!("TUI_SEARCH active-items={expected_items} exact=true");
                 if scenario == Scenario::Clipboard {
                     exercise_clipboard(fixture, 14, "ticket05-e2e-password-canary")?;
                     eprintln!("TUI_STAGE stage=clipboard-independent result=pass");
@@ -1894,6 +1902,22 @@ mod windows_fixture {
         eprintln!("TUI_STAGE stage=organization-history-copy result=pass");
         exercise_generator_access_audit(fixture)?;
         exercise_local_operations(fixture, &paths, b"synthetic-ticket27-rotated-master")?;
+        // The completed master rotation leaves its mandatory information panel
+        // visible. Resize expects the catalog, so dismiss the reviewed panel by
+        // the ordinary Browse key path before establishing the resize witness.
+        fixture
+            .observer
+            .wait_for_information(
+                "Master password rotated; old backups and exposed copies retain historical paths",
+            )
+            .map_err(io::Error::other)?;
+        eprintln!("TUI_RESIZE_PRECONDITION prior=master-rotation-panel");
+        press(fixture, "\x1b")?;
+        fixture
+            .observer
+            .wait_for("Items (selection is metadata only)")
+            .map_err(io::Error::other)?;
+        eprintln!("TUI_RESIZE_PRECONDITION current=catalog geometry=80x24");
         exercise_resize(fixture, paths.geometry)?;
         write_keyboard_input(fixture, b"q")?;
         require_tui_exit(fixture.process)
@@ -2543,6 +2567,10 @@ mod windows_fixture {
             .map(encode_operation_field)
             .join("|");
             type_visible_and_submit(fixture, &request, "|SYNC")?;
+            let submitted = Instant::now();
+            // Measure only fixed public phase categories seen on the real
+            // screen. A phase skipped between polls is not assigned a time.
+            let phases = std::cell::RefCell::new(Vec::<(&str, Instant)>::new());
             let result = fixture.observer.wait_for_checked_matching(
                 "successful sync complete panel",
                 |state| {
@@ -2550,6 +2578,23 @@ mod windows_fixture {
                         return Ok(false);
                     };
                     let text = rows.join(" ");
+                    let phase = if text.contains("pushing ciphertext") {
+                        Some("pushing")
+                    } else if text.contains("pulling ciphertext") {
+                        Some("pulling")
+                    } else if text.contains("started; ciphertext-only") {
+                        Some("started")
+                    } else if text.contains("Sync complete through pinned TLS:") {
+                        Some("succeeded")
+                    } else {
+                        None
+                    };
+                    if let Some(phase) = phase {
+                        let mut phases = phases.borrow_mut();
+                        if phases.last().is_none_or(|(previous, _)| *previous != phase) {
+                            phases.push((phase, Instant::now()));
+                        }
+                    }
                     if text.contains("no success")
                         || text.contains("no state was accepted")
                         || text.contains("not declared successful")
@@ -2561,9 +2606,22 @@ mod windows_fixture {
                         && text.contains("pulled="))
                 },
             );
+            let finished = Instant::now();
+            let phases = phases.into_inner();
+            for (index, (phase, first)) in phases.iter().enumerate() {
+                let next = phases.get(index + 1).map_or(finished, |(_, at)| *at);
+                eprintln!(
+                    "TUI_SYNC_PHASE phase={phase} first_ms={} observed_ms={} ended={}",
+                    first.duration_since(submitted).as_millis(),
+                    next.duration_since(*first).as_millis(),
+                    index + 1 < phases.len(),
+                );
+            }
             eprintln!(
-                "TUI_SYNC elapsed_ms={} complete-panel={}",
+                "TUI_SYNC elapsed_ms={} submit_ms={} wait_ms={} complete-panel={}",
                 started.elapsed().as_millis(),
+                submitted.duration_since(started).as_millis(),
+                finished.duration_since(submitted).as_millis(),
                 result.is_ok()
             );
             result.map_err(io::Error::other)?;
