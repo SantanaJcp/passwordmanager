@@ -5363,6 +5363,7 @@ de span completo significa NOT_MEASURED, nunca cero. Relectura del log históric
 | Workload / fuente | Push | Gets | Descarga grafos | Aplicación | Pull completo | Job total |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 36, histórico [37180406421](https://github.com/SantanaJcp/passwordmanager/actions/runs/37180406421),063bba4 |5.374986s |154/3.440835s |24/2.903289s |group_activate0.084500s |3.876555s |9.288192s |
+| 36, fase9 run4,a479bbb |4.518138s |154/3.546900s |24/3.106597s |group_activate0.087781s |4.036956s |8.591408s |
 | 36, fase9 run3,5b4fa05 |6.001968s |112/3.473106s al corte |17 completos/18 iniciados,2.537452s |NOT_MEASURED |NOT_MEASURED |NOT_MEASURED |
 | 70, fase9 run1,a455c02 |NOT_MEASURED;286put/8.264494s al corte |NOT_RUN al corte |NOT_RUN al corte |NOT_RUN al corte |NOT_MEASURED |NOT_MEASURED |
 
@@ -5375,7 +5376,8 @@ con pushing aún activo. Corrida2 no alcanza SYNC por el error del test propio.
 Los tres runs están terminados; logs `/tmp/pmw1h-run{1,2,3}.log`, histórico
 `/tmp/pmw1h-historical36.log`, métricas `/tmp/pmw1h-native-metrics.json`.
 
-No existe nueva medición completa36/70 sobre la composición actual. La pregunta
+Al corte de corrida3 no existía nueva medición completa36/70; corrida4 añade
+36 completo como se registra abajo.70 completo sigue ausente. La pregunta
 pendiente propone observar el mismo worker hasta su final después del FAIL15s,
 como diagnóstico separado máximo120s, sin reenviar ni cambiar ningún deadline
 productivo. El método anterior no autorizaba esa espera posterior; la extensión
@@ -5433,3 +5435,59 @@ de borrado; se conservan sin autorización para alterarlos. Los residuos del
 cutoff no prueban que esos llamados fallaran ni que se alcanzaran; el control
 nuevo conserva FAIL si quedan después de un SYNC aceptado. No se presentan los
 Drop/LocalFree/DestroyWindow heredados como corregidos o verificados.
+
+
+### Corrida4 fase9 y checkpoint final — 4/4 terminado
+
+[37188616185](https://github.com/SantanaJcp/passwordmanager/actions/runs/37188616185),
+SHA `a479bbbfa8e530d92d4c1cbd499e1d73b407c764`, completed/failure. Artifacts0,
+runner estándar Windows11 ARM64, mismo workflow manual/inputs sintéticos.
+Log `/tmp/pmw1h-run4.log`, métricas actualizadas `/tmp/pmw1h-native-metrics.json`.
+
+Cleanup **PASS**: completed-sync-residue/owned/foreign-owner/unexpected-child
+PASS, contexto de producto aceptado y cero stages reales al final; recursos
+propios ausentes, sin error de limpieza en el agregado. No se amplía aceptación
+para un SYNC exitoso con residuo. El caso positivo inventaría y borra un archivo
+revision no vacío; el negativo conserva el error de producto con ese residuo.
+No se observa cutoff70 con staging productivo no vacío en esta candidata.
+
+Local-operations **FAIL conservado**: shape-read autenticado ok + descriptor de
+stream → preparación invalid-input de nuevo. No se aplicó corrección común ni
+cambio de selección. Sigue fuera de W1 y pendiente de decisión/owner común.
+
+SYNC36 **PASS TUI y job completo**: process_started1/tls_handshake1, cierre
+cliente checked/exit exitoso,154puts/154gets, export compartido0.268912s/24grafos.
+Push4.518138s/pull4.036956s/job_total8.591408s; get3.546900s y
+aplicación group_activate0.087781s incluidos en pull. Pushing first6.184s,
+pulling first10.504s y succeeded first14.494s; wait14.494s, submit0.002s,
+span externo14.723s, complete-panel=true; margen wait15 **0.506s** en este run.
+Carga36 es consecuencia del local-operations fallido, no el flujo integral70.
+No comparar con70 parcial como benchmark pareado ni acreditar política nueva.
+
+PAIR y RETIRE **TUI PASS**. Observer sync durable154blocks/1root/close checked
+PASS; observer de RETIRE durable **FAIL**, sólo emite WINDOWS_HUMAN_FIXTURE_FAILED.
+Causa no diagnosticada en esta fase: no se atribuye a roster/producto/fixture
+sin evidencia. El agregado final es local-operations,device-retire-durable;
+Windows integral sigue FAIL. Se consumen4/4 corridas y todas terminaron; no
+repetición adicional ni cierre de ticket.
+
+Gates finales: barrido52/49rc0/tres RED conocidos sobre5b4fa05 con fuente
+Linux/Rust final; check55.618s/clean52.377s, Wayland real, W4 fuera de gates,
+logs `/tmp/pmw1h-confirmation-gates-*`. Los RED G7 conservan EIO/ENOSPC con
+stream staging y authority-or-receipts-changed de bootstrap/vault. Barrido
+previo52/48 con FAIL cancellable token-exchange permanece; enfocado y último
+barrido pasan sin demostrar la causa ni corrección de esa intermitencia.
+
+Tras el guard PowerShell: check rc0 `/tmp/pmw1h-guard-check.log`, clean locked/
+offline rc0 `/tmp/pmw1h-guard-clean.log`, cada invocación bajo flock. Manifest
+`/tmp/pmw1h-guard-preservation.json` prueba crates/scripts Linux/Cargo/workflows
+byte-idénticos a5b4fa05; sólo PowerShell/docs difieren, verificados por run4.
+No se atribuye el barrido Linux a ejecución de PowerShell ni a otro HEAD.
+Enlaces nuevos, diff --check y Status claimed/Owner sol-27 intactos comprobados.
+
+Siguiente acción del coordinador: asignar o autorizar el arreglo de organización
+con streams en el vault común, preservando adjuntos y sin solaparse con W3;
+acordar observación diagnóstica del job70 completo tras su FAIL15s y autorizar
+un presupuesto nativo nuevo, puesto que4/4 está agotado. Después clasificar el
+observer durable de RETIRE. La política de plazos/RPC de lote sigue pendiente;
+no integración, cambio de estados, reglas, force push o merge de PR1.
