@@ -1320,3 +1320,197 @@ el margen Intel reducido y la intermitencia unlock/restore requieren su
 trabajo y evidencia, sin integrarlo desde este encargo. Revalidar Windows
 SYNC70/RETIRE y cliente legado integral en el siguiente ciclo autorizado,
 sin sustituir NOT_RUN por PASS ni cerrar G7/producto con estos resultados.
+
+
+<a id="composicion-w6-pmint8"></a>
+
+## Composición W6 — método pmint8 (2026-10-04)
+
+Encargo del merger: base local/origin limpia
+`9a45482308c38294aff6a7689bf1e3ebc271343f`, candidata W6 local/origin
+`72b1935c7c9903ca934642a2a972cd7a87b56b8c`. Merge explícito
+`17e3842f1d4c8fb194dda332d906a1b6ace1f6ff`, padres base/W6 en ese orden,
+sin rebase/squash ni cambios manuales de producto. **Cero conflictos**:
+los 14 paths W6 son byte-idénticos a la candidata; ninguno había cambiado
+entre su base W2 b1d374c y la base de integración. TUI/fixtures/purge_sync y
+sesión única W1/W2 conservados. Manifest `/tmp/pmint8-preservation.json`.
+
+Método52 vigente de pmint7: runner `/tmp/pmint8-run-local.py`, cwd worktree
+integration-26-28, cada check/build/Cargo/lab bajo
+`flock /tmp/pm-cargo-window.lock`. Wayland real wayland-1 desde el inicio;
+PM_KEYCLOAK_DIST y PM_CFT_DIR absolutos fijados en el encargo.
+Fuentes congeladas por hash antes de cada caso y al terminar. W4 concurrency
+sólo observación fuera de gates; g7-matrix y g7-extra-bootstrap/vault conservan
+rc1 esperado. Logs exclusivamente `/tmp/pmint8-*.log`, sin limpieza ajena.
+AST de fixtures Python, enlaces locales ticket26, configuración nativa/macOS,
+shell y diff-check PASS antes de publicar; no sustituyen ejecución nativa.
+
+CI autorizada: máximo dos macOS y una Windows. Primera macOS normal,
+inputs pasteboard_diagnostic=false/final_phase_only=false: hipótesis de
+compatibilidad de W6 con la composición W1/W2, Full25/final/cleanup ambas CPU.
+Windows diagnostic_only=false/service_diagnostics=true/tui_conpty_red=true/
+onepux_memory_diagnostics=false, comparada con37184712787.
+Publicar SHA exacto antes del dispatch. Segunda macOS sólo con hipótesis o
+cambio discriminante registrado; nunca repetición idéntica. Unlock8s,
+sync20s macOS/15s Windows y KDF256MiB/3/p1 permanecen intactos.
+Repositorio PUBLIC comprobado por API; workflows manuales estándar sin cambios,
+sin secrets/cache/artifacts/larger runners. Gratuidad estándar pública
+verificada en [GitHub](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+
+Fallbacks heredados inspeccionados y preservados:
+`pm-vault/src/backup.rs:RestoreCollector::finish` convierte fallo de consulta
+SQLite en false y devuelve Integrity; `export_attachments` sustituye fallo
+de conversión chunk_count por i64::MAX. Inventarios previos W6/W1/W2 aplican;
+no nueva ruta alternativa ni cambio de política del merger.
+
+### Gates locales pmint8
+
+SHA ejecutado17e3842, **52 casos /49 rc0 /tres rc1 esperados /unexpected=[]**,
+fuentes congeladas. Comparación caso por caso con pmint7: mismos52 comandos,
+expected/gate y rc, cero diferencias.682.849s agregados; no benchmark pareado.
+Check62.556s y clean locked/offline49.377s rc0.26 wrappers Linux, tres modos
+publicación, pérdida/canarios, purge-probe, purge-sync y restore-digest pasan.
+W4 concurrency rc0 sólo observación, fuera de aceptación multiagente.
+
+Endpoint W6 conserva rc4/frame unavailable/stderr vacío/roots0 y pasa tanto
+check como purge-sync. PMW2_STORE16put/16get/publish1/list1/sqlite_opens1,
+commit RO antes del cierre, ACL por RPC y negativas de sesión conservados.
+Plaintext happy/rechazo temprano/confirmación/carrera y backup/attachment PASS.
+Tres rc1 conservan exactamente sus causas: g7-matrix ProductRed
+commit-outbox-audit EIO+ENOSPC, stream staging tras fallo/restart;
+g7-extra-bootstrap/vault AssertionError authority or receipts changed across loss.
+No cambio de aserciones/cleanup, no retry de producto ni sustitución de RED.
+Resultados `/tmp/pmint8-gates-local-results.json`, resumen
+`/tmp/pmint8-gates-local-summary.json` y `/tmp/pmint8-local-summary.log`.
+
+### Windows nativo pmint8 — FAIL por plazo conocido
+
+[Run37185775161](https://github.com/SantanaJcp/passwordmanager/actions/runs/37185775161),
+[job111387244898](https://github.com/SantanaJcp/passwordmanager/actions/runs/37185775161/job/111387244898),
+SHA exacto `17e3842f1d4c8fb194dda332d906a1b6ace1f6ff`, completed/failure.
+Única corrida Windows autorizada consumida; inputs false/true/true/false
+según orden diagnostic_only/service_diagnostics/tui_conpty_red/onepux_memory_diagnostics.
+Build/PE y14 primitivas/1pipe/24observer/3sync-lib/2sync-bin PASS.
+Tests authenticated_response_survives_checked_server_close y
+real_session_rechecks_acl_between_rpcs_without_replay PASS nativo.
+TUI sources/resize/clipboard/access/rotations/matrix/local-operations/device-pair
+PASS. Local-operations fallaba en baseline37184712787; su PASS actual conserva
+la intermitencia histórica, no demuestra una corrección del merger.
+
+SYNC FAIL: submit0.002s, espera**15.007s**, span15.038s, panel incompleto,
+margen contractual**-0.007s**. Sigue pushing (first6.142s/observed8.865s,
+ended=false); RETIRE NOT_RUN por sync-failed. Observer de sync/retire durable
+FAIL dependiente. No NATIVE_SYNC durable PASS ni total/push/pull completos:
+no convertir snapshot parcial en publicación final.
+
+| Fase / contador parcial | Medición |
+| --- | --- |
+| Eventos / grafos exportados |68 /49;55 eventos completos y56 iniciados |
+| Export compartido |1 /1.201600s |
+| Put |238 completos /7.634884s;239 iniciados |
+| Proceso / handshake |1 /0.052659s y1 /0.045333s |
+| SQLite servidor |1 apertura /0.008595s;store_sqlite_open1 |
+| Publish/ack/pull/job_total |NOT_MEASURED completo al cutoff |
+
+Baseline37184712787:36eventos/24grafos, push completo6.864544s,
+154put/6.281261s, cutoff durante pull15.001s. Actual carga68/49 y cutoff
+durante push: pérdida de alcance durable observada respecto a ese run,
+**comparación causal de rendimiento y ausencia integral de regresión no
+demostradas** con cargas distintas. No nuevo error funcional observado en
+las puertas alcanzadas; sesión/ACL/SQLite únicos conservados y sin edición
+merger de sync/Windows. La negativa NATIVE_TRANSFER broken-pipe explícita
+es el peer closure esperado, no el ERROR_BROKEN_PIPE histórico del sync.
+
+Cleanup estricto FAIL conocido: staging productivo no inventariado y raíz
+propia restante al interrumpir worker; no ampliar inventario ni limpiar recurso
+remoto ajeno. Aceptación Windows integral FAIL, durabilidad/RETIRE pendientes.
+Logs `/tmp/pmint8-native-windows1.log`, `…-111387244898.log`, metadata
+`…windows1{,-jobs,-artifacts}.json`, métricas `…windows1-metrics.json`.
+
+### macOS nativo pmint8
+
+[Run37185773908](https://github.com/SantanaJcp/passwordmanager/actions/runs/37185773908),
+SHA exacto `17e3842f1d4c8fb194dda332d906a1b6ace1f6ff`, completed/success.
+Intel [job111387241032](https://github.com/SantanaJcp/passwordmanager/actions/runs/37185773908/job/111387241032)
+y ARM [job111387241223](https://github.com/SantanaJcp/passwordmanager/actions/runs/37185773908/job/111387241223)
+**PASS completos**: endpoint, core, Full25, backup/plaintext colisiones,
+sync, fase final y cleanup estricto. Inputs false/false; plist y binarios
+normales, sin PMW6_LOG/OBSERVER ni timing W6 forzado. Una corrida Mac de dos
+consumida; segunda no necesaria ni ejecutada sin hipótesis discriminante.
+
+| CPU | Unlock observado (15 muestras) | Menor margen wait8 | Sync envío /espera /total | Margen real wait20 |
+| --- | --- | --- | --- | --- |
+| Intel |0.708–1.238s |6.762s /84.5% |1.417 /14.236 /15.653s |5.764s /28.8% |
+| ARM |0.506–3.593s |4.407s /55.1% |0.824 /17.746 /18.570s |2.254s /11.3% |
+
+Unlock corresponde a PMW2_UNLOCK result=observed/wait_ms en
+start_macos_tui; no inventar timings internos de KDF ni asignar estas15
+muestras a toda operación que use contraseña. Negativa de contraseña incorrecta
+pasa su gate original. Ningún FAIL unlock8 en esta corrida: KDF por fase
+**NOT_MEASURED**, opt-in no activado. No decisión del plazo pendiente asumida.
+Sync corresponde a PMINT5_SYNC_OBSERVER: envío no forma parte del wait20.
+Pantalla/durable=succeeded, process=same y287bloques/root1 en ambas CPU.
+Ambas colisiones dan DESTINATION_EXISTS completo, destino intacto y sin
+.partial. Restore pasa con autoridad actual conservada, mismo oráculo8s;
+esta corrida normal no mide prepare/commit/decodes por fase.
+
+Tests Unix W2 y endpoint W6 pasan nativamente en ambas CPU:
+PMW2_STORE16put/16get/publish1/list1/sqlite_opens1; commit RO antes de cierre,
+ACL por RPC, pérdida explícita y framing/deadline originales conservados.
+No BrokenPipe del fixture y ninguna relajación de publicación final exclusiva.
+
+Comparación con baseline37184713874/07830a4: Intel wait17.447→14.236s,
+margen2.553→5.764s; ARM wait6.665→17.746s, margen13.335→2.254s.
+**Variación medida**, sin benchmark pareado ni causa de rendimiento atribuible
+a W6. El PASS conjunto normal sobre esta composición no elimina la intermitencia
+histórica ARM, no demuestra estabilidad futura y no alcanza el objetivo
+histórico30% de margen sync en ninguna CPU. No criterio cambiado del encargo.
+
+Metadata/logs `/tmp/pmint8-native-macos1{,-jobs,-artifacts}.json`,
+`…macos1.log`, crudos `…macos1-{111387241032,111387241223}.log`, métricas
+`…macos1-{intel,arm}-metrics.json`. Ambos workflows artifacts total0 por API;
+repositorio público, labels estándar, workflows manuales contents:read y
+sin cache/secrets/upload/larger. Descarga cruda de logs requirió
+--allow-escape-sequences de gh; sólo cambia lectura de evidencia local,
+no corrida nativa ni su resultado. El primer monitor se detuvo por ese guard,
+se reanudó lectura de los mismos runs; no segundo dispatch.
+
+Entorno: macOS15.7.9/kernel24.6.0, Rust1.98.1/48a229cea nativo;
+Intel imagen20260824.0482.1/x86_64-apple-darwin y
+ARM imagen20260907.0337.1/aarch64-apple-darwin. Windows11 Enterprise
+10.0.26200 ARM64, imagen20260924.168.1, Rust1.98.1-aarch64-pc-windows-msvc,
+libsodium1.0.22 MSVC ARM64 estático/MT. El preflight no sustituye laboratorio.
+Windows11 x64/Linux ARM, reboot/FDE, firma/notarización y terminal humano
+continúan sin demostrar por esta CI.
+
+### Resultado y publicación pmint8
+
+**Composición W6 verificada: gates locales sin diferencias y macOS completo
+en ambas CPU PASS. Aceptación integral sigue FAIL por Windows y REDs G7.**
+
+| Hallazgo | Clasificación |
+| --- | --- |
+| Conflictos /código del merger |Ninguno;14 paths byte-idénticos a W6, W1/W2 conservados. |
+| g7-matrix /g7-extra-bootstrap/vault |Tres RED conocidos con causas idénticas a pmint7. |
+| macOS unlock/restore |PASS del oráculo8s actual; intermitencia histórica no cerrada ni KDF/plazo cambiados. |
+| macOS sync |PASS contractual ambas CPU; márgenes28.8%/11.3%, variación de rendimiento causal no demostrada. |
+| Windows local-operations |PASS en esta muestra; intermitencia histórica no corregida por el merger. |
+| Windows SYNC/durable/RETIRE |FAIL por plazo15.007s durante push68eventos; durabilidad no alcanzada y RETIRE NOT_RUN; no comparación causal con36eventos baseline. |
+| Windows cleanup |FAIL conocido de staging no inventariado/raíz restante; no cleanup remoto adicional. |
+
+Push normal de17e3842 sólo a codex/pm-integration-26-28. Helper configurado
+falló por ruta gh inexistente: se usó exclusivamente el override por comando
+que autorizó el usuario. Git/API confirmaron SHA exacto antes de dispatch.
+El remoto anunció el bypass de regla ya autorizado; sin cambios de reglas,
+force, rebase, squash, merge de PR1 ni publicación a otra rama.
+El commit posterior de este informe es sólo documental; árbol de
+código/fixtures/scripts/workflows idéntico al SHA ejecutado.
+Raíz HEAD/status/hash de .gitignore comprobados iguales al inicio, candidatas
+intactas. No cambio de estado de tickets ni integración del nuevo trabajo
+Windows que W1 prepara en paralelo.
+
+Siguiente acción: entregar a W1 los logs de SYNC68 y staging/cleanup para
+su trabajo aislado; obtener la decisión pendiente del usuario sobre unlock8
+antes de cualquier cambio. Integrar una nueva candidata Windows sólo en otro
+encargo autorizado y volver a verificar SYNC/RETIRE/durabilidad. Conservar los
+REDs G7 y límites de evidencia; no declarar producto completo ni fusionar PR1.
