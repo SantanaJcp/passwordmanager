@@ -4288,3 +4288,89 @@ Preflight candidata5 completo rc0 bajo flock,
 `/tmp/pmw1e-windows-fixtures-check8.log`; fmt/diff-check rc0 y enlaces nuevos
 de26/27 existentes. Observaciones/helpers son cfgWindows; barrido52 Linux y
 SHA de aceptación Mac mantienen sus árboles de producto respectivos.
+
+Corrida5 despachada sobre `38763e06655b8dfdd0040856030bba235dccb084`,
+[37173102423](https://github.com/SantanaJcp/passwordmanager/actions/runs/37173102423),
+inputs false/true/true, headSha exacto por API. Hipótesis nueva: bytes de los
+paquetes conservados durante SCM y lector parcial protegido de namespace con
+cierre explícito funcionan en Windows real; los helpers SQLite deben compilar
+nativamente, sin atribuirles runtime si el bloqueo W2 impide alcanzarlos.
+Presupuesto Windows5/6, Mac1/2; esta corrida sigue activa al escribir el preflight.
+
+### Corte verificado de fase5
+
+Corrida5 finaliza **FAIL global** sobre38763e0;
+[job111349942903](https://github.com/SantanaJcp/passwordmanager/actions/runs/37173102423/job/111349942903),
+Win11 ARM64/imagen20260924.168.1/Rust1.98.1/libsodium1.0.22 MT, artifacts0.
+Build de producto/fixtures, PE estático y primitives14/pipe1/observer24/sync-lib1
+PASS. Reparse sin lease/DACL exacta, RPK mismo SID→UnknownCA sin request,
+siete negativas wire con cierre nativo, resize estricto clamp0, clipboard,
+access, rotaciones y operaciones locales PASS. Matrix conserva exactamente
+seed8 crypto-resource W5; lease restaurada, sin reducir seed ni tocar custodia.
+
+SCM alternado **PASS**, nota remota/readback ordinario **PASS**, bytes de paquete
+remoto conservado/local restaurado **PASS** antes de cada nuevo arranque.
+PAIR ConPTY/panel completo **PASS** y PAIR_NAMESPACE formato exacto/archivo
+protegido/CloseHandle comprobado **PASS**. Los observers SQLite nuevos compilan
+nativamente, pero no se ejecutan: **SYNC y RETIRE NOT_RUN** por E0282/E0283 de
+pm-sync main.rs:314. Tampoco se alcanzan los gates SCM/security posteriores a
+ese build en esta candidata. No hay tiempos Windows de sync que reportar ni
+evidencia pair-sync-retire integral. No se infiere rendimiento de compilación,
+setup o pairing. Cleanup propio no reporta fallo adicional. Logs y metadata
+`/tmp/pmw1e-windows5.{log,json}`; no hay run propio pendiente.
+
+| Corrida Windows fase5 | SHA exacto | Resultado/frontera observada |
+| --- | --- | --- |
+| [1:37170439961](https://github.com/SantanaJcp/passwordmanager/actions/runs/37170439961) | dd74320962ca0d64deeccbe8d593bef9324916e3 | FAIL compile pm-sync; sin runtime nuevo |
+| [2:37171139137](https://github.com/SantanaJcp/passwordmanager/actions/runs/37171139137) | 98ad4fb4050a5a30811a377a156bf284dcd3a6ac | FAIL sources por argumentos fixture, matrix W5 y build sync; RPK/wire/operaciones PASS |
+| [3:37171773346](https://github.com/SantanaJcp/passwordmanager/actions/runs/37171773346) | 18aaa38a60bc662cbfddca35fcd15d46a7769805 | Reparse PASS; FAIL precondición heredada de ACL del helper, antes de segundo ID |
+| [4:37172559049](https://github.com/SantanaJcp/passwordmanager/actions/runs/37172559049) | dc791d897f8f78da471dbbd21fcfd444b15fe17c | SCM segundo ID y PAIR PASS; FAIL build sync y matrix W5 |
+| [5:37173102423](https://github.com/SantanaJcp/passwordmanager/actions/runs/37173102423) | 38763e06655b8dfdd0040856030bba235dccb084 | Bytes auditoría/namespace/cierres PASS; FAIL build sync y matrix W5 |
+
+Presupuesto consumido **Windows5/6, Mac1/2**. Todas las corridas terminadas;
+sin repeat idéntico, plazos ampliados, cache/artifact/secret o runner pagado.
+Mac completo Intel+ARM permanece sobre62cb539: superficie de producto/harness
+Mac idéntica en la candidataWindows, aunque no se atribuye run Mac al SHA nuevo.
+Margen Intel conservador2.013s/gate3.286s; backup ARM6.285s/restante1.715s,
+sync ARM wait19.713/20s/restante0.287s, total20.641s. Riesgos documentados
+en [26](ticket-26.md#w1-fase-5--rechazo-temprano-aprobado-y-aceptación-mac-2026-10-04).
+
+Esta tabla sustituye el corte vigente de fase4, preservando sus pruebas
+históricas y los estados del tracker/section15:
+
+| Criterio27 | Resultado vigente | Evidencia/frontera pendiente |
+| --- | --- | --- |
+| Servicio virtual/DACL/DPAPI y peer bilateral G1 por proceso real | PASS parcial | SCM Win11 ARM64, SID/PID servidor y TLS/RPK ordinarios; segundo ID con ambos paquetes conservados. G1 integral, Win11 x64 y reboot pendientes; sufijo de gates tras build sync no ejecutado en candidata5. |
+| Sustitución/impersonación/dump/lectura y fallos de custodia rechazados | PASS parcial | Reparse integral sin lease/DACL exacta, RPK impostor con mismo SID rechazado, siete wire negativos y fuentes empty/directory/multilink. PID cliente cambiado, dump/lectura y matriz Win32/custodia completa no demostrados. Herencia runtime de paquetes observada; fixture detenido no acredita protección explícita continua. |
+| ConPTY/clipboard/persistencia nativos sin admin del agente | PASS parcial | Resize estricto, clipboard/access/tipos7/CSV/operaciones/restore/rotaciones y PAIR con segundo dispositivo PASS. SYNC/RETIRE NOT_RUN por build W2; 1PUX seed8 bloqueado W5, adjunto grande integral pendiente; multiagente W4 sin decisión y fuera de gates. |
+| TDD RED→GREEN y comandos exactos, sin skip/stubs | PASS acotado | Backup TUI rechazo temprano/carrera RED→GREEN real con destino intacto/sin temporales; 52 locales=49rc0+3RED conocidos, check y clean PASS bajo flock. Compile/argumentos/ACL de fixtures no se presentan como RED productivo. |
+| Revisión contractual e integración del merger antes de resolver | pendiente | Publicado sólo W1, límites/KDF/DACL/guards/protocolo preservados. Sin integración unificada, merge PR1 o cambio de ticket; fallbacks heredados reportados e intactos. |
+
+Archivos de fase5: `crates/pm-custody/src/tui.rs`,
+`crates/pm-custody/tests/download_publication_lab.py`,
+`crates/pm-custody/tests/macos_tui_migration_lab.py`,
+`crates/pm-custody/examples/windows_human_tui_seed.rs`,
+`crates/pm-native-channel/examples/windows_tui_conpty_fixture.rs`,
+`scripts/test-windows-custody-lab.ps1`,
+`scripts/verify-windows-libsodium-build.sh`, `docs/verification/ticket-26.md`
+y este informe. Cambios finales cfgWindows/harness/documentales conservan el
+árbol Linux del barrido52. Memoria protegida/custodia W3/W5, listener/proveedor
+W4 y código/protocolo W2 intactos; no se instalan dependencias locales.
+
+Siguiente acción: W2 debe entregar o autorizar la única anotación
+`let completion: Result<(), ()> = (|| {` en su helper cfgWindows para desbloquear
+el binario ordinario. Propuesta concreta en `/tmp/pmw1e-sync-type-proposal.patch`,
+sin cambios de lógica/plazo30s; pendiente de autorización por frontera de
+propiedad del encargo, no aplicada. Después nueva candidata exacta puede usar
+la corridaWindows restante para SYNC/RETIRE y medir fases sin portar sesiones
+ni subir plazos. W5 sigue con crypto-resource en su rama. Sólo el merger
+compondrá candidatos; W1 no integra ni cierra aceptación global.
+
+Verificación documental final: enlaces relativos nuevos26/27 y AST de ambos
+labs Python PASS; diff-check rc0; metadata de las seis corridas confirma
+completed y sus SHA exactos. El hijo documental conserva código/harness de
+38763e0. No hay diff desde84af9d4 en tracker/spec, workflows, manifests,
+lock/toolchain o zonas W2/W3/W4/W5. Raíz b3577d2 con su .gitignore/.pi/odd
+ajenos intactos; integración893074a intacta. PR1 sigue abierto/draft y vinculado
+al hilo, sin watcher ni merge. Check/clean/barrido y RED→GREEN locales registrados
+arriba; no se repiten por esta actualización documental.
