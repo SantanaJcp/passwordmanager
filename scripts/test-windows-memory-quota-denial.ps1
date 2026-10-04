@@ -7,7 +7,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # Called only for the collision-checked synthetic SCM record owned by the
-# custody harness. Snapshot and restore its exact privileges through SCM APIs.
+# custody harness. Its temporary SCM record is removed before the normal
+# record is re-created and verified with its original unset privileges.
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -17,6 +18,8 @@ using System.Runtime.InteropServices;
 using System.Threading;
 
 public static class W5QuotaDeniedService {
+    static string OriginalPrivileges;
+    static bool CapturedOriginalPrivileges;
     [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     static extern IntPtr OpenSCManagerW(string machine, string database, uint access);
     [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
@@ -71,54 +74,48 @@ public static class W5QuotaDeniedService {
         Check(QueryServiceStatusEx(service, 0, out status, (uint)Marshal.SizeOf<Status>(), out needed), "query service status");
         return status;
     }
-    public static void Run(string name) {
+    public static void Run(string name, bool deny) {
         IntPtr manager = IntPtr.Zero, service = IntPtr.Zero, snapshot = IntPtr.Zero;
         IntPtr text = IntPtr.Zero, info = IntPtr.Zero;
-        uint bytes = 0; bool changed = false;
+        uint bytes = 0;
         var errors = new List<Exception>();
         try {
             manager = OpenSCManagerW(null, null, 1); Check(manager != IntPtr.Zero, "open SCM");
             service = OpenServiceW(manager, name, 1 | 2 | 4 | 16); Check(service != IntPtr.Zero, "open owned service");
             if (ReadStatus(service).State != 1) throw new InvalidOperationException("quota negative requires stopped service");
             snapshot = Snapshot(service, out bytes);
-            // Validate the snapshot before modifying the owned SCM record.
-            Privileges(snapshot, bytes);
-            text = Marshal.StringToHGlobalUni("SeChangeNotifyPrivilege\0");
-            info = Marshal.AllocHGlobal(IntPtr.Size); Marshal.WriteIntPtr(info, text);
-            Check(ChangeServiceConfig2W(service, 6, info), "remove owned service working-set privilege");
-            changed = true;
-            bool started = StartServiceW(service, 0, IntPtr.Zero);
-            int startError = Marshal.GetLastWin32Error();
-            if (!started && startError != 1067 && startError != 1053 && startError != 1816)
-                throw new Win32Exception(startError, "start quota negative service");
-            var timer = Stopwatch.StartNew();
-            for (;;) {
-                Status status = ReadStatus(service);
-                if (status.State == 4) throw new InvalidOperationException("quota denied service reached RUNNING");
-                if (status.State == 1) {
-                    if (status.Win32Exit != 1816 || status.Pid != 0)
-                        throw new InvalidOperationException("service did not report stable quota failure");
-                    break;
+            // Compare the same exact API representation after the normal
+            // record is re-created, including an unset/empty privilege list.
+            string observedPrivileges = Privileges(snapshot, bytes);
+            if (!deny && (!CapturedOriginalPrivileges || observedPrivileges != OriginalPrivileges))
+                throw new InvalidOperationException("service privilege restoration differs");
+            if (deny) {
+                OriginalPrivileges = observedPrivileges;
+                CapturedOriginalPrivileges = true;
+                text = Marshal.StringToHGlobalUni("SeChangeNotifyPrivilege\0");
+                info = Marshal.AllocHGlobal(IntPtr.Size); Marshal.WriteIntPtr(info, text);
+                Check(ChangeServiceConfig2W(service, 6, info), "remove owned service working-set privilege");
+                bool started = StartServiceW(service, 0, IntPtr.Zero);
+                int startError = Marshal.GetLastWin32Error();
+                if (!started && startError != 1067 && startError != 1053 && startError != 1816)
+                    throw new Win32Exception(startError, "start quota negative service");
+                var timer = Stopwatch.StartNew();
+                for (;;) {
+                    Status status = ReadStatus(service);
+                    if (status.State == 4) throw new InvalidOperationException("quota denied service reached RUNNING");
+                    if (status.State == 1) {
+                        if (status.Win32Exit != 1816 || status.Pid != 0)
+                            throw new InvalidOperationException("service did not report stable quota failure");
+                        break;
+                    }
+                    if (status.State != 2 || timer.ElapsedMilliseconds >= 15000)
+                        throw new InvalidOperationException("quota negative service did not stop");
+                    Thread.Sleep(100);
                 }
-                if (status.State != 2 || timer.ElapsedMilliseconds >= 15000)
-                    throw new InvalidOperationException("quota negative service did not stop");
-                Thread.Sleep(100);
             }
         }
         catch (Exception error) { errors.Add(error); }
         finally {
-            if (changed) {
-                try {
-                    Check(ChangeServiceConfig2W(service, 6, snapshot), "restore exact service privileges");
-                    uint restoredBytes; IntPtr restored = Snapshot(service, out restoredBytes);
-                    try {
-                        if (Privileges(snapshot, bytes) != Privileges(restored, restoredBytes))
-                            throw new InvalidOperationException("service privilege restoration differs");
-                    }
-                    finally { Marshal.FreeHGlobal(restored); }
-                }
-                catch (Exception error) { errors.Add(error); }
-            }
             if (service != IntPtr.Zero && !CloseServiceHandle(service))
                 errors.Add(new Win32Exception(Marshal.GetLastWin32Error(), "close owned service handle"));
             if (manager != IntPtr.Zero && !CloseServiceHandle(manager))
@@ -132,10 +129,10 @@ public static class W5QuotaDeniedService {
 }
 '@
 
-[W5QuotaDeniedService]::Run($ServiceName)
+[W5QuotaDeniedService]::Run($ServiceName, $true)
 $lines = @(Get-Content -LiteralPath $DiagnosticPath -ErrorAction Stop)
 if ($lines.Count -ne 3 -or $lines[0] -ne 'phase=args-ok' -or $lines[2] -ne 'phase=service-failed' -or
     $lines[1] -notmatch '^phase=protected-memory-quota-failure category=PROTECTED_MEMORY_QUOTA_UNAVAILABLE reason=working-set-set win32-error=1314$') {
     throw 'SCM quota negative did not stop before bootstrap with the explicit category'
 }
-Write-Host 'PASS windows-scm-quota-denied public=PROTECTED_MEMORY_QUOTA_UNAVAILABLE scm-exit=1816 win32=1314 bootstrap=not-opened endpoints=not-created privileges=restored'
+Write-Host 'PASS windows-scm-quota-denied public=PROTECTED_MEMORY_QUOTA_UNAVAILABLE scm-exit=1816 win32=1314 bootstrap=not-opened endpoints=not-created fixture-restoration=pending'

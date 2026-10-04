@@ -404,12 +404,17 @@ test "$(printf '%s\n' "$dumpbin_line" | wc -l)" -eq 2 || {
 }
 first_dumpbin_line=$(printf '%s\n' "$dumpbin_line" | sed -n '1p')
 last_dumpbin_line=$(printf '%s\n' "$dumpbin_line" | sed -n '2p')
-service_line=$(grep -nF "Invoke-Checked 'sc.exe' @('create', \$serviceName" "$lab" | cut -d: -f1)
-test "$build_line" -lt "$first_dumpbin_line" &&
-    test "$last_dumpbin_line" -lt "$service_line" || {
-    echo 'Native PE dependency inspection must run after build and before SCM fixtures' >&2
+service_lines=$(grep -nF "Invoke-Checked 'sc.exe' @('create', \$serviceName" "$lab" | cut -d: -f1)
+test "$build_line" -lt "$first_dumpbin_line" || {
+    echo 'Native PE dependency inspection must run after build' >&2
     exit 1
 }
+for service_line in $service_lines; do
+    test "$last_dumpbin_line" -lt "$service_line" || {
+        echo 'Native PE dependency inspection must run before every SCM fixture' >&2
+        exit 1
+    }
+done
 
 # The Windows custody fixture must stage all data while the elevated installer
 # is the only non-SYSTEM trustee, then seal each runtime tree before SCM starts.

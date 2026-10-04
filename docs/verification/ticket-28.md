@@ -50,8 +50,12 @@ caso se añade un probe SCM real con permisos administrativos del runner:
 privilegios del servicio sintético propio, conserva sólo
 `SeChangeNotifyPrivilege`, lo arranca y exige STOPPED/PID0/exit1816 antes de
 bootstrap/endpoints, con categoría `PROTECTED_MEMORY_QUOTA_UNAVAILABLE` y
-error1314. Restaura y relee la configuración original mediante APIs SCM,
-propaga todos los fallos de cleanup y restaura el command del lab. Sin
+error1314. La primera variante de restauración por ChangeServiceConfig2
+falló nativamente (corrida B abajo). El método corregido usa un registro
+SCM sintético temporal para la negativa: lo elimina después, verifica su
+ausencia, crea el registro normal original, exige SID idéntico y compara
+exactamente su lista de privilegios con el snapshot inicial por API SCM.
+Propaga todos los fallos de cleanup y conserva el command normal del lab. Sin
 políticas globales ni dumps. El log separado debe contener exactamente
 args-ok/quota-failure/service-failed; el recorrido normal se mantiene intacto.
 Fuente primaria: [privilegios requeridos del servicio](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_required_privileges_infow).
@@ -132,6 +136,56 @@ restantes. Fmt/diff-check/enlaces relativos PASS; PowerShell/C# no ejecutables
 localmente y requieren el próximo run nativo. La negativa agrega un archivo
 propio, conserva/valida los privilegios originales y nunca relaja la política
 normal del servicio ni sustituye un arranque fallido por otro backend.
+
+### Corrida fase 2 B — fallo de restauración del fixture
+
+[Run37171254720](https://github.com/SantanaJcp/passwordmanager/actions/runs/37171254720),
+SHA `957efd48db160666de247b7ff3796a44afb18920`, **failure terminado**.
+Build ARM64/static MSVC y primitivas14/pipe1/observer20/sync-lib1 PASS.
+El C# nativo del probe SCM compila y el fallo agregado comunicado es
+`service privilege restoration differs`; la negativa con registro temporal
+no termina su cleanup. No se llegó a validar el log categórico ni a ejecutar
+preview/contador. **No es GREEN nativo del enforcement** y no se atribuyen
+resultados no ejecutados. Log `/tmp/pmw5b-native-green-attempt.log`, metadata
+`/tmp/pmw5b-native-green.json` (se conserva copia antes del próximo run).
+
+Corrección sólo del fixture: no usar el snapshot NULL como orden de borrado
+de privilegios por ChangeServiceConfig2. Retirar el registro sintético de
+la negativa y crear el normal con los parámetros originales; comprobar
+el mismo SID, la ausencia previa del registro y la misma representación
+exacta de privilegios por QueryServiceConfig2. La aserción de igualdad de
+privilegios se conserva, se cambia la operación de restauración. No se
+eliminan datos de bóveda ni un servicio ajeno; no hay ruta alternativa si
+la negativa o su cleanup fallan. La propiedad se mantiene hasta verificar
+la ausencia del registro. Las consultas previas al delete usan CIM, evitando
+introducir un ServiceController con handle todavía abierto.
+
+El checker previo volvió a revelar su supuesto scalar para sc-create:
+`/tmp/pmw5b-fixture-first-check.log`, rc1 antes de Cargo. Ahora exige inspección
+PE **antes de cada** creación SCM; la regla de ACL de cada config se conserva.
+No se relajan oráculos ni se cambia producto Rust tras `957efd4`.
+
+Barrido Linux sobre el código Rust `957efd4`: **52 casos /49 rc0 /3 rc1
+esperados**, driver rc0, fuentes congeladas hasta terminar. Los mismos52
+comandos de fase1, con logs nuevos `/tmp/pmw5b-linux-*.log`, resultados
+`/tmp/pmw5b-linux-results.json`, manifiesto `/tmp/pmw5b-source-manifest.json`
+y resumen `/tmp/pmw5b-linux-summary.log`. Token exchange rc0 en29.279s con
+el wrapper original: controles/cancelación/adversarios pasan; la causa del
+fallo histórico sigue sin atribuir, no se presenta como defecto corregido.
+La corrección posterior sólo modifica scripts Windows y documentación;
+los cuerpos de producto y fixtures Linux permanecen byte-idénticos a ese
+barrido. Se ejecutan check/clean nuevos por la extensión del checker, sin
+repetir los50 labs Linux ajenos a esa operación SCM Windows.
+
+Gates de la corrección de fixture: check rc0
+`/tmp/pmw5b-fixture-check.log`, clean rc0 (45.71s)
+`/tmp/pmw5b-fixture-clean.log`, cada invocación bajo flock. Tras sustituir
+la consulta ServiceController por CIM se reejecutó el verificador Windows,
+rc0 `/tmp/pmw5b-fixture-verify-windows.log`; no cambia Rust ni el orden de
+ACL/PE comprobado. Comparación de hashes con el barrido52: sólo cambian los
+tres scripts Windows (harness, quota-denial y verifier). Los dos ProductRed
+matrix EIO/ENOSPC son idénticos al baseline; los dos diagnósticos conservan
+closed1/replacement0/cleanup0. Sin regresiones Linux observadas.
 
 ## Windows G7 — W5: diagnóstico nativo de cuota (2026-10-03)
 

@@ -732,11 +732,30 @@ try {
         }
         catch { $quotaNegativeFailure = $_ }
         try {
-            Invoke-Checked 'sc.exe' @('config', $serviceName, 'binPath=', $binPath)
+            # ChangeServiceConfig2 treats the original NULL privilege list as
+            # "unchanged", so remove the temporary negative record. Re-create
+            # the normal owned record with its original unset privileges.
+            $quotaRecord = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
+            Assert-True ($null -ne $quotaRecord) 'quota fixture record disappeared'
+            if ([string]$quotaRecord.State -eq 'Running') {
+                $quotaPid = Get-StoppableServicePid $serviceName
+                Stop-OwnedService $serviceName $quotaPid
+            }
+            $quotaRecord = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
+            Assert-True ($null -ne $quotaRecord -and [string]$quotaRecord.State -eq 'Stopped') 'quota fixture did not stop before removal'
+            Invoke-Checked 'sc.exe' @('delete', $serviceName)
+            Assert-True ($null -eq (Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop)) 'quota fixture SCM record survived deletion'
+            $serviceOwned = $false
+            Invoke-Checked 'sc.exe' @('create', $serviceName, 'type=', 'own', 'start=', 'demand', 'obj=', "NT SERVICE\$serviceName", 'binPath=', $binPath)
+            $serviceOwned = $true
+            Invoke-Checked 'sc.exe' @('sidtype', $serviceName, 'unrestricted')
+            Assert-True ((Get-Sid "NT SERVICE\$serviceName") -eq $serviceSid) 'normal service SID changed after quota fixture'
+            [W5QuotaDeniedService]::Run($serviceName, $false)
+            Write-Host 'PASS windows-quota-fixture-restored privileges=original-exact sid=same command=normal'
         }
         catch {
             if ($null -ne $quotaNegativeFailure) {
-                throw [AggregateException]::new('Quota negative and command restoration failed', @($quotaNegativeFailure.Exception, $_.Exception))
+                throw [AggregateException]::new('Quota negative and fixture restoration failed', @($quotaNegativeFailure.Exception, $_.Exception))
             }
             throw
         }
