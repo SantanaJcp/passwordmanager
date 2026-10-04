@@ -768,7 +768,8 @@ try {
     $syncDb = Join-Path $syncDir 'opaque.sqlite3'
     $syncOut = Join-Path $harnessDir 'sync.out'
     $syncErr = Join-Path $harnessDir 'sync.err'
-    $syncPipe = '\\.\pipe\passwordmanager.ticket27.sync'
+    $syncPipe = '\\.\pipe\pm-sync-' + [Guid]::NewGuid().ToString('N')
+    Assert-True ($syncPipe -cmatch '^\\\\\.\\pipe\\pm-sync-[a-f0-9]{32}$') 'sync endpoint violates the ordinary named-pipe contract'
     $remoteDevice = '28282828282828282828282828282828'
     foreach ($path in @($aliasDir, $aliasPath, $syncDir, $deviceConfig, $pairing, $syncBinary, $syncServerKey, $syncServerPublic, $syncClientKey, $syncClientPublic, $syncDb, "${syncDb}-wal", "${syncDb}-shm", $syncOut, $syncErr, "${vault}.sync-status", "${vault}.sync-job", "${vault}.sync-stage")) { Add-OwnedPath $ownedPaths $path }
     if ($TuiConPtyRed) {
@@ -1119,6 +1120,10 @@ try {
             Write-Host (Get-Content $tuiErr -Raw)
             if ($p.ExitCode -eq 0) { Assert-TuiFixtureOutput $tuiOut $deviceMode; Write-Host "TUI_CASE case=device-$deviceMode result=pass" }
             else { $tuiCaseFailures.Add("device-$deviceMode"); Write-Host "TUI_CASE case=device-$deviceMode result=fail" }
+            if ($deviceMode -eq 'sync' -and $p.ExitCode -ne 0) {
+                Write-Host 'TUI_CASE case=device-retire result=not-run reason=sync-failed'
+                break
+            }
             if ($deviceMode -eq 'pair') {
                 if ($p.ExitCode -ne 0) { break }
                 $p = Start-AsUser $humanCredential $tuiSeed @('--pair-namespace', $pairing) $emptyInput $humanOut $humanErr

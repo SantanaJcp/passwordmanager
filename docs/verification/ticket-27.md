@@ -4374,3 +4374,64 @@ lock/toolchain o zonas W2/W3/W4/W5. Raíz b3577d2 con su .gitignore/.pi/odd
 ajenos intactos; integración893074a intacta. PR1 sigue abierto/draft y vinculado
 al hilo, sin watcher ni merge. Check/clean/barrido y RED→GREEN locales registrados
 arriba; no se repiten por esta actualización documental.
+
+## W1 fase 6 — diagnóstico de matriz Windows (2026-10-04 UTC)
+
+Worktree W1 limpio17b56a1, fast-forward explícito a
+1d270ad (identidad completa se conserva en la historia Git), publicado normalmente
+antes de editar. Base real `1d270ad` de integración W1/W5; raíz b3577d2,
+.integration y zonas W2/W3/W4/W5 preservadas. No se cambia estado de tickets.
+
+Método vigente de fases4–5 y pmint6: check, clean locked/offline y exactamente
+52 casos (49rc0 más matrix y dos extras rc1 conocidos), bajo flock individual,
+artefactos absolutos y sesión Wayland real; logs `/tmp/pmw1f-*.log`. Hasta seis
+corridas nuevas Windows manuales, estándar/públicas/sintéticas, false/true/true,
+SHAs exactos publicados y terminación obligatoria. Sin caches/artifacts/secrets.
+Gratuidad revalidada en [GitHub](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+
+Baselines nativos discriminantes: [37174043601](https://github.com/SantanaJcp/passwordmanager/actions/runs/37174043601),
+código0d8c57dadb4434e6fbb4e09e5c6e9af6a5fd7111; log conservado
+`/tmp/pmw1f-integration4-windows.log`. Nombre del pipe no cumple
+validate_sync_pipe_name (prefijo pm-sync y32hex), idéntico en configuración
+cliente/servidor. El servidor sale antes de submit; no hay framing cliente
+ni medición de sync en ese baseline. Corrección exclusivamente del fixture:
+GUID sintético32hex y guard exacto, misma ruta para ambos, SID/DACL/TLS intactos.
+No se atribuye ese exit a ACL, framing ni plazo sin prueba adicional.
+
+Resize100×30 ya acredita witness nativo fresco, repaint completo, clamp0 y
+child vivo; falla exclusivamente expected-present. La matriz acaba en panel
+obligatorio de master rotation; render_app selecciona Information en lugar
+del catálogo. El caso independiente acaba en Browse sin ese panel. El fixture
+ahora exige el panel completo previo, registra sólo esa categoría, lo descarta
+por Escape ordinario y exige catálogo antes del resize. Mantiene witness nuevo,
+repaint completo fresco, geometría exacta, wait15s y CUP/HVP/contadores existentes:
+clamp únicamente al viewport con parámetros válidos hasta32767; por encima
+se conserva rechazo estricto, igual que CHA/VPA/CSI desconocidos. No se cambia
+parser ni TUI productiva.
+
+La precondición de local-operations posterior al restore de Matrix es dos
+Password activos, original y nuevo ID, en vez de uno. Se exige exactamente2,
+sin aceptar conteo arbitrario ni eliminar los originales. El conteo y la
+normalización del panel requieren confirmación nativa; no se anticipa GREEN.
+
+Sync: server timings existentes server_sqlite_open/server_dispatch, y nuevas
+medidas categóricas del fixture submit/wait y fases públicas observadas sobre
+pantalla completa, sin jobs/paths/payloads en diagnóstico. Los intervalos de
+pantalla son observaciones con resolución del poll, no medición interna del
+worker; las fases saltadas no se inventan. ProcessTlsTransport Windows conserva
+un proceso por RPC. Si falla sync, se conserva el error y no se inicia retiro.
+Si supera15s, se entrega la medición parcial/propuesta y se detiene, sin ampliar
+plazos ni portar sesión Unix. Sin edición propia de pm-sync o fixtures macOS.
+
+Fallbacks inspeccionados y conservados: WindowsServerPipe::drop ignora fallo
+CloseHandle; create pipe ignora retorno LocalFree del descriptor; ClipboardWindow::drop
+ignora DestroyWindow cuando queda HWND. Pueden ocultar fallo de liberación de
+recurso; ninguna causa demostrada aquí los involucra. ProcessTlsTransport
+conserva clasificación genérica de exit desconocido como Unavailable y su
+reenvío de timing descarta errores de escritura; server dispatch sustituye
+error interno por JSON ok=false. Se reportan, sin modificar ni usar para PASS.
+
+Preflight del primer checkpoint: fmt/check completos locked/offline bajo flock,
+log `/tmp/pmw1f-initial-check.log`, todos los grupos ejecutados sin fallo y
+Clippy final completado. Diff-check limpio. Esto verifica Linux y guards de
+CI; cfgWindows y los nuevos intervalos aún requieren ejecución nativa.
