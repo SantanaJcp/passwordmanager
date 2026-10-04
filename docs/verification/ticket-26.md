@@ -2511,3 +2511,13 @@ causa histórica pendiente. Backup6.883s, restore no acreditado dentro8s,
 sync/final NOT_RUN. Intel aún pendiente en esta anotación; no aceptación
 ambas CPU. Siguiente discriminante: retirar perfil unlock y feature de
 instrumentación, manteniendo Full25 y plazos completos.
+
+W2 verificación1
+[37176973454](https://github.com/SantanaJcp/passwordmanager/actions/runs/37176973454),
+`d199ada5ce33002742c878052f1d58702aa22f45`: ARM **PASS completo**,
+Intel **FAIL restore8s**, sync Intel NOT_RUN, workflow FAIL. ARM happy sync
+wait7.390s (margen12.610s/63.1%), total8.259s; backup0.912s. Apertura SQLite
+una por576 RPCs, commits y ACL por RPC. Unlock no falla; ninguna causa
+histórica confirmada. Linux52:49 rc0/tres RED conocidos/cero regresiones,
+check y clean offline PASS, W4 fuera de gates. Pendiente última evidencia
+Intel del producto actual y confirmación plist normal en ambas CPU.

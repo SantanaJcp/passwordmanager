@@ -926,6 +926,37 @@ código; no se modifica el parser ni se usa para validar esta corrección.
 Check final del segundo cambio `/tmp/pmw2e-sqlite-check3.log` rc0, suite y
 Clippy completos. El log check2 rc101 conserva el cast de longitud de log
 señalado por Clippy; se sustituyó por conversión comprobada. Sin lints
-suprimidos. Primer barrido52:48 rc0/tres RED conocidos/un FAIL Clippy del
+suprimidos para los errores observados. Primer barrido52:48 rc0/tres RED conocidos/un FAIL Clippy del
 nuevo test; escenarios funcionales y negativos esperados conservados.
 El segundo barrido completo corresponde al nuevo servidor persistente.
+
+### Verificación 1: servidor persistente, ARM PASS / Intel restore FAIL
+
+[37176973454](https://github.com/SantanaJcp/passwordmanager/actions/runs/37176973454),
+`d199ada5ce33002742c878052f1d58702aa22f45`, completed/failure.
+ARM PASS completo: happy wait7.390s, envío0.869s, total8.259s;
+margen12.610s/**63.1%**. Job7.064155s, push5.283153s/pull1.698172s;
+exportación1/0.245667s; put287/4.385954s, get287/0.622633s;
+dispatch576/3.940343s, apertura real SQLite1; fsync download36/0.045292s,
+joined5/0.105334s y status4/0.045680s. PIDs estables, pushed59/pulled59,
+root1 y bloques287, fase final y cleanup completos. Backup0.912s frente a
+6.883s anterior; **backup no cambió**, no atribuir esa variación al fix.
+
+Intel FAIL restore8s antes de sync; unlocks1.090–6.195s observados y backup
+2.667s. Snapshot después del wait mantiene diagnóstico de restore sin
+aceptación; sync/final NOT_RUN. Control39: ARM publicación5.895s /
+convergencia7.962s; Intel publicación17.993s/convergencia22.354s. La variabilidad está presente.
+
+Segundo barrido `/tmp/pmw2e-session-gates-results.json`:52 casos,49 rc0,
+tres RED conocidos (g7-matrix/g7-extra-bootstrap/g7-extra-vault), cero
+regresiones. W4 concurrency se ejecutó sólo como observación. Check22.609s,
+clean47.626s, tiempos wall que pueden incluir espera del flock. Wayland real
+wayland-1 desde el inicio; ninguna repetición por entorno. Fuente congelada.
+
+Siguiente diagnóstico autorizado: sample nativo1s en TUI/custodio propios
+**después** de un fallo restore8s, sólo booleanos KDF/restore/backup/SQLite/
+protección/lectura/fsync. Conservar el FAIL original y su snapshot; no usar
+respuesta tardía como PASS. Se eliminan las hooks temporales de KDF ya
+retiradas del build; scopes sync siguen activos para medir Intel si alcanza
+happy. La corrida final retirará también scopes/plist y confirmará el perfil
+normal. Sin producto nuevo tras el barrido52.
