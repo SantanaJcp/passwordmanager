@@ -4380,7 +4380,7 @@ arriba; no se repiten por esta actualización documental.
 Worktree W1 limpio17b56a1, fast-forward explícito a
 1d270ad (identidad completa se conserva en la historia Git), publicado normalmente
 antes de editar. Base real `1d270ad` de integración W1/W5; raíz b3577d2,
-.integration y zonas W2/W3/W4/W5 preservadas. No se cambia estado de tickets.
+worktree integration-26-28 y zonas W2/W3/W4/W5 preservadas. No se cambia estado de tickets.
 
 Método vigente de fases4–5 y pmint6: check, clean locked/offline y exactamente
 52 casos (49rc0 más matrix y dos extras rc1 conocidos), bajo flock individual,
@@ -4435,3 +4435,72 @@ Preflight del primer checkpoint: fmt/check completos locked/offline bajo flock,
 log `/tmp/pmw1f-initial-check.log`, todos los grupos ejecutados sin fallo y
 Clippy final completado. Diff-check limpio. Esto verifica Linux y guards de
 CI; cfgWindows y los nuevos intervalos aún requieren ejecución nativa.
+
+### Corrida1 fase6 — GREEN de fixtures, límite de sync alcanzado
+
+[Run37175374172](https://github.com/SantanaJcp/passwordmanager/actions/runs/37175374172),
+[job111356790364](https://github.com/SantanaJcp/passwordmanager/actions/runs/37175374172/job/111356790364),
+SHA exacto **a58bbe7be4fc361665e133566c431f4e88af4f90**, terminado **failure**.
+Inputs false/true/true/false (diagnostic_only/service_diagnostics/tui_conpty_red/
+onepux_memory_diagnostics); ref API comprobado antes/después. Artifact count0.
+Logs/metadata `/tmp/pmw1f-windows1.{log,json}`. Windows11 ARM64 nativo,
+Rust1.98.1, libsodium1.0.22 static/MSVC. Build/PE, primitives14, pipe1,
+observer24 y sync-lib1 PASS. Única corrida nueva, presupuesto1/6; ninguna activa.
+
+**(a) Causa confirmada y corrección GREEN:** Matrix exige y observa el panel
+completo de master rotation previo, Escape ordinario devuelve catálogo80×24,
+y después los tres resize100×30/42×12/80×24 pasan con witness nuevo,
+complete-repaint=true y cup-hvp-clamped=0. También pasa el resize separado.
+Matrix completa, seed8 1PUX con lease/DACL exactas, organización/history/copy,
+generator/access/audit, backup/export/trash/restore/recovery/master y readback
+pasan. Local-operations posterior observa exactamente2 Password activos y
+completa sus operaciones/rotación; originales preservados. No se cambió
+producto, geometría inicial, orden de eventos de resize ni parser estricto.
+
+**(b) Causa confirmada y corrección GREEN:** el nombre válido permite conservar
+el servidor vivo durante submit y ejecutar cuatro requests autenticados con
+server_sqlite_open/server_dispatch medidos. Desaparecen la salida previa al
+submit y el error de cleanup de servidor terminado. PAIR/namespace protegido,
+segundo dispositivo SCM ordinario y ambos paquetes byte-exactos PASS. No hay
+SYNC_UNAVAILABLE ni SYNC_REQUEST_FAILED del servidor en la corrida. No se
+identifica fallo de framing, DACL o deadline del servidor; esas negativas
+integrales no quedan demostradas por el happy path parcial. La corrección fue
+exclusivamente del fixture W1, sin tocar pm-sync de W2.
+
+**SYNC FAIL por plazo original:** al terminar la espera15s el panel sigue en
+pushing. El fixture envía una sola operación y conserva el error; no reenvía,
+no amplía espera ni espera fuera de banda para inventar éxito. RETIRE **NOT_RUN**
+por esa frontera. El observer readonly de sync no satisface blocks>0 y roots>0;
+emite categoría genérica de fallo, sin conteos: no atribuirle un número de roots
+observado. El observer de retiro tampoco pasa, después de no ejecutar retiro;
+no es una regresión de retire. El agregado final conserva device-sync,
+device-sync-durable y device-retire-durable. Cleanup propio no añade error.
+
+| Medida Windows | Resultado | Alcance |
+| --- | --- | --- |
+| Preparación/envío del teclado hasta submit |2 ms| Fixture; no representa preparación interna del worker. |
+| Espera submit→panel completo |15,005 ms, FAIL| Wait original15s; tolerancia de scheduling, sin ampliación. |
+| Total registrado del span del fixture |15,044 ms| Incluye medición/diagnóstico; no es duración completa del job. |
+| Primer pushing observado después de submit |6,097 ms| Intervalo previo no clasificado; no se atribuye a KDF/spawn sin métricas internas. |
+| Pushing visible hasta expirar |8,907 ms, ended=false| Observación de pantalla/poll; fase incompleta, no duración integral de push. |
+| Pulling/activación/convergencia |No observadas| No inventar cero ni tiempo total de sync. |
+| server_sqlite_open |4 spans,8,313 us acumulados; max2,110 us| Apertura servidor; no incluye spawn/TLS/cliente. |
+| server_dispatch |4 spans,28,409 us acumulados; max21,885 us| Dispatch servidor; no representa tiempo completo de RPC. |
+
+Los dos conjuntos de medidas se solapan y no se suman como duración del job.
+ProcessTlsTransport sigue haciendo un proceso por RPC en cfgWindows, confirmado
+por fuente; no se midió su coste individual. Sólo36.722 ms acumulados en los
+spans del servidor no localizan los segundos restantes. La hipótesis de coste
+en preparación/cliente/spawn/TLS requiere discriminante, no se declara causa
+probada ni se extrapola un tiempo final desde cuatro requests.
+
+**Propuesta y punto de parada:** autorizar un diagnóstico Windows acotado que
+capture job_prepare/push/pull/process_spawn/process_wait/client_prepare/TLS
+con el mismo servicio/pipe/SIDs, KDF, workload y límites. Recomiendo ese
+instrumentado antes de elegir una optimización. Según su resultado, evaluar
+sesión persistente específica para Windows como cambio separado; no portar
+ahora la sesión Unix ni ampliar15/30s. Alternativa: evaluar un método de
+aceptación asíncrona del mismo job con observación completa, que también
+requiere aprobación previa del plazo/método. Ninguna propuesta aplicada.
+Se detiene toda modificación/CI de sync en esta frontera solicitada; sólo
+continúan el barrido local pendiente y el cierre documental.
