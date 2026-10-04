@@ -377,6 +377,24 @@ function Open-StoppedInstallerNode([string]$Path) {
     Invoke-Checked 'icacls.exe' @($Path, '/grant:r', "${installerName}:F")
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     Assert-True (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'device move refuses reparse'
+    # Runtime atomic replacement may inherit the sealed parent's role ACL.
+    # Provision an explicit protected ACL while SCM is stopped, after proving
+    # the inherited/effective trustees are exactly the same three principals.
+    $before = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $expected = @(@('SYSTEM', $installerName, "NT SERVICE\$serviceName") | ForEach-Object { Get-Sid $_ })
+    $seen = @{}
+    foreach ($rule in @($before.Access)) {
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        Assert-True ($expected -contains $sid) 'stopped installer node has unexpected trustee'
+        Assert-True ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow) 'stopped installer node has deny ACE'
+        Assert-True (($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl) 'stopped installer node lacks full role rights'
+        $seen[$sid] = $true
+    }
+    Assert-True ($seen.Count -eq $expected.Count) 'stopped installer node lacks an expected trustee'
+    $inherited = @($before.Access | Where-Object { $_.IsInherited }).Count
+    Write-Host "STOPPED_NODE_ACL protected=$($before.AreAccessRulesProtected) entries=$(@($before.Access).Count) inherited=$inherited trustees=exact rights=full"
+    $rolePermission = if ($item.PSIsContainer) { '(OI)(CI)F' } else { 'F' }
+    Invoke-Checked 'icacls.exe' @($Path, '/inheritance:r', '/grant:r', "SYSTEM:$rolePermission", "NT SERVICE\${serviceName}:$rolePermission", "${installerName}:F")
     Assert-ExactNodeAcl $Path @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
 }
 

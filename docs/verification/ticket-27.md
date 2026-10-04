@@ -4197,3 +4197,53 @@ anotación de W2 continúa pendiente de autorización y permanece sin aplicar.
 Preflight de argumentos/orden fase5 rc0, `/tmp/pmw1e-windows-fixtures-check4.log`,
 check completo bajo flock. Diff-check rc0. Sólo cambia el harness Windows;
 código Linux y los oráculos del barrido52 permanecen idénticos.
+
+Corrida3 Windows despachada sobre18aaa38a60bc662cbfddca35fcd15d46a7769805,
+[37171773346](https://github.com/SantanaJcp/passwordmanager/actions/runs/37171773346),
+inputs false/true/true, ref exacto antes/después por API. Hipótesis comprobable:
+argumentos completos permiten llegar al rechazo reparse, y la independencia
+de PAIR permite observar SCM/audit/segundo ID antes del build sync heredado.
+Presupuesto actualWindows3/6,Mac1/2. Al registrar este párrafo sigue activa.
+
+Fallback heredado adicional inspeccionado, sin modificación: en Unix,
+`tui.rs::sync_endpoint_available` usa `UnixStream::connect(path).is_ok()`;
+cualquier error (también permiso denegado, no sólo endpoint ausente) se convierte
+en false y el panel declara offline sin enviar sync. Se agrupa la categoría de
+conexión. El camino Windows conserva su API nativa y mapea errores explícitos;
+este inventario no autoriza cambiar ninguno de ambos. Siguen también los
+cleanup Win32/handler descartados y el parser/cleanup del transporte W2 ya
+inventariados. No se añadió una alternativa al fallar el build sync.
+
+Corrida3 finalizada **FAIL**: reparse integral del método aprobado **PASS**:
+TUI sources con argumentos completos, fuente original/target exactos intactos,
+no lease, DACL de proceso exacta, alias instalado/removido sin traversal y
+cleanup propio sin otro fallo reportado. RPK y siete wire negativos siguen
+PASS; resize/clipboard/access/rotations/local-operations PASS, matrix conserva
+crypto-resource W5. No es GREEN de un defecto productivo reparse: el rojo
+anterior fue sólo un error de argumentos del fixture.
+
+Segundo dispositivo alcanza STOP y aprovisionamiento del paquete, pero falla
+antes del primer movimiento: `ACL inheritance remains enabled` en
+vault.sqlite3.audit-custody. No configura el ID remoto ni llega a PAIR/SYNC/
+RETIRE. Log/metadata `/tmp/pmw1e-windows3.{log,json}`; job111345995937,
+artifacts0, Win11 ARM64 imagen20260924.168.1/Rust1.98.1/libsodium1.0.22 MT.
+El helper añadido había supuesto archivo con DACL protegida tras reemplazos
+productivos; el hecho observado desmiente esa precondición. No se atribuye
+causa de implementación sin otra evidencia ni se cambia custodia W3/W5.
+
+Método de preparación corregido antes de nueva corrida: sólo con SCM detenido,
+ledger propio y nodo no-reparse, tras habilitar instalador verificar cada ACE:
+Allow, FullControl y SID exclusivamente SYSTEM/servicio/instalador, presencia
+de los tres efectivos. Reportar protected/entries/inherited categóricos.
+Convertir entonces ese mismo perfil a DACL protegida y explícita por nodo,
+sin traversal/recursión, exigir Assert-ExactNodeAcl original antes de mover y
+retirar instalador antes de cada arranque. No aceptar trustees/derechos distintos,
+ni cambiar guards genéricos o relajar aserciones. El helper es provisión de
+fixture detenido: la herencia observada del archivo productivo se conserva
+como límite de evidencia; no se declara protección explícita continua durante
+los reemplazos de runtime. Esta diferencia justifica la corrida4, no un repeat
+idéntico. El bloqueo de tipo W2 sigue pendiente de autorización.
+
+Preflight de esa provisión rc0: check completo bajo flock,
+`/tmp/pmw1e-windows-fixtures-check5.log`; diff-check rc0. Guards genéricos
+intactos y sin cambios Linux adicionales al barrido52 verificado.
