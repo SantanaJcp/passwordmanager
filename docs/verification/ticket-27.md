@@ -3906,3 +3906,68 @@ UAC_ENABLE_LUA1, Rust1.98.1-aarch64-pc-windows-msvc/libsodium1.0.22 ARM64/MT.
 Mac15.7.9/kernel24.6.0, imágenes Intel20260824.0482.1 y
 ARM20260907.0337.1, toolchain1.98.1 por host nativo. No acredita32/reboot/FDE/
 firma/terminal visible ni revisión/integración del merger.
+
+### Continuación acotada de fracaso por handle — método antes del fixture
+
+Se continúa la matriz de fuentes no regulares/empty/multilink ya definida en
+el método de transferencia anterior, independientemente de las extensiones
+reparse/segundo dispositivo pendientes. Además del rechazo local TUI sin
+lease, se enviarán tres handles **reales y abiertos del proceso humano propio**
+por31: archivo regular vacío, directorio y alias hardlink del1PUX sintético.
+No se cambia el producto ni se elude una guarda TUI productiva: el cliente de
+fixture wire negativo existente ejerce directamente la validación del servicio.
+
+El fixture crea exclusivamente un nombre propio nuevo bajo la raíz humana;
+colisión falla. Antes del envío, GetFileInformationByHandle sobre ese mismo
+handle debe probar el tipo/size0/link1, directorio o regular size>frame/link2,
+respectivamente, y ausencia de reparse. Cada transferencia conserva TLS/RPK,
+ack31, ACE exacta, cierre corroborado, restauración DACL y cierre explícito
+del handle propio; se elimina exclusivamente el alias/archivo/directorio
+creado y se propagan todos los errores. El instalador registra esos tres
+nombres en su inventario cerrado de cleanup, sin modificar los guards
+genéricos ni agregar privilegios. Las fases nuevas de cada caso deben tener
+una ack31/token/transfer-duplicate-failed, cero transfer-duplicated/parser.
+No presentar estos tres casos como toda la matriz Win32 ni como reparse/G1
+integrales. La corrida Windows siguiente, sobre nuevo SHA publicado, verifica
+estas fronteras y preserva todos los grupos previos, incluido el FAIL de W5.
+
+### Barrido local reconstruido después del reinicio
+
+Driver `/tmp/pmw1d-resume-run-local.py`, lista y rc completos
+`/tmp/pmw1d-resume-local-results.json`, resumen `...-local-summary.{log,json}`.
+52 comandos reconstruidos, ejecutados secuencialmente bajo flock, mismos
+artefactos absolutos Keycloak/CFT y sin multiagente W4. HEAD de código6aeaf1a;
+manifiesto de crates/scripts/workflows/lock/toolchain idéntico de principio a
+fin, incluso durante el commit documental8874458.
+
+**Resultado bruto:52 casos /48 rc0 /tres RED conocidos /un fallo de entorno.**
+Check/clean rc0,77.652/48.521s. El único mismatch adicional es tui-content:
+wl-paste no recibió WAYLAND_DISPLAY tras el reinicio y activó su fallback
+heredado wayland-0; ese socket no existe. No es un RED del producto. Se
+reporta dicho fallback del ejecutable externo, sin modificarlo ni aceptar su
+salida como correcta. Hyprland `instances` y el socket con propietario humano
+confirman la sesión real wayland-1; se repone el prerrequisito explícito.
+
+Repetición enfocada, después de concluir los52 y sin cambiar código Linux:
+`WAYLAND_DISPLAY=wayland-1 PM_KEYCLOAK_DIST=<artefacto absoluto>
+PM_CFT_DIR=<artefacto absoluto> PYTHONDONTWRITEBYTECODE=1 flock
+/tmp/pm-cargo-window.lock ./scripts/test-linux-tui-content-lab.sh`, **rc0**,
+`/tmp/pmw1d-resume-tui-content-wayland.log`. PASS observable de7 tipos/campos,
+resize/Unicode/reveal/expiry/idle/clipboard real, owner race y agente hostil.
+Se conserva la fila/log rc1 inicial: no se presenta el barrido bruto como49
+rc0 ni se reutiliza un PASS anterior a este reinicio.
+
+Los52 casos únicos quedan verificados con los mismos rc esperados de la
+integración (49 verdes y los3 RED), con una repetición justificada por reparar
+el entorno; ninguna regresión de producto observada. Matrix mantiene sólo
+commit-outbox-audit EIO/ENOSPC y cleanup0; bootstrap/vault ambiguos conservan
+unchanged=(1,0,1,1,1), replacement0/closed1 y cleanup0. Operations/bootstrap,
+concurrencia ordinaria, probe purge,33 E2EE+shared-purge y digest2 pasan con
+oráculos originales. Tiempos incluyen esperas del lock compartido y no miden
+rendimiento. Los fixtures Windows posteriores no modifican el código Linux
+ni los53 comandos/fixtures funcionales ejecutados (52 más el repeat enfocado).
+
+Preflight de los tres casos wire nuevos: `flock /tmp/pm-cargo-window.lock
+bash -c './scripts/cargo-local.sh fmt --all && ./scripts/check.sh'` rc0,
+`/tmp/pmw1d-live-handle-check.log`; diff-check rc0. Native cfgWindows y
+PowerShell requieren la siguiente corrida; no se les atribuye este PASS Linux.

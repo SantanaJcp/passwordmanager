@@ -623,6 +623,9 @@ try {
     $localPlaintext = Join-Path $humanDir 'local-operations.jsonl'
     Add-OwnedPath $ownedPaths $tuiCsv
     Add-OwnedPath $ownedPaths $tuiOnePux
+    foreach ($negative in @('file-empty', 'directory-handle', 'file-multilink')) {
+        Add-OwnedPath $ownedPaths ([IO.Path]::ChangeExtension($tuiOnePux, "wire-$negative"))
+    }
     Add-OwnedPath $ownedPaths $tuiBackup
     Add-OwnedPath $ownedPaths $tuiPlaintext
     Add-OwnedPath $ownedPaths $localBackup
@@ -730,15 +733,24 @@ try {
         Write-Host (Get-Content $humanOut -Raw)
         # Invalid source frames are independent of restore and key rotations.
         # Preserve every failure, then continue the other native cases once.
-        foreach ($negative in @('null', 'invalid-handle', 'thread-pseudohandle', 'malformed-token')) {
+        foreach ($negative in @('null', 'invalid-handle', 'thread-pseudohandle', 'malformed-token', 'file-empty', 'directory-handle', 'file-multilink')) {
             $diagnosticStart = if ($ServiceDiagnostics) { @(Get-Content -LiteralPath $diagnosticPath -ErrorAction Stop).Count } else { 0 }
-            $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId, '--transfer-negative', $negative) $humanInput $humanOut $humanErr
+            $negativeArgs = @($humanProfile, $humanPrivate, $vaultId, '--transfer-negative', $negative)
+            if ($negative -in @('file-empty', 'directory-handle', 'file-multilink')) {
+                $negativeArgs += $tuiOnePux
+            }
+            $p = Start-AsUser $humanCredential $tuiSeed $negativeArgs $humanInput $humanOut $humanErr
             Write-Host (Get-Content $humanErr -Raw)
             Write-ServiceSubphaseDiagnostics $diagnosticPath
             try {
                 Assert-True ($p.ExitCode -eq 0) ('ordinary human transfer negative failed: ' + $negative + '; ' + (Get-Content $humanErr -Raw))
                 Assert-True ((Get-Content $humanOut -Raw).Trim() -eq "PASS windows-transfer-negative case=$negative ack31=accepted peer-eof=1 dacl-before-during-after=exact") 'negative transfer did not prove exact DACL and peer closure'
                 Write-Host (Get-Content $humanOut -Raw)
+                if ($negative -in @('file-empty', 'directory-handle', 'file-multilink')) {
+                    $sourceWitness = @(Get-Content $humanErr -ErrorAction Stop)
+                    Assert-True (@($sourceWitness | Where-Object { $_ -eq "NATIVE_SOURCE case=$negative witness=exact handle=open" }).Count -eq 1) 'negative source lacks exact native handle witness'
+                    Assert-True (@($sourceWitness | Where-Object { $_ -eq "NATIVE_SOURCE case=$negative handle-closed=true source-cleaned=true" }).Count -eq 1) 'negative source lacks checked close and cleanup'
+                }
                 if ($ServiceDiagnostics) {
                     $newPhases = @(Get-Content -LiteralPath $diagnosticPath -ErrorAction Stop | Select-Object -Skip $diagnosticStart)
                     Assert-True (@($newPhases | Where-Object { $_ -eq 'phase=transfer-ack31' }).Count -eq 1) 'negative transfer lacks one native ack31'

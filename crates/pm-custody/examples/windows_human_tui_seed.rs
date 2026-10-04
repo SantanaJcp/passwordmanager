@@ -85,6 +85,134 @@ mod fixture {
             _ => "other",
         }
     }
+
+    fn with_negative_token(
+        case: &str,
+        source: Option<&Path>,
+        operation: impl FnOnce(&[u8]) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        let fixed: Option<&[u8]> = match case {
+            "null" => Some(&[0; 8]),
+            "invalid-handle" => Some(&[0xff; 8]),
+            "thread-pseudohandle" => Some(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe]),
+            "malformed-token" => Some(&[0; 7]),
+            "file-empty" | "directory-handle" | "file-multilink" => None,
+            _ => return Err(std::io::Error::other("unknown negative source case")),
+        };
+        if let Some(token) = fixed {
+            if source.is_some() {
+                return Err(std::io::Error::other(
+                    "fixed negative token received a source",
+                ));
+            }
+            return operation(token);
+        }
+        use std::os::windows::{fs::OpenOptionsExt, io::IntoRawHandle};
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            Storage::FileSystem::{
+                BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_TYPE_DISK,
+                GetFileInformationByHandle, GetFileType,
+            },
+        };
+        let source = source.ok_or_else(|| std::io::Error::other("live negative source absent"))?;
+        let owned = source.with_extension(format!("wire-{case}"));
+        match std::fs::symlink_metadata(&owned) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+            Ok(_) => return Err(std::io::Error::other("negative source collision")),
+        }
+        let directory = case == "directory-handle";
+        let remove_owned = || {
+            if directory {
+                std::fs::remove_dir(&owned)
+            } else {
+                std::fs::remove_file(&owned)
+            }
+        };
+        let file = if case == "file-empty" {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&owned)?
+        } else {
+            if directory {
+                std::fs::create_dir(&owned)?;
+            } else {
+                std::fs::hard_link(source, &owned)?;
+            }
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+                .open(&owned)
+            {
+                Ok(file) => file,
+                Err(error) => {
+                    return match remove_owned() {
+                        Ok(()) => Err(error),
+                        Err(cleanup) => Err(std::io::Error::other(format!(
+                            "{error}; negative source cleanup: {cleanup}"
+                        ))),
+                    };
+                }
+            }
+        };
+        let handle = file.into_raw_handle();
+        let result = (|| {
+            let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+            if unsafe { GetFileInformationByHandle(handle, &raw mut info) } == 0
+                || unsafe { GetFileType(handle) } != FILE_TYPE_DISK
+                || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            {
+                return Err(std::io::Error::other(
+                    "negative source native witness failed",
+                ));
+            }
+            let is_directory = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+            let size = (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow);
+            let witnessed = match case {
+                "file-empty" => !is_directory && size == 0 && info.nNumberOfLinks == 1,
+                "directory-handle" => is_directory,
+                "file-multilink" => !is_directory && size > 1024 * 1024 && info.nNumberOfLinks == 2,
+                _ => {
+                    return Err(std::io::Error::other(
+                        "negative source classification changed",
+                    ));
+                }
+            };
+            if !witnessed {
+                return Err(std::io::Error::other("negative source witness mismatch"));
+            }
+            eprintln!("NATIVE_SOURCE case={case} witness=exact handle=open");
+            let token = u64::try_from(handle as usize)
+                .map_err(|_| std::io::Error::other("negative source token overflow"))?
+                .to_be_bytes();
+            operation(&token)
+        })();
+        let close = if unsafe { CloseHandle(handle) } != 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        };
+        let removed = remove_owned();
+        eprintln!(
+            "NATIVE_SOURCE case={case} handle-closed={} source-cleaned={}",
+            close.is_ok(),
+            removed.is_ok()
+        );
+        let failures = [result, close, removed]
+            .into_iter()
+            .filter_map(Result::err)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(failures.join("; ")))
+        }
+    }
     fn bytes(request: &mut Vec<u8>, value: &[u8]) -> Result<(), Failure> {
         request.extend_from_slice(
             &u32::try_from(value.len())
@@ -414,7 +542,9 @@ mod fixture {
                 args[3].parse().map_err(|_| Failure::Unavailable)?,
             );
         }
-        if !(args.len() == 3 || (args.len() == 5 && args[3] == "--transfer-negative")) {
+        if !(args.len() == 3
+            || ((args.len() == 5 || args.len() == 6) && args[3] == "--transfer-negative"))
+        {
             return Err(Failure::Unavailable);
         }
         let mut input = NativeStdin::open().map_err(|_| Failure::Unavailable)?;
@@ -440,7 +570,7 @@ mod fixture {
         if used == 0 {
             return Err(Failure::Unavailable);
         }
-        let negative = args.len() == 5;
+        let negative = args.len() >= 5;
         let mut tls = observe(
             "connect",
             negative,
@@ -458,19 +588,12 @@ mod fixture {
             if *observe("unlock-response", negative, success(&mut tls))? != [0] {
                 return Err(Failure::Unavailable);
             }
-            if args.len() == 5 {
-                let token: &[u8] = match args[4].as_str() {
-                    "null" => &[0; 8],
-                    "invalid-handle" => &[0xff; 8],
-                    "thread-pseudohandle" => &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe],
-                    "malformed-token" => &[0; 7],
-                    _ => return Err(Failure::Unavailable),
-                };
+            if negative {
                 observe("request31", true, send(&mut tls, &[31, 0]))?;
                 if *observe("ack31", true, success(&mut tls))? != [0] {
                     return Err(Failure::Unavailable);
                 }
-                crate::acl::with_exact_human_lease(|| {
+                with_negative_token(&args[4], args.get(5).map(Path::new), |token| crate::acl::with_exact_human_lease(|| {
                     send(&mut tls, token).map_err(|_| {
                         eprintln!("NATIVE_TRANSFER stage=token-sent result=fail");
                         std::io::Error::other("negative transfer token could not be sent")
@@ -510,7 +633,7 @@ mod fixture {
                             ))
                         }
                     }
-                })
+                }))
                 .map_err(|_| Failure::Unavailable)?;
                 return Ok(());
             }
@@ -555,7 +678,7 @@ mod fixture {
         })();
         let closed = observe("close", negative, close_tls(tls));
         operation.and(closed)?;
-        if args.len() == 5 {
+        if negative {
             println!(
                 "PASS windows-transfer-negative case={} ack31=accepted peer-eof=1 dacl-before-during-after=exact",
                 args[4]
