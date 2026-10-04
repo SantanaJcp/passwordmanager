@@ -66,16 +66,23 @@ fn emit(category: &str, count: usize, us: u128) {
         }
         return;
     }
-    #[cfg(windows)]
-    let logging = Instant::now();
+    #[cfg(not(windows))]
     let _ = writeln!(
         std::io::stderr().lock(),
         "PMW2_TIMING category={category} count={count} us={us}"
     );
     #[cfg(windows)]
-    STDERR_MICROS.with(|total| {
-        total.set(total.get() + logging.elapsed().as_micros());
-    });
+    {
+        let logging = Instant::now();
+        // Windows stderr is a synchronous pipe when redirected by the native
+        // harness. Formatting directly into it issues a write per fragment;
+        // form the same bounded, payload-free line before acquiring the sink.
+        let line = format!("PMW2_TIMING category={category} count={count} us={us}\n");
+        let _ = std::io::stderr().lock().write_all(line.as_bytes());
+        STDERR_MICROS.with(|total| {
+            total.set(total.get() + logging.elapsed().as_micros());
+        });
+    }
 }
 
 #[cfg(windows)]

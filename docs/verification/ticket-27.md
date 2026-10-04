@@ -5045,3 +5045,37 @@ los agregados. No redirigir/reintentar/substituir el sink ni cambiar watchdog,
 plazos, framing, ACL o commits. Si logging domina, emitir cada línea ya formada
 con una sola write_all en Windows (mismo destino/texto/fracaso heredado).
 Si otra fase domina, seleccionar la corrección sólo con evidencia nativa.
+
+### Fase8 corrida5 — transporte rápido; coste entre spans aislado
+
+[37182137295](https://github.com/SantanaJcp/passwordmanager/actions/runs/37182137295),
+SHA `b7a448a2e3245c3476d571e57e99cee938b2a5eb`, completed/failure;5/6 usadas.
+Primitivas/pipe/observer/sync-lib/sync-bin PASS. Local-operations conserva
+CUSTODY_UNAVAILABLE antes de sync; PAIR PASS; SYNC FAIL15s,pushing desde6.091s,
+48puts completados de49 iniciados,10eventos de36. RETIRE NOT_RUN.
+
+Servidor parcial50RPC: dispatch0.383202s,verify0.001362s,response_write0.004910s,
+request_read0.050140s; spawn0.004784s+join0.006856s. Cliente TLS_read48
+8.601017s. Ninguna de esas fases explica los≈8s entre spans: el coste del
+watchdog servidor también descartado. El cierre de conexión no ocurrió antes
+del snapshot: contador total server_timing_emit todavía ausente. Tres líneas
+inesperadas aparecen categóricamente y mantienen FAIL estricto; no se
+reinterpreta como respuesta positiva ni se revela su contenido. Cleanup
+conserva FAIL por staging no inventariado.
+
+Inferencia acotada: cada span servidor termina emitiendo una línea a stderr
+redirigido; writeln formatea directamente al writer con varias escrituras.
+El sink Windows síncrono es el trabajo no incluido en esos spans. Método6:
+formar exactamente la misma línea en memoria y una write_all en Windows,
+con el mismo stderr, sin buffering acumulado, cambio Unix ni sink alterno.
+Los spans y aserciones quedan. El fallo de escritura heredado sigue ignorado
+como antes (timing.rs emit, sólo diagnóstico); se reporta, no se cambia su
+semántica ni se usa para aceptar sync. Los fallbacks Drop/LocalFree del canal
+nativo quedan intactos; cierre109 del RED usó CloseHandle comprobado.
+
+Validar el efecto y el job completo en la sexta/última corrida Windows,
+incluyendo SYNC/RETIRE y observación durable. Si el sink no explica el margen,
+conservar FAIL sin ampliar15s/30s ni consumir corridas extra. Código nuevo
+sólo cfgWindows: el camino emit Unix sigue textualmente igual al verificado
+por la corrida macOS, no se repite por hipótesis. Finalizar con los52 gates
+sobre el código final, bajo flock y sesión Wayland real.
