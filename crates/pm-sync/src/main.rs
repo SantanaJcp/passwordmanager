@@ -285,6 +285,7 @@ fn run_with_deadline(
     let completed = Arc::new((Mutex::new(false), Condvar::new()));
     let waiter = Arc::clone(&completed);
     let signal = stop.clone();
+    let spawning = timing::Span::new("deadline_spawn");
     let worker = std::thread::Builder::new()
         .name("pm-sync-request-deadline".to_owned())
         .spawn(move || {
@@ -299,6 +300,7 @@ fn run_with_deadline(
             Ok(())
         })
         .map_err(|_| ())?;
+    drop(spawning);
     let result = operation();
     if timing::w1_enabled() {
         timing::count(
@@ -310,12 +312,14 @@ fn run_with_deadline(
             1,
         );
     }
+    let joining = timing::Span::new("deadline_join");
     let completion: Result<(), ()> = (|| {
         let (lock, changed) = &*completed;
         *lock.lock().map_err(|_| ())? = true;
         changed.notify_all();
         worker.join().map_err(|_| ())?
     })();
+    drop(joining);
     if timing::w1_enabled() {
         timing::count(
             if completion.is_ok() {

@@ -4967,3 +4967,55 @@ truncado y UTF-8), deadline ya vencido y cleanup del hijo. El harness exige
 un process_started/un handshake en el job completo, además de oráculos previos
 SYNC/RETIRE. Measurement handshake ahora completo, no first_write del legado.
 Una corrida macOS adicional verifica código común sin integrar W2.
+
+### Fase8 corrida3 — sesión válida, job completo medido, TUI aún RED
+
+[Windows37180406421](https://github.com/SantanaJcp/passwordmanager/actions/runs/37180406421),
+SHA `063bba4ff6fbb8b473a0e960259eb2a72b39d700`, completed/failure;3/6 usadas.
+Compilación nativa y 14primitivas/1pipe/24observer/3sync-lib/2sync-bin PASS,
+incluidas cierre109 y sesión real con retirada de ACL entre RPCs sin replay.
+Un proceso y un handshake:310RPCs,154put/154get/1publish/1list,311verifies
+previos correctos. Exit0, cierre de stop comprobado. SQLite keeper1/apertura
+única; dispatch sigue comprobando ACL y commits por petición.
+
+Workload **36 eventos** por FAIL local-operations previo, frente a70 del run2: no
+comparación de throughput pareada. Job completo9.288192s, prepare0.003270s,
+push5.374986s (prepare0.046688s,154puts4.389406s,36exports0.785606s,
+publish0.029098s,ack0.024049s), pull3.876555s (154gets3.440835s,
+list0.021332s,24graph_download2.903289s,activación0.084500s). Scopes
+anidados, no sumar entre sí. TLS lectura310 spans7.518774s; servidor
+dispatch310 spans1.444617s. Desfase≈6.07s no atribuido aún a SQLite.
+
+TUI muestra pushing a6.102s, pulling a11.430s y vence15.001s; job termina
+en la captura posterior al cleanup del fixture, sin espera adicional fuera
+del límite. El job completo observado no convierte ese cutoff en PASS.
+SYNCdurable PASS `NATIVE_SYNC blocks=154 roots=1 close=checked`; SYNC TUI
+FAIL, RETIRE NOT_RUN/observer durable FAIL. Cleanup estricto PASS en este
+run; no se amplió inventario de staging del run2. Local-operations vuelve
+a fallar CUSTODY_UNAVAILABLE/Organization committed15s: frontera humana,
+intermitente (run2 PASS), causa raíz sigue pendiente; ningún fix de ese flujo.
+
+Diagnóstico4 acotado, antes de optimizar: spans opt-in deadline_spawn y
+deadline_join dentro de run_with_deadline cfgWindows, cliente y servidor
+por separado. Hipótesis: crear/recolectar un watchdog por RPC explica buena
+parte de TLS_read−dispatch. Sin cambiar guardas, deadline30s ni I/O. Si los
+spans lo confirman, amortizar el watchdog por conexión preservando armado
+absoluto por petición, señalización/cancelación, rechazo de respuesta tardía y
+join comprobado al terminar. No tocar agrupación/common engine de W2.
+
+macOS adicional [37180407191](https://github.com/SantanaJcp/passwordmanager/actions/runs/37180407191),
+mismoSHA, completed/failure global:33E2EE por CPU PASS, incluyendo WAL/ACL/RPK
+y workload39eventos/271put/272get (ARM7.354/9.549s,Intel10.626/13.460s
+publish/convergencia). ARM Full25 PASS con sync/retire y cleanup; Intel falla
+SYNCpanel20s,287blocks/1root,pushed59/pulled0,PIDs custodio/servidor estables.
+No es fallo anterior a sync ni confirma recepción/retire Intel. Unix no cambia
+semánticamente por habilitar cfgWindows; no afirmar aceptación macOS global.
+
+Primer barrido final sobre063bba4:52casos,48rc0 y4rc1. Matrix conserva
+residuo stream staging en commit-outbox-audit EIO/ENOSPC; extras bootstrap/
+vault conservan authority-or-receipts-changed. Fallo adicional token-exchange
+en token_exchange_lab.py:460: hostile auth start devuelve CUSTODY_UNAVAILABLE
+antes de obtener intento. Logs íntegros /tmp/pmw1g-phase8-gates-*.log; no
+skips/reintentos ni cambio de oráculo. Check/clean PASS (clean49.813s). Se
+preserva FAIL adicional, fuera del flujo pm-sync; repetir gate final tras
+terminar los cambios Windows y reportar por separado el resultado anterior.
