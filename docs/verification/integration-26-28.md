@@ -1,6 +1,6 @@
 # Integración 26–28 — composición y evidencia
 
-Fecha: 2026-10-03. Rol: merger de candidatas publicadas. El corte vigente está en [Composición W3/W4/W2/W1 fijada](#composicion-w1-w4-20261003); las secciones anteriores conservan la integración y remediación históricas. Esta composición no corrige defectos abiertos ni cambia estados de tickets.
+Fecha: 2026-10-03. Rol: merger de candidatas publicadas. El corte vigente está en [Composición W1/W5 pmint6](#composicion-w1-w5-pmint6); las secciones anteriores conservan la integración y remediación históricas. Esta composición no corrige defectos abiertos ni cambia estados de tickets.
 
 ## Identidad y alcance
 
@@ -796,3 +796,255 @@ verificada y revalida la composición, manteniendo el wait20 y vigilando el
 margen Intel. Resolver decisiones de binding/proveedor/staging corresponde a
 sus dueños, sin abrir esas funciones desde esta rama de remediación. PR#1
 continúa borrador; no merge ni cambio de tickets/reglas.
+
+
+<a id="composicion-w1-w5-pmint6"></a>
+
+## Composición W1 → W5 — método pmint6 (2026-10-04 UTC)
+
+Encargo del merger: componer dos candidatas fijadas y corregir únicamente la
+inferencia del closure Windows de pm-sync. No implementar funciones, corregir
+REDs abiertos, decidir producto ni cambiar estados de tickets. La raíz sigue
+en b3577d2; sus cambios ajenos `.gitignore`, `.pi/` y `odd/` se preservan.
+
+### Candidatas, composición y preservación
+
+Fetch de las tres ramas y comparación de refs local/origin antes de integrar:
+HEAD893074af5192217d313fce12ea81ca3351aa22ea limpio;
+W1 `17b56a131433db47fdd7a805fd546a46105e390a` y
+W5 `d79563596560de107e02349ed1197a4202269150`, ambos local=origin exactos.
+
+| Orden | Operación | Commit resultante |
+| --- | --- | --- |
+| 1 | W1, fast-forward desde893074a | `17b56a131433db47fdd7a805fd546a46105e390a` |
+| 2 | W5, merge explícito sin rebase/squash; mensaje cita SHA completo | `aed8fd8e60c9f6640e50dcff7b7b3a747fd6ef40` |
+| 3 | Anotación de tipo autorizada, commit propio | `0d8c57dadb4434e6fbb4e09e5c6e9af6a5fd7111` |
+
+Dos conflictos textuales, ambos mecánicos:
+
+- `crates/pm-custody/src/windows.rs:ServiceDiagnostics`: conservar literalmente
+  `record_1pux_result` de W1 y `memory`/`memory_quota_failure` de W5. El resultado
+  automático de `serve_human` conserva tanto el callback de transferencia como
+  el registro de memoria; `serve_vault` configura/verifica cuota antes de
+  DPAPI/bootstrap/auditoría y comunica el fallo explícito.
+- `scripts/verify-windows-libsodium-build.sh:scm_config_lines`: conservar todos
+  los literals W1 de transición detenida/paquetes/ACL, las comprobaciones PE
+  previas a cada creación SCM de W5 y el orden de cada configuración. Exactamente
+  cuatro configs en el harness compuesto: quota-denied, inicial, remoto y
+  restaurado; la restauración de cuota re-crea el registro normal y se comprueba
+  separadamente. La cardinalidad3 de W1 se compone con la config de negativa de
+  W5, sin escoger sólo la primera ni relajar ningún guard de ACL/bytes/owner.
+
+`scripts/test-windows-custody-lab.ps1` se fusionó automáticamente; workflow y
+los informes de26/27/28 no requirieron resolución. Manifest propio
+`/tmp/pmint6-preservation.json`:21 paths exclusivos byte-idénticos a sus
+candidatas (W1=11/W5=10), tres compartidos inspeccionados, ambos SHAs en
+ascendencia. Un único engine. Se conservan working set mínimo64 MiB blando y
+reread; presupuesto32 MiB cobrado en páginas+canario+guardas sólo Windows;
+DACL/lease, clipboard, cierre PeekNamedPipe, resize CUP/HVP y publicación
+exclusiva final/rechazo temprano DestinationExists. Linux/macOS no reciben
+la nueva regla de páginas. Sin nuevas dependencias instaladas.
+
+### Corrección de compilación
+
+Única edición del merger en pm-sync:
+`let completion: Result<(), ()> = (|| { ... })();`
+en `crates/pm-sync/src/main.rs:314`, cfgWindows. Aplicación exacta de
+`/tmp/pmw1e-sync-type-proposal.patch`; diff de una línea, sin cambio de lógica
+ni deadline30s. Commit0d8c57d cita los dos baselines E0282/E0283:
+[37172559049](https://github.com/SantanaJcp/passwordmanager/actions/runs/37172559049)
+y [37173102423](https://github.com/SantanaJcp/passwordmanager/actions/runs/37173102423).
+Linux no compila ese cfg; el resultado nativo se registra abajo.
+
+### Método de verificación y publicación
+
+Método52 vigente de pmint5 y candidatas, misma lista/orden/expected de W1,
+runner `/tmp/pmint6-run-local.py` con cwd integración. Cada check/build/Cargo/lab
+bajo `flock /tmp/pm-cargo-window.lock`; scripts/cargo-local.sh no hace cd.
+Rust1.98.1 exacto locked/offline; PYTHONDONTWRITEBYTECODE=1 y sesión real
+WAYLAND_DISPLAY=wayland-1 (/run/user/1000/wayland-1 presente). Artefactos:
+PM_KEYCLOAK_DIST=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/keycloak/keycloak-26.7.3;
+PM_CFT_DIR=/home/santana/Documents/ChatGPT/passwordmanager/.scratch/lab-artifacts/cft/chrome-linux64.
+Fuentes congeladas por manifest antes/después de cada invocación. Los tres rc1
+esperados conservan sus aserciones; comparar también causa/cleanup, no sólo rc.
+Multiagente W4 fuera de gates. Sin borrar residuos/logs `/tmp/pm-*` ajenos.
+
+Checks posteriores a W1 y W5 rc0:
+`/tmp/pmint6-merge-w1-check.log` y `/tmp/pmint6-merge-w5-check.log`.
+El código0d8c57d se publicó por push ordinario a
+codex/pm-integration-26-28 antes de dispatch; HEAD=origin=ref API exactos.
+El helper configurado apuntaba a un gh inexistente: se usó exclusivamente el
+override por comando autorizado, sin cambiar configuración persistente.
+No force, rebase/squash, cambios de reglas, rama raíz ni merge del PR borrador1.
+
+CI manual, pública/estándar/sintética; sin caches/artifacts/secrets. Visibilidad
+PUBLIC y workflows/labels verificados; gratuidad estándar reconfirmada en
+[fuente primaria de facturación](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+Windows completo y memoria son hipótesis distintas, no repeats idénticos.
+Mac normal exige Full25 y fase final en Intel+ARM. Presupuesto:2/3 Windows,
+1/2 macOS. La aparición demorada del primer run en la API se resolvió por
+lectura de runs nuevos, sin volver a despachar ni duplicar ejecución.
+
+
+### Resultado local frente al baseline
+
+Código ejecutado exacto0d8c57d. Runner rc0: **52 casos /49 rc0 /tres rc1
+esperados /cero diferencias inesperadas**. Manifest de fuentes estable hasta
+finalizar.599.390s agregados, incluyendo esperas de flock; no son benchmark.
+Resultados `/tmp/pmint6-gates-local-results.json`, resumen
+`/tmp/pmint6-gates-local-summary.{json,log}`. Los52 comandos/rc son exactos a W1
+`/tmp/pmw1e-gates-local-results.json`. W5 `/tmp/pmw5b-linux-results.json` usa
+nombres de fila distintos y filtro `restore_graph_digest_` en vez de
+`restore_graph_digest`;51 comandos exactos y los logs de digest prueban las
+mismas dos funciones with_streams/without_streams, ambas PASS. Los52 resultados
+coinciden; controles/causas de los tres rc1 también conservados. No hubo fallo
+Wayland ni replay de un caso.
+
+| Gate | Resultado; logs `/tmp/pmint6-gates-…` |
+| --- | --- |
+| check / clean locked-offline | rc0 /rc0;62.898 /49.339s; `final-check.log`, `final-clean.log`. |
+| 26 wrappers base y publicación backup/plaintext/attachment |26/26 y3/3 rc0. TUI operations76.185s, token exchange27.929s; no alterar plazos. |
+| custody audit/sqlite-sync/bootstrap completed |3/3 rc0. |
+| inflight result-sync/bootstrap/audit/crash y canaries |5/5 rc0; bootstrap closed1/replacement0/calls1/authority-exact1 y cleanup0. |
+| vault completed/inflight vault/inflight-live/matrix trace |6/6 rc0; autoridad y cleanup originales. |
+| concurrency/purge-probe/E2EE+shared-purge/digest |4/4 rc0; pool/admisión y purga/restore conservados. Multiagente W4 excluido. |
+| g7-matrix |rc1 **conocido**: ProductRed exacto commit-outbox-audit EIO y ENOSPC por stream staging retenido tras fallo y restart, cleanup errors0. |
+| g7-extra-bootstrap /g7-extra-vault |rc1 **diagnósticos conocidos**: autoridad/receipts changed, unchanged=(1,0,1,1,1), replacement0/closed1/cleanup0, fuera de gates. |
+
+### Corridas nativas sobre el código compuesto
+
+Todos los runs siguientes resuelven exactamente
+`0d8c57dadb4434e6fbb4e09e5c6e9af6a5fd7111`. Todas las corridas terminadas;
+artifacts total0 comprobado por API en cada una. Los jobs storage-diagnostics
+Windows están **skipped por input diagnostic_only=false**: no se atribuye a
+ellos aceptación ni un gate omitido del job productivo.
+
+| Run y modo | Resultado / alcance |
+| --- | --- |
+| [Windows completo37174043601](https://github.com/SantanaJcp/passwordmanager/actions/runs/37174043601), false/true/true/false |**FAIL terminado**. Binario normal pm-sync compila; seed8/import1PUX, PAIR y grupos previos pasan. Nuevas fronteras posteriores al bloqueo previo detalladas abajo; SYNC/RETIRE no ejecutados. |
+| [Windows memoria37174067674](https://github.com/SantanaJcp/passwordmanager/actions/runs/37174067674), false/true/false/true |**PASS acotado**. Preview exacto sobre seed8 y dos registros 1PUX, preparado validado, lease restaurada, sin commit; cuota/API/SCM/páginas/concurrencia y cleanup estrictos. No prueba ConPTY integral. |
+| [macOS normal37174069206](https://github.com/SantanaJcp/passwordmanager/actions/runs/37174069206), false/false |**FAIL global**: Intel success completo; ARM failure por unlock Full25 temprano, antes de backup/sync. No repetir el mismo SHA/inputs para ocultar intermitencia. |
+
+Metadata `/tmp/pmint6-native-{windows-full1,windows-memory1,macos1}.json`,
+`…-jobs.json` y `…-artifacts.json`; inputs/hipótesis en `…-dispatch.json`.
+Logs completos `…windows-full1.log`, `…windows-memory1.log`, `…macos1.log`;
+CPU Mac `…macos1-{intel,arm}.log`. Ningún run pendiente; presupuesto2/3Windows
+y1/2Mac, no se consumen los restantes sin un cambio o discriminante pertinente.
+
+**Windows ARM64:** ambos runs sobre Windows11 Enterprise10.0.26200/build26200,
+imagen win11-vs2026-arm64/20260924.168.1, UAC_ENABLE_LUA1,
+Rust1.98.1-aarch64-pc-windows-msvc y libsodium1.0.22 static/MSVC ARM64.
+[Job completo111352818563](https://github.com/SantanaJcp/passwordmanager/actions/runs/37174043601/job/111352818563).
+Build/PE static, primitives14, pipe1, observer24 y sync-lib1 PASS. Fuentes
+reparse por alias instalador/DACL exacta, RPK impostor, siete negativas wire,
+resize separado100×30→42×12→80×24 clamp0, clipboard, access y rotations PASS.
+Matrix supera el bloqueo crypto-resource previo: transfer-preview/preparation/
+signature/frame-ready/frame-sent category=ok; import1PUX transaccional, DACL y
+lease exactas, organización/history/copy, generator/access/audit, backup/export/
+trash/restore/recovery/master y ficheros regulares no vacíos observados.
+SCM alternado, dos paquetes conservados byte-exactos, nota remota/readback,
+PAIR y namespace protegido/cierre comprobado PASS.
+
+El build obligatorio normal de pm-sync, antes bloqueado por E0282/E0283,
+**PASS nativo ARM64** (03:33:03–03:33:06 UTC; build3.35s); se instala y verifica PE estático.
+No se observa otro error de compilación y no se añade otra corrección.
+
+**Memoria W5:** [job111352892762](https://github.com/SantanaJcp/passwordmanager/actions/runs/37174067674/job/111352892762)
+PASS. Cuota efectiva67108864/67108864 bytes, flags10, antes de bootstrap.
+Denegación SCM con privilegio retirado: categoría pública
+PROTECTED_MEMORY_QUOTA_UNAVAILABLE, Win321314, exit1816, STOPPED/PID0,
+bootstrap no abierto/endpoints no creados. Restauración normal con privilegios
+originales exactos y mismo SID. API query-only denegada: error5, cuota intacta,
+sin retry. Cinco tests de presupuesto y uno de API PASS: frontera31 MiB lógicos,
+32 MiB cobrados exactos33554432, capacidad33165296, bloqueados33292288,
+guardas262144; reserva rechazada antes del secreto, truncate/drop/reuso y
+contadores finales0.2730 regiones de1byte agotan33546240 de cargo;8 allocators
+comparten límite, page-budget/Win320 y liberación final0. Preview seed8 exacto,
+preparado válido y lease restituida. Registry64/32 sin LocalDumps ni exclusión
+all-user observada; WER efectivo/dumps/crash siguen **no demostrados**.
+
+### FAIL Windows y disponibilidad de tiempos
+
+| Frontera | Clasificación y evidencia |
+| --- | --- |
+| Matrix después de import/backup/restore/rotaciones |**NUEVO EXPUESTO**, fuera de corrección. Resize100×30 supera geometría/witness fresco/repaint completo/clamp0/hijo vivo, pero expected-present=false para `Items (selection is metadata only)` en15s. El resize separado sí pasa. No es el antiguo fallo clamp42×12. |
+| local-operations después de Matrix |**FALLO CONOCIDO de precondición tras restore, reaparece en otro orden**: wait15s `Search returned 1 active items`. ticket27 ya documenta que restore añade IDs nuevos y conserva originales. La Matrix ahora alcanza restore, que antes no se ejecutaba por seed8. Causa de conteo duplicado respaldada por orden/código; el log no emite el conteo real, no presentarlo como medición. |
+| Servidor sync antes del submit TUI |**NUEVO EXPUESTO, defecto heredado del fixture W1**. `scripts/test-windows-custody-lab.ps1:$syncPipe` usa `\\.\pipe\passwordmanager.ticket27.sync`; `pm-native-channel::windows::validate_sync_pipe_name` exige `\\.\pipe\pm-sync-` +32hex. Validación estática determinista: el literal no es admisible. El binario sale antes de submit; cleanup agrega `owned sync server exited unexpectedly`. El run no emitió etapa interna de startup: la incompatibilidad es probada, no se atribuyen otros fallos internos. |
+
+Las tres fronteras están en cuerpos de fixture/TUI/canal **byte-idénticos a W1**;
+W5 y el merger no editaron esas funciones. No se identifica regresión mecánica
+de composición adicional. No se cambian textos/aserciones, nombres de pipe,
+frames, deadlines ni listas de FAIL. Corresponde al dueño W1 corregir su fixture
+bajo autorización; no se transforma un nuevo FAIL en un PASS del merger.
+
+**SYNC/RETIRE NOT_RUN**, no hay `TUI_SYNC`, `WINDOWS_SYNC_TIMING` ni métricas
+por fase utilizables en este run: el servidor salió antes de la petición.
+No inferir rendimiento de los tiempos de build, setup o PAIR. Se conserva
+`sync_job::run_inner` cfgWindows con ProcessTlsTransport::new, un proceso por
+RPC; no se porta la sesión Unix ni se aumenta ningún deadline.
+
+### macOS: resultado y márgenes
+
+[Job Intel111352897149](https://github.com/SantanaJcp/passwordmanager/actions/runs/37174069206/job/111352897149)
+**PASS completo normal**: Full25-import/offline+wrong-pin/local/full25,
+backup/plaintext collision rejected/destination same, sync durable/screen
+succeeded con blocks287/roots1, same-job/restart/lock/idle/bounded-unavailable/
+retire/offline, fase final y cleanup. macOS15.7.9/kernel24.6.0,
+imagen20260824.0482.1, Rust1.98.1-x86_64-apple-darwin/Mach-O x86_64.
+
+[Job ARM111352897081](https://github.com/SantanaJcp/passwordmanager/actions/runs/37174069206/job/111352897081)
+**FAIL conocido por síntoma**, causa no discriminada: en
+macos_tui_migration_lab.py:461→start_macos_tui→wait Unlocked, sigue
+password-prompt/post-mark/parser-ground/child-alive al límite original8s.
+Ya documentado como intermitencia de unlock ARM en ticket26/run37090972867 y
+fase anterior W1 ticket27; aquí ocurre al entrar Full25, después de core,
+concurrency/discovery, ticket23/partial24 y controles aislados AppKit.
+Sin fallo adicional de cleanup comunicado. No hay datos que prueben si es
+input, KDF, dispatcher u observación; no se atribuye a los merges.
+macOS15.7.9/kernel24.6.0, imagen20260907.0337.1,
+Rust1.98.1-aarch64-apple-darwin/Mach-O arm64. La TUI y fixtures Mac son
+byte-idénticos a W1; regla de páginas W5 sólo Windows.
+
+| CPU / medida | Esta composición0d8c57d | Referencia W1 sobre62cb539 |
+| --- | --- | --- |
+| Intel backup submit→panel |1.421s;6.579s de margen conservador8 |1.396s |
+| Intel sync submit→panel |18.023s;1.977s conservadores sobre total20 |17.987s;2.013s |
+| Intel envío /espera contractual |1.375 /16.648s; margen real wait20 **3.352s** |1.272 /16.714s;3.286s |
+| ARM backup |**NOT_RUN**, sin margen nuevo |6.285s;1.715s conservadores |
+| ARM sync |**NOT_RUN**, sin margen nuevo |wait19.713s;0.287s de margen real;total20.641s incluye envío |
+
+Intel: prefijo incompleto16.647s, panel completo16.647s redondeados;
+complete-at-prefix=0 y la condición final exige juntos mensaje/ID/contadores.
+Total no equivale al wait ni a duración interna del job. Margen conservador
+Intel cae0.036s frente a W1, mientras el wait dispone0.066s más de margen;
+una muestra no garantiza rendimiento futuro. Los márgenes ARM históricos
+siguen siendo riesgo de referencia, **no** evidencia de esta composición.
+No hay Full25/backup/sync/fase final aceptados en ARM sobre este SHA.
+
+### Fallbacks heredados, entrega y siguiente acción
+
+No se introducen ni cambian fallbacks. Conservados en rutas inspeccionadas:
+`serve_one` agrupa parser/dispatch como ok=false genérico;
+`sync_job::record_journal_failure` descarta el fallo secundario al persistir
+emergencia; accept/worker descartan errores de handler/ejecución/settle;
+`ProcessTlsTransport::rpc` ignora errores secundarios al emitir timing y
+agrupa exits no reconocidos en Unavailable. Se activan en esos errores y
+ocultan detalle/errores secundarios; no se usan como evidencia de aceptación.
+Los inventarios previos26/27/28 y los pendientes de heaps/presentación/TLS,
+WER/extracción/reboot/FDE/firma/targets humanos permanecen vigentes.
+
+Composición y corrección autorizadas publicadas/verificadas; **aceptación
+nativa global FAIL**, objetivo Mac ambas CPU no alcanzado sobre este SHA y
+objetivo Windows SYNC/RETIRE no demostrado. Linux baseline preservado y
+memoria Windows GREEN acotado. Cero cambios de estado de tickets, spec/tracker,
+KDF, límites/deadlines, rulesets, rama raíz o PR1. Informe documental posterior
+hijo de0d8c57d con mismo árbol de código/fixtures; ninguna CI repetida sólo por
+añadir evidencia.
+
+Siguiente acción para el orquestador: despacho W1 para pipe canónico y
+precondiciones de observación tras restore/rotación; discriminante acotado del
+unlock ARM sin ampliar8s ni repetir autenticación. Volver a ejecutar CI sobre
+una candidata corregida/autorizada, conservando los FAIL anteriores. El
+merger no corrige estos defectos abiertos ni consume los runs restantes con
+SHA/hipótesis idénticos. G7 staging EIO/ENOSPC y diagnósticos de autoridad siguen
+conocidos; W4 multiagente continúa fuera de gates.
