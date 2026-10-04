@@ -209,10 +209,7 @@ impl Manager {
         let queued_at = std::time::Instant::now();
         std::thread::spawn(move || {
             if timing::enabled() {
-                eprintln!(
-                    "PMW2_TIMING category=job_spawn_wait count=1 us={}",
-                    queued_at.elapsed().as_micros()
-                );
+                timing::duration("job_spawn_wait", queued_at.elapsed());
             }
             manager.run(config);
         });

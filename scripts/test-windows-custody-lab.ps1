@@ -438,11 +438,12 @@ function Close-StoppedInstallerDirectory([string]$Path) {
     Assert-ExactNodeAcl $Path @('SYSTEM', "NT SERVICE\$serviceName")
 }
 
-function Write-SyncTimingSummary([string]$Path) {
+function Write-SyncTimingSummary([string]$Path, [string]$Source = 'server') {
     $totals = @{}
     foreach ($line in @(Get-Content -LiteralPath $Path -ErrorAction Stop)) {
         if ([string]::IsNullOrEmpty($line)) { continue }
         Assert-True ($line -cmatch '^PMW2_TIMING category=([a-z_]+) count=([0-9]+) us=([0-9]+)$') 'sync server emitted unexpected diagnostics'
+        if ($Source -eq 'job') { Write-Host "WINDOWS_SYNC_SAMPLE $line" }
         $category = $Matches[1]; $count = [long]$Matches[2]; $us = [long]$Matches[3]
         if (-not $totals.ContainsKey($category)) { $totals[$category] = @{ Count = 0L; Us = 0L; Max = 0L } }
         $totals[$category].Count += $count; $totals[$category].Us += $us
@@ -450,7 +451,13 @@ function Write-SyncTimingSummary([string]$Path) {
     }
     foreach ($category in @($totals.Keys | Sort-Object)) {
         $row = $totals[$category]
-        Write-Host "WINDOWS_SYNC_TIMING source=server category=$category count=$($row.Count) us=$($row.Us) max_us=$($row.Max)"
+        Write-Host "WINDOWS_SYNC_TIMING source=$Source category=$category count=$($row.Count) us=$($row.Us) max_us=$($row.Max)"
+    }
+    if ($Source -eq 'job') {
+        foreach ($required in @('job_prepare', 'events', 'process_started', 'spawn_to_main', 'client_prepare', 'client_pipe_open', 'tls_handshake_first_write', 'rpc_put')) {
+            Assert-True ($totals.ContainsKey($required)) 'sync job lacks a required measurement category'
+        }
+        Write-Host 'WINDOWS_SYNC_CUTOFF source=job scope=partial-observation wait-seconds=15'
     }
 }
 
@@ -564,6 +571,8 @@ $aliasOwned = $false
 $syncProcess = $null
 $diagnosticDir = Join-Path $root 'service-diagnostics'
 $diagnosticPath = Join-Path $diagnosticDir 'startup.phases'
+$syncTimingPath = Join-Path $diagnosticDir 'sync.timings'
+$measureSync = $ServiceDiagnostics -and $TuiConPtyRed
 $agentName = 'pm27agent'
 $humanName = 'pm27human'
 $serviceName = 'PasswordManager'
@@ -689,6 +698,10 @@ try {
     if ($ServiceDiagnostics) {
         Add-OwnedPath $ownedPaths $diagnosticPath
         [IO.File]::WriteAllText($diagnosticPath, [string]::Empty)
+        if ($measureSync) {
+            Add-OwnedPath $ownedPaths $syncTimingPath
+            [IO.File]::WriteAllText($syncTimingPath, [string]::Empty)
+        }
         if ($OnePuxMemoryDiagnostics) {
             $quotaDeniedDiagnosticPath = Join-Path $diagnosticDir 'quota-denied.txt'
             Add-OwnedPath $ownedPaths $quotaDeniedDiagnosticPath
@@ -697,6 +710,7 @@ try {
         Set-ExactTreeAcl $diagnosticDir @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
         Assert-ExactNodeAcl $diagnosticDir @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
         Assert-ExactNodeAcl $diagnosticPath @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
+        if ($measureSync) { Assert-ExactNodeAcl $syncTimingPath @('SYSTEM', $installerName, "NT SERVICE\$serviceName") }
     }
 
     $serverPrivate = Join-Path $serviceDir 'server.key'
@@ -1106,6 +1120,12 @@ try {
                 Copy-Item -LiteralPath $builtSync -Destination $syncBinary -ErrorAction Stop
                 Set-ExactTreeAcl $syncBinary @('SYSTEM', "NT SERVICE\$serviceName")
                 Close-StoppedInstallerDirectory $serviceDir
+                if ($measureSync) {
+                    # Only the owned SCM service and its clients receive timing.
+                    $serviceRegistry = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+                    Assert-True (-not (Get-Item -LiteralPath $serviceRegistry).GetValueNames().Contains('Environment')) 'owned service already has a private environment'
+                    New-ItemProperty -LiteralPath $serviceRegistry -Name Environment -PropertyType MultiString -Value @('PMW1_TIMING=1', "PMW1_TIMING_FILE=$syncTimingPath") | Out-Null
+                }
                 $postStopPid = Start-OwnedServiceWithNewPid $serviceName $installPid
                 $syncArguments = @('serve', '--db', $syncDb, '--socket', $syncPipe, '--server-key', $syncServerKey, '--namespace', $namespace, '--server-sid', (Get-Sid $installerName), '--client-pub', $syncClientPublic, '--client-sid', $serviceSid)
                 $env:PMW2_TIMING = '1'
@@ -1118,6 +1138,7 @@ try {
             }
             $p = Start-AsUser $humanCredential $tuiFixture @($stationSddl, $tuiCustody, "--$deviceMode", $deviceConfig, $tuiOnePux, $tuiBackup, $tuiPlaintext, '--', 'tui', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId, '--idle-seconds', '300', '--reveal-seconds', '1', '--copy-seconds', '1') $humanInput $tuiOut $tuiErr
             Write-Host (Get-Content $tuiErr -Raw)
+            if ($deviceMode -eq 'sync' -and $measureSync) { Write-SyncTimingSummary $syncTimingPath 'job' }
             if ($p.ExitCode -eq 0) { Assert-TuiFixtureOutput $tuiOut $deviceMode; Write-Host "TUI_CASE case=device-$deviceMode result=pass" }
             else { $tuiCaseFailures.Add("device-$deviceMode"); Write-Host "TUI_CASE case=device-$deviceMode result=fail" }
             if ($deviceMode -eq 'sync' -and $p.ExitCode -ne 0) {

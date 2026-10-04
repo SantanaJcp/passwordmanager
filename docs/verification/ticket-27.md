@@ -4558,3 +4558,55 @@ Siguiente acción: revisar la candidata por el merger y decidir el diagnóstico
 de rendimiento Windows propuesto arriba. La parada por wait15s es explícita;
 aceptación integral de27 sigue pendiente y no se promete una duración final
 ni cierre de retiro. Ninguna corrida pendiente, Windows1/6 consumida.
+
+## W1 fase 7 — método autorizado de medición Windows
+
+Encargo 2026-10-04: sólo instrumentación opt-in, sin optimizar pm-sync ni
+integrar W2. Base limpia `768881b60159029ceb05edb9f5e924d68d274710`.
+Máximo dos dispatch de Ticket 27 Windows custody, false/true/true/false,
+repo público/runner estándar `windows-11-vs2026-arm`, sin caches, artifacts,
+secrets ni cambios de workflow. Cada run se identifica por URL y SHA exacto.
+Plazos originales de observación15s y request30s, workload y aserciones intactos.
+
+La activación requiere ServiceDiagnostics y TuiConPtyRed en el harness; sólo
+al reiniciar el servicio propio antes del SYNC se instala su Environment
+privado (PMW1_TIMING=1 y archivo precreado con ACL SYSTEM/installer/servicio).
+Los clientes heredan ese destino. No se imprime el destino, IDs ni payloads.
+La lectura al retornar el fixture es un corte parcial, sin esperar al worker
+fuera del plazo ni convertir spans pendientes en cero. Se conservan líneas
+categóricas y resúmenes count/sum/max, con separación cliente/servidor.
+
+Scopes anidados: job/push/event/RPC/process_wait no se suman entre sí. Se
+miden creación/escritura/fsync/borrado del temporal, exportación, preparación,
+spawn/espera, pipe, primera escritura TLS, respuesta y verificación. La primera
+escritura de rustls completa el handshake existente y envía los primeros4bytes:
+es una cota superior del handshake, sin adelantar ni duplicar I/O. Spawn→main
+es una aproximación conjunta de carga/inicialización/scheduling usando reloj
+wall compartido; no afirma medir el loader aislado. Gaps entre RPCs incluyen
+trabajo local y temporales, no sólo inactividad. Conteos por evento excluyen
+puts del descriptor de página/root, registrados por separado.
+
+Validación: check.sh y clean-offline-build.sh completos locked/offline, cwd
+este worktree, cada comando bajo flock /tmp/pm-cargo-window.lock y logs propios.
+Tests de proceso TLS existentes mantienen respuestas byte-exactas, límites y
+negativas; validación nativa exige captura no vacía y formato estricto sin
+contenido arbitrario. La comparación Linux opcional usa exclusivamente un
+test con ProcessTlsTransport::new, sin cambiar la selección productiva Unix.
+Resultados fallidos, parciales y NOT_RUN se registran separados. No tickets
+modificados. Fallbacks heredados (exit desconocido→Unavailable, cleanup y
+escrituras de diagnóstico ignorados, dispatch→ok=false) se conservan.
+
+Preflight fase7: check completo rc0 (`/tmp/pmw1g-check.log`) sin registros
+PMW2_TIMING en el modo normal; clean offline rc0 (`/tmp/pmw1g-clean.log`).
+Test Linux existente `replica_push_and_pull_cross_the_real_tls_rpc_process`,
+constructor explícito ProcessTlsTransport::new, opt-in PMW1, rc0 (1test,
+32filtrados), 3.16s. No seam productivo Unix forzado ni aserción modificada.
+801 registros de formato estricto (`/tmp/pmw1g-linux-process.timings`), resumen
+`/tmp/pmw1g-linux-process-summary.json`; log `/tmp/pmw1g-linux-process.log`.
+49 procesos/RPCs, 24put/23get/1publish/1list incluyendo negativas y probe grande
+posterior. Push1.652s/pull0.489s, evento único14 intentos de put más2 de framing;
+backoff1.000s deliberado por LostFirstPut. Startup acumulado62.655ms,
+prepare45.231ms, handshake84.161ms, exchange407.637ms; temporal+fsync1.246ms.
+Scopes solapados y workload distinto: complemento de observabilidad/contrato,
+no proporción Windows ni estimación del happy job Windows. Sin logs de contenido.
+Todos los comandos Cargo anteriores bajo flock; sin dependencias instaladas.

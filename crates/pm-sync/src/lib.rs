@@ -182,6 +182,7 @@ impl ProcessTlsTransport {
         namespace: [u8; 32],
         extra: &[(&str, String)],
     ) -> Result<String, SyncError> {
+        let _gap = timing::RpcGap::default();
         let mut command = Command::new(&self.program);
         command
             .arg(method)
@@ -206,9 +207,27 @@ impl ProcessTlsTransport {
         command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        if timing::w1_enabled() {
+            timing::count(
+                match method {
+                    "put" => "rpc_started_put",
+                    "get" => "rpc_started_get",
+                    "publish" => "rpc_started_publish",
+                    "list" => "rpc_started_list",
+                    _ => "rpc_started_other",
+                },
+                1,
+            );
+            if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                command.env("PMW1_SPAWN_US", now.as_micros().to_string());
+            }
+        }
         let started = timing::Span::new("process_spawn");
         let child = command.spawn().map_err(|_| SyncError::Unavailable)?;
         drop(started);
+        if timing::w1_enabled() {
+            timing::count("process_started", 1);
+        }
         let waiting = timing::Span::new("process_wait");
         let output = child
             .wait_with_output()
@@ -235,6 +254,7 @@ impl ProcessTlsTransport {
 }
 impl SyncTransport for ProcessTlsTransport {
     fn put(&self, n: [u8; 32], h: [u8; 32], b: &[u8]) -> Result<(), SyncError> {
+        timing::put_started();
         #[cfg(unix)]
         if self.session.is_some() {
             let _rpc = timing::Span::new("rpc_put");
@@ -245,11 +265,18 @@ impl SyncTransport for ProcessTlsTransport {
         }
         let parent = self.client_key.parent().ok_or(SyncError::Unavailable)?;
         let temporary = parent.join(format!(".pm-sync-put-{}-{}", std::process::id(), hex(&h)));
+        let creating = timing::Span::new("put_file_create");
         let mut file = pm_native_channel::create_private_file(&temporary, false, true)
             .map_err(|_| SyncError::Unavailable)?;
+        drop(creating);
         let writing = timing::Span::new("put_file_fsync");
+        let writing_only = timing::Span::new("put_file_write");
         file.write_all(b)
-            .and_then(|()| file.sync_all())
+            .and_then(|()| {
+                drop(writing_only);
+                let _syncing = timing::Span::new("put_file_sync");
+                file.sync_all()
+            })
             .map_err(|_| SyncError::Unavailable)?;
         drop(file);
         drop(writing);
@@ -261,7 +288,9 @@ impl SyncTransport for ProcessTlsTransport {
                 ("--input", temporary.display().to_string()),
             ],
         );
+        let removing = timing::Span::new("put_file_remove");
         let _ = std::fs::remove_file(temporary);
+        drop(removing);
         result.map(drop)
     }
     fn get(&self, n: [u8; 32], h: [u8; 32]) -> Result<Vec<u8>, SyncError> {
@@ -590,6 +619,8 @@ impl SyncReplica {
             let mut hashes = Vec::with_capacity(batch.len());
             let mut graph_hashes = Vec::new();
             for event in batch {
+                let _event = timing::Span::new("event_total");
+                let _event_puts = timing::EventPuts::default();
                 let sealed = self.pairing.seal(&event.to_bytes())?;
                 let hash = digest(&sealed);
                 retry(|| server.put(namespace, hash, &sealed))?;
@@ -602,7 +633,9 @@ impl SyncReplica {
                 if let Some(graph) = graph {
                     graph_hashes.push(self.upload_graph(server, &graph)?);
                 }
+                let cleanup = timing::Span::new("graph_cleanup");
                 let _ = std::fs::remove_dir_all(stage);
+                drop(cleanup);
             }
             hashes.sort_unstable();
             graph_hashes.sort_unstable();
@@ -612,6 +645,9 @@ impl SyncReplica {
             }
             let sealed = self.pairing.seal(&descriptor)?;
             let hash = digest(&sealed);
+            if timing::w1_enabled() {
+                timing::count("framing_puts", 1);
+            }
             retry(|| server.put(namespace, hash, &sealed))?;
             pages.push(hash);
         }
@@ -622,6 +658,9 @@ impl SyncReplica {
         }
         let sealed = self.pairing.seal(&descriptor)?;
         let root = digest(&sealed);
+        if timing::w1_enabled() {
+            timing::count("framing_puts", 1);
+        }
         retry(|| server.put(namespace, root, &sealed))?;
         retry(|| server.publish(namespace, root))?;
         let _ack = timing::Span::new("outbox_ack");

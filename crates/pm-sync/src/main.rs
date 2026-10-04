@@ -51,6 +51,8 @@ struct Key {
 }
 
 fn main() {
+    timing::process_entry();
+    let _main = timing::Span::new("client_main");
     if run().is_err() {
         eprintln!("SYNC_UNAVAILABLE");
         std::process::exit(4)
@@ -707,19 +709,39 @@ fn client_exchange(socket: &Path, config: ClientConfig, request: &[u8]) -> Resul
     let name = socket.to_str().ok_or(())?;
     let stop = WindowsStopEvent::create().map_err(|_| ())?;
     let mut response = None;
+    let deadline = timing::Span::new("client_deadline_scope");
     let result = run_with_deadline(&stop, || {
+        let opening = timing::Span::new("client_pipe_open");
         let pipe = WindowsClientPipe::connect_sync(name, &stop).map_err(|_| ())?;
+        drop(opening);
+        let configuring = timing::Span::new("client_tls_config");
         let conn = ClientConnection::new(
             Arc::new(config),
             ServerName::try_from("passwordmanager.invalid").map_err(|_| ())?,
         )
         .map_err(|_| ())?;
         let mut tls = rustls::StreamOwned::new(conn, pipe);
-        write_frame(&mut tls, request)?;
+        drop(configuring);
+        let exchange = timing::Span::new("tls_exchange");
+        let writing = timing::Span::new("tls_request_write");
+        write_frame(
+            &mut timing::FirstWrite {
+                writer: &mut tls,
+                first: true,
+            },
+            request,
+        )?;
+        drop(writing);
+        let reading = timing::Span::new("tls_response_read");
         response = Some(read_frame(&mut tls)?);
+        drop(reading);
+        drop(exchange);
+        let verifying = timing::Span::new("client_pipe_verify");
         tls.sock.verify().map_err(|_| ())?;
+        drop(verifying);
         Ok(())
     });
+    drop(deadline);
     let closed = stop.close().map_err(|_| ());
     match (result, closed, response) {
         (Ok(()), Ok(()), Some(response)) => Ok(response),
