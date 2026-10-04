@@ -66,10 +66,29 @@ fn emit(category: &str, count: usize, us: u128) {
         }
         return;
     }
+    #[cfg(windows)]
+    let logging = Instant::now();
     let _ = writeln!(
         std::io::stderr().lock(),
         "PMW2_TIMING category={category} count={count} us={us}"
     );
+    #[cfg(windows)]
+    STDERR_MICROS.with(|total| {
+        total.set(total.get() + logging.elapsed().as_micros());
+    });
+}
+
+#[cfg(windows)]
+thread_local! {
+    static STDERR_MICROS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+}
+
+/// Windows-only diagnostic: measure the inherited formatted stderr sink itself.
+#[cfg(windows)]
+pub fn windows_stderr_summary() {
+    if enabled() {
+        STDERR_MICROS.with(|total| emit("server_timing_emit", 1, total.replace(0)));
+    }
 }
 
 thread_local! {

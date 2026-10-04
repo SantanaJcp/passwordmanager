@@ -440,9 +440,15 @@ function Close-StoppedInstallerDirectory([string]$Path) {
 
 function Write-SyncTimingSummary([string]$Path, [string]$Source = 'server') {
     $totals = @{}
+    $unexpected = $false
     foreach ($line in @(Get-Content -LiteralPath $Path -ErrorAction Stop)) {
         if ([string]::IsNullOrEmpty($line)) { continue }
-        Assert-True ($line -cmatch '^PMW2_TIMING category=([a-z_]+) count=([0-9]+) us=([0-9]+)$') 'sync server emitted unexpected diagnostics'
+        if ($line -cnotmatch '^PMW2_TIMING category=([a-z_]+) count=([0-9]+) us=([0-9]+)$') {
+            $unexpected = $true
+            $diagnostic = if ($line -ceq 'SYNC_REQUEST_FAILED') { 'request_failed' } else { 'unexpected' }
+            Write-Host "WINDOWS_SYNC_DIAGNOSTIC source=$Source category=$diagnostic"
+            continue
+        }
         if ($Source -eq 'job') { Write-Host "WINDOWS_SYNC_SAMPLE $line" }
         $category = $Matches[1]; $count = [long]$Matches[2]; $us = [long]$Matches[3]
         if (-not $totals.ContainsKey($category)) { $totals[$category] = @{ Count = 0L; Us = 0L; Max = 0L } }
@@ -453,6 +459,8 @@ function Write-SyncTimingSummary([string]$Path, [string]$Source = 'server') {
         $row = $totals[$category]
         Write-Host "WINDOWS_SYNC_TIMING source=$Source category=$category count=$($row.Count) us=$($row.Us) max_us=$($row.Max)"
     }
+    # Preserve rejection of every unexpected line, after exposing valid metrics.
+    Assert-True (-not $unexpected) 'sync server emitted unexpected diagnostics'
     if ($Source -eq 'job') {
         foreach ($required in @('job_prepare', 'events', 'process_started', 'spawn_to_main', 'client_prepare', 'client_pipe_open', 'tls_handshake', 'rpc_put')) {
             Assert-True ($totals.ContainsKey($required)) 'sync job lacks a required measurement category'

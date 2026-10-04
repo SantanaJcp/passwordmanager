@@ -108,6 +108,7 @@ pub(super) fn serve(
     let result = (|| loop {
         let mut ended = false;
         run_with_deadline(stop, || {
+            let reading = timing::Span::new("server_request_read");
             let mut length = [0; 4];
             if tls.read(&mut length[..1]).map_err(|_| ())? == 0 {
                 ended = true;
@@ -120,9 +121,12 @@ pub(super) fn serve(
             }
             let mut request = vec![0; n];
             tls.read_exact(&mut request).map_err(|_| ())?;
+            drop(reading);
             // Verify before dispatch/commit/reply, while this request's peer is
             // connected. A clean EOF after the last reply needs no live peer.
+            let verifying = timing::Span::new("server_pipe_verify");
             tls.sock.verify().map_err(|_| ())?;
+            drop(verifying);
             let peer = tls
                 .conn
                 .peer_certificates()
@@ -135,12 +139,14 @@ pub(super) fn serve(
             let dispatching = timing::Span::new("server_dispatch");
             let response = dispatch_response(&store, peer, &request)?;
             drop(dispatching);
+            let _writing = timing::Span::new("server_response_write");
             write_frame(&mut tls, response.as_bytes())
         })?;
         if ended {
             return Ok(());
         }
     })();
+    timing::windows_stderr_summary();
     let closed = database.close().map_err(|_| ());
     result.and(closed)
 }

@@ -5019,3 +5019,29 @@ antes de obtener intento. Logs íntegros /tmp/pmw1g-phase8-gates-*.log; no
 skips/reintentos ni cambio de oráculo. Check/clean PASS (clean49.813s). Se
 preserva FAIL adicional, fuera del flujo pm-sync; repetir gate final tras
 terminar los cambios Windows y reportar por separado el resultado anterior.
+
+### Fase8 corrida4 — hipótesis watchdog cliente descartada; diagnóstico servidor perdido
+
+[37181499326](https://github.com/SantanaJcp/passwordmanager/actions/runs/37181499326),
+SHA `f75055414efa6f8a82b31da3b08029f4661faa92`, completed/failure;4/6 usadas.
+Regresiones primitivas/pipe/observer/sync-lib/sync-bin PASS. Local-operations
+vuelve CUSTODY_UNAVAILABLE/Organization committed15s; PAIR PASS. SYNC TUI
+FAIL15s,36eventos/35completados,141puts/142iniciados,RETIRE NOT_RUN. Lectura
+TLS parcial8.346894s; watchdog cliente spawn143=0.010963s,join142=0.014927s:
+no coste dominante demostrado, **no se amortiza por hipótesis**. Comparación
+con run3 no pareada: ambos36eventos pero medición extra y distinto runner.
+
+El servidor emite diagnóstico fuera del formato timing tras el cutoff y el
+resumen estricto aborta antes de publicar cualquier agregado servidor. Job
+no completo; conserva rechazo `sync server emitted unexpected diagnostics`
+y cleanup FAIL por .pm-sync-stage no inventariado, sin ampliar cleanup.
+
+Método diagnóstico5: spans cfgWindows server_request_read/server_pipe_verify/
+server_response_write; contador thread-local cfgWindows del tiempo gastado
+por la salida stderr formateada heredada, publicado al terminar conexión.
+El resumen imprime métricas válidas y sólo categorías request_failed/unknown;
+**la misma aserción rechaza todas las líneas inesperadas**, después de imprimir
+los agregados. No redirigir/reintentar/substituir el sink ni cambiar watchdog,
+plazos, framing, ACL o commits. Si logging domina, emitir cada línea ya formada
+con una sola write_all en Windows (mismo destino/texto/fracaso heredado).
+Si otra fase domina, seleccionar la corrección sólo con evidencia nativa.
