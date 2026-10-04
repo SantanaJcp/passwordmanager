@@ -2996,3 +2996,43 @@ Rust y fixtures Linux byte-idénticos al snapshot52. AST/diff/config/shell
 locales validan este ajuste; la interfaz macOS requiere siguiente corrida
 nativa. Se mantiene timing opt-in forzado exclusivamente al harness en
 este candidato de comparación; todavía no se declara aceptación normal.
+
+
+#### Comparación optimizada: tercera corrida PASS completa
+
+[37183736170](https://github.com/SantanaJcp/passwordmanager/actions/runs/37183736170),
+SHA978bce806abc1312c64d57065f9650559dbc8575, completed/success,
+[Intel111381283720](https://github.com/SantanaJcp/passwordmanager/actions/runs/37183736170/job/111381283720)
+y [ARM111381283804](https://github.com/SantanaJcp/passwordmanager/actions/runs/37183736170/job/111381283804)
+PASS completos: endpoint, core, Full25, ambas colisiones con código de panel
+DESTINATION_EXISTS/hash intacto/temporal ausente, sync, fase final y cleanup.
+Inputs false/false; artifacts0; misma metadata de OS/imagen/host Rust que
+referencia2, arquitectura nativa comprobada. Timing sólo en harness sintético.
+
+| Restore / CPU | Referencia9a74387 | Optimizado978bce8 |
+| --- | ---: | ---: |
+| Intel total TUI (s) | 2.570260 | 2.773892 |
+| Intel prepare / commit (s) | 2.146351 / 0.386675 | 2.284844 / 0.439064 |
+| Intel decodes / coste acumulado (ms) | 34 / 10.956 | 17 / 5.362 |
+| ARM total TUI (s) | 3.429893 | 2.511333 |
+| ARM prepare / commit (s) | 3.087762 / 0.315793 | 2.230711 / 0.240595 |
+| ARM decodes / coste acumulado (ms) | 34 / 4.474 | 17 / 5.341 |
+
+RED→GREEN determinista de coste: dos decodes por revisión pasan a uno,17
+revisiones de igual inventario. Tiempo de decode local siete tipos1.187→0.671ms.
+CI no aísla ruido de runner/logging: Intel total aumenta0.204s pese a menos
+decodes; ARM total baja0.919s mientras decode acumulado aumenta0.867ms.
+**No se demuestra mejora del tiempo total nativo atribuible a este cambio.**
+Sí se elimina trabajo evitable sin retirar validación/reencriptado/durabilidad.
+Intel fase1 de7.970s no se reproduce; el margen actual no decide la política
+de plazos ni garantiza que otro runner cumpla8s. KDF256MiB/3/p1 intacto.
+
+Sync original20s: Intel wait11.902s/submit1.282s; ARM wait8.038s/submit1.056s.
+Las dos CPU terminan normal Full25 y final; no final_phase_only ni skip.
+Logs macos3-*.log/phases.json; sólo timings/categorías sintéticas.
+
+Siguiente checkpoint devuelve launcher byte-idéntico a143a96b: sin forzar
+PMW6_TIMING. Rust/fixtures Linux byte-idénticos al barrido52; única otra
+diferencia es el fixture macOS ya ejecutado en ambas CPU. Config/AST/shell/diff
+PASS al preparar launcher normal. Última corrida autorizada verifica ausencia
+de instrumentación forzada sobre el mismo producto, con los mismos límites.
