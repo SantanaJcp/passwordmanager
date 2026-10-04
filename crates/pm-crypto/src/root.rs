@@ -23,8 +23,12 @@ const SUITE: u64 = 1;
 const MAX_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 4 * 1024;
 const FILE_CHUNK_BYTES: usize = 1024 * 1024;
-const LOCKED_SECRET_BUDGET: usize = 32 * 1024 * 1024;
+pub(crate) const LOCKED_SECRET_BUDGET: usize = 32 * 1024 * 1024;
 static LOCKED_SECRET_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(windows)]
+pub(crate) fn locked_secret_bytes() -> usize {
+    LOCKED_SECRET_BYTES.load(Ordering::Acquire)
+}
 #[cfg(test)]
 static TEST_LOCKED_SECRET_BUDGET: AtomicUsize = AtomicUsize::new(LOCKED_SECRET_BUDGET);
 
@@ -182,27 +186,41 @@ impl ProtectedBytes {
                 capacity: 0,
             });
         }
-        LOCKED_SECRET_BYTES
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        let reservation =
+            LOCKED_SECRET_BYTES.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current
                     .checked_add(len)
                     .filter(|next| *next <= locked_secret_budget())
-            })
-            .map_err(|_| CryptoError::ResourceUnavailable)?;
+            });
+        if reservation.is_err() {
+            #[cfg(windows)]
+            crate::windows_memory::failed("budget", len, 0)?;
+            return Err(CryptoError::ResourceUnavailable);
+        }
         // SAFETY: sodium is initialized; a non-null allocation is owned here
         // until freed on failure or transferred into `Self`.
         let pointer = unsafe { libsodium_sys::sodium_malloc(len) }.cast::<u8>();
         let Some(pointer) = NonNull::new(pointer) else {
+            #[cfg(windows)]
+            let win32_error = crate::windows_memory::last_error();
             LOCKED_SECRET_BYTES.fetch_sub(len, Ordering::AcqRel);
+            #[cfg(windows)]
+            crate::windows_memory::failed("alloc", len, win32_error)?;
             return Err(CryptoError::ResourceUnavailable);
         };
         // SAFETY: the allocation is valid for `len`. A lock failure frees it
         // before any plaintext is copied into the allocation.
         if unsafe { libsodium_sys::sodium_mlock(pointer.as_ptr().cast(), len) } != 0 {
+            #[cfg(windows)]
+            let win32_error = crate::windows_memory::last_error();
             unsafe { libsodium_sys::sodium_free(pointer.as_ptr().cast()) };
             LOCKED_SECRET_BYTES.fetch_sub(len, Ordering::AcqRel);
+            #[cfg(windows)]
+            crate::windows_memory::failed("virtual-lock", len, win32_error)?;
             return Err(CryptoError::ResourceUnavailable);
         }
+        #[cfg(windows)]
+        crate::windows_memory::allocated(len);
         Ok(Self {
             pointer,
             len,
@@ -260,6 +278,8 @@ impl Drop for ProtectedBytes {
             libsodium_sys::sodium_free(self.pointer.as_ptr().cast());
         }
         LOCKED_SECRET_BYTES.fetch_sub(self.capacity, Ordering::AcqRel);
+        #[cfg(windows)]
+        crate::windows_memory::released(self.capacity);
     }
 }
 

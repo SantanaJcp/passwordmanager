@@ -4,9 +4,13 @@
 param(
     [switch]$EphemeralCI,
     [switch]$ServiceDiagnostics,
-    [switch]$TuiConPtyRed
+    [switch]$TuiConPtyRed,
+    [switch]$OnePuxMemoryDiagnostics
 )
 
+if ($OnePuxMemoryDiagnostics -and (-not $ServiceDiagnostics -or $TuiConPtyRed)) {
+    throw 'Focused memory diagnostics require ServiceDiagnostics and exclude TuiConPtyRed.'
+}
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -164,7 +168,9 @@ function Write-ServiceSubphaseDiagnostics([string]$Path) {
         'phase=service-failed'
     )
     foreach ($line in $lines) {
-        Assert-True ($allowed -contains [string]$line) 'unexpected service diagnostic phase'
+        $memoryStatus = [string]$line -match '^phase=protected-memory-status live-capacity=[0-9]+ budget=33554432 live-payload-pages=[0-9]+ live-regions=[0-9]+ working-set-min=[0-9]+ working-set-max=[0-9]+ working-set-flags=[0-9]+$'
+        $memoryFailure = [string]$line -match '^phase=protected-memory-failure category=(budget|alloc|virtual-lock) requested-capacity=[0-9]+ requested-payload-pages=[0-9]+ win32-error=[0-9]+$'
+        Assert-True (($allowed -contains [string]$line) -or $memoryStatus -or $memoryFailure) 'unexpected service diagnostic phase'
         Write-Host "SERVICE_PHASE $line"
     }
     Assert-ServiceDiagnosticGenerations $lines
@@ -527,6 +533,9 @@ try {
     }
 
     Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
+    if ($OnePuxMemoryDiagnostics) {
+        Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '--example', 'windows_onepux_memory_probe', '--locked', '--offline')
+    }
     if ($TuiConPtyRed) {
         Invoke-Checked 'cargo' @('build', '-p', 'pm-native-channel', '--example', 'windows_tui_conpty_fixture', '--locked', '--offline')
         Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '--example', 'windows_human_tui_seed', '--locked', '--offline')
@@ -567,6 +576,19 @@ try {
         Copy-Item -LiteralPath $custody -Destination $tuiCustody -ErrorAction Stop
         Add-OwnedPath $ownedPaths $tuiFixture
         Add-OwnedPath $ownedPaths $tuiCustody
+    }
+
+    $memoryProbe = $null
+    $memorySource = $null
+    if ($OnePuxMemoryDiagnostics) {
+        $builtProbe = Join-Path $repo 'target\debug\examples\windows_onepux_memory_probe.exe'
+        Assert-NativeStaticMsvcBinary $dumpbin $builtProbe 'windows_onepux_memory_probe.exe'
+        $memoryProbe = Join-Path $humanDir 'windows_onepux_memory_probe.exe'
+        $memorySource = Join-Path $humanDir 'memory.1pux'
+        Copy-Item -LiteralPath $builtProbe -Destination $memoryProbe -ErrorAction Stop
+        Add-OwnedPath $ownedPaths $memoryProbe
+        Add-OwnedPath $ownedPaths $memorySource
+        New-SyntheticOnePux $memorySource
     }
 
     $agentSid = Get-Sid "$env:COMPUTERNAME\$agentName"
@@ -691,6 +713,19 @@ try {
     $p = Start-AsUser $humanCredential $custody @('probe', '--profile', $humanProfile, '--private', $humanPrivate, '--vault-id', $vaultId) $emptyInput $humanOut $humanErr
     Assert-True ($p.ExitCode -eq 0) 'human RPK channel failed after SCM restart'
 
+    if ($OnePuxMemoryDiagnostics) {
+        $p = Start-AsUser $humanCredential $memoryProbe @($humanProfile, $humanPrivate, $vaultId, $memorySource) $humanInput $humanOut $humanErr
+        Write-Host (Get-Content $humanErr -Raw)
+        Write-Host (Get-Content $humanOut -Raw)
+        Write-ServiceSubphaseDiagnostics $diagnosticPath
+        $previewExit = $p.ExitCode
+        # Independent native budget evidence, even when the seed8 preview is RED.
+        & cargo test -p pm-crypto --test windows_memory_budget --locked --offline -- --nocapture
+        $budgetExit = $LASTEXITCODE
+        Assert-True ($previewExit -eq 0) 'focused seed8 1PUX preview failed'
+        Assert-True ((Get-Content $humanOut -Raw).Trim() -eq 'PASS w5-onepux-memory seed8=exact preview=2 prepared=validated lease=restored commit=not-sent') 'focused preview did not prove exact result'
+        Assert-True ($budgetExit -eq 0) 'native aggregate protected-memory budget failed'
+    }
     if ($TuiConPtyRed) {
         $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId) $humanInput $humanOut $humanErr
         Assert-True ($p.ExitCode -eq 0) ('ordinary human type seeding failed: ' + (Get-Content $humanErr -Raw))

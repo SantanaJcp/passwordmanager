@@ -246,6 +246,21 @@ impl ServiceDiagnostics {
             .map_err(|_| Failure::Unavailable)?;
         file.sync_all().map_err(|_| Failure::Unavailable)
     }
+
+    fn memory(&self, failure: Option<pm_crypto::WindowsMemoryFailure>) -> Result<(), Failure> {
+        let status = match failure {
+            Some(failure) => failure.status,
+            None => pm_crypto::windows_memory_status().map_err(|_| Failure::Unavailable)?,
+        };
+        let mut file = self.file.lock().map_err(|_| Failure::Unavailable)?;
+        file.seek(SeekFrom::End(0))
+            .map_err(|_| Failure::Unavailable)?;
+        if let Some(failure) = failure {
+            writeln!(file, "phase=protected-memory-failure category={} requested-capacity={} requested-payload-pages={} win32-error={}", failure.category, failure.requested_capacity_bytes, failure.requested_payload_page_bytes, failure.win32_error).map_err(|_| Failure::Unavailable)?;
+        }
+        writeln!(file, "phase=protected-memory-status live-capacity={} budget={} live-payload-pages={} live-regions={} working-set-min={} working-set-max={} working-set-flags={}", status.live_capacity_bytes, status.budget_bytes, status.live_payload_page_bytes, status.live_regions, status.working_set_min_bytes, status.working_set_max_bytes, status.working_set_flags).map_err(|_| Failure::Unavailable)?;
+        file.sync_all().map_err(|_| Failure::Unavailable)
+    }
 }
 
 fn validate_diagnostic_file(file: &File) -> Result<(), Failure> {
@@ -545,6 +560,7 @@ fn serve_vault(
             .map_err(|_| Failure::Unavailable)?;
         if let Some(diagnostics) = diagnostics.as_ref() {
             diagnostics.record(ServiceDiagnosticPhase::ArgsOk)?;
+            diagnostics.memory(None)?;
         }
         let bootstrap = Arc::new(read_bootstrap(&bootstrap_path)?);
         if let Some(diagnostics) = diagnostics.as_ref() {
@@ -622,6 +638,11 @@ fn serve_vault(
     })();
     if result.is_err() {
         if let Some(diagnostics) = diagnostics.as_ref() {
+            if let Some(failure) =
+                pm_crypto::windows_memory_failure().map_err(|_| Failure::Unavailable)?
+            {
+                diagnostics.memory(Some(failure))?;
+            }
             diagnostics.record(ServiceDiagnosticPhase::ServiceFailed)?;
         }
     }
@@ -927,11 +948,18 @@ fn serve_human(
                 let source = duplicated.map_err(|_| Failure::Unavailable)?;
                 let preview = crate::human_wire::handle_1pux_file(&mut vault, tls, rest, source);
                 let diagnostic = if let Some(diagnostics) = service.diagnostics.as_ref() {
-                    diagnostics.record(if preview.is_ok() {
-                        ServiceDiagnosticPhase::TransferPreviewSent
-                    } else {
-                        ServiceDiagnosticPhase::TransferPreviewFailed
-                    })
+                    diagnostics
+                        .memory(
+                            pm_crypto::windows_memory_failure()
+                                .map_err(|_| Failure::Unavailable)?,
+                        )
+                        .and_then(|()| {
+                            diagnostics.record(if preview.is_ok() {
+                                ServiceDiagnosticPhase::TransferPreviewSent
+                            } else {
+                                ServiceDiagnosticPhase::TransferPreviewFailed
+                            })
+                        })
                 } else {
                     Ok(())
                 };

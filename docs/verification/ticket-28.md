@@ -1,5 +1,97 @@
 # Ticket 28 — método de fallos operativos, canarios y crash safety
 
+## Windows G7 — W5: diagnóstico nativo de cuota (2026-10-03)
+
+Worktree aislado `w5-win-memory`, rama `codex/pm-w5-win-memory`, base
+`893074af5192217d313fce12ea81ca3351aa22ea`. Alcance autorizado: allocator
+protegido, cuota al arrancar Windows y owners del preview si se demuestra
+agotamiento del presupuesto. Sin integración ni cambios de estado de tickets.
+
+Método previo al código: instrumentar únicamente fallos de alloc/budget/mlock
+Windows y el estado inicial del proceso. Registrar categoría, capacidad
+solicitada/vigente, presupuesto de 32 MiB, regiones vigentes, bytes de páginas
+del payload bloqueado, GetLastError capturado inmediatamente y working set
+mínimo/máximo/flags. El contador de páginas de payload es un límite inferior:
+`sodium_malloc` también intenta bloquear el canario; no confundirlo con todo el
+working set ni con una medición del overhead interno. Sin contenido, direcciones,
+handles, identidades, paths de secretos o stack traces.
+
+El probe enfocado independiente de ConPTY ejecutará el servicio normal con
+diagnóstico explícito y el mismo seed de ocho registros/tipos7 de ticket27,
+por el wire humano autenticado, seguido del 1PUX sintético del harness
+(adjunto 2097159 bytes). Usará las APIs existentes de transferencia y restauración
+sin modificarlas. El modo normal conserva todas sus aserciones y pasos; el
+modo enfocado no acredita TUI ni aceptación integral. Se exige preview exitoso,
+conteos exactos y cancelación del preparado sin importar; un error sigue RED.
+
+Prerrequisitos: método [CI efímero](native-ci.md), runner estándar Windows11
+ARM64, Rust1.98.1 y libsodium1.0.22 autenticados, compilación offline, identidades
+reales separadas y cleanup estricto existentes. Hasta cinco dispatches autorizados
+del workflow `Ticket 27 Windows custody`, cada uno sobre SHA exacto W5 y con
+hipótesis/cambio distinto. Soltar flock mientras se espera CI.
+
+RED de referencia: [37134445641](https://github.com/SantanaJcp/passwordmanager/actions/runs/37134445641),
+SHA `1c490764c0cf2dae44d996243351d24101b90918` (W1), `crypto-resource` en
+preview tras validar/duplicar el descriptor y con lease restaurada. No mide
+VirtualLock ni demuestra su causa. El probe nuevo discriminará cuota nativa
+frente al presupuesto agregado o un fallo de asignación.
+
+Si la cuota es causal, antes de implementar se devolverá la decisión concreta
+sobre mínimo/máximo/margen/flags, todavía no fijada por G7. El rechazo del SO
+debe detener explícitamente el arranque; nunca desbloquear memoria, reducir KDF,
+aumentar el presupuesto o reintentar con otra política.
+
+Gates locales autorizados: `check.sh`, `clean-offline-build.sh` y, al tocar código
+compartido, los 52 casos/49 rc0 de integración, comparados por comando y rc.
+Cada Cargo/check/lab bajo `flock /tmp/pm-cargo-window.lock`, cwd W5 y artefactos
+Keycloak/CFT fijados por el despacho. Logs propios `/tmp/pmw5-*.log`. Sólo Linux
+cfg observado localmente; Windows queda acreditado exclusivamente por su run.
+
+Fallbacks heredados inspeccionados y conservados: `WindowsServerPipe::drop`
+descarta CloseHandle; creación de pipe/DPAPI/SID descarta ciertos LocalFree;
+`ClipboardWindow::drop` descarta DestroyWindow. Si la liberación falla, se
+oculta su error y se conserva el resultado previo. `sodium_malloc` de libsodium
+ignora internamente su primer mlock; el producto exige después sodium_mlock
+comprobado antes de colocar el secreto, como ya prevé G7. Ninguno se corrige
+ni se atribuye como causa sin evidencia.
+
+### Reanudación y primer checkpoint
+
+Tras el reinicio se preservaron los diez archivos heredados. `git status`,
+diff completo y los tres archivos nuevos se inspeccionaron antes de editar;
+`gh run list --branch codex/pm-w5-win-memory` no encontró corridas previas.
+La rama no tenía commits propios. La referencia W1 se descargó de nuevo en
+`/tmp/pmw5-reference-w1-red.log`, SHA y conclusión comprobados por API.
+
+Se corrigió un hueco de observación: el listener heredado descarta el error de
+una conexión y continúa (zona W4, conservado). Por tanto, registrar memoria
+sólo al terminar el servicio no observa el fallo de preview. Ahora el opt-in
+registra su snapshot de memoria junto al resultado del preview, sin cambiar
+listener, transferencia ni lease. El probe exige los siete conteos exactos
+`2/2/0/0/0/4/1`; ya no basta que campos preservados/páginas sean positivos.
+El test nativo independiente de presupuesto se ejecuta incluso con preview
+RED; ambos exit codes deben ser cero para declarar GREEN.
+
+Primer gate: `flock /tmp/pm-cargo-window.lock sh -c
+'./scripts/cargo-local.sh fmt --all && ./scripts/check.sh'`, rc0,
+`/tmp/pmw5-checkpoint-check.log`. Incluye fmt/check/test/clippy del workspace
+locked/offline. `flock /tmp/pm-cargo-window.lock
+./scripts/clean-offline-build.sh` también terminó rc0, compilación 42.49 s,
+`/tmp/pmw5-checkpoint-clean.log`. El YAML del workflow carga con el parser disponible y conserva
+trigger manual, runner estándar ARM64, contents:read y ausencia de
+caches/artifacts/secrets. Este gate sólo ejecuta cfg Linux, no acredita aún
+compilación ni comportamiento Windows.
+
+Fuentes primarias consultadas al reanudar:
+[VirtualLock](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtuallock),
+[SetProcessWorkingSetSizeEx](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-setprocessworkingsetsizeex)
+y [libsodium 1.0.22 utils.c](https://github.com/jedisct1/libsodium/blob/1.0.22/src/libsodium/sodium/utils.c).
+VirtualLock tiene una cuota relacionada con el mínimo del working set menos
+overhead; esto sustenta la hipótesis, no sustituye el RED nativo. El código
+fijado de sodium_mlock Windows devuelve directamente el resultado de
+VirtualLock: GetLastError se captura antes de cleanup. Las páginas de canario
+que bloquea internamente sodium_malloc siguen fuera del contador de payload.
+
 ## Frontera y prerrequisitos
 
 Este método prueba Linux x86_64 en un `user namespace` desechable con UIDs

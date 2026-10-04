@@ -9,6 +9,13 @@ mod native_stdin;
 mod protected_text;
 mod protected_writer;
 mod root;
+#[cfg(windows)]
+mod windows_memory;
+
+#[cfg(windows)]
+pub use windows_memory::{
+    WindowsMemoryFailure, WindowsMemoryStatus, windows_memory_failure, windows_memory_status,
+};
 
 use std::ffi::CStr;
 
