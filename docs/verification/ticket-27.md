@@ -4139,3 +4139,31 @@ Inspección adicional del fixture: pm-custody keygen Windows usa PMWK1/DPAPI,
 pero pm-sync consume PMK1, u32 de PKCS8, PKCS8 y SPKI44. Preparar explícitamente
 las claves sintéticas en ese formato ordinario, como los tests existentes de
 pm-sync; no convertir el parser ni usar una alternativa después de fallo.
+
+Extensión acotada de negativa G1 antes de ejecutarla: clave RPK impostora
+sintética provisionada al mismo SID humano, diferente de la RPK instalada.
+El cliente fixture conecta por WindowsClientPipe instalado (peer nativo real)
+y completa TLS/lee el resultado sin enviar magic humano ni solicitud de bóveda.
+Exigir alerta rustls UnknownCA exacta, no cierre/timeout genérico, y cierre de
+su propio handle comprobado. Con diagnósticos, exigir sólo human-accepted y
+cero magic/unlock/transfer. La DACL del servicio/listener/verificadores no cambia;
+no se acepta una identidad alternativa ni se simula otro agente.
+
+Barrido fase5 terminado en códigoLinux de dd74320: **52 casos,49 rc0, tres
+RED esperados, cero mismatches**, source manifest íntegro durante597.353 s.
+Resultados `/tmp/pmw1e-gates-local-results.json`, resumen `.json` y
+`/tmp/pmw1e-gates-local-summary.log`; driver `/tmp/pmw1e-run-local.py`.
+Cada comando bajo flock separado; check59.790 s y clean46.564 s incluyen
+espera del lock, no son rendimiento. Artefactos absolutos Keycloak26.7.3/CFT
+y sesión real wayland-1 confirmada por Hyprland, sin fallback al socket ausente.
+Tui-content rc0; multiagente W4 fuera. Matrix conserva exactamente los dos
+RED commit-outbox-audit EIO/ENOSPC por staging retenido, cleanup0; extras
+bootstrap/vault conservan authority-or-receipts-changed, sin ocultar rc1.
+
+Preflight actualizado de fixtures rc0 `/tmp/pmw1e-windows-fixtures-check3.log`.
+Claves PMK1 explícitas con creación privada/cierre comprobado; negativa RPK
+estricta y build ordinario pm-sync después de los casos independientes.
+La anotación W2 sigue sin aplicar. No se omite el build: su fallo será gate
+rojo después de haber observado reparse/RPK/operaciones. Ningún fallback nuevo.
+Estas diferencias son cfgWindows/harness; no cambian las ramas Linux del
+producto y el check posterior conserva todos los guards estáticos.

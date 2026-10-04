@@ -568,7 +568,7 @@ try {
         Set-ExactTreeAcl $diagnosticDir @('SYSTEM', $installerName)
     }
 
-    Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '-p', 'pm-sync', '--locked', '--offline')
+    Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '-p', 'pm-cli', '--locked', '--offline')
     if ($TuiConPtyRed) {
         Invoke-Checked 'cargo' @('build', '-p', 'pm-native-channel', '--example', 'windows_tui_conpty_fixture', '--locked', '--offline')
         Invoke-Checked 'cargo' @('build', '-p', 'pm-custody', '--example', 'windows_human_tui_seed', '--locked', '--offline')
@@ -631,12 +631,17 @@ try {
     $agentPublic = Join-Path $agentDir 'agent.rpk'
     $humanPrivate = Join-Path $humanDir 'human.key'
     $humanPublic = Join-Path $humanDir 'human.rpk'
+    $impostorPrivate = Join-Path $humanDir 'impostor.key'
+    $impostorPublic = Join-Path $humanDir 'impostor.rpk'
+    Add-OwnedPath $ownedPaths $impostorPrivate
+    Add-OwnedPath $ownedPaths $impostorPublic
     foreach ($path in @($serverPrivate, $serverPublic, $agentPrivate, $agentPublic, $humanPrivate, $humanPublic)) {
         Add-OwnedPath $ownedPaths $path
     }
     Invoke-Checked $custody @('keygen', '--private', $serverPrivate, '--public', $serverPublic)
     Invoke-Checked $custody @('keygen', '--private', $agentPrivate, '--public', $agentPublic)
     Invoke-Checked $custody @('keygen', '--private', $humanPrivate, '--public', $humanPublic)
+    Invoke-Checked $custody @('keygen', '--private', $impostorPrivate, '--public', $impostorPublic)
     $bootstrap = Join-Path $serviceDir 'bootstrap.dpapi'
     Add-OwnedPath $ownedPaths $bootstrap
     Invoke-Checked $custody @('provision-bootstrap', '--path', $bootstrap, '--server-private', $serverPrivate, '--server-public', $serverPublic, '--service-sid', $serviceSid, '--agent-public', $agentPublic, '--agent-sid', $agentSid, '--human-public', $humanPublic, '--human-sid', $humanSid)
@@ -697,10 +702,8 @@ try {
         Set-ExactTreeAcl $aliasDir @('SYSTEM', $installerName, "$env:COMPUTERNAME\$humanName")
         Set-ExactTreeAcl $syncDir @('SYSTEM', $installerName)
         $builtSync = Join-Path $repo 'target\debug\pm-sync.exe'
-        Assert-NativeStaticMsvcBinary $dumpbin $builtSync 'pm-sync.exe'
-        Copy-Item -LiteralPath $builtSync -Destination $syncBinary -ErrorAction Stop
-        Invoke-Checked $custody @('keygen', '--private', $syncServerKey, '--public', $syncServerPublic)
-        Invoke-Checked $custody @('keygen', '--private', $syncClientKey, '--public', $syncClientPublic)
+        Invoke-Checked $installerSeed @('--sync-keygen', $syncServerKey, $syncServerPublic)
+        Invoke-Checked $installerSeed @('--sync-keygen', $syncClientKey, $syncClientPublic)
         $pin = ([IO.File]::ReadAllBytes($syncServerPublic) | ForEach-Object { $_.ToString('x2') }) -join ''
         Assert-True ($pin.Length -eq 88) 'sync RPK is not exactly 44 bytes'
         [IO.File]::WriteAllLines($deviceConfig, @($pin, $pairing, $syncBinary, $syncPipe, $syncClientKey, $syncServerPublic, $remoteDevice), [Text.UTF8Encoding]::new($false))
@@ -796,6 +799,16 @@ try {
             $tuiCaseFailures.Add('peer-pid')
             Write-Host 'NATIVE_PID case=impostor result=fail'
         }
+        $rpkStart = if ($ServiceDiagnostics) { @(Get-Content -LiteralPath $diagnosticPath -ErrorAction Stop).Count } else { 0 }
+        $p = Start-AsUser $humanCredential $tuiSeed @('--rpk-negative', $humanProfile, $impostorPrivate, $vaultId) $emptyInput $humanOut $humanErr
+        Write-Host (Get-Content $humanErr -Raw)
+        if ($p.ExitCode -eq 0 -and (Get-Content $humanOut -Raw).Trim() -eq 'PASS windows-rpk-negative same-sid=accepted wrong-rpk=unknown-ca app-request=0 close=checked') {
+            if ($ServiceDiagnostics) {
+                $rpkPhases = @(Get-Content -LiteralPath $diagnosticPath -ErrorAction Stop | Select-Object -Skip $rpkStart)
+                Assert-True ($rpkPhases.Count -eq 1 -and $rpkPhases[0] -eq 'phase=human-accepted') 'wrong RPK reached application authorization'
+            }
+            Write-Host (Get-Content $humanOut -Raw)
+        } else { $tuiCaseFailures.Add('peer-rpk'); Write-Host 'NATIVE_RPK result=fail' }
         $p = Start-AsUser $humanCredential $tuiSeed @($humanProfile, $humanPrivate, $vaultId) $humanInput $humanOut $humanErr
         Assert-True ($p.ExitCode -eq 0) ('ordinary human type seeding failed: ' + (Get-Content $humanErr -Raw))
         Assert-True ((Get-Content $humanOut -Raw).Trim() -eq 'PASS windows-tui-seed types=7 ordinary-human-wire=1 readback=exact') 'seven-type readback was not exact'
@@ -911,9 +924,13 @@ try {
     }
 
     if ($TuiConPtyRed) {
+        Invoke-Checked 'cargo' @('build', '-p', 'pm-sync', '--locked', '--offline')
+        Assert-NativeStaticMsvcBinary $dumpbin $builtSync 'pm-sync.exe'
         $devicePid = Get-StoppableServicePid $serviceName
         Stop-OwnedService $serviceName $devicePid
         Open-StoppedInstallerNode $serviceDir
+        Copy-Item -LiteralPath $builtSync -Destination $syncBinary -ErrorAction Stop
+        Set-ExactTreeAcl $syncBinary @('SYSTEM', "NT SERVICE\$serviceName")
         Open-StoppedInstallerNode $auditPath
         Assert-True (-not (Test-Path -LiteralPath $ownerAudit)) 'owner audit collision'
         Assert-True (-not (Test-Path -LiteralPath $remoteAudit)) 'remote audit collision'

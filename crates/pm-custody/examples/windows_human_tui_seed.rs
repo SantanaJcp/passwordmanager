@@ -532,6 +532,64 @@ mod fixture {
 
     pub(super) fn run() -> Result<(), Failure> {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
+        if args.len() == 3 && args[0] == "--sync-keygen" {
+            use aws_lc_rs::{
+                rand::SystemRandom,
+                signature::{Ed25519KeyPair, KeyPair},
+            };
+            use std::os::windows::io::IntoRawHandle;
+            let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+                .map_err(|_| Failure::Unavailable)?;
+            let pair =
+                Ed25519KeyPair::from_pkcs8(document.as_ref()).map_err(|_| Failure::Unavailable)?;
+            let mut public = vec![
+                0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+            ];
+            public.extend_from_slice(pair.public_key().as_ref());
+            let mut encoded = zeroize::Zeroizing::new(b"PMK1".to_vec());
+            bytes(&mut encoded, document.as_ref())?;
+            encoded.extend_from_slice(&public);
+            for (path, content) in [
+                (Path::new(&args[1]), encoded.as_slice()),
+                (Path::new(&args[2]), public.as_slice()),
+            ] {
+                let mut file = pm_native_channel::create_private_file(path, false, true)
+                    .map_err(|_| Failure::Unavailable)?;
+                let written = file.write_all(content).and_then(|()| file.sync_all());
+                let closed =
+                    unsafe { windows_sys::Win32::Foundation::CloseHandle(file.into_raw_handle()) };
+                if written.is_err() || closed == 0 {
+                    return Err(Failure::Unavailable);
+                }
+            }
+            println!("PASS sync-keygen format=PMK1 files=2 close=checked");
+            return Ok(());
+        }
+        if args.len() == 4 && args[0] == "--rpk-negative" {
+            let mut tls = connect(Path::new(&args[1]), Path::new(&args[2]), &args[3])?;
+            eprintln!("NATIVE_RPK native-peer=accepted app-request=absent");
+            let operation = (|| {
+                while tls.conn.is_handshaking() {
+                    tls.conn.complete_io(&mut tls.sock)?;
+                }
+                let mut byte = [0_u8; 1];
+                tls.read_exact(&mut byte)
+            })();
+            let rejected = operation.err().is_some_and(|error| {
+                matches!(
+                    error.get_ref().and_then(|e| e.downcast_ref::<TlsError>()),
+                    Some(TlsError::AlertReceived(rustls::AlertDescription::UnknownCA))
+                )
+            });
+            let closed = close_tls(tls);
+            if !rejected || closed.is_err() {
+                return Err(Failure::Unavailable);
+            }
+            println!(
+                "PASS windows-rpk-negative same-sid=accepted wrong-rpk=unknown-ca app-request=0 close=checked"
+            );
+            return Ok(());
+        }
         if args.len() == 3 && matches!(args[0].as_str(), "--installer-alias" | "--remove-alias") {
             let alias = Path::new(&args[1]);
             let target = Path::new(&args[2]);
