@@ -4114,3 +4114,28 @@ workflows manuales originales y gratuidad estándar verificadas en fuente
 [GitHub](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
 Sin caches/artifacts/secrets ni lock local retenido esperando CI. Sigue activa
 al publicar este preflight; ningún PASS nativo se presume.
+
+Mac fase5 corrida1 terminada: **PASS Intel+ARM**, sobre62cb539; detalle y
+márgenes en [ticket26](ticket-26.md#w1-fase-5--rechazo-temprano-aprobado-y-aceptación-mac-2026-10-04).
+Backup ARM6.285 s frente a8 s conservadores (riesgo1.715 s), Intel1.396 s.
+Sync Intel panel17.987 s, margen conservador2.013 s (espera16.714/20,
+margen gate3.286 s); ARM total20.641 s incluye0.929 de envío, espera19.713/20,
+margen gate0.287 s. No se amplía el plazo ni se confunde total con wait.
+
+Windows fase5 corrida1 activa, [37170439961](https://github.com/SantanaJcp/passwordmanager/actions/runs/37170439961),
+SHA `dd74320962ca0d64deeccbe8d593bef9324916e3`, false/true/true,
+ref API exacto antes/después. Presupuesto de esta fase: Windows1/6, Mac1/2.
+
+Windows fase5 corrida1 finalizó **FAIL de compilación**, antes de ejecutar
+los fixtures. `pm-sync` bin Windows no formaba parte del lab anterior; al
+construirlo ahora se revela E0282/E0283 heredado en main.rs:314,
+`run_with_deadline::completion`. Log `/tmp/pmw1e-windows1.log`, metadata `.json`,
+artifacts0. No es RED conductual, ni acredita reparse/segundo device. Propuesta
+concreta enviada al orquestador: `let completion: Result<(), ()> = (|| {`,
+única anotación cfgWindows sin cambio de lógica/plazo30s/protocolo. Está fuera
+de la propiedad W1; no aplicada al registrar este corte, pendiente autorización.
+
+Inspección adicional del fixture: pm-custody keygen Windows usa PMWK1/DPAPI,
+pero pm-sync consume PMK1, u32 de PKCS8, PKCS8 y SPKI44. Preparar explícitamente
+las claves sintéticas en ese formato ordinario, como los tests existentes de
+pm-sync; no convertir el parser ni usar una alternativa después de fallo.

@@ -2461,3 +2461,34 @@ Intel/ARM PASS8s sobrec403865. Antes de nueva corrida, el coordinador debe
 proveer hipótesis/cambio pertinente y una nueva ventana CI. Entorno propio:
 macOS15.7.9/kernel24.6.0; Intel20260824.0482.1, ARM20260907.0337.1,
 Rust1.98.1. No se cambió backup, deadline, publicación ni estado de26.
+
+### W1 fase 5 — rechazo temprano aprobado y aceptación Mac (2026-10-04)
+
+El orquestador autorizó comprobar el destino en el cliente TUI antes de
+solicitar backup. `symlink_metadata` rechaza toda entrada existente (también
+alias colgante) con DestinationExists; otros errores fallan explícitamente.
+Se conserva `publish_new_file` final frente a carreras. El error mantiene
+status público y aparece completo en el panel. No se cambia el custodio,
+backup/sync, KDF, límites ni plazos. RED→GREEN real del rechazo previo y de
+la carrera posterior documentado en [fase5 de27](ticket-27.md#w1-fase-5--método-aprobado-2026-10-04).
+
+[Mac37169986857](https://github.com/SantanaJcp/passwordmanager/actions/runs/37169986857),
+SHA `62cb53998d347cf41da686720cbf90dc053aae70`, inputs false/false,
+**PASS completo Intel y ARM**; ambos jobs terminados, artifacts0. Full25
+normal, fase final y cleanup estricto pasan; colisiones backup/plaintext
+rechazadas con digest intacto. Log `/tmp/pmw1e-macos1.log`, metadata `.json`.
+
+| CPU | Backup feliz submit→panel | Sync submit→panel | Envío / espera del panel | Margen |
+| --- | --- | --- | --- | --- |
+| Intel | 1.396 s | 17.987 s | 1.272 / 16.714 s | 2.013 s conservadores sobre total20; gate real espera20:3.286 s |
+| ARM | 6.285 s | 20.641 s | 0.929 / 19.713 s | gate real espera20:0.287 s; total incluye envío y supera20 |
+
+El timer contractual de sync empieza después de enviar: no ocultar que el
+wall total ARM supera20 aunque el gate original pase. Backup ARM consume
+6.285 s de un margen conservador8 (1.715 s restante); rendimiento riesgoso,
+no garantía futura. El rechazo temprano evita la descarga innecesaria de la
+colisión, pero no acelera el backup feliz ni modifica plazos. Intel previo
+fase4:17.671 s y2.329 s conservadores; esta muestra tiene0.316 s menos de
+margen conservador. No repetir un SHA idéntico por variabilidad ni cambiar
+el oráculo. FDE/reboot/firma/terminal humano siguen sin acreditarse;26 no cambia
+estado ni se integra en la rama unificada.
