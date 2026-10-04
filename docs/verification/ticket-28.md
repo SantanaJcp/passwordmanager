@@ -45,10 +45,18 @@ Prueba nativa de cuota denegada: abrir un handle real del proceso actual con
 inyecta un éxito ni se usa otro mínimo. Este seam demuestra propagación del
 fallo real de SetProcessWorkingSetSizeEx; no reproduce todavía un fallo del
 SCM por presión del SO/privilegio retirado al token de servicio. Para ese
-caso, un laboratorio humano debe retirar `SeIncreaseWorkingSetPrivilege`
-a la identidad sintética del servicio o imponer un límite de job inferior,
-reiniciar, exigir STOPPED/no endpoints y categoría pública de cuota, sin
-secretos ni dumps. No ejecutar esa política global en CI.
+caso se añade un probe SCM real con permisos administrativos del runner:
+`scripts/test-windows-memory-quota-denial.ps1` captura la configuración de
+privilegios del servicio sintético propio, conserva sólo
+`SeChangeNotifyPrivilege`, lo arranca y exige STOPPED/PID0/exit1816 antes de
+bootstrap/endpoints, con categoría `PROTECTED_MEMORY_QUOTA_UNAVAILABLE` y
+error1314. Restaura y relee la configuración original mediante APIs SCM,
+propaga todos los fallos de cleanup y restaura el command del lab. Sin
+políticas globales ni dumps. El log separado debe contener exactamente
+args-ok/quota-failure/service-failed; el recorrido normal se mantiene intacto.
+Fuente primaria: [privilegios requeridos del servicio](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_required_privileges_infow).
+Este nuevo caso aún está por ejecutar; la denegación por presión física del
+SO es una negativa distinta y no se anuncia demostrada.
 
 Secuencia RED/GREEN: checkpoint sólo de cuota y tests nuevos, esperando GREEN
 de preview y RED del presupuesto por páginas; después enforcement Windows y
@@ -71,6 +79,59 @@ Esa observación no modifica políticas ni genera dumps, y no acredita exclusió
 por usuario del servicio ni crash-safety. Fuente:
 [LocalDumps independiente de WER](https://learn.microsoft.com/en-us/windows/win32/wer/collecting-user-mode-dumps).
 Windows11x64, reboot/FDE y crash/extracción siguen no demostrados.
+
+### Corrida fase 2 A — cuota aplicada y RED discriminante
+
+[Run37170261274](https://github.com/SantanaJcp/passwordmanager/actions/runs/37170261274),
+SHA `e33f27a24caeb06b905ddb9ee74a60d9de352f38`, terminado **failure esperado**.
+Dispatch por rama congelada y headSha comprobado: GitHub rechazó previamente
+el SHA corto como ref (HTTP422, no creó una corrida). Inputs opt-in idénticos
+al probe causal; cambio: cuota64 MiB y nuevas pruebas de frontera por páginas.
+Logs `/tmp/pmw5b-native-red.log`, metadata `/tmp/pmw5b-native-red.json`.
+
+- **GREEN seed8**: ocho registros exactos, preview2, preparado validado,
+  lease restaurada, commit no enviado. Servicio con cuota efectiva
+  **67108864 /67108864 bytes, flags10**, página4096. Primitivas14, pipe1,
+  observer20 y sync-lib1 PASS; cleanup estricto sin error adicional.
+- **GREEN rechazo API**: query-only handle, Set rechazado con error5,
+  cuota efectiva sin cambio; no prueba todavía el nuevo caso SCM.
+- **RED páginas**: prueba grande alcanza32 MiB cobrados y la reserva adicional
+  devuelve `Ok(())` en vez de ResourceUnavailable (closure sintética ejecutada).
+  Lo mismo en el caso de owners de1 byte. No es fallo de compilación ni1453:
+  ambas aserciones discriminan el enforcement ausente del contador.
+  Dos tests GREEN (cuota/oversized) y dos RED de páginas; sin rebajar oráculos.
+- **WER observado**: Registry64 y Registry32 sin clave LocalDumps global ni
+  pm-custody.exe y sin valor de exclusión para todos los usuarios.
+  Sólo política de registro de esa VM; exclusión del servicio y protección
+  de dumps/crash siguen **no demostradas**. No se generó ningún dump.
+
+Cambio siguiente: reservar atómicamente páginas/guardas antes de sodium_malloc,
+liberar ante cualquier fallo y comprobar el lock del canario además del payload.
+Agregar prueba de ocho allocators concurrentes compartiendo el mismo límite;
+no hay copia ordinaria de plaintext ni optimización de owners1PUX. El único
+cambio fuera del backend es el arranque/diagnóstico categórico de cuota del
+servicio y su negativa opt-in. No se edita TUI/transferencia/observer/listener/
+admisión/proveedor/sync. Sin integración ni cambios de estado de tickets.
+
+### Verificación local del checkpoint de enforcement
+
+Primer intento de check: rc1 antes de Cargo en
+`/tmp/pmw5b-initial-linux-check.log`; el checker de ACL esperaba un scalar
+para el único `sc config` histórico y encontró tres tras añadir la negativa
+SCM/restauración. No es RED conductual de memoria. El método conserva cada
+comparación stage/provision/vault/seal y ahora exige que **todas** las líneas
+SCM config sigan al seal; no se elige la primera para ocultar otra mutación.
+El driver52 se reinició con fuentes nuevas congeladas; la fila fallida y su
+manifiesto se conservan bajo `/tmp/pmw5b-initial-*`.
+
+Gates sobre el enforcement y la negativa SCM: `check.sh` rc0 en152.109s
+(incluye espera de lock), clean rc0 en50.445s, logs
+`/tmp/pmw5b-linux-{check,clean}.log`. Driver52 fuente-congelada aún en ejecución
+al publicar este checkpoint; no se atribuye aún el resultado de sus50 casos
+restantes. Fmt/diff-check/enlaces relativos PASS; PowerShell/C# no ejecutables
+localmente y requieren el próximo run nativo. La negativa agrega un archivo
+propio, conserva/valida los privilegios originales y nunca relaja la política
+normal del servicio ni sustituye un arranque fallido por otro backend.
 
 ## Windows G7 — W5: diagnóstico nativo de cuota (2026-10-03)
 

@@ -203,6 +203,12 @@ impl ProtectedBytes {
             crate::windows_memory::failed(error.category, len, error.win32_error)?;
             return Err(CryptoError::ResourceUnavailable);
         }
+        #[cfg(windows)]
+        if !crate::windows_memory::reserve_pages(len) {
+            LOCKED_SECRET_BYTES.fetch_sub(len, Ordering::AcqRel);
+            crate::windows_memory::failed("page-budget", len, 0)?;
+            return Err(CryptoError::ResourceUnavailable);
+        }
         // SAFETY: sodium is initialized; a non-null allocation is owned here
         // until freed on failure or transferred into `Self`.
         let pointer = unsafe { libsodium_sys::sodium_malloc(len) }.cast::<u8>();
@@ -211,16 +217,24 @@ impl ProtectedBytes {
             let win32_error = crate::windows_memory::last_error();
             LOCKED_SECRET_BYTES.fetch_sub(len, Ordering::AcqRel);
             #[cfg(windows)]
+            crate::windows_memory::release_pages(len);
+            #[cfg(windows)]
             crate::windows_memory::failed("alloc", len, win32_error)?;
             return Err(CryptoError::ResourceUnavailable);
         };
         // SAFETY: the allocation is valid for `len`. A lock failure frees it
         // before any plaintext is copied into the allocation.
-        if unsafe { libsodium_sys::sodium_mlock(pointer.as_ptr().cast(), len) } != 0 {
+        #[cfg(windows)]
+        let lock_result = unsafe { crate::windows_memory::lock_payload_and_canary(pointer, len) };
+        #[cfg(not(windows))]
+        let lock_result = unsafe { libsodium_sys::sodium_mlock(pointer.as_ptr().cast(), len) };
+        if lock_result != 0 {
             #[cfg(windows)]
             let win32_error = crate::windows_memory::last_error();
             unsafe { libsodium_sys::sodium_free(pointer.as_ptr().cast()) };
             LOCKED_SECRET_BYTES.fetch_sub(len, Ordering::AcqRel);
+            #[cfg(windows)]
+            crate::windows_memory::release_pages(len);
             #[cfg(windows)]
             crate::windows_memory::failed("virtual-lock", len, win32_error)?;
             return Err(CryptoError::ResourceUnavailable);

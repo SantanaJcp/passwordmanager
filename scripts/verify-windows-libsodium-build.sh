@@ -461,7 +461,7 @@ service_final_line=$(grep -nF 'Set-ExactTreeAcl $serviceDir @(' "$lab" | grep -v
 agent_final_line=$(grep -nF 'Set-ExactTreeAcl $agentDir @(' "$lab" | grep -vF 'installerName' | cut -d: -f1 | tail -n1)
 human_final_line=$(grep -nF 'Set-ExactTreeAcl $humanDir @(' "$lab" | grep -vF 'installerName' | cut -d: -f1 | tail -n1)
 harness_file_line=$(grep -nF '[IO.File]::WriteAllBytes($emptyInput' "$lab" | cut -d: -f1)
-scm_config_line=$(grep -nF "Invoke-Checked 'sc.exe' @('config', \$serviceName" "$lab" | cut -d: -f1)
+scm_config_lines=$(grep -nF "Invoke-Checked 'sc.exe' @('config', \$serviceName" "$lab" | cut -d: -f1)
 test "$(grep -nF 'Set-ExactTreeAcl $serviceDir @(' "$lab" | grep -vF 'installerName' | wc -l)" -eq 1 &&
     test "$(grep -nF 'Set-ExactTreeAcl $agentDir @(' "$lab" | grep -vF 'installerName' | wc -l)" -eq 1 &&
     test "$(grep -nF 'Set-ExactTreeAcl $humanDir @(' "$lab" | grep -vF 'installerName' | wc -l)" -eq 1 || {
@@ -474,7 +474,7 @@ test -n "$staging_line" && test -n "$mkdirs_line" && test -n "$keygen_line" &&
     test -n "$vault_line" &&
     test -n "$harness_file_line" && test -n "$service_final_line" &&
     test -n "$agent_final_line" && test -n "$human_final_line" &&
-    test -n "$scm_config_line" || {
+    test -n "$scm_config_lines" || {
     echo 'Windows fixture ACL phase markers are incomplete' >&2
     exit 1
 }
@@ -484,11 +484,20 @@ test "$staging_line" -lt "$mkdirs_line" && test "$mkdirs_line" -lt "$directory_s
     test "$human_directory_staging_line" -lt "$harness_staging_line" &&
     test "$harness_staging_line" -lt "$keygen_line" &&
     test "$vault_line" -lt "$harness_file_line" && test "$harness_file_line" -lt "$service_final_line" &&
-    test "$service_final_line" -lt "$agent_final_line" && test "$agent_final_line" -lt "$human_final_line" &&
-    test "$human_final_line" -lt "$scm_config_line" || {
+    test "$service_final_line" -lt "$agent_final_line" && test "$agent_final_line" -lt "$human_final_line" || {
     echo 'Windows fixture ACL order must be stage -> provision/vault -> seal -> SCM' >&2
     exit 1
 }
+
+
+# The focused quota negative configures and restores the same owned service.
+# Every SCM configuration must follow the role-only seal, not just the first.
+for scm_config_line in $scm_config_lines; do
+    test "$human_final_line" -lt "$scm_config_line" || {
+        echo 'Windows fixture SCM configuration precedes the role-only seal' >&2
+        exit 1
+    }
+done
 
 for input in third_party/libsodium/LATEST.tar.gz third_party/libsodium/LATEST.tar.gz.minisig; do
     attribute=$(git -C "$root" check-attr text -- "$input")

@@ -159,3 +159,59 @@ fn native_small_regions_exhaust_page_budget_while_logical_capacity_is_small() {
         at_limit.live_budget_page_bytes
     );
 }
+
+#[test]
+fn native_concurrent_owners_share_one_page_budget_and_release_pending_reservations() {
+    use std::sync::{Arc, Barrier};
+    let initial = prepare_windows_protected_memory().unwrap();
+    assert_eq!(initial.live_capacity_bytes, 0);
+    let capacity = 16 * initial.page_bytes - 16;
+    let charge = 18 * initial.page_bytes;
+    let start = Arc::new(Barrier::new(8));
+    let threads = (0..8)
+        .map(|_| {
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                let mut owners = Vec::new();
+                for _ in 0..256 {
+                    match ProtectedBytes::zeroed(capacity) {
+                        Ok(owner) => owners.push(owner),
+                        Err(CryptoError::ResourceUnavailable) => break,
+                        Err(other) => panic!("unexpected allocation error: {other}"),
+                    }
+                }
+                // The output remains alive in the join handle until it is moved
+                // into the main thread's collection, so no early budget release.
+                owners
+            })
+        })
+        .collect::<Vec<_>>();
+    let owners = threads
+        .into_iter()
+        .flat_map(|thread| thread.join().expect("native worker"))
+        .collect::<Vec<_>>();
+    let at_limit = windows_memory_status().unwrap();
+    assert_eq!(owners.len(), initial.budget_bytes / charge);
+    assert_eq!(at_limit.live_budget_page_bytes, owners.len() * charge);
+    assert!(at_limit.live_budget_page_bytes + charge > initial.budget_bytes);
+    assert!(matches!(
+        ProtectedBytes::zeroed(capacity),
+        Err(CryptoError::ResourceUnavailable)
+    ));
+    let failure = windows_memory_failure()
+        .unwrap()
+        .expect("explicit shared budget rejection");
+    assert_eq!(failure.category, "page-budget");
+    assert_eq!(failure.win32_error, 0);
+    drop(owners);
+    let released = windows_memory_status().unwrap();
+    assert_eq!(released.live_capacity_bytes, 0);
+    assert_eq!(released.live_budget_page_bytes, 0);
+    assert_eq!(released.live_locked_page_bytes, 0);
+    assert_eq!(released.live_regions, 0);
+    println!(
+        "PASS windows-concurrent-page-budget workers=8 charged={} rejected=page-budget win32=0 released=0",
+        at_limit.live_budget_page_bytes
+    );
+}

@@ -625,6 +625,11 @@ try {
     if ($ServiceDiagnostics) {
         Add-OwnedPath $ownedPaths $diagnosticPath
         [IO.File]::WriteAllText($diagnosticPath, [string]::Empty)
+        if ($OnePuxMemoryDiagnostics) {
+            $quotaDeniedDiagnosticPath = Join-Path $diagnosticDir 'quota-denied.txt'
+            Add-OwnedPath $ownedPaths $quotaDeniedDiagnosticPath
+            [IO.File]::WriteAllText($quotaDeniedDiagnosticPath, [string]::Empty)
+        }
         Set-ExactTreeAcl $diagnosticDir @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
         Assert-ExactNodeAcl $diagnosticDir @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
         Assert-ExactNodeAcl $diagnosticPath @('SYSTEM', $installerName, "NT SERVICE\$serviceName")
@@ -717,6 +722,25 @@ try {
     $binPath = "`"$custody`" service --bootstrap `"$bootstrap`" --vault-id $vaultId --vault `"$vault`" --device $device"
     if ($ServiceDiagnostics) {
         $binPath += " --service-diagnostics `"$diagnosticPath`""
+    }
+    if ($OnePuxMemoryDiagnostics) {
+        $deniedBinPath = $binPath.Replace($diagnosticPath, $quotaDeniedDiagnosticPath)
+        Invoke-Checked 'sc.exe' @('config', $serviceName, 'binPath=', $deniedBinPath)
+        $quotaNegativeFailure = $null
+        try {
+            & (Join-Path $repo 'scripts\test-windows-memory-quota-denial.ps1') -ServiceName $serviceName -DiagnosticPath $quotaDeniedDiagnosticPath
+        }
+        catch { $quotaNegativeFailure = $_ }
+        try {
+            Invoke-Checked 'sc.exe' @('config', $serviceName, 'binPath=', $binPath)
+        }
+        catch {
+            if ($null -ne $quotaNegativeFailure) {
+                throw [AggregateException]::new('Quota negative and command restoration failed', @($quotaNegativeFailure.Exception, $_.Exception))
+            }
+            throw
+        }
+        if ($null -ne $quotaNegativeFailure) { throw $quotaNegativeFailure }
     }
     Invoke-Checked 'sc.exe' @('config', $serviceName, 'binPath=', $binPath)
     Write-ServiceDiagnostic 'before-start' $serviceName

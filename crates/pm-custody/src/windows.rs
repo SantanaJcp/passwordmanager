@@ -76,6 +76,7 @@ pub(super) const HUMAN_MAGIC: &[u8; 5] = b"PMH1\n";
 const AGENT_MAGIC: &[u8; 5] = b"PMA1\n";
 static SERVICE_ARGUMENTS: std::sync::OnceLock<Vec<OsString>> = std::sync::OnceLock::new();
 static SERVICE_FAILED: AtomicBool = AtomicBool::new(false);
+static SERVICE_MEMORY_QUOTA_FAILED: AtomicBool = AtomicBool::new(false);
 
 struct ServiceControlContext {
     stop: WindowsStopEvent,
@@ -261,6 +262,15 @@ impl ServiceDiagnostics {
         writeln!(file, "phase=protected-memory-status live-capacity={} budget={} live-payload-pages={} live-locked-pages={} live-budget-pages={} page-bytes={} live-regions={} working-set-min={} working-set-max={} working-set-flags={}", status.live_capacity_bytes, status.budget_bytes, status.live_payload_page_bytes, status.live_locked_page_bytes, status.live_budget_page_bytes, status.page_bytes, status.live_regions, status.working_set_min_bytes, status.working_set_max_bytes, status.working_set_flags).map_err(|_| Failure::Unavailable)?;
         file.sync_all().map_err(|_| Failure::Unavailable)
     }
+
+    fn memory_quota_failure(
+        &self,
+        error: pm_crypto::WindowsMemoryQuotaError,
+    ) -> Result<(), Failure> {
+        let mut file = self.file.lock().map_err(|_| Failure::Unavailable)?;
+        writeln!(file, "phase=protected-memory-quota-failure category=PROTECTED_MEMORY_QUOTA_UNAVAILABLE reason={} win32-error={}", error.category, error.win32_error).map_err(|_| Failure::Unavailable)?;
+        file.sync_all().map_err(|_| Failure::Unavailable)
+    }
 }
 
 fn validate_diagnostic_file(file: &File) -> Result<(), Failure> {
@@ -328,6 +338,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
 
 fn service_dispatch(arguments: Vec<OsString>) -> Result<(), Failure> {
     SERVICE_FAILED.store(false, Ordering::Release);
+    SERVICE_MEMORY_QUOTA_FAILED.store(false, Ordering::Release);
     SERVICE_ARGUMENTS
         .set(arguments)
         .map_err(|_| Failure::Unavailable)?;
@@ -397,7 +408,11 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
                 context.publish(SERVICE_RUNNING, SERVICE_ACCEPT_STOP, 0)
             })
         });
-    let exit_code = u32::from(result.is_err() || SERVICE_FAILED.load(Ordering::Acquire));
+    let exit_code = if SERVICE_MEMORY_QUOTA_FAILED.load(Ordering::Acquire) {
+        windows_sys::Win32::Foundation::ERROR_NOT_ENOUGH_QUOTA
+    } else {
+        u32::from(result.is_err() || SERVICE_FAILED.load(Ordering::Acquire))
+    };
     let stopped = context.publish(SERVICE_STOPPED, 0, exit_code);
     let ServiceControlContext { stop, .. } = *context;
     let closed = stop.close().map_err(|_| Failure::Unavailable);
@@ -562,8 +577,12 @@ fn serve_vault(
             diagnostics.record(ServiceDiagnosticPhase::ArgsOk)?;
         }
         // Establish the quota before DPAPI/bootstrap/audit can place a secret.
-        if pm_crypto::prepare_windows_protected_memory().is_err() {
+        if let Err(error) = pm_crypto::prepare_windows_protected_memory() {
+            SERVICE_MEMORY_QUOTA_FAILED.store(true, Ordering::Release);
             eprintln!("PROTECTED_MEMORY_QUOTA_UNAVAILABLE");
+            if let Some(diagnostics) = diagnostics.as_ref() {
+                diagnostics.memory_quota_failure(error)?;
+            }
             return Err(Failure::Unavailable);
         }
         if let Some(diagnostics) = diagnostics.as_ref() {

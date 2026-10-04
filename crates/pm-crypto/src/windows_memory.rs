@@ -191,14 +191,45 @@ fn payload_page_bytes(len: usize) -> usize {
 pub(crate) fn allocated(len: usize) {
     LIVE_PAYLOAD_PAGES.fetch_add(payload_page_bytes(len), Ordering::AcqRel);
     LIVE_LOCKED_PAGES.fetch_add(locked_page_bytes(len), Ordering::AcqRel);
-    LIVE_BUDGET_PAGES.fetch_add(budget_page_bytes(len), Ordering::AcqRel);
     LIVE_REGIONS.fetch_add(1, Ordering::AcqRel);
+}
+
+// Charge pending allocations too: concurrent owners must never exceed the
+// process page budget between reservation and the checked native lock.
+pub(crate) fn reserve_pages(len: usize) -> bool {
+    let charge = budget_page_bytes(len);
+    LIVE_BUDGET_PAGES
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current
+                .checked_add(charge)
+                .filter(|next| *next <= crate::root::LOCKED_SECRET_BUDGET)
+        })
+        .is_ok()
+}
+
+pub(crate) fn release_pages(len: usize) {
+    LIVE_BUDGET_PAGES.fetch_sub(budget_page_bytes(len), Ordering::AcqRel);
+}
+
+/// # Safety
+/// `pointer` must be a live, uniquely owned sodium_malloc(len) allocation
+/// from the pinned Windows libsodium1.0.22 guarded-memory backend.
+pub(crate) unsafe fn lock_payload_and_canary(pointer: std::ptr::NonNull<u8>, len: usize) -> i32 {
+    // SAFETY: the pinned allocator places the 16-byte canary immediately
+    // before the user region. Verify all of its accessible pages, including
+    // a separate canary page for page-aligned payloads. Guards stay no-access.
+    unsafe {
+        libsodium_sys::sodium_mlock(
+            pointer.as_ptr().sub(CANARY_BYTES).cast(),
+            len + CANARY_BYTES,
+        )
+    }
 }
 
 pub(crate) fn released(len: usize) {
     LIVE_PAYLOAD_PAGES.fetch_sub(payload_page_bytes(len), Ordering::AcqRel);
     LIVE_LOCKED_PAGES.fetch_sub(locked_page_bytes(len), Ordering::AcqRel);
-    LIVE_BUDGET_PAGES.fetch_sub(budget_page_bytes(len), Ordering::AcqRel);
+    release_pages(len);
     LIVE_REGIONS.fetch_sub(1, Ordering::AcqRel);
 }
 
