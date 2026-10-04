@@ -370,7 +370,7 @@ fn serve_one(stream: impl Read + Write, db: &Path, config: Arc<ServerConfig>) ->
     let store = OpaqueSyncStore::create(db).map_err(|_| ())?;
     let store = store.session_connection().map_err(|_| ())?;
     drop(opening);
-    let result = (|| loop {
+    let result: Result<(), ()> = (|| loop {
         let dispatching = timing::Span::new("server_dispatch");
         let response = dispatch_response(&store, &peer, &request)?;
         drop(dispatching);
