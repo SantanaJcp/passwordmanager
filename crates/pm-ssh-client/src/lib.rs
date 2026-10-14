@@ -305,10 +305,9 @@ impl Signer for CustodySigner<'_> {
             to_sign.zeroize();
             return Err(Error::Protocol);
         }
-        let mut request = vec![6];
-        put_bytes(&mut request, &to_sign)?;
+        let request = field_frame(6, &to_sign)?;
         write_frame(self.stream, &request).await?;
-        request.zeroize();
+        drop(request);
         let response = read_frame(self.stream).await?;
         let mut cursor = Cursor::new(&response);
         if cursor.byte()? != 7 {
@@ -360,7 +359,7 @@ pub async fn serve(
             accepted=consumer.accept()=>{
                 let(mut stream,_)=accepted?;if peer_uid(&stream)?!=profile.consumer_uid(){continue}
                 let request=read_frame(&mut stream).await.inspect_err(|error|error.log_internal("consumer-read"))?;
-                let reference=parse_consumer_reference(&request).inspect_err(|error|error.log_internal("consumer-parse"))?;let Some(connection)=retained.get(&reference) else{write_frame(&mut stream,&[1]).await?;continue};
+                let reference=parse_consumer_reference(&request).inspect_err(|error|error.log_internal("consumer-parse"))?;let Some(connection)=retained.get(reference) else{write_frame(&mut stream,&[1]).await?;continue};
                 match connection.handle.channel_open_session().await{Ok(channel)=>{channel.close().await.map_err(Error::from)?;write_frame(&mut stream,&[0]).await?;}Err(error)=>{Error::from(error).log_internal("consumer-channel");write_frame(&mut stream,&[1]).await?;}}
             }
         }
@@ -371,7 +370,7 @@ pub async fn serve(
 async fn authenticate(
     profile: &Profile,
     stream: &mut UnixStream,
-) -> Result<(String, Retained, Vec<u8>), Error> {
+) -> Result<(String, Retained, pm_crypto::ProtectedBytes), Error> {
     let request = read_frame(stream).await?;
     let mut cursor = Cursor::new(&request);
     if cursor.byte()? != 4 {
@@ -461,12 +460,7 @@ async fn authenticate(
         client::AuthResult::Success => {
             let reference = random_reference()?;
             let observed = profile.host_key_sha256();
-            let json = format!(
-                "{{\"kind\":\"ssh_authenticated_connection\",\"consumer_ref\":\"{reference}\",\"host_key_sha256\":\"{observed}\",\"username\":\"{}\"}}",
-                profile.username()
-            );
-            let mut response = vec![0];
-            put_bytes(&mut response, json.as_bytes())?;
+            let response = authentication_response(&reference, observed, profile.username())?;
             Ok((reference, Retained { handle }, response))
         }
         client::AuthResult::Failure {
@@ -489,22 +483,61 @@ pub async fn consume(socket: &Path, reference: &str) -> Result<(), Error> {
         return Err(Error::Protocol);
     }
     let mut stream = UnixStream::connect(socket).await?;
-    let mut request = vec![1];
-    put_bytes(&mut request, reference.as_bytes())?;
+    let request = field_frame(1, reference.as_bytes())?;
     write_frame(&mut stream, &request).await?;
     match &*read_frame(&mut stream).await? {
         [0] => Ok(()),
         _ => Err(Error::Rejected),
     }
 }
-fn parse_consumer_reference(request: &[u8]) -> Result<String, Error> {
+fn parse_consumer_reference(request: &[u8]) -> Result<&str, Error> {
     let mut cursor = Cursor::new(request);
     if cursor.byte()? != 1 {
         return Err(Error::Protocol);
     }
-    let reference = cursor.text()?.to_owned();
+    let reference = cursor.text()?;
     cursor.finish()?;
     Ok(reference)
+}
+// Each field is borrowed until the exact output owner has been locked.
+fn field_frame(opcode: u8, value: &[u8]) -> Result<pm_crypto::ProtectedBytes, Error> {
+    field_parts(opcode, &[value])
+}
+fn field_parts(opcode: u8, parts: &[&[u8]]) -> Result<pm_crypto::ProtectedBytes, Error> {
+    let length = parts.iter().try_fold(0usize, |size, part| {
+        size.checked_add(part.len()).ok_or(Error::Protocol)
+    })?;
+    let size = length.checked_add(5).ok_or(Error::Protocol)?;
+    let encoded_length = u32::try_from(length).map_err(|_| Error::Protocol)?;
+    let mut output = pm_crypto::ProtectedWriter::new(size).map_err(Error::Memory)?;
+    output.put(&[opcode]).map_err(Error::Memory)?;
+    output
+        .put(&encoded_length.to_be_bytes())
+        .map_err(Error::Memory)?;
+    for part in parts {
+        output.put(part).map_err(Error::Memory)?;
+    }
+    output.finish_exact().map_err(Error::Memory)
+}
+fn authentication_response(
+    reference: &str,
+    observed: &str,
+    username: &str,
+) -> Result<pm_crypto::ProtectedBytes, Error> {
+    // Fields are the generated URL-safe reference and validated installed
+    // hash/username; preserve their existing JSON representation byte for byte.
+    field_parts(
+        0,
+        &[
+            b"{\"kind\":\"ssh_authenticated_connection\",\"consumer_ref\":\"",
+            reference.as_bytes(),
+            b"\",\"host_key_sha256\":\"",
+            observed.as_bytes(),
+            b"\",\"username\":\"",
+            username.as_bytes(),
+            b"\"}",
+        ],
+    )
 }
 fn random_reference() -> Result<String, Error> {
     let mut bytes = [0; 32];
@@ -651,3 +684,6 @@ impl<'a> Cursor<'a> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod error_propagation_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod wire_memory_tests;

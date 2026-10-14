@@ -28,6 +28,7 @@ pub(crate) fn serve_agent(
     service: &AgentService<'_>,
     observed_rpk: &[u8],
 ) -> Result<(), Failure> {
+    service.admission.verify_local()?;
     let peer = AgentPeer::from_transport_rpk(observed_rpk).map_err(|_| Failure::Unavailable)?;
     let vault = DelegatedVault::open(
         service.path,
@@ -75,7 +76,13 @@ fn serve_agent_requests(
         let Some(request) = read_agent_frame(tls).map_err(AgentReadFailure::public_failure)? else {
             return Ok(());
         };
-        write_frame(tls, &handle_attempt_request(service, peer, &request)?)?;
+        let response = handle_attempt_request(service, peer, &request)?;
+        write_frame(tls, &response)?;
+        // A current revoked identity has no further delegated operations. Close
+        // its channel so all native/authenticated admission permits are freed.
+        if response == [5] {
+            return Ok(());
+        }
     }
 }
 
@@ -186,6 +193,7 @@ fn handle_attempt_request(
     request: &[u8],
 ) -> Result<Vec<u8>, Failure> {
     let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
+    service.admission.verify_local()?;
     verify_admission_custody(service, opcode)?;
     let attempts = AttemptVault::open(
         DelegatedVault::open(

@@ -4,6 +4,9 @@
 import base64, fcntl, hashlib, json, os, pathlib, pty, select, shutil, signal
 import socket, sqlite3, ssl, stat, struct, subprocess, sys, tempfile, termios, threading, time, urllib.parse, urllib.request
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "pm-custody/tests"))
+import chef_installed_fixture as installed_fixture
+
 CUSTODIAN,HUMAN,BRIDGE,UNTRUSTED,DESTINATION=1,2,3,4,5
 MASTER=b"synthetic ticket 14 master"
 PASSWORD="synthetic-ticket14-initial-password"
@@ -20,11 +23,13 @@ def identity(uid,tty=None):
 
 def run_uid(uid,cmd,*,input=None,check=True,env=None,timeout=40):
  merged=os.environ.copy();merged.update(env or {})
- return subprocess.run([str(x) for x in cmd],input=input,capture_output=True,check=check,preexec_fn=identity(uid),env=merged,timeout=timeout)
+ cmd, change = installed_fixture.prepare(uid, cmd, identity(uid))
+ return subprocess.run([str(x) for x in cmd],input=input,capture_output=True,check=check,preexec_fn=change,env=merged,timeout=timeout)
 
 def start_uid(uid,cmd,*,env=None,cwd=None,stdout=subprocess.PIPE,stderr=subprocess.PIPE):
  merged=os.environ.copy();merged.update(env or {})
- return subprocess.Popen([str(x) for x in cmd],preexec_fn=identity(uid),env=merged,cwd=cwd,stdout=stdout,stderr=stderr)
+ cmd, change = installed_fixture.prepare(uid, cmd, identity(uid))
+ return subprocess.Popen([str(x) for x in cmd],preexec_fn=change,env=merged,cwd=cwd,stdout=stdout,stderr=stderr)
 
 def stop(p):
  if p.poll() is None:
@@ -251,7 +256,8 @@ def latest_waiting_request(vault):
 
 def main():
  custody_src,cli_src,web_src,bridge_src,kc_src,cft_src,extension_src,java_src=map(lambda x:pathlib.Path(x).resolve(),sys.argv[1:])
- root=pathlib.Path(tempfile.mkdtemp(prefix="pm-passkey-login-lab-"));procs=[]
+ installed_fixture.initialize(custody_src)
+ root=pathlib.Path(tempfile.mkdtemp(prefix="pm-pkl-"));procs=[]
  try:
   root.chmod(0o711);custody,cli_bin,web,bridge=[root/x for x in ("pm-custody","pm","pm-web-auth","pm-passkey-bridge")]
   for src,dst in ((custody_src,custody),(cli_src,cli_bin),(web_src,web),(bridge_src,bridge)):shutil.copy2(src,dst);dst.chmod(0o755)
@@ -278,6 +284,9 @@ def main():
   daemon=start_uid(CUSTODIAN,[custody,"serve-vault","--bootstrap",boot,"--agent-socket",run/"agent.sock","--human-socket",run/"human.sock","--vault",vault,"--device",DEVICE]);procs.append(daemon);wait_path(daemon,run/"agent.sock");wait_path(daemon,run/"human.sock")
   time.sleep(1)
   human_auth(custody,hk,hprof,run/"human.sock","setup",ap.read_bytes(),up.read_bytes())
+  installed_fixture.stop_and_unlink(daemon, [run/"agent.sock",run/"human.sock"], timeout=8);procs.remove(daemon)
+  installed_fixture.migrate(custody,boot,vault,DEVICE,(up,UNTRUSTED))
+  daemon=start_uid(CUSTODIAN,[custody,"serve-vault","--bootstrap",boot,"--agent-socket",run/"agent.sock","--human-socket",run/"human.sock","--vault",vault,"--device",DEVICE]);procs.append(daemon);wait_path(daemon,run/"agent.sock");wait_path(daemon,run/"human.sock")
   conf=pathlib.Path(str(bridge)+".conf");conf.write_text("\n".join(["PMN1",f"profile={aprof}",f"private={ak}",f"socket={run/'agent.sock'}",f"extension_origin={EXTENSION_ORIGIN}",f"origin={origin}","rp_id=auth.test",""]));os.chown(conf,BRIDGE,BRIDGE);conf.chmod(0o400)
   home=bh/"browser";home.mkdir();os.chown(home,BRIDGE,BRIDGE);home.chmod(0o700)
   for x in (home/"tmp",home/"registration-profile",home/".pki/nssdb"):x.mkdir(parents=True,exist_ok=True);chown_tree(home,BRIDGE)
@@ -409,6 +418,9 @@ def main():
   print("PASS passkey-login-negative challenge-expired=denied provider-restart=integrity-failure revoke-before-UPUV=denied os-authenticator=unused")
   print("LIMIT cft=laboratory-instrument product-browser=ticket33-NOT_RUN six-native-targets=NOT_RUN")
  finally:
+  if "home" in locals():
+   for log in home.glob("*chrome.log"):
+    shutil.copyfile(log, installed_fixture.ROOT / log.name)
   for p in reversed(procs):stop(p)
   shutil.rmtree(root,ignore_errors=True)
 if __name__=="__main__":main()

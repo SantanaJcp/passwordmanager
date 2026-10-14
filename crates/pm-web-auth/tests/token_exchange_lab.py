@@ -10,6 +10,7 @@ import signal
 import shutil
 import socket
 import ssl
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -18,6 +19,8 @@ import time
 import urllib.parse
 
 import web_auth_lab as common
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "pm-custody/tests"))
+import chef_installed_fixture as installed_fixture
 
 CUSTODIAN, HUMAN, AGENT_A, AGENT_B, PROVIDER, DESTINATION = 1, 2, 3, 4, 5, 6
 DEVICE = "11111111111111111111111111111111"
@@ -298,7 +301,7 @@ def wait_terminal(cli, env, attempt):
 
 
 def hostile_server(port, cert, key, capture, mode, subject_token):
-    code = r'''import json,pathlib,socket,ssl,sys
+    code = r'''import json,pathlib,socket,ssl,sys,time
 port=int(sys.argv[1]);cert,key,capture,mode,token=sys.argv[2:]
 ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(cert,key)
 s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',port));s.listen();pathlib.Path(capture+'.ready').write_text('1')
@@ -309,6 +312,11 @@ with ctx.wrap_socket(c,server_side=True) as t:
  head,rest=data.split(b'\r\n\r\n',1);length=int(next(x.split(b':',1)[1] for x in head.split(b'\r\n') if x.lower().startswith(b'content-length:')))
  while len(rest)<length:rest+=t.recv(4096)
  pathlib.Path(capture).write_bytes(head+b'\r\n\r\n'+rest)
+ if mode=='hold':
+  end=time.monotonic()+20
+  while not pathlib.Path(capture+'.release').exists():
+   assert time.monotonic()<end, 'synthetic hold did not release'
+   time.sleep(.01)
  if mode=='reflect':
   body=json.dumps({'access_token':token,'expires_in':300,'token_type':'Bearer','issued_token_type':'urn:ietf:params:oauth:token-type:access_token','scope':'target.read'}).encode()
   t.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body)
@@ -328,6 +336,7 @@ def main():
     custody, cli, adapter, kc_source, java_source = map(
         lambda value: pathlib.Path(value).resolve(), sys.argv[1:]
     )
+    installed_fixture.initialize(custody)
     root = pathlib.Path(tempfile.mkdtemp(prefix="pm-token-exchange-linux-lab-"))
     processes = []
     paused_process = None
@@ -482,18 +491,57 @@ def main():
         assert audience_terminal["state"] == "FAILED" and audience_terminal["result"] is None, audience_terminal
         common.stop(daemon); processes.remove(daemon); common.stop(web); processes.remove(web)
 
-        # With no provider worker an accepted attempt remains CREATED and can be
-        # cancelled through the public TLS/RPK API; cancellation stays terminal.
-        daemon = common.start_uid(CUSTODIAN, [local_custody, "serve-vault", "--bootstrap", bootstrap,
+        # Ordinary installed routing uses the real adapter. A controlled TLS
+        # destination holds its response, giving cancellation a measured worker
+        # boundary rather than relying on a race with an absent worker.
+        for endpoint in (runtime / "agent.sock", runtime / "human.sock"):
+            metadata = endpoint.lstat()
+            assert stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == CUSTODIAN
+            assert daemon.poll() == -signal.SIGTERM
+            endpoint.unlink()
+        installed_fixture.migrate(local_custody, bootstrap, vault, DEVICE, (agent_b_pub, AGENT_B))
+        configured = installed_fixture.run(CUSTODIAN, [local_custody, "provision-adapters",
+            "--bootstrap", bootstrap, "--vault", vault, "--device", DEVICE,
+            "--integration", "keycloak-token-exchange", "--profile", "keycloak-exchange-lab",
+            "--method", "token_exchange", "--endpoint", provider_socket, "--adapter-uid", str(PROVIDER)])
+        assert configured.returncode == 0 and configured.stderr == b"", configured
+        port = common.free_port(); cancel_capture = destination_home / "cancel.request"
+        server = hostile_server(port, auth_cert, auth_key, cancel_capture, "hold", "unused"); processes.append(server)
+        common.wait_path(server, pathlib.Path(str(cancel_capture) + ".ready"))
+        profile.write_text(profile_text(port, provider_home / "ca.der", subject, token_path="/token"))
+        os.chown(profile, PROVIDER, PROVIDER); profile.chmod(0o400)
+        web = start_adapter(local_adapter, profile, provider_socket, provider_log); processes.append(web)
+        common.wait_path(web, provider_socket)
+        ordinary = [local_custody, "serve-vault", "--bootstrap", bootstrap,
             "--agent-socket", runtime / "agent.sock", "--human-socket", runtime / "human.sock",
-            "--vault", vault, "--device", DEVICE]); processes.append(daemon)
+            "--vault", vault, "--device", DEVICE]
+        command, preexec = installed_fixture.prepare(CUSTODIAN, ordinary, common.identity(CUSTODIAN))
+        daemon = subprocess.Popen(command, preexec_fn=preexec, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        processes.append(daemon)
         common.wait_path(daemon, runtime / "agent.sock"); common.wait_path(daemon, runtime / "human.sock")
         _, cancellable = start_attempt(local_cli, env, item, "7")
         assert cancellable.returncode == 0
         cancel_id = json.loads(cancellable.stdout)["result"]["attempt_id"]
+        common.wait_path(server, cancel_capture)
+        probe = sqlite3.connect(vault, timeout=0)
+        try:
+            probe.execute("BEGIN IMMEDIATE")
+            probe.rollback()
+            lock_observation = "available"
+        except sqlite3.OperationalError as error:
+            lock_observation = str(error)
+        finally:
+            probe.close()
+        (installed_fixture.ROOT / "cancel-boundary.json").write_text(json.dumps({
+            "attempt_id":cancel_id,"provider_post_observed":True,"write_transaction":lock_observation},indent=2)+"\n")
         cancelled = common.cli(AGENT_A, local_cli, env, ["--json", "auth", "cancel", "--attempt", cancel_id])
         assert json.loads(cancelled.stdout)["result"]["state"] == "CANCELLED"
+        release = pathlib.Path(str(cancel_capture) + ".release")
+        release.touch(); os.chown(release, DESTINATION, DESTINATION)
+        terminal, _ = wait_terminal(local_cli, env, cancel_id)
+        assert terminal["state"] == "CANCELLED" and terminal["result"] is None
         common.stop(daemon); processes.remove(daemon)
+        common.stop(web); processes.remove(web); common.stop(server); processes.remove(server)
 
         # Keep a provider listening, then suspend before admission. The request is
         # rejected and the destination observes no POST. The lower-level vault test
@@ -535,6 +583,8 @@ def main():
         if scan_error is not None:
             raise scan_error
     finally:
+        if "cancel_capture" in locals() and cancel_capture.exists():
+            shutil.copyfile(cancel_capture, installed_fixture.ROOT / "synthetic-cancel.request")
         cleanup_owned_lab(processes, root, paused_process)
 
     print("PASS token-exchange-p2 keycloak=26.7.3 exchange=standard-v2 A!=B subject+actor+audience+scope=bound tls=1.3")

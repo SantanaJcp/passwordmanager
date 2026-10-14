@@ -18,8 +18,10 @@ import time
 
 from linux_lab import as_uid, create_vault, expect_unavailable, start_as, stop, wait_for_sockets, wire_fields
 
+os.environ["PM_TMUX_SERVER"] = f"{os.environ.get("PM_TMUX_SERVER", "pm-ticket24")}-{os.getpid()}"
+
 if len(sys.argv) <= 1 or sys.argv[1] != "provider":
-    from tui_content_lab import wait_information, screen, send, start_tui, tmux, wait_text
+    from tui_content_lab import wait_information, screen, send, tmux, wait_text
 
 CUSTODIAN, HUMAN, AGENT_A, AGENT_B, AGENT_C, PROVIDER = 1, 0, 3, 4, 6, 5
 DEVICE = "24242424242424242424242424242424"
@@ -150,15 +152,59 @@ def close_tui(root):
     # tmux exits its server asynchronously after the last client; observe the
     # session boundary above, then allow that owned server to finish teardown.
     time.sleep(0.1)
+    stop_owned_tmux(root)
+
+
+OWNED_TMUX = {}
+
+
+def start_tui(root, binary, profile, key, runtime, password, *, idle=30, reveal=1, copy=2):
+    # Record creation immediately after new-session, before later UI steps can fail.
+    from tui_content_lab import TMUX_SERVER
+    assert TMUX_SERVER.startswith("pm") and TMUX_SERVER != "default"
+    # tmux uses its native /tmp path, independently of Python's fixture tempdir.
+    endpoint = pathlib.Path("/tmp") / f"tmux-{os.getuid()}" / TMUX_SERVER
+    assert root not in OWNED_TMUX and not endpoint.exists(), endpoint
+    raw = root / "terminal.raw"
+    command = [binary, "tui", "--profile", profile, "--private", key,
+        "--socket", runtime / "human.sock", "--idle-seconds", str(idle),
+        "--reveal-seconds", str(reveal), "--copy-seconds", str(copy)]
+    tmux(root, "new-session", "-d", "-x", "80", "-y", "24", "--", *command)
+    metadata = endpoint.lstat()
+    assert stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == HUMAN
+    pid = int(tmux(root, "display-message", "-p", "#{pid}").stdout)
+    assert pathlib.Path(f"/proc/{pid}").stat().st_uid == HUMAN
+    OWNED_TMUX[root] = (endpoint, metadata.st_dev, metadata.st_ino, pid)
+    tmux(root, "pipe-pane", "-o", f"cat >> {raw}")
+    wait_text(root, "Password required")
+    send(root, password.decode(), enter=True, hidden=True)
+    wait_text(root, "Unlocked: selection never reveals secrets")
+    return raw
 
 
 def stop_owned_tmux(root):
+    if root not in OWNED_TMUX:
+        return  # This fixture never created a server; do not contact any socket.
+    endpoint, device, inode, pid = OWNED_TMUX[root]
+    metadata = endpoint.lstat()
+    assert stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == HUMAN
+    assert (metadata.st_dev, metadata.st_ino) == (device, inode)
     result = tmux(root, "has-session", check=False)
     if result.returncode == 0:
+        assert int(tmux(root, "display-message", "-p", "#{pid}").stdout) == pid
         tmux(root, "kill-server")
-        return
-    expected = b"no server running on"
-    assert result.returncode == 1 and expected in result.stderr, result
+    else:
+        assert result.returncode == 1 and b"no server running on" in result.stderr, result
+    deadline = time.monotonic() + 5
+    while pathlib.Path(f"/proc/{pid}").exists():
+        assert time.monotonic() < deadline, pid
+        time.sleep(.05)
+    metadata = endpoint.lstat()
+    assert stat.S_ISSOCK(metadata.st_mode) and metadata.st_uid == HUMAN
+    assert (metadata.st_dev, metadata.st_ino) == (device, inode)
+    endpoint.unlink()
+    assert not endpoint.exists()
+    del OWNED_TMUX[root]
 
 
 def remove_as_owner(path, uid):

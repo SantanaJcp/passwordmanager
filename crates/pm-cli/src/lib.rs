@@ -60,6 +60,8 @@ pub fn run(arguments: &[OsString]) -> Result<(), CliError> {
         [group, command, path] if group == "vault" && command == "open" => {
             open(Path::new(path)).map_err(|e| CliError::new(e, 5))
         }
+        [command, arguments @ ..] if command == "tui" => pm_custody::human_tui(arguments)
+            .map_err(|error| CliError::new(error.to_string(), error.exit_code())),
         _ => delegated(arguments),
     }
 }
