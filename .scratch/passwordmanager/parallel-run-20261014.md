@@ -56,6 +56,16 @@ La política de ancestros Windows procede del TCB administrativo ya confirmado (
 
 `pm tui` está confirmado en spec §11 y agent-identity, no es una nueva puerta de elección de nombre. Nuevo escritor exclusivo expone la entrada humana mediante código existente, sin shell/PATH/role flag ni permisos nuevos; no toca daemon fuera del bridge `lib.rs`. El owner daemon continúa admisión G4 (4 conexiones/agente, no global4) en sus propios archivos. Revisores Claude R1 read-only inspeccionan SHAs fijados, no archivos en vivo. Firmas reales, plataformas ausentes y aceptación humana siguen siendo externas.
 
+## Checkpoint de revisiones y candidatos
+
+- Daemon correctivo `894aa360`: Skeptic/Architect R2 **PASS de fuente** sobre D1/D2; última ronda permitida. RED→GREEN local del autor, no ejecutado por revisores. [Triage R2](reviews/20261014-unix-memory-r2/triage.md). No integración exacta aún.
+- Entrada humana `4c3a90c8`: GREEN Linux local y Claude R1 sin P0/P1. Nativos NOT_RUN. SID `f56c993b` también sin P0/P1 en revisión de fuente; epoch depende de una conexión/instancia actual.
+- Config instalada `2801c489`: primitiva comprometida y resultado terminal recibido. R1 deja riesgo inferido de ACL stock ProgramData frente a política de ancestros y gaps de corpus inicial. [Triage kernel/CLI R1](reviews/20261014-kernel-cli-r1/triage.md).
+- Follow-up nativo `e18cf389` completado y resultado recibido: SID round-trip/release checked, corpus native inicial estable y ancestros propios, docs rename-lock/layout corregidas; shared Linux6/6/fmt/clippy0. Windows build/runtime/RED→GREEN **NOT_RUN**, hipótesis ProgramData aún abierta.
+- Distribución fija ProgramData **datos**, no la nueva config administrativa pública. Corrección técnica acotada al mismo owner: propuesta explícita de PUBLIC cfg/fixture protegida ProgramFiles/config, sin mover datos/código, aprender owners, ampliar ACLs o fallback de ubicación. Corregir afirmación share-lock, corpus initial-open, SID round-trip e invariant de conexión. Medición nativa sigue pendiente de permiso 3; no cerrar riesgo por defaults supuestos.
+
+No batch PASS, cambios de tickets, master/PR/publicación/instalación ni CI. Puertas 3 y 4 siguen sin respuesta. `kitchen integrate`, clean/52 y caller Windows permanecen pendientes. Follow-up de implementación `native-profile-proof-r3` no es tercera revisión.
+
 ## Seguimiento
 
 Los taskIds, clientRequestIds y resultados del despacho se guardan en el registro JSON adyacente `parallel-run-20261014.tasks.json`, propiedad exclusiva del coordinador. No son estados duplicados de los tickets.

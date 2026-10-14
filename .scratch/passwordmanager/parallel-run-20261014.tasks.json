@@ -267,6 +267,223 @@
       "model": "gpt-6.1-sol",
       "followUpOf": "daemon-implementation",
       "delegationBase": "7b7026e0099ec87114dbb8e962e8e398bee18a71"
+    },
+    {
+      "lane": "review-skeptic-r2",
+      "clientRequestId": "pm-chef-20261014-unix-memory-review-skeptic-r2",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-unix-memory-review-skeptic-r2",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-unix-memory-review-skeptic-r2",
+      "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A48a5063a-6d33-41df-a90e-6794d7402ab6%253Adelegate-task%253Apm-chef-20261014-unix-memory-review-skeptic-r2:ordinal:1",
+      "statusAtDispatch": "running",
+      "terminalStatus": "completed",
+      "provider": "claudeAgent",
+      "model": "claude-opus-5-5",
+      "options": {
+        "effort": "high",
+        "fastMode": false
+      },
+      "mode": "bounded-prior-D1-D2",
+      "round": 2,
+      "pinnedScopes": [
+        {
+          "base": "7b7026e0099ec87114dbb8e962e8e398bee18a71",
+          "head": "894aa3600610e23a1834d831668bf66dc2bb7112",
+          "scope": "Only prior D1/D2; final permitted round"
+        }
+      ],
+      "report": "reviews/20261014-unix-memory-r2/skeptic.md"
+    },
+    {
+      "lane": "review-architect-r2",
+      "clientRequestId": "pm-chef-20261014-unix-memory-review-architect-r2",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-unix-memory-review-architect-r2",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-unix-memory-review-architect-r2",
+      "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A48a5063a-6d33-41df-a90e-6794d7402ab6%253Adelegate-task%253Apm-chef-20261014-unix-memory-review-architect-r2:ordinal:1",
+      "statusAtDispatch": "running",
+      "terminalStatus": "completed",
+      "provider": "claudeAgent",
+      "model": "claude-opus-5-5",
+      "options": {
+        "effort": "high",
+        "fastMode": false
+      },
+      "mode": "bounded-prior-D1-D2",
+      "round": 2,
+      "pinnedScopes": [
+        {
+          "base": "7b7026e0099ec87114dbb8e962e8e398bee18a71",
+          "head": "894aa3600610e23a1834d831668bf66dc2bb7112",
+          "scope": "Only prior D1/D2; final permitted round"
+        }
+      ],
+      "report": "reviews/20261014-unix-memory-r2/architect.md"
+    },
+    {
+      "lane": "kernel-cli-review-skeptic-r1",
+      "clientRequestId": "pm-chef-20261014-kernel-cli-review-skeptic-r1",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-kernel-cli-review-skeptic-r1",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-kernel-cli-review-skeptic-r1",
+      "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A48a5063a-6d33-41df-a90e-6794d7402ab6%253Adelegate-task%253Apm-chef-20261014-kernel-cli-review-skeptic-r1:ordinal:1",
+      "statusAtDispatch": "running",
+      "terminalStatus": "completed",
+      "provider": "claudeAgent",
+      "model": "claude-opus-5-5",
+      "options": {
+        "effort": "high",
+        "fastMode": false
+      },
+      "mode": "design+diff",
+      "round": 1,
+      "pinnedScopes": [
+        {
+          "label": "SID-only kernel identity",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "f56c993b2ba3d770f6aae7f5c3401bf0263d98e1",
+          "paths": [
+            "crates/pm-native-channel/src/windows.rs"
+          ]
+        },
+        {
+          "label": "Windows PUBLIC installed-config capability",
+          "base": "a900a69f0a57e4ff09baa458dae69f278d29b250",
+          "head": "2801c4893b1a1e1870479eb692b120929518c8a4",
+          "paths": [
+            "crates/pm-native-channel/src/installed_config.rs",
+            "crates/pm-native-channel/src/installed_config_windows.rs",
+            "crates/pm-native-channel/src/lib.rs",
+            "docs/verification/chef-installed-config-20261014.md"
+          ]
+        },
+        {
+          "label": "confirmed human CLIentry",
+          "base": "2f818c7dff7dcc20f227fbe1d1f7c60a9544d00b",
+          "head": "4c3a90c8e3c5ceac229060e66f551012e88c46dd",
+          "paths": [
+            "crates/pm-cli/src/lib.rs",
+            "crates/pm-custody/src/lib.rs",
+            "crates/pm-cli/tests/chef_human_entry.rs",
+            "crates/pm-cli/tests/chef_human_entry_lab.py",
+            "docs/verification/chef-cli-human-entry-20261014.md"
+          ]
+        }
+      ],
+      "report": "reviews/20261014-kernel-cli-r1/skeptic.md"
+    },
+    {
+      "lane": "kernel-cli-review-architect-r1",
+      "clientRequestId": "pm-chef-20261014-kernel-cli-review-architect-r1",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-kernel-cli-review-architect-r1",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-kernel-cli-review-architect-r1",
+      "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A48a5063a-6d33-41df-a90e-6794d7402ab6%253Adelegate-task%253Apm-chef-20261014-kernel-cli-review-architect-r1:ordinal:1",
+      "statusAtDispatch": "running",
+      "terminalStatus": "completed",
+      "provider": "claudeAgent",
+      "model": "claude-opus-5-5",
+      "options": {
+        "effort": "high",
+        "fastMode": false
+      },
+      "mode": "design+diff",
+      "round": 1,
+      "pinnedScopes": [
+        {
+          "label": "SID-only kernel identity",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "f56c993b2ba3d770f6aae7f5c3401bf0263d98e1",
+          "paths": [
+            "crates/pm-native-channel/src/windows.rs"
+          ]
+        },
+        {
+          "label": "Windows PUBLIC installed-config capability",
+          "base": "a900a69f0a57e4ff09baa458dae69f278d29b250",
+          "head": "2801c4893b1a1e1870479eb692b120929518c8a4",
+          "paths": [
+            "crates/pm-native-channel/src/installed_config.rs",
+            "crates/pm-native-channel/src/installed_config_windows.rs",
+            "crates/pm-native-channel/src/lib.rs",
+            "docs/verification/chef-installed-config-20261014.md"
+          ]
+        },
+        {
+          "label": "confirmed human CLIentry",
+          "base": "2f818c7dff7dcc20f227fbe1d1f7c60a9544d00b",
+          "head": "4c3a90c8e3c5ceac229060e66f551012e88c46dd",
+          "paths": [
+            "crates/pm-cli/src/lib.rs",
+            "crates/pm-custody/src/lib.rs",
+            "crates/pm-cli/tests/chef_human_entry.rs",
+            "crates/pm-cli/tests/chef_human_entry_lab.py",
+            "docs/verification/chef-cli-human-entry-20261014.md"
+          ]
+        }
+      ],
+      "report": "reviews/20261014-kernel-cli-r1/architect.md"
+    },
+    {
+      "lane": "kernel-cli-review-minimalist-r1",
+      "clientRequestId": "pm-chef-20261014-kernel-cli-review-minimalist-r1",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-kernel-cli-review-minimalist-r1",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-kernel-cli-review-minimalist-r1",
+      "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A48a5063a-6d33-41df-a90e-6794d7402ab6%253Adelegate-task%253Apm-chef-20261014-kernel-cli-review-minimalist-r1:ordinal:1",
+      "statusAtDispatch": "running",
+      "terminalStatus": "completed",
+      "provider": "claudeAgent",
+      "model": "claude-opus-5-5",
+      "options": {
+        "effort": "high",
+        "fastMode": false
+      },
+      "mode": "design+diff",
+      "round": 1,
+      "pinnedScopes": [
+        {
+          "label": "SID-only kernel identity",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "f56c993b2ba3d770f6aae7f5c3401bf0263d98e1",
+          "paths": [
+            "crates/pm-native-channel/src/windows.rs"
+          ]
+        },
+        {
+          "label": "Windows PUBLIC installed-config capability",
+          "base": "a900a69f0a57e4ff09baa458dae69f278d29b250",
+          "head": "2801c4893b1a1e1870479eb692b120929518c8a4",
+          "paths": [
+            "crates/pm-native-channel/src/installed_config.rs",
+            "crates/pm-native-channel/src/installed_config_windows.rs",
+            "crates/pm-native-channel/src/lib.rs",
+            "docs/verification/chef-installed-config-20261014.md"
+          ]
+        },
+        {
+          "label": "confirmed human CLIentry",
+          "base": "2f818c7dff7dcc20f227fbe1d1f7c60a9544d00b",
+          "head": "4c3a90c8e3c5ceac229060e66f551012e88c46dd",
+          "paths": [
+            "crates/pm-cli/src/lib.rs",
+            "crates/pm-custody/src/lib.rs",
+            "crates/pm-cli/tests/chef_human_entry.rs",
+            "crates/pm-cli/tests/chef_human_entry_lab.py",
+            "docs/verification/chef-cli-human-entry-20261014.md"
+          ]
+        }
+      ],
+      "report": "reviews/20261014-kernel-cli-r1/minimalist.md"
+    },
+    {
+      "lane": "native-profile-proof",
+      "terminalStatus": "completed",
+      "resultHead": "e18cf389c91623072d7e8584860e9ca85a6f5356",
+      "clientRequestId": "pm-chef-20261014-native-profile-proof-r3",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Athread-send%3Apm-chef-20261014-native-profile-proof-r3",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-protected-memory-r1",
+      "statusAtDispatch": "starting",
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "followUpOf": "installed-config",
+      "delegationBase": "2801c4893b1a1e1870479eb692b120929518c8a4",
+      "ownership": "Native-channel/src and own installed-config report only; no policy widening/user-data relocation/native execution"
     }
   ]
 }

@@ -75,8 +75,8 @@
       "nativeSidHead": "f56c993b2ba3d770f6aae7f5c3401bf0263d98e1",
       "coreDiffInspectedByCoordinator": true,
       "workerMeasured": "Three actualmemlockRED→sameGREEN; check.shonce0. Windows/macOS nativeNOTRUN; nativeSID source localtestsnotexecuted.",
-      "review": "ClaudeR1all3lenses noP0/P1 only protectedcrypto diff f56..a900. SOURCEPASS, noexecutedacceptance. SID+futureconfigrequiresseparatereview.",
-      "action": "Samewriter implementingfixed-ownerinstalledfilecapability, Linuxpolicy4/4+checkreported; immutableconfigSHApending. NoG7closure."
+      "review": "Memoryonly f56..a900 ClaudeR1 noP0/P1. SID ea57..f56 separately kernel+CLI R1 three lenses noP0/P1 source-only; document one connection/instance. Windows SID native NOT_RUN.",
+      "action": "InstalledConfig committed2801; configR1 unresolved inferred stock-ProgramData compatibility/fixture location. Samewriter bounded public-config profile/proof corrections (no permissions widening or data move), source/Windows scope remains unvalidated."
     },
     {
       "lane": "adapter-memory",
@@ -106,14 +106,101 @@
     },
     {
       "lane": "daemon-implementation",
-      "status": "ISSUES — Claude R1 twoP1 blockers",
-      "head": "7b7026e0099ec87114dbb8e962e8e398bee18a71",
+      "status": "ISSUES product; SOURCE PASS prior D1/D2 after final Claude R2",
+      "head": "894aa3600610e23a1834d831668bf66dc2bb7112",
       "base": "ecc2e9d390b780223dfdf1322288762f87af891c",
       "withdrawnAloneHead": "6728bbd7fe475ef3fb1d79da6aa16722c22d85ea",
       "coreDiffInspectedByCoordinator": true,
       "workerMeasured": "RootagentownedactualRED→sameGREEN; legitimateownchroot0+actualexternalTUI A+Bcrossroles/hotrevoke andrealmigration, realwebadapterTLSsyntheticsuccess/restartonecall+WAITINGrecovery+negative0calls. Packages/clippytarget0; fullcheckoncefailedthenfiveclippyfixesverifiedtargeted(notfullrc0).",
-      "review": "ClaudeSkeptic+ArchitectagreeP1global4crossagentstarvation andlocalpreflightterminalizesunknownreconciliation. Parenttracedrun_provider_once/call_provider, D2inferredreachability; realREDassignedsamewriter. MinimalistP2only.",
-      "action": "NOTaccepted/integrated. Sameownerfollow-upadmission+recovery; excludeslib.rsnowCLIwriter. NativeWindowsworker/APIintegrationpending, macOSNOTRUN, noallG7acceptance."
+      "review": "Claude Skeptic+Architect R2 both source PASS exact894, prior D1+D2 resolved; no executions by reviewers. Maximum two rounds consumed; no third round. Other gaps remain NOT_RUN.",
+      "action": "Eligible local exact composition for corrected Unix; Windows registry/provider caller remains missing. No batch/native/G7/ticket closure.",
+      "priorHead": "7b7026e0099ec87114dbb8e962e8e398bee18a71",
+      "workerCorrectiveMeasured": "Exact7b real authenticatedA4 deniedB REDrc4; separate/shared UID A4+B4 GREEN, fifth each/no-magic A closed before app reads; release close/revoke/restart/panic. Eight reconciliation REDs→sameGREEN preserving nonterminal unknown/one real web login; packageclippy andcheckonce0; final no-magic strengthenclippy0."
+    },
+    {
+      "lane": "daemon-admission-recovery",
+      "status": "PASS local corrective measurements; sourcePASS boundedD1D2 only",
+      "head": "894aa3600610e23a1834d831668bf66dc2bb7112",
+      "base": "7b7026e0099ec87114dbb8e962e8e398bee18a71",
+      "reviewReports": [
+        "reviews/20261014-unix-memory-r2/skeptic.md",
+        "reviews/20261014-unix-memory-r2/architect.md",
+        "reviews/20261014-unix-memory-r2/triage.md"
+      ],
+      "integrationExecuted": false
+    },
+    {
+      "lane": "cli-human-entry",
+      "status": "PASS Linux-local worker measurements; sourceR1 noP0/P1",
+      "head": "4c3a90c8e3c5ceac229060e66f551012e88c46dd",
+      "base": "2f818c7",
+      "workerMeasured": "Actual samepublic pmtui REDUNAUTHORIZED3→GREEN nativeTUI prompt/unlock/search/orgcommit/lockexit/terminalrestoration; nine CLItests/checkonce0. Crossed UID/realagent TTY/wrongRPK/serveridentity/missingresource/JSON/MCPnegativeguardsgreen.",
+      "review": "All3 configuredClaudeR1 sourceonly noP0/P1; inheritedWindows console-diagnostics surface P2 notchanged.",
+      "notRun": [
+        "Windows",
+        "macOS",
+        "exact sibling integration"
+      ]
+    },
+    {
+      "lane": "installed-config",
+      "status": "ISSUES — source-only capability; native compatibility/FFI/runtime pending",
+      "head": "2801c4893b1a1e1870479eb692b120929518c8a4",
+      "base": "a900a69f0a57e4ff09baa458dae69f278d29b250",
+      "resultAcknowledged": true,
+      "workerMeasured": "Linuxpurepolicy4/4developmentRED→sameGREEN,lib6/6+clippy/fmt0; checkpointcheckonce0, finalfocusedrechecks0. Windows build/runtime NOT_RUN.",
+      "review": "Kernel+CLI ClaudeR1 Skeptic/Architect P1 stockProgramDataACE conflictsstrictancestorpolicy, inferrednotmeasured; Minimalist same P2. Data locationProgramData is confirmed; distribution44 doesNOTfixpublic administrative configthere. ParentwillnotwidenACL/moveuserdata; exactpublicconfiglocation/ownedfixture correctiondelegated.",
+      "action": "Bounded native-profile-proof followup; actualnativeACL preflight under permission3 stillrequired. Purepolicy and stable snapshot change tests notnativeclassifierproof."
+    },
+    {
+      "lane": "review-skeptic-r2",
+      "status": "PASS source prior D1+D2 only",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-unix-memory-review-skeptic-r2",
+      "resultAcknowledged": true,
+      "report": "reviews/20261014-unix-memory-r2/skeptic.md",
+      "executedTests": false
+    },
+    {
+      "lane": "review-architect-r2",
+      "status": "PASS source prior D1+D2 only",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-unix-memory-review-architect-r2",
+      "resultAcknowledged": true,
+      "report": "reviews/20261014-unix-memory-r2/architect.md",
+      "executedTests": false
+    },
+    {
+      "lane": "kernel-cli-review-skeptic-r1",
+      "status": "ISSUES source",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-kernel-cli-review-skeptic-r1",
+      "resultAcknowledged": true,
+      "report": "reviews/20261014-kernel-cli-r1/skeptic.md",
+      "executedTests": false
+    },
+    {
+      "lane": "kernel-cli-review-architect-r1",
+      "status": "ISSUES source",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-kernel-cli-review-architect-r1",
+      "resultAcknowledged": true,
+      "report": "reviews/20261014-kernel-cli-r1/architect.md",
+      "executedTests": false
+    },
+    {
+      "lane": "kernel-cli-review-minimalist-r1",
+      "status": "ISSUES source P2/P3 only",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-kernel-cli-review-minimalist-r1",
+      "resultAcknowledged": true,
+      "report": "reviews/20261014-kernel-cli-r1/minimalist.md",
+      "executedTests": false
+    },
+    {
+      "lane": "native-profile-proof",
+      "status": "ISSUES — focused followup completed; Windows NOT_RUN",
+      "base": "2801c4893b1a1e1870479eb692b120929518c8a4",
+      "action": "Checked SID roundtrip/release, one-instance epoch docs, fresh stable-invalid security and ownedancestor native corpus, corrected share-lock/public-root docs committed. API/policy/16KiB unchanged; ProgramData stockACL hypothesis remains OPEN. Native grant3/profilepreflight/R1-onlyR2 and Windowscaller integration pending.",
+      "head": "e18cf389c91623072d7e8584860e9ca85a6f5356",
+      "resultAcknowledged": true,
+      "coreDiffInspectedByCoordinator": "SID delta and report; native test delta still source-only",
+      "workerMeasured": "Shared Linux6/6/fmt/clippy0, blockingflock/private target; Windowsnativecompile/runtime/behavioralRED-GREEN NOT_RUN."
     }
   ]
 }
