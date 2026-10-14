@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_SOURCE = ROOT / "crates/pm-vault/src/lib.rs"
-OBSERVER_SOURCE = ROOT / "crates/pm-custody/examples/windows_human_tui_seed.rs"
+OBSERVER_SOURCE = ROOT / "crates/pm-custody/examples/windows_human_tui_seed/observer.rs"
 
 
 def source_contract():
@@ -22,14 +22,15 @@ def source_contract():
         SCHEMA_SOURCE.read_text(),
         re.DOTALL,
     )
-    query = re.search(
-        r'db.query_row\("(SELECT count\(\*\) FROM authority_events[^"\n]+)", '
-        r'\[vec!\[0x([0-9a-f]+)_u8;(\d+)\]\]',
-        OBSERVER_SOURCE.read_text(),
-    )
-    if schema is None or query is None:
+    source = OBSERVER_SOURCE.read_text()
+    query = re.search(r'const RETIRE_QUERY:\s*&str\s*=\s*"([^"]+)";', source)
+    subject = re.search(r"const RETIRE_SUBJECT: \[u8; (\d+)\] = \[0x([0-9a-f]+); (\d+)\];", source)
+    if schema is None or query is None or subject is None:
         raise AssertionError("current schema/observer seam changed; inspect before probing")
-    return schema.group(), query[1], bytes([int(query[2], 16)]) * int(query[3])
+    if subject[1] != subject[3]:
+        raise AssertionError("subject array declaration differs from initializer")
+    return schema.group(), query[1], bytes([int(subject[2], 16)]) * int(subject[3])
+
 
 
 def observe_rows(rows):
