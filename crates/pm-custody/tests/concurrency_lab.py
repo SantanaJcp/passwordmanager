@@ -12,11 +12,11 @@ import tempfile
 
 os.environ["PM_TMUX_SERVER"] = f"pmw4-concurrency-{os.getpid()}"
 
-from linux_lab import as_uid, create_vault, expect_unavailable, start_as, wait_for_sockets
-from tui_content_lab import screen, send, start_tui, wait_text
+from linux_lab import initialize_installed_fixture, as_uid, create_vault, expect_unavailable, start_as, wait_for_sockets
+from tui_content_lab import screen, send, wait_text
 from tui_access_lab import (
     AGENT_A, AGENT_B, AGENT_C, CUSTODIAN, HUMAN, LAB_PARENT, LAB_PREFIX,
-    PROVIDER, authorization, close_tui, discover, finish_owned_resources, provision,
+    PROVIDER, authorization, close_tui, discover, finish_owned_resources, provision, start_tui,
 )
 
 DEVICE = "44444444444444444444444444444444"
@@ -55,7 +55,11 @@ def main():
     mode = sys.argv[3] if len(sys.argv) == 4 else "concurrency"
     assert mode in ("concurrency", "multiagent")
     source_binary, source_cli = (pathlib.Path(value).resolve() for value in sys.argv[1:3])
-    root = pathlib.Path(tempfile.mkdtemp(prefix=LAB_PREFIX, dir=LAB_PARENT))
+    import chef_installed_fixture as installed_fixture
+    owned_root = initialize_installed_fixture(source_binary)
+    import tui_access_lab
+    tui_access_lab.LAB_PARENT = owned_root
+    root = pathlib.Path(tempfile.mkdtemp(prefix=LAB_PREFIX, dir=owned_root))
     daemon = held = None
     try:
         root.chmod(0o711)
@@ -93,6 +97,13 @@ def main():
         wait_for_sockets(daemon, [runtime / "agent.sock", runtime / "human.sock"])
         authorization(binary, human_key, human_profile, runtime / "human.sock", password,
                       "setup", a_public.read_bytes(), b_public.read_bytes())
+        installed_fixture.stop_and_unlink(daemon, [runtime / "agent.sock", runtime / "human.sock"])
+        daemon = None
+        installed_fixture.migrate(binary, bootstrap, vault, DEVICE, (b_public, AGENT_B))
+        daemon = start_as(CUSTODIAN, [binary, "serve-vault", "--bootstrap", bootstrap,
+            "--agent-socket", runtime / "agent.sock", "--human-socket", runtime / "human.sock",
+            "--vault", vault, "--device", DEVICE])
+        wait_for_sockets(daemon, [runtime / "agent.sock", runtime / "human.sock"])
         baseline = discover(binary, AGENT_A, a_key, agent_profile, runtime / "agent.sock")
         start_tui(root, binary, human_profile, human_key, runtime, password)
         if mode == "multiagent":

@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 
-from linux_lab import as_uid, create_vault, expect_unavailable, start_as, stop, wait_for_sockets, wire_fields
+from linux_lab import initialize_installed_fixture, as_uid, create_vault, expect_unavailable, start_as, stop, wait_for_sockets, wire_fields
 
 CUSTODIAN, HUMAN, AGENT_A, AGENT_B = 1, 2, 3, 4
 DEVICE = "77777777777777777777777777777777"
@@ -63,6 +63,7 @@ def discover(binary, uid, private, profile, socket, *, allowed=True):
 def main():
     assert pathlib.Path("/proc/self/uid_map").exists() and len(sys.argv) == 3
     source_binary, source_cli = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:])
+    initialize_installed_fixture(source_binary)
     root = pathlib.Path(tempfile.mkdtemp(prefix="pm-authorization-linux-lab-"))
     try:
         root.chmod(0o711)
@@ -101,6 +102,13 @@ def main():
         daemon = start(binary, boot_a, runtime, vault)
         human_action(binary, human_key, human_profile, runtime / "human.sock", password,
             "setup", a_pub.read_bytes(), b_pub.read_bytes())
+        import chef_installed_fixture as installed_fixture
+        installed_fixture.stop_and_unlink(daemon, [runtime / "agent.sock", runtime / "human.sock"])
+        daemon = None
+        registry = installed_fixture.migrate(binary, boot_a, vault, DEVICE, (b_pub, AGENT_B))
+        installed_fixture.assert_agent_root_rejected(binary, boot_a, vault, DEVICE,
+            [runtime / "agent.sock", runtime / "human.sock"])
+        daemon = start(binary, boot_a, runtime, vault)
         first = discover(binary, AGENT_A, a_key, agent_profile, runtime / "agent.sock")
         stop(daemon)
 
@@ -140,13 +148,21 @@ def main():
             "reenroll-a", a2_pub.read_bytes())
         stop(daemon)
 
-        daemon = start(binary, boot_a, runtime, vault)
+        registry_stat = registry.lstat()
+        assert registry_stat.st_uid == CUSTODIAN and stat.S_IMODE(registry_stat.st_mode) == 0o400
+        retired = state / "registry-generation1.retired"
+        assert not retired.exists()
+        registry.rename(retired)
+        assert retired.stat().st_ino == registry_stat.st_ino and not registry.exists()
+        installed_fixture.migrate(binary, boot_a2, vault, DEVICE, (b_pub, AGENT_B))
+
+        daemon = start(binary, boot_b, runtime, vault)
         discover(binary, AGENT_A, a_key, agent_profile, runtime / "agent.sock", allowed=False)
         stop(daemon)
         daemon = start(binary, boot_a2, runtime, vault)
         assert discover(binary, AGENT_A, a2_key, agent_profile, runtime / "agent.sock") == second
         stop(daemon)
-        daemon = start(binary, boot_rogue, runtime, vault)
+        daemon = start(binary, boot_a2, runtime, vault)
         discover(binary, AGENT_A, rogue_key, agent_profile, runtime / "agent.sock", allowed=False)
         stop(daemon)
 

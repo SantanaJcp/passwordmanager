@@ -9,6 +9,7 @@ invented by this script or by a client.
 """
 
 import hashlib
+from contextlib import contextmanager
 import os
 import pathlib
 import select
@@ -22,6 +23,16 @@ import sys
 import tempfile
 import time
 
+INSTALLED_FIXTURE = None
+
+
+def initialize_installed_fixture(custody):
+    global INSTALLED_FIXTURE
+    import chef_installed_fixture
+    INSTALLED_FIXTURE = chef_installed_fixture
+    return INSTALLED_FIXTURE.initialize(custody)
+
+
 CUSTODIAN = 1
 HUMAN = 2
 AGENT = 3
@@ -33,6 +44,8 @@ def as_uid(uid, command, *, check=True, input=None):
         os.setgid(uid)
         os.setuid(uid)
 
+    if INSTALLED_FIXTURE is not None:
+        command, change_identity = INSTALLED_FIXTURE.prepare(uid, command, change_identity)
     return subprocess.run(
         command,
         check=check,
@@ -49,6 +62,8 @@ def start_as(uid, command, *, stdin=None):
         os.setgid(uid)
         os.setuid(uid)
 
+    if INSTALLED_FIXTURE is not None:
+        command, change_identity = INSTALLED_FIXTURE.prepare(uid, command, change_identity)
     return subprocess.Popen(
         command,
         stdin=stdin,
@@ -96,6 +111,29 @@ def stop(process):
     assert stderr == b"", stderr
 
 
+@contextmanager
+def paused_for_state_scan(process):
+    """Observe this child's stopped/continued boundaries around a complete scan."""
+    def observed(flag, expected):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            pid, status = os.waitpid(process.pid, flag | os.WNOHANG)
+            if pid:
+                assert pid == process.pid and expected(status), (pid, status)
+                return
+            assert process.poll() is None
+            time.sleep(.01)
+        raise AssertionError("owned custodian state transition timed out")
+    assert process.poll() is None
+    process.send_signal(signal.SIGSTOP)
+    observed(os.WUNTRACED, lambda status: os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGSTOP)
+    try:
+        yield
+    finally:
+        process.send_signal(signal.SIGCONT)
+        observed(os.WCONTINUED, os.WIFCONTINUED)
+
+
 def create_vault(cli, path):
     password = b"synthetic ticket 04 e2e master"
 
@@ -141,6 +179,8 @@ def main():
     assert os.geteuid() == 0, "harness must be root only inside the disposable user namespace"
     source_binary = pathlib.Path(sys.argv[1]).resolve()
     source_cli = pathlib.Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else None
+    if source_cli is not None:
+        initialize_installed_fixture(source_binary)
     run_content = len(sys.argv) > 3 and sys.argv[3] == "content"
     root = pathlib.Path(tempfile.mkdtemp(prefix="pm-custody-linux-lab-"))
     try:
@@ -155,12 +195,14 @@ def main():
         state = root / "state"
         runtime = root / "run"
         agent_home = root / "agent"
+        second_home = root / "agent-b"
         human_home = root / "human"
         profiles = root / "profiles"
         for path, uid, mode in [
             (state, CUSTODIAN, 0o700),
             (runtime, CUSTODIAN, 0o755),
             (agent_home, AGENT, 0o755),
+            (second_home, 4, 0o755),
             (human_home, HUMAN, 0o755),
             (profiles, 0, 0o755),
         ]:
@@ -270,12 +312,6 @@ def main():
         denied_unlink = as_uid(AGENT, ["rm", agent_socket], check=False)
         assert denied_unlink.returncode != 0 and agent_socket.exists()
 
-        agent_ok = as_uid(
-            AGENT,
-            [binary, "probe", "--profile", agent_profile, "--private", agent_private, "--socket", agent_socket],
-        )
-        assert agent_ok.stdout == b"READY role=agent peer_uid=1 tls=1.3 rpk=pinned alpn=pm-agent/1\n"
-        assert agent_ok.stderr == b""
         human_ok = as_uid(
             HUMAN,
             [binary, "probe", "--profile", human_profile, "--private", human_private, "--socket", human_socket],
@@ -434,9 +470,10 @@ def main():
                     b"ticket05-e2e-search-canary",
                     b"ticket05-large-stream-canary",
                 ]
-                for candidate in vault.parent.glob(vault.name + "*"):
-                    persisted = candidate.read_bytes()
-                    assert all(canary not in persisted for canary in canaries)
+                with paused_for_state_scan(daemon):
+                    for candidate in vault.parent.glob(vault.name + "*"):
+                        persisted = candidate.read_bytes()
+                        assert all(canary not in persisted for canary in canaries)
                 database = sqlite3.connect(vault)
                 assert database.execute("select count(*) from attachment_stream_chunks").fetchone() == (17,)
                 assert database.execute("select max(length(ciphertext)) from attachment_stream_chunks").fetchone()[0] <= 1024 * 1024 + 21
@@ -479,6 +516,36 @@ def main():
                     "(select count(*) from attachment_stream_chunks)"
                 ).fetchone() == published_before_crash
                 database.close()
+
+        if source_cli is not None:
+            # Keep all CRUD/audit counters above on their original fresh vault.
+            # Human authority is installed only before the first delegated probe.
+            second_private, second_public = second_home / "second.key", second_home / "second.pub"
+            as_uid(4, [binary, "keygen", "--private", second_private, "--public", second_public])
+            enrolled = as_uid(HUMAN, [binary, "human-authorization", "--profile", human_profile,
+                "--private", human_private, "--socket", human_socket, "--action", "setup"],
+                input=wire_fields([master, agent_public.read_bytes(), second_public.read_bytes()]))
+            assert enrolled.stdout == b"PASS human-authorization action=setup\n" and enrolled.stderr == b""
+            INSTALLED_FIXTURE.stop_and_unlink(daemon, [agent_socket, human_socket])
+            daemon = None
+            INSTALLED_FIXTURE.migrate(binary, bootstrap, vault, "44" * 16, (second_public, 4))
+            daemon = start_as(CUSTODIAN, serve)
+            wait_for_sockets(daemon, [agent_socket, human_socket])
+
+        agent_ok = as_uid(
+            AGENT,
+            [binary, "probe", "--profile", agent_profile, "--private", agent_private, "--socket", agent_socket],
+        )
+        assert agent_ok.stdout == b"READY role=agent peer_uid=1 tls=1.3 rpk=pinned alpn=pm-agent/1\n"
+        assert agent_ok.stderr == b""
+        if source_cli is not None:
+            for source, uid, home in [(agent_private, 4, second_home), (second_private, AGENT, agent_home)]:
+                cross = home / "cross.key"
+                shutil.copyfile(source, cross); os.chown(cross, uid, uid); cross.chmod(0o400)
+                denied = as_uid(uid, [binary, "probe", "--profile", agent_profile,
+                    "--private", cross, "--socket", agent_socket], check=False)
+                expect_unavailable(denied)
+            print("OBSERVED installed-native A+B crossed-RPK/UID=denied", flush=True)
 
         os.chmod(agent_private, 0o600)
         key_acl_fault = as_uid(

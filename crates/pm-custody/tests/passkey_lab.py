@@ -6,6 +6,8 @@ import base64, fcntl, hashlib, json, os, pathlib, pty, select, shutil, signal
 import sqlite3, ssl, stat, subprocess, sys, tempfile, termios, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import chef_installed_fixture as installed_fixture
+
 CUSTODIAN,HUMAN,BRIDGE,AGENT,ROGUE=1,2,3,4,5
 DEVICE="13131313131313131313131313131313"
 MASTER=b"synthetic ticket 13 e2e master"
@@ -22,15 +24,24 @@ def identity(uid, tty_fd=None):
 
 def run_uid(uid, command, *, input=None, check=True, env=None, timeout=30):
     merged=os.environ.copy();merged.update(env or {})
+    command, change = installed_fixture.prepare(uid, command, identity(uid))
     return subprocess.run([str(x) for x in command],input=input,capture_output=True,check=check,
-        preexec_fn=identity(uid),env=merged,timeout=timeout)
+        preexec_fn=change,env=merged,timeout=timeout)
 
 def start_uid(uid, command, *, env=None):
     merged=os.environ.copy();merged.update(env or {})
-    return subprocess.Popen([str(x) for x in command],stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-        preexec_fn=identity(uid),env=merged)
+    command, change = installed_fixture.prepare(uid, command, identity(uid))
+    process = subprocess.Popen([str(x) for x in command],stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+        preexec_fn=change,env=merged)
+    if len(command) > 1 and command[1] == "serve-vault":
+        process.fixture_sockets = [installed_fixture.ROOT / str(command[command.index(flag)+1]).lstrip("/")
+                                   for flag in ("--agent-socket", "--human-socket")]
+    return process
 
 def stop(process):
+    if hasattr(process, "fixture_sockets"):
+        installed_fixture.stop_and_unlink(process, process.fixture_sockets, timeout=8)
+        return
     if process.poll() is None:
         process.send_signal(signal.SIGTERM)
         try: process.wait(timeout=8)
@@ -180,7 +191,8 @@ def request(op,rid,challenge,**extra):
 
 def main():
     custody_source,bridge_source,cli_source,cft,extension=map(lambda p:pathlib.Path(p).resolve(),sys.argv[1:])
-    root=pathlib.Path(tempfile.mkdtemp(prefix="pm-passkey-linux-lab-"));procs=[]
+    installed_fixture.initialize(custody_source)
+    root=pathlib.Path(tempfile.mkdtemp(prefix="pm-pk-"));procs=[]
     try:
         root.chmod(0o711);custody,bridge,cli=[root/n for n in ("pm-custody","pm-passkey-bridge","pm")]
         for src,dst in [(custody_source,custody),(bridge_source,bridge),(cli_source,cli)]: shutil.copy2(src,dst);dst.chmod(0o755)
@@ -200,6 +212,10 @@ def main():
         daemon=start_uid(CUSTODIAN,[custody,"serve-vault","--bootstrap",boot,"--agent-socket",run/"agent.sock","--human-socket",run/"human.sock","--vault",vault,"--device",DEVICE]);procs.append(daemon)
         wait_path(daemon,run/"agent.sock");wait_path(daemon,run/"human.sock")
         human_authorization(custody,hk,hprof,run/"human.sock","setup",ap.read_bytes(),bp.read_bytes())
+        installed_fixture.stop_and_unlink(daemon, [run/"agent.sock", run/"human.sock"], timeout=8);procs.remove(daemon)
+        installed_fixture.migrate(custody, boot, vault, DEVICE, (bp, AGENT))
+        daemon=start_uid(CUSTODIAN,[custody,"serve-vault","--bootstrap",boot,"--agent-socket",run/"agent.sock","--human-socket",run/"human.sock","--vault",vault,"--device",DEVICE]);procs.append(daemon)
+        wait_path(daemon,run/"agent.sock");wait_path(daemon,run/"human.sock")
 
         # Private, exact bridge binding. The executable contains no passkey secret.
         config=pathlib.Path(str(bridge)+".conf")
@@ -273,7 +289,17 @@ def main():
 
         get=request("get","41"*16,"51"*32,itemId=item,issuedAt=int(time.time()*1_000_000),nonce="61"*16,
           credentialIds=[registration["credentialId"]])
-        waiting=cdp.evaluate(session,get);assert waiting["state"]=="waiting" and waiting["operation"]=="get"
+        waiting=cdp.evaluate(session,get)
+        if waiting.get("state") != "waiting":
+            db=sqlite3.connect(vault)
+            rows=db.execute("select hex(attempt_id),state from authentication_attempts").fetchall();db.close()
+            diagnostic={"response":waiting,"attempts":rows,"public":[]}
+            for attempt, state_value in rows:
+                observed=run_uid(BRIDGE,[custody,"agent-attempt","--profile",aprof,"--private",ak,
+                    "--socket",run/"agent.sock","--action","get","--attempt",attempt.lower()],check=False)
+                diagnostic["public"].append({"rc":observed.returncode,"stdout":observed.stdout.decode(),"stderr":observed.stderr.decode()})
+            (installed_fixture.ROOT / "passkey-get-failure.json").write_text(json.dumps(diagnostic,indent=2)+"\n")
+        assert waiting["state"]=="waiting" and waiting["operation"]=="get"
         presence=[custody,"human-passkey-confirm","--profile",hprof,"--private",hk,"--socket",run/"human.sock","--request","41"*16,"--verification","presence"]
         tty_action(HUMAN,presence,None,expected=4)
         assert cdp.evaluate(session,{"op":"response","requestId":"41"*16})["state"]=="waiting"
@@ -330,9 +356,18 @@ def main():
         print("PASS passkey-adversarial origin+document+extension+host+unknown=denied iframe=no-content-script rogue-rpk=denied revoke-before-sign=denied secrets=absent")
         print("LIMIT cft=laboratory-instrument product-browser=ticket33-NOT_RUN passkey-login=ticket14-NOT_RUN cross-platform=NOT_RUN")
     finally:
-        try: server.shutdown();server.server_close()
-        except Exception: pass
-        for process in reversed(procs): stop(process)
-        shutil.rmtree(root,ignore_errors=True)
+        primary = sys.exception()
+        errors = []
+        if "home" in locals() and (home / "chrome.log").exists():
+            shutil.copyfile(home / "chrome.log", installed_fixture.ROOT / "passkey-chrome.log")
+        if "server" in locals():
+            try: server.shutdown();server.server_close()
+            except BaseException as error: errors.append(error)
+        for process in reversed(procs):
+            try: stop(process)
+            except BaseException as error: errors.append(error)
+        shutil.rmtree(root)
+        if errors:
+            raise BaseExceptionGroup("passkey lab cleanup failed", ([primary] if primary else []) + errors) from None
 
 if __name__=="__main__": main()
