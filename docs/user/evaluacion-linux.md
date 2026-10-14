@@ -17,22 +17,22 @@ El registro local vincula una clave RPK con el principal nativo UID de Linux. No
 
 Estos archivos no son texto para editar a mano. El parser fija los encabezados, los campos y los flags. La lectura valida su identidad, permisos, propietario, tamaño máximo serializado de 16 KiB y estabilidad; los padres solo se aceptan bajo la cadena confiable de root o del custodio actual, con la excepción acotada del ancestro root-owned sticky. No se aprende un propietario desde / ni se añade una excepción para UID 65534. La ausencia, retirada o invalidez de configuración no activa un proveedor de laboratorio, un binding por UID solamente ni otra ruta delegada.
 
-Este árbol todavía no proporciona una instalación ordinaria completa y verificada: no define una distribución/instalador, el ciclo de vida de un servicio del sistema ni el procedimiento aprobado para establecer la cadena de directorios y recursos nativos de un host normal. Las capacidades de provisión del binario no sustituyen esos pasos.
+**Inferido de spec §15:** el diseño de distribución G8 está confirmado documentalmente; este árbol todavía no entrega una distribución o instalador aceptado, el ciclo de vida de un servicio del sistema ni un procedimiento aprobado para establecer la cadena de directorios y recursos nativos de un host normal. Las capacidades de provisión del binario no sustituyen esos pasos.
 
 ## Requisitos de evaluación
 
 El perfil de diseño separa al propietario humano, al proceso custodio y al agente. Una cuenta distinta por sí sola no demuestra separación. Cada agente debe tener su identidad y clave privada protegida en su entorno, sin compartirla entre registros. El agente no debe leer la bóveda humana, claves maestras/de contenido/recuperación, perfiles del propietario o custodio, la TUI, el terminal humano ni su portapapeles, ni poder modificar el binario o la configuración del custodio. Este árbol no configura la instalación ordinaria ni demuestra ese aislamiento; la evaluación local no conecta agentes fuera de fixtures propios. Consulta el [contrato de aislamiento](../design/isolation.md).
 
-Para compilar offline se necesita el toolchain Rust 1.98.1 y las dependencias fijadas ya disponibles en el directorio .toolchain compartido por la raíz Git. **scripts/cargo-local.sh** selecciona ese toolchain; **--locked --offline** evita cambiar el lockfile o descargar dependencias. Si el toolchain o su caché no existen, detente: esta guía no instala paquetes ni descarga artefactos.
+Para compilar offline se necesita el toolchain Rust 1.98.1 y las dependencias fijadas ya disponibles en el directorio `.toolchain` de la raíz Git. **scripts/cargo-local.sh** selecciona ese toolchain fijo; los ejemplos desactivan la instalación automática con **RUSTUP_AUTO_INSTALL=0**, esperan el bloqueo exclusivo y bloqueante **flock -x /tmp/pm-cargo-window.lock** y usan **--locked --offline**. Si el toolchain o su caché no existen, detente: esta guía no instala paquetes, descarga artefactos ni busca una alternativa.
 
 Los laboratorios Linux documentados usan user namespaces, rangos subuid y subgid ya asignados, unshare y Python 3. El [preflight Linux](../verification/linux-lab-preflight.md) demuestra viabilidad de mecanismos en un host concreto; no es aceptación del producto ni un perfil de producción. No cambies ownership de mounts o directorios ajenos, ACLs del host ni crees un servicio privilegiado para ejecutar esta guía.
 
 ## Compilar y comprobar
 
-Desde la raíz del checkout, con el toolchain y las dependencias ya provisionados:
+Desde la raíz del checkout, con el toolchain y las dependencias ya provisionados y usando el target `target/` de este checkout (no uno heredado de otro worktree):
 
-    ./scripts/cargo-local.sh build --workspace --locked --offline
-    ./scripts/check.sh
+    RUSTUP_AUTO_INSTALL=0 flock -x /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh build --workspace --locked --offline
+    RUSTUP_AUTO_INSTALL=0 flock -x /tmp/pm-cargo-window.lock ./scripts/check.sh
 
 check.sh valida entradas de build y ejecuta fmt, check, tests y clippy en modo bloqueado y offline. Un resultado verde no significa que los laboratorios completos, la aceptación nativa, la composición exacta de candidatos o la revisión final estén verdes. Esta actualización documental no ejecuta Cargo ni laboratorios.
 
@@ -89,20 +89,24 @@ La respuesta contiene **get_capabilities**, **discover_credentials**, **start_au
 
 El laboratorio existente de custodia usa un user namespace descartable y datos sintéticos:
 
-    ./scripts/test-linux-custody-lab.sh
+    RUSTUP_AUTO_INSTALL=0 flock -x /tmp/pm-cargo-window.lock ./scripts/test-linux-custody-lab.sh
 
-Lee el [contrato y la evidencia del ticket 03](../verification/ticket-03.md) antes de interpretar su salida. El wrapper usa target/debug/pm-custody; ejecútalo solo con el target predeterminado en un checkout descartable y sin override de CARGO_TARGET_DIR. El test histórico limpia algunos temporales con ignore_errors=True, así que su código de salida no acredita por sí solo la limpieza.
+Lee el [contrato y la evidencia del ticket 03](../verification/ticket-03.md) antes de interpretar su salida. Ambos wrappers de laboratorio compilan con `--locked --offline`; el de custodia ejecuta `target/debug/pm-custody` del mismo checkout. Usa el target predeterminado, sin apuntar `CARGO_TARGET_DIR` al target de otro worktree. El test histórico limpia algunos temporales con ignore_errors=True, así que su código de salida no acredita por sí solo la limpieza.
 
-El laboratorio de contenido TUI **scripts/test-linux-tui-content-lab.sh** usa Wayland real, wl-copy y wl-paste, y puede modificar el portapapeles de la sesión. No lo ejecutes en un escritorio con datos personales.
+El laboratorio de contenido TUI usa Wayland real, wl-copy y wl-paste, y puede modificar el portapapeles de la sesión. Si se ejecuta en un entorno de laboratorio descartable, conserva el mismo bloqueo y el target predeterminado del checkout:
+
+    RUSTUP_AUTO_INSTALL=0 flock -x /tmp/pm-cargo-window.lock ./scripts/test-linux-tui-content-lab.sh
+
+No lo ejecutes en el escritorio del propietario ni con su portapapeles o datos personales.
 
 **Fixture nueva 1A/2A, evidencia atribuida al worker daemon:** los casos registry y adapter del runner **crates/pm-custody/tests/chef_runtime_chroot.py** se ejecutaron dentro de un namespace UID-mapped propio, con custodia en un chroot UID 0 propio y cliente/TUI humano fuera en PTY. Cuando los archivos de los candidatos fijados estén presentes en el checkout, el runner se puede repetir con binarios propios, un target privado y los prerrequisitos del preflight:
 
     export CARGO_TARGET_DIR="$PWD/target-chef-daemon-implementation"
     export RUSTUP_AUTO_INSTALL=0
-    flock /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh build -p pm-custody -p pm-cli -p pm-web-auth --example chef_runtime_open_channel --bins --locked --offline
+    RUSTUP_AUTO_INSTALL=0 flock -x /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh build -p pm-custody -p pm-cli -p pm-web-auth --example chef_runtime_open_channel --bins --locked --offline
     BIN="$CARGO_TARGET_DIR/debug"
-    python3 crates/pm-custody/tests/chef_runtime_chroot.py registry "$BIN/pm-custody" "$BIN/pm" "$BIN/pm-web-auth"
-    python3 crates/pm-custody/tests/chef_runtime_chroot.py adapter "$BIN/pm-custody" "$BIN/pm" "$BIN/pm-web-auth"
+    flock -x /tmp/pm-cargo-window.lock python3 crates/pm-custody/tests/chef_runtime_chroot.py registry "$BIN/pm-custody" "$BIN/pm" "$BIN/pm-web-auth"
+    flock -x /tmp/pm-cargo-window.lock python3 crates/pm-custody/tests/chef_runtime_chroot.py adapter "$BIN/pm-custody" "$BIN/pm" "$BIN/pm-web-auth"
 
 El runner debe ejecutarse dentro de un namespace UID-mapped propio con los rangos ya asignados que exige el [preflight Linux](../verification/linux-lab-preflight.md). La fixture crea su chroot de evaluación; no es un instalador, servicio normal, aceptación de sistema de archivos raíz productivo ni evidencia de que la instalación cotidiana esté lista. No cambies ownership ni ACL de mounts del host. Esta actualización documental no compiló ni ejecutó estos comandos.
 
@@ -117,9 +121,9 @@ El contrato y el alcance implementado están en los tickets [21](../../.scratch/
 
 ## Estado y evidencia pendiente
 
-**Medición local Linux atribuida a los workers:** la entrada humana de CLI mostró el flujo TUI descrito arriba; el candidato daemon midió registro, adaptadores sintéticos, revocación y reconciliación. Estas ejecuciones usaron fixtures propias. No se compusieron aquí los SHAs hermanos ni se ejecutó el vector completo.
+**Medición Linux atribuida a los workers; reporte de integración no repetido aquí:** la entrada humana de CLI mostró el flujo TUI descrito arriba; el daemon midió registro, adaptadores sintéticos, revocación, admisión y reconciliación. El reporte `0a11733ffc784e80cb75c8df01d2cdcf34862d7e` registró el compuesto exacto `8cd45529b062506a2cbe0c567538d3999ac8a2b6`: kitchen, check completo y clean/offline terminaron con código 0; la barrida completa tuvo 42/52 casos con código 0 y 10 con código 1. Pasaron 17 flujos focalizados agrupados, incluidos TUI humana pública, registry/admission, ocho reconciliaciones y tres comprobaciones de memoria que cambiaron de RED en baseline a GREEN en el compuesto. El resultado global sigue siendo ISSUES: siete fixtures ordinarias aún no migradas a 1A/2A y tres casos G7 dieron código 1; no equivale a PASS de 52 casos ni a aceptación de producto.
 
-**Estado de composición registrado por el coordinador:** el lote sigue parcial; batchAccepted e integrationExecuted son falsos. Windows y macOS nativos están NOT_RUN. El consumidor Windows ordinario de registro/adaptadores sigue incompleto. La compatibilidad de ACL/ubicación de configuración Windows continúa como hipótesis inferida y no se valida por proponer una ruta alternativa; la propuesta de configuración pública bajo ProgramFiles tampoco tiene prueba nativa. No se afirma soporte de Windows o macOS. El [estado consolidado de spec §15](../../.scratch/passwordmanager/spec.md#15-estado-consolidado-acuerdos-cierres-de-diseño-y-validación) sigue siendo la fuente global.
+**Medido en el snapshot actual del coordinador:** `batchAccepted=false` e `integrationExecuted=true`; el PASS de integración cubre solo kitchen/check/clean y la suite completa sigue ISSUES. **Inferido por comparación de SHAs:** el compuesto `8cd45529b062506a2cbe0c567538d3999ac8a2b6` no incluye esta guía en su head actual `e1307808be9b88a77cc3a9725356b7281f4bb49f` ni la corrección posterior de sync; hace falta otra composición exacta después de las migraciones de callers. El estado del coordinador mantiene Windows y macOS nativos en NOT_RUN y el consumidor Windows ordinario de registro/adaptadores incompleto. La compatibilidad de ACL/ubicación de configuración Windows continúa como hipótesis inferida; la propuesta de configuración pública bajo ProgramFiles tampoco tiene prueba nativa. No se afirma soporte de Windows o macOS. El [estado consolidado de spec §15](../../.scratch/passwordmanager/spec.md#15-estado-consolidado-acuerdos-cierres-de-diseño-y-validación) sigue siendo la fuente global.
 
 La aceptación nativa hospedada continúa pendiente de la decisión del propietario 3. La intención preparada durable y el cierre de esquema G7 continúan pendientes de la decisión del propietario 4. Revisa el [método CI nativo efímero](../verification/native-ci.md) antes de preparar runners; su disponibilidad no acredita soporte. No se cierran tickets ni se declara producto listo, aceptado para instalación o certificado en seguridad.
 
