@@ -1,0 +1,38 @@
+{
+  "codeBase": "d4b1be662a1b8766eff54c2b8269ef4c94770c54",
+  "batchAccepted": false,
+  "integrationExecuted": false,
+  "results": [
+    {
+      "lane": "verification-map",
+      "status": "ISSUES",
+      "resultAcknowledged": true,
+      "evidence": "Read-only recovery of historical 52-case vector; no builds/labs executed. Own-source inspection of script target paths and kitchen clone toolchain requirements.",
+      "action": "Explicit private target/debug paths for wrapper labs; verified toolchain link only in disposable integration clone. No 49/52 result treated as product PASS."
+    },
+    {
+      "lane": "daemon-readiness",
+      "status": "ISSUES",
+      "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+      "head": "037c75fa2dc18e4388155b2207c221498fd9fd12",
+      "branch": "t3/daemon-identity-repro",
+      "worktree": "/home/santana/.t3/worktrees/passwordmanager/t3-4f4bfeab",
+      "coreDiffInspectedByCoordinator": true,
+      "workerMeasured": "Ordinary daemon A+B enrollment accepted; A discovered, B failed CUSTODY_UNAVAILABLE. Crossed UID/RPK denied. Probe rc1, strict cleanup verified, check.sh rc0; no A/B GREEN.",
+      "coordinatorInference": "128-line public-process probe uses current trusted single-agent bootstrap and does not alter product. Three CREATED queries are bounded observations, not proof for entire provider deadline.",
+      "action": "Owner approved 1A/2A; exact probe/source passed to separately owned daemon implementation. Its old unanswered decision text remains historical."
+    },
+    {
+      "lane": "macos-stability",
+      "status": "BLOCKED",
+      "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+      "head": "837f5564b14f5b6f8a058b21304dfbd5d7ef1fb7",
+      "branch": "t3/macos-custody-stability",
+      "worktree": "/home/santana/.t3/worktrees/passwordmanager/t3-8528f022",
+      "coreDiffInspectedByCoordinator": true,
+      "workerMeasured": "Diagnostic overlap flags RED/GREEN; observer regression, CI verifier and check.sh rc0. No native execution.",
+      "coordinatorInference": "Core diff adds independent categorical prompt/unlock/Items diagnostics and synthetic regression; timers, acceptance oracles and product unchanged. Does not prove ARM unlock or streaming root cause.",
+      "action": "Hold for cross-review/composition; native capture requires explicit owner authorization."
+    }
+  ]
+}
