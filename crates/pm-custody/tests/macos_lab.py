@@ -932,7 +932,16 @@ class MacPtySession:
             parser = "pending-control"
         frame = "post-mark" if len(self._screen_events) > since else "none"
         child = "eof" if self.eof else "alive"
-        return f"mode={mode} render={render} event={frame} parser={parser} child={child}"
+        # The first matching category can hide overlapping repaint content.
+        # Record independent current-screen flags in password/unlocked/items
+        # order, without logging input, cells or raw bytes. Items alone is not
+        # proof of unlock: that pane also exists while the prompt is visible.
+        unlock_markers = "".join(str(int(marker in rendered)) for marker in (
+            "Password required", "Unlocked: selection never reveals secrets",
+            "Items (selection is metadata only)",
+        ))
+        return (f"unlock-markers={unlock_markers} "
+                f"mode={mode} render={render} event={frame} parser={parser} child={child}")
 
     def wait_text(self, expected, *, timeout=8, since=0):
         deadline = time.monotonic() + timeout
@@ -1271,6 +1280,41 @@ def classify_shared_control_exit(returncode, owned_termination_sent):
     return b"natural-nonzero", status
 
 
+def assert_unlock_cutoff_diagnostic_regression():
+    """Distinguish overlapping repaint markers without accepting that frame."""
+    session = object.__new__(MacPtySession)
+    session.screen = VtScreen(80, 24)
+    session.eof = False
+    session._screen_events = [(1, "synthetic event")]
+    # Synthetic Ratatui-style cursor addressing, not bytes captured on ARM.
+    session.screen.feed(b"\x1b[?1049h\x1b[2;2HPassword required")
+    assert "unlock-markers=100" in session._screen_diagnostic(0)
+    session.screen.feed(b"\x1b[4;2HItems (selection is metadata only)")
+    assert "unlock-markers=101" in session._screen_diagnostic(0)
+    session.screen.feed(b"\x1b[6;2HUnlocked: selection never reveals secrets")
+    session.screen.feed(b"\x1b[10;2Hsynthetic-private-cell-canary")
+    diagnostic = session._screen_diagnostic(0)
+    assert "unlock-markers=111" in diagnostic
+    assert "render=password-prompt" in diagnostic
+    assert "parser=ground" in diagnostic
+    assert "synthetic" not in diagnostic
+    # Pending cursor output must remain distinguishable from a complete parse.
+    session.screen.feed(b"\x1b[2;")
+    assert "parser=pending-control" in session._screen_diagnostic(0)
+    session.screen.feed(b"2H\x1b[2K")
+    assert "unlock-markers=011" in session._screen_diagnostic(0)
+    session._screen_events.append((2, session.screen.application_text()))
+    # Removing all visual evidence must remove all positive diagnostic flags.
+    session.screen.feed(b"\x1b[2J")
+    assert "unlock-markers=000" in session._screen_diagnostic(0)
+    try:
+        session.wait_text("Unlocked: selection never reveals secrets", timeout=0)
+    except AssertionError as error:
+        assert "unlock-markers=000" in str(error)
+    else:
+        raise AssertionError("diagnostic history replaced the current-screen oracle")
+
+
 def assert_screen_observer_regression():
     """The PTY observer must preserve cells addressed by cursor-positioned output."""
     captured = (
@@ -1441,6 +1485,7 @@ def assert_screen_observer_regression():
         split_expiry, forbidden="note", forbidden_in_exposure=True, timeout=0,
     ).find("Exposure: <hidden>") >= 0
     assert_information_panel_regression()
+    assert_unlock_cutoff_diagnostic_regression()
     assert_pasteboard_diagnostic_regression()
     assert_pty_helper_drain_regression()
 

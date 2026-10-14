@@ -1682,7 +1682,7 @@ impl PasskeyKeyPair {
         sodium()?;
         let seed = Secret::random()?;
         let mut public_key = [0_u8; KEY_BYTES];
-        let mut expanded = [0_u8; 64];
+        let mut expanded = ProtectedBytes::zeroed(64)?;
         let result = unsafe {
             // SAFETY: buffers have libsodium's documented Ed25519 sizes.
             libsodium_sys::crypto_sign_seed_keypair(
@@ -1691,8 +1691,8 @@ impl PasskeyKeyPair {
                 seed.0.as_ptr(),
             )
         };
-        // SAFETY: the expanded key is not retained by this abstraction.
-        unsafe { libsodium_sys::sodium_memzero(expanded.as_mut_ptr().cast(), expanded.len()) };
+        // Release and wipe the locked temporary as soon as derivation/signing ends.
+        drop(expanded);
         if result != 0 {
             return Err(CryptoError::Authentication);
         }
@@ -1709,7 +1709,7 @@ impl PasskeyKeyPair {
         sodium()?;
         let seed = Secret::new(seed)?;
         let mut public_key = [0_u8; KEY_BYTES];
-        let mut expanded = [0_u8; 64];
+        let mut expanded = ProtectedBytes::zeroed(64)?;
         let result = unsafe {
             // SAFETY: buffers have libsodium's documented Ed25519 sizes.
             libsodium_sys::crypto_sign_seed_keypair(
@@ -1718,8 +1718,8 @@ impl PasskeyKeyPair {
                 seed.0.as_ptr(),
             )
         };
-        // SAFETY: the expanded key is not retained by this abstraction.
-        unsafe { libsodium_sys::sodium_memzero(expanded.as_mut_ptr().cast(), expanded.len()) };
+        // Release and wipe the locked temporary as soon as derivation/signing ends.
+        drop(expanded);
         if result != 0 {
             return Err(CryptoError::Authentication);
         }
@@ -1776,7 +1776,7 @@ impl AuditDeviceKeyPair {
         }
         let signing_seed = Secret::random()?;
         let mut signing_public_key = [0_u8; KEY_BYTES];
-        let mut expanded = [0_u8; 64];
+        let mut expanded = ProtectedBytes::zeroed(64)?;
         if unsafe {
             // SAFETY: Ed25519 key buffers have their documented exact lengths.
             libsodium_sys::crypto_sign_seed_keypair(
@@ -1788,8 +1788,8 @@ impl AuditDeviceKeyPair {
         {
             return Err(CryptoError::RandomUnavailable);
         }
-        // SAFETY: expanded secret is no longer needed.
-        unsafe { libsodium_sys::sodium_memzero(expanded.as_mut_ptr().cast(), expanded.len()) };
+        // Release and wipe the locked temporary as soon as derivation/signing ends.
+        drop(expanded);
         Ok(Self {
             encryption_public_key,
             encryption_private_key,
@@ -1849,7 +1849,7 @@ impl AuditDeviceKeyPair {
             return Err(CryptoError::Authentication);
         }
         let mut derived_signing = [0_u8; KEY_BYTES];
-        let mut expanded = [0_u8; 64];
+        let mut expanded = ProtectedBytes::zeroed(64)?;
         let result = unsafe {
             // SAFETY: Ed25519 key buffers have their documented exact lengths.
             libsodium_sys::crypto_sign_seed_keypair(
@@ -1858,8 +1858,8 @@ impl AuditDeviceKeyPair {
                 signing_seed.0.as_ptr(),
             )
         };
-        // SAFETY: expanded secret is no longer needed.
-        unsafe { libsodium_sys::sodium_memzero(expanded.as_mut_ptr().cast(), expanded.len()) };
+        // Release and wipe the locked temporary as soon as derivation/signing ends.
+        drop(expanded);
         if result != 0 || derived_signing != signing_public_key {
             return Err(CryptoError::Authentication);
         }
@@ -2216,7 +2216,7 @@ impl AuditDeviceKeyPair {
             authority_event,
             commitment,
         )?;
-        let mut plaintext = vec![0_u8; signed.fields.sealed_box.len() - 48];
+        let mut plaintext = ProtectedBytes::zeroed(signed.fields.sealed_box.len() - 48)?;
         if unsafe {
             // SAFETY: key and message buffers have the exact declared lengths.
             libsodium_sys::crypto_box_seal_open(
@@ -2228,11 +2228,10 @@ impl AuditDeviceKeyPair {
             )
         } != 0
         {
-            wipe_vec(&mut plaintext);
             return Err(CryptoError::Authentication);
         }
         let decoded = decode_sealed_key_context(&plaintext);
-        wipe_vec(&mut plaintext);
+        drop(plaintext);
         let (target, inner_recipient, generation) = decoded?;
         if target != signed.fields.target_header
             || inner_recipient != recipient
@@ -3321,7 +3320,7 @@ impl DeviceKeyPair {
             authority_event,
             commitment,
         )?;
-        let mut plaintext = vec![0_u8; signed.fields.sealed_box.len() - 48];
+        let mut plaintext = ProtectedBytes::zeroed(signed.fields.sealed_box.len() - 48)?;
         if unsafe {
             // SAFETY: key and message buffers have the exact declared lengths.
             libsodium_sys::crypto_box_seal_open(
@@ -3336,7 +3335,7 @@ impl DeviceKeyPair {
             return Err(CryptoError::Authentication);
         }
         let decoded = decode_sealed_key_context(&plaintext);
-        wipe_vec(&mut plaintext);
+        drop(plaintext);
         let (target, inner_recipient, generation) = decoded?;
         if target != signed.fields.target_header
             || inner_recipient != recipient
@@ -3440,7 +3439,7 @@ pub fn create_human_root(password: &[u8], profile: KdfProfile) -> Result<Created
     let recovery_key = Secret::random()?;
     let signing_seed = Secret::random()?;
     let mut public_key = [0_u8; KEY_BYTES];
-    let mut expanded_secret = [0_u8; 64];
+    let mut expanded_secret = ProtectedBytes::zeroed(64)?;
     // SAFETY: buffers have the exact Ed25519 sizes documented by libsodium.
     let keypair_result = unsafe {
         libsodium_sys::crypto_sign_seed_keypair(
@@ -3449,8 +3448,8 @@ pub fn create_human_root(password: &[u8], profile: KdfProfile) -> Result<Created
             signing_seed.0.as_ptr(),
         )
     };
-    // SAFETY: the expanded secret is no longer needed regardless of result.
-    unsafe { libsodium_sys::sodium_memzero(expanded_secret.as_mut_ptr().cast(), 64) };
+    // Release and wipe the locked temporary as soon as derivation/signing ends.
+    drop(expanded_secret);
     if keypair_result != 0 {
         return Err(CryptoError::RandomUnavailable);
     }
@@ -3706,7 +3705,7 @@ fn unlock_with_key(
         return Err(CryptoError::Authentication);
     }
     let mut derived_public = [0_u8; KEY_BYTES];
-    let mut expanded_secret = [0_u8; 64];
+    let mut expanded_secret = ProtectedBytes::zeroed(64)?;
     // SAFETY: buffers have the exact sizes required by libsodium.
     let result = unsafe {
         libsodium_sys::crypto_sign_seed_keypair(
@@ -3715,8 +3714,8 @@ fn unlock_with_key(
             signing_seed.0.as_ptr(),
         )
     };
-    // SAFETY: expanded material is no longer needed.
-    unsafe { libsodium_sys::sodium_memzero(expanded_secret.as_mut_ptr().cast(), 64) };
+    // Release and wipe the locked temporary as soon as derivation/signing ends.
+    drop(expanded_secret);
     if result != 0 || !constant_time_equal(&derived_public, &bundle.trusted_root.public_key) {
         return Err(CryptoError::Authentication);
     }
@@ -4432,7 +4431,9 @@ fn decode_sealed_key_context(bytes: &[u8]) -> Result<(Header, [u8; 16], u64), Cr
     let mut decoder = Decoder::new(bytes);
     expect_map(&mut decoder, 4)?;
     expect_key(&mut decoder, "key")?;
-    let _: [u8; 32] = decode_bytes(&mut decoder)?;
+    if decoder.bytes().map_err(invalid)?.len() != KEY_BYTES {
+        return Err(CryptoError::InvalidFormat);
+    }
     expect_key(&mut decoder, "recipient")?;
     let recipient = decode_bytes(&mut decoder)?;
     expect_key(&mut decoder, "target_header")?;
@@ -4733,7 +4734,7 @@ fn decode_grant_with_event(bytes: &[u8]) -> Result<GrantFields, CryptoError> {
 
 fn sign_detached(seed: &Secret, message: &[u8]) -> Result<[u8; 64], CryptoError> {
     let mut public = [0_u8; 32];
-    let mut expanded = [0_u8; 64];
+    let mut expanded = ProtectedBytes::zeroed(64)?;
     if unsafe {
         // SAFETY: key buffers have the documented Ed25519 sizes.
         libsodium_sys::crypto_sign_seed_keypair(
@@ -4757,8 +4758,8 @@ fn sign_detached(seed: &Secret, message: &[u8]) -> Result<[u8; 64], CryptoError>
             expanded.as_ptr(),
         )
     };
-    // SAFETY: expanded secret is no longer used.
-    unsafe { libsodium_sys::sodium_memzero(expanded.as_mut_ptr().cast(), expanded.len()) };
+    // Release and wipe the locked temporary as soon as derivation/signing ends.
+    drop(expanded);
     if result != 0 || signature_len != 64 {
         return Err(CryptoError::Authentication);
     }
