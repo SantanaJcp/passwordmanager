@@ -18,8 +18,9 @@ use windows_sys::Win32::{
         ACL,
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-            EXPLICIT_ACCESS_W, GRANT_ACCESS, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
-            SetEntriesInAclW, SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
+            ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetSecurityInfo,
+            SDDL_REVISION_1, SE_KERNEL_OBJECT, SetEntriesInAclW, SetSecurityInfo, TRUSTEE_IS_SID,
+            TRUSTEE_IS_USER,
         },
         Cryptography::{
             CRYPT_INTEGER_BLOB, CRYPTPROTECT_LOCAL_MACHINE, CryptProtectData, CryptUnprotectData,
@@ -86,6 +87,10 @@ const PIPE_BUFFER: u32 = 1024 * 1024;
 // needs data/attribute I/O, never authority to create another server instance.
 const AGENT_PIPE_CLIENT_ACCESS: u32 =
     FILE_GENERIC_READ | (FILE_GENERIC_WRITE & !FILE_CREATE_PIPE_INSTANCE);
+// Necessary SID-text bound derived from the daemon's 16 KiB configuration
+// serialization contract. This does not claim full JSON/framing fits, nor set
+// a principal-count limit. The kernel also validates the constructed DACL.
+const MAX_AGENT_REGISTRY_BYTES: usize = 16 * 1024;
 const SYNC_PIPE_PREFIX: &str = r"\\.\pipe\pm-sync-";
 
 fn agent_pipe_sddl(
@@ -100,6 +105,73 @@ fn agent_pipe_sddl(
     Ok(format!(
         "{prefix}(A;;0x{AGENT_PIPE_CLIENT_ACCESS:08x};;;{client_sid})"
     ))
+}
+
+// The registry owns the principal-count limit; this transport validates every
+// supplied principal and never substitutes the first entry on a list failure.
+fn agent_pipe_sddl_for_sids(
+    service_sid: &str,
+    client_sids: &[String],
+) -> Result<String, ChannelAuthenticationError> {
+    if client_sids.is_empty()
+        || service_sid.len() > MAX_AGENT_REGISTRY_BYTES
+        || !crate::valid_specific_sid(service_sid, "S-1-5-80-")
+    {
+        return Err(ChannelAuthenticationError);
+    }
+    let mut text_bytes = 0_usize;
+    for sid in client_sids {
+        if !crate::valid_specific_sid(sid, "S-1-5-21-") {
+            return Err(ChannelAuthenticationError);
+        }
+        text_bytes = text_bytes
+            .checked_add(sid.len())
+            .ok_or(ChannelAuthenticationError)?;
+        if text_bytes > MAX_AGENT_REGISTRY_BYTES {
+            return Err(ChannelAuthenticationError);
+        }
+    }
+    if client_sids
+        .iter()
+        .enumerate()
+        .any(|(index, sid)| client_sids[..index].contains(sid))
+    {
+        return Err(ChannelAuthenticationError);
+    }
+    validate_canonical_sid(service_sid)?;
+    let mut descriptor =
+        format!("O:{service_sid}G:{service_sid}D:P(A;;GA;;;SY)(A;;GA;;;{service_sid})");
+    for sid in client_sids {
+        // Preserve the existing service/user role restrictions, excluding
+        // broad well-known principals and service SIDs in the client list.
+        validate_canonical_sid(sid)?;
+        descriptor.push_str(&format!("(A;;0x{AGENT_PIPE_CLIENT_ACCESS:08x};;;{sid})"));
+    }
+    Ok(descriptor)
+}
+
+fn validate_canonical_sid(value: &str) -> Result<(), ChannelAuthenticationError> {
+    // Decimal role prefixes are already checked; reject numeric aliases before
+    // asking Windows to validate subauthority sizes/counts and the binary SID.
+    if value
+        .split('-')
+        .skip(1)
+        .any(|part| part.len() > 1 && part.starts_with('0'))
+    {
+        return Err(ChannelAuthenticationError);
+    }
+    let text = wide(value);
+    let mut sid = ptr::null_mut();
+    if unsafe { ConvertStringSidToSidW(text.as_ptr(), &raw mut sid) } == 0 || sid.is_null() {
+        return Err(ChannelAuthenticationError);
+    }
+    let valid = unsafe { IsValidSid(sid) } != 0;
+    free_local(sid)?;
+    if valid {
+        Ok(())
+    } else {
+        Err(ChannelAuthenticationError)
+    }
 }
 
 fn validate_sync_pipe_name(name: &str) -> Result<(), ChannelAuthenticationError> {
@@ -266,6 +338,7 @@ pub struct WindowsServerPipe {
     stop: WindowsStopEvent,
     expected_client_sids: Vec<String>,
     client_pid: Option<u32>,
+    client_sid: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -323,6 +396,35 @@ impl WindowsServerPipe {
         )
     }
 
+    /// Creates a local agent instance for the complete authorized SID list.
+    /// Each client receives data I/O only, without server-instance creation.
+    /// The registry, not this transport, bounds the number of principals.
+    ///
+    /// # Errors
+    /// Rejects empty, duplicate, malformed or role-invalid identity lists,
+    /// invalid instance bounds and descriptor/native handle failures.
+    pub fn create_agent_instance_for_sids(
+        vault: &str,
+        service_sid: &str,
+        client_sids: &[String],
+        stop: &WindowsStopEvent,
+        first: bool,
+        instances: u32,
+    ) -> Result<Self, ChannelAuthenticationError> {
+        if !(2..255).contains(&instances) {
+            return Err(ChannelAuthenticationError);
+        }
+        let descriptor = agent_pipe_sddl_for_sids(service_sid, client_sids)?;
+        Self::create_agent_role_instance(
+            vault,
+            &descriptor,
+            client_sids.to_vec(),
+            stop,
+            first,
+            instances,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn create_role_instance(
         endpoint: WindowsEndpoint,
@@ -365,6 +467,55 @@ impl WindowsServerPipe {
             stop: stop.clone(),
             expected_client_sids: vec![client_sid.to_owned()],
             client_pid: None,
+            client_sid: None,
+        })
+    }
+
+    fn create_agent_role_instance(
+        vault: &str,
+        descriptor_text: &str,
+        client_sids: Vec<String>,
+        stop: &WindowsStopEvent,
+        first: bool,
+        instances: u32,
+    ) -> Result<Self, ChannelAuthenticationError> {
+        let name = wide(&WindowsEndpoint::Agent.pipe_name(vault)?);
+        let sddl = wide(descriptor_text);
+        let security_length = u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+            .map_err(|_| ChannelAuthenticationError)?;
+        let mut descriptor = ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(ChannelAuthenticationError);
+        }
+        let security = SECURITY_ATTRIBUTES {
+            nLength: security_length,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let creation = create_pipe_instance(name.as_ptr(), &raw const security, first, instances);
+        let released = free_local(descriptor);
+        let handle = match (creation, released) {
+            (Ok(handle), Ok(())) => handle,
+            (Err(_), Ok(())) | (Err(_), Err(_)) => return Err(ChannelAuthenticationError),
+            (Ok(handle), Err(_)) => {
+                close_handle(handle)?;
+                return Err(ChannelAuthenticationError);
+            }
+        };
+        Ok(Self {
+            handle,
+            stop: stop.clone(),
+            expected_client_sids: client_sids,
+            client_pid: None,
+            client_sid: None,
         })
     }
 
@@ -430,6 +581,7 @@ impl WindowsServerPipe {
             stop: stop.clone(),
             expected_client_sids: client_sids,
             client_pid: None,
+            client_sid: None,
         })
     }
 
@@ -438,6 +590,8 @@ impl WindowsServerPipe {
     /// # Errors
     /// Returns an opaque error when either kernel identity check fails.
     pub fn accept(&mut self) -> Result<u32, ChannelAuthenticationError> {
+        self.client_pid = None;
+        self.client_sid = None;
         overlapped_connect(self.handle, self.stop.raw_handle())?;
         let mut pid = 0;
         if unsafe { GetNamedPipeClientProcessId(self.handle, &raw mut pid) } == 0 || pid == 0 {
@@ -448,7 +602,18 @@ impl WindowsServerPipe {
             return Err(ChannelAuthenticationError);
         }
         self.client_pid = Some(pid);
+        self.client_sid = Some(sid);
         Ok(pid)
+    }
+
+    /// Returns the kernel-impersonated SID captured by this successful accept.
+    /// Revalidates the owning connection before exposing the captured identity.
+    ///
+    /// # Errors
+    /// Fails before accept, after a rejected accept or after peer disconnect/change.
+    pub fn accepted_client_sid(&self) -> Result<&str, ChannelAuthenticationError> {
+        self.verify()?;
+        self.client_sid.as_deref().ok_or(ChannelAuthenticationError)
     }
 
     /// Revalidates that the connected pipe still names the accepted process.
@@ -499,6 +664,7 @@ impl WindowsServerPipe {
             stop: self.stop.clone(),
             expected_client_sids: self.expected_client_sids.clone(),
             client_pid: self.client_pid,
+            client_sid: self.client_sid.clone(),
         })
     }
 
@@ -2128,6 +2294,227 @@ mod tests {
         for pipe in owned {
             pipe.close().unwrap();
         }
+    }
+
+    #[test]
+    fn agent_sid_list_rejects_invalid_principals_and_preserves_exact_acl() {
+        use windows_sys::Win32::Security::GetSecurityDescriptorDacl;
+        let service = "S-1-5-80-10-20-30-40-50";
+        let clients = vec![
+            "S-1-5-21-1-2-3-1001".to_owned(),
+            "S-1-5-21-4-5-6-1002".to_owned(),
+        ];
+        for invalid in [
+            vec![],
+            vec![clients[0].clone(), clients[0].clone()],
+            vec!["S-1-1-0".to_owned()],
+            vec![service.to_owned()],
+            vec!["S-1-5-21-1-2-3-4294967296".to_owned()],
+            vec!["S-1-5-21-1-2-3-01001".to_owned()],
+            vec!["S-1-5-21-1-2-3-1001)(A;;GA;;;WD)".to_owned()],
+        ] {
+            assert!(agent_pipe_sddl_for_sids(service, &invalid).is_err());
+        }
+        assert!(agent_pipe_sddl_for_sids(&clients[0], &clients).is_err());
+        let oversized: Vec<String> = (0..2000).map(|id| format!("S-1-5-21-1-2-3-{id}")).collect();
+        assert!(agent_pipe_sddl_for_sids(service, &oversized).is_err());
+        let descriptor_text = agent_pipe_sddl_for_sids(service, &clients).unwrap();
+        assert_eq!(
+            descriptor_text,
+            format!(
+                "O:{service}G:{service}D:P(A;;GA;;;SY)(A;;GA;;;{service})(A;;0x0012019b;;;{})(A;;0x0012019b;;;{})",
+                clients[0], clients[1]
+            )
+        );
+        let text = wide(&descriptor_text);
+        let mut descriptor = ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    text.as_ptr(),
+                    SDDL_REVISION_1,
+                    &raw mut descriptor,
+                    ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let inspected = || {
+            let mut present = 0;
+            let mut defaulted = 0;
+            let mut dacl = ptr::null_mut();
+            assert_ne!(
+                unsafe {
+                    GetSecurityDescriptorDacl(
+                        descriptor,
+                        &raw mut present,
+                        &raw mut dacl,
+                        &raw mut defaulted,
+                    )
+                },
+                0
+            );
+            assert_ne!(present, 0);
+            assert!(!dacl.is_null());
+            assert_eq!(unsafe { (*dacl).AceCount }, 4);
+            for (index, expected) in clients.iter().enumerate() {
+                let mut raw = ptr::null_mut();
+                assert_ne!(
+                    unsafe { GetAce(dacl, u32::try_from(index + 2).unwrap(), &raw mut raw) },
+                    0
+                );
+                let ace = raw.cast::<ACCESS_ALLOWED_ACE>();
+                assert_eq!(unsafe { (*ace).Header.AceType }, 0);
+                assert_eq!(unsafe { (*ace).Mask }, 0x0012_019b);
+                assert_eq!(unsafe { (*ace).Mask } & FILE_CREATE_PIPE_INSTANCE, 0);
+                let sid = unsafe { std::ptr::addr_of!((*ace).SidStart).cast_mut().cast() };
+                assert_eq!(sid_string(sid).unwrap(), *expected);
+            }
+        };
+        // Free the owned native descriptor even if an assertion unwinds.
+        let result = std::panic::catch_unwind(inspected);
+        free_local(descriptor).unwrap();
+        result.unwrap();
+        let stop = WindowsStopEvent::create().unwrap();
+        for instances in [0, 1, 255, 256] {
+            assert!(
+                WindowsServerPipe::create_agent_instance_for_sids(
+                    "00000000000000000000000000000001",
+                    service,
+                    &clients,
+                    &stop,
+                    true,
+                    instances
+                )
+                .is_err()
+            );
+        }
+        stop.close().unwrap();
+    }
+
+    #[test]
+    fn accepted_sid_is_kernel_observed_connection_bound_and_cloned() {
+        observed_agent_sid_fixture(false);
+        observed_agent_sid_fixture(true);
+    }
+
+    fn observed_agent_sid_fixture(reject_observed: bool) {
+        let owner = current_process_sid().unwrap();
+        let other = "S-1-5-21-999999999-999999999-999999999-9999".to_owned();
+        let service = "S-1-5-80-10-20-30-40-50";
+        // Put the actual owner second: choosing expectedlistfirst must fail.
+        let clients = vec![other.clone(), owner.clone()];
+        let descriptor = agent_pipe_sddl_for_sids(service, &clients)
+            .unwrap()
+            .replacen(
+                &format!("O:{service}G:{service}"),
+                &format!("O:{owner}G:{owner}"),
+                1,
+            )
+            .replacen(
+                &format!("(A;;GA;;;{service})"),
+                &format!("(A;;GA;;;{owner})"),
+                1,
+            );
+        let vault = format!(
+            "{:032x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let stop = WindowsStopEvent::create().unwrap();
+        let expected = if reject_observed {
+            vec![other]
+        } else {
+            clients
+        };
+        let mut server = WindowsServerPipe::create_agent_role_instance(
+            &vault,
+            &descriptor,
+            expected,
+            &stop,
+            true,
+            2,
+        )
+        .unwrap();
+        assert!(server.accepted_client_sid().is_err());
+        let pre_accept_clone = server.try_clone().unwrap();
+        assert!(pre_accept_clone.accepted_client_sid().is_err());
+        let name = WindowsEndpoint::Agent.pipe_name(&vault).unwrap();
+        let client_stop = stop.clone();
+        let (close_sender, close_receiver) = std::sync::mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let outcome = (|| {
+                let name = wide(&name);
+                let handle = unsafe {
+                    CreateFileW(
+                        name.as_ptr(),
+                        AGENT_PIPE_CLIENT_ACCESS,
+                        0,
+                        ptr::null(),
+                        OPEN_EXISTING,
+                        SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                        ptr::null_mut(),
+                    )
+                };
+                if handle == INVALID_HANDLE_VALUE {
+                    return Err(ChannelAuthenticationError);
+                }
+                let peer = WindowsClientPipe {
+                    handle,
+                    expected_server_pid: unsafe {
+                        windows_sys::Win32::System::Threading::GetCurrentProcessId()
+                    },
+                    io_mode: WindowsClientIoMode::Installed,
+                };
+                if write_handle(peer.handle, CANARY).map_err(|_| ChannelAuthenticationError)?
+                    != CANARY.len()
+                {
+                    return Err(ChannelAuthenticationError);
+                }
+                close_receiver
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(|_| ChannelAuthenticationError)?;
+                drop(peer);
+                Ok(())
+            })();
+            client_stop.signal().unwrap();
+            outcome
+        });
+        if reject_observed {
+            // A failed new accept must erase any stale identity from a prior one.
+            server.client_sid = Some(owner.clone());
+            server.client_pid =
+                Some(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() });
+            assert!(server.accept().is_err());
+            assert!(server.accepted_client_sid().is_err());
+            assert!(server.client_sid.is_none());
+            assert!(server.try_clone().unwrap().accepted_client_sid().is_err());
+        } else {
+            server.accept().unwrap();
+            let mut payload = [0_u8; CANARY.len()];
+            io::Read::read_exact(&mut server, &mut payload).unwrap();
+            assert_eq!(payload.as_slice(), CANARY);
+            assert_eq!(server.accepted_client_sid().unwrap(), owner);
+            let cloned = server.try_clone().unwrap();
+            assert_eq!(cloned.accepted_client_sid().unwrap(), owner);
+            assert!(pre_accept_clone.accepted_client_sid().is_err());
+            close_sender.send(()).unwrap();
+            client.join().unwrap().unwrap();
+            assert!(server.accepted_client_sid().is_err());
+            assert!(cloned.accepted_client_sid().is_err());
+            drop(cloned);
+            drop(pre_accept_clone);
+            drop(server);
+            stop.close().unwrap();
+            return;
+        }
+        close_sender.send(()).unwrap();
+        client.join().unwrap().unwrap();
+        drop(pre_accept_clone);
+        drop(server);
+        stop.close().unwrap();
     }
 
     #[test]
