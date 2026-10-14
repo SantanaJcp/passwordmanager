@@ -92,6 +92,21 @@
       "statusAtDispatch": "running",
       "provider": "codex",
       "model": "gpt-6.1-sol"
+    },
+    {
+      "lane": "daemon-implementation",
+      "clientRequestId": "pm-chef-20261014-daemon-implementation-r1",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-daemon-implementation-r1",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-daemon-implementation-r1",
+      "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A48a5063a-6d33-41df-a90e-6794d7402ab6%253Adelegate-task%253Apm-chef-20261014-daemon-implementation-r1:ordinal:1",
+      "statusAtDispatch": "running",
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "delegationBase": "ecc2e9d390b780223dfdf1322288762f87af891c",
+      "approvedDecisions": [
+        "1A",
+        "2A"
+      ]
     }
   ]
 }
