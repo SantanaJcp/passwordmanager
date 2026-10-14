@@ -201,6 +201,46 @@
       "resultAcknowledged": true,
       "coreDiffInspectedByCoordinator": "SID delta and report; native test delta still source-only",
       "workerMeasured": "Shared Linux6/6/fmt/clippy0, blockingflock/private target; Windowsnativecompile/runtime/behavioralRED-GREEN NOT_RUN."
+    },
+    {
+      "lane": "exact-local-integration",
+      "status": "RUNNING delegated; no terminal result/test evidence yet",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-exact-local-integration-r1",
+      "base": "31b48ace181512d273738ff3b344201be8e8f08b",
+      "requiresOwnerDecision": [],
+      "action": "Exact private kitchen composition/check/52/newaffectedflows; knownG7RED remainsRED, no native/publication."
+    },
+    {
+      "lane": "guide-alignment",
+      "status": "RUNNING delegated; no terminal result/test evidence yet",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-guide-alignment-r2",
+      "base": "31b48ace181512d273738ff3b344201be8e8f08b",
+      "requiresOwnerDecision": [],
+      "action": "Update truthful docs against exact realCLI/registry source; docs-only no builds."
+    },
+    {
+      "lane": "evidence-review-skeptic-r1",
+      "status": "RUNNING delegated; no terminal result/test evidence yet",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-skeptic-r1",
+      "base": "31b48ace181512d273738ff3b344201be8e8f08b",
+      "requiresOwnerDecision": [],
+      "action": "Independent configuredClaude R1 source-only evidence/oracle review; no executions or nested review."
+    },
+    {
+      "lane": "evidence-review-architect-r1",
+      "status": "RUNNING delegated; no terminal result/test evidence yet",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-architect-r1",
+      "base": "31b48ace181512d273738ff3b344201be8e8f08b",
+      "requiresOwnerDecision": [],
+      "action": "Independent configuredClaude R1 source-only evidence/oracle review; no executions or nested review."
+    },
+    {
+      "lane": "evidence-review-minimalist-r1",
+      "status": "RUNNING delegated; no terminal result/test evidence yet",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-minimalist-r1",
+      "base": "31b48ace181512d273738ff3b344201be8e8f08b",
+      "requiresOwnerDecision": [],
+      "action": "Independent configuredClaude R1 source-only evidence/oracle review; no executions or nested review."
     }
   ]
 }

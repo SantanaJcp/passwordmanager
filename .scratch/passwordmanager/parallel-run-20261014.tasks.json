@@ -484,6 +484,189 @@
       "followUpOf": "installed-config",
       "delegationBase": "2801c4893b1a1e1870479eb692b120929518c8a4",
       "ownership": "Native-channel/src and own installed-config report only; no policy widening/user-data relocation/native execution"
+    },
+    {
+      "lane": "exact-local-integration",
+      "clientRequestId": "pm-chef-20261014-exact-local-integration-r1",
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "options": {
+        "reasoningEffort": "medium",
+        "serviceTier": "default"
+      },
+      "isolation": "worktree",
+      "ownership": "New scripts/chef-integration-20261014.sh + nested helpers and own new report; source edits prohibited",
+      "requiresOwnerDecision": [],
+      "base": "31b48ace181512d273738ff3b344201be8e8f08b",
+      "excludedHeads": [
+        "2801c4893b1a1e1870479eb692b120929518c8a4",
+        "e18cf389c91623072d7e8584860e9ca85a6f5356"
+      ],
+      "pinnedHeads": [
+        "894aa3600610e23a1834d831668bf66dc2bb7112",
+        "a900a69f0a57e4ff09baa458dae69f278d29b250",
+        "15bfaa248cf4950f5c8a3bf99dccc869791f3227",
+        "4c3a90c8e3c5ceac229060e66f551012e88c46dd",
+        "6a2a81fa76023c28e6b7e4a6d8282820c4e09fdc",
+        "837f5564b14f5b6f8a058b21304dfbd5d7ef1fb7",
+        "5e26f3b4d4813c4e606339353e67e82ede4dcdf5",
+        "0eff9d93b97abefd8048d16236cf674601af0a41",
+        "9de9aa99347cc2b3300190601ba00c568f22aa86"
+      ],
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-exact-local-integration-r1",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-exact-local-integration-r1",
+      "statusAtDispatch": "running"
+    },
+    {
+      "lane": "guide-alignment",
+      "clientRequestId": "pm-chef-20261014-guide-alignment-r2",
+      "provider": "codex",
+      "model": "gpt-6-luna",
+      "options": {
+        "reasoningEffort": "max",
+        "serviceTier": "default"
+      },
+      "isolation": "worktree",
+      "ownership": "README/docs-user + new own report only; no builds/testsource",
+      "requiresOwnerDecision": [],
+      "base": "31b48ace181512d273738ff3b344201be8e8f08b",
+      "sourceHeads": [
+        "894aa3600610e23a1834d831668bf66dc2bb7112",
+        "4c3a90c8e3c5ceac229060e66f551012e88c46dd",
+        "9de9aa99347cc2b3300190601ba00c568f22aa86"
+      ],
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-guide-alignment-r2",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-guide-alignment-r2",
+      "statusAtDispatch": "running"
+    },
+    {
+      "lane": "evidence-review-skeptic-r1",
+      "clientRequestId": "pm-chef-20261014-evidence-review-skeptic-r1",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-skeptic-r1",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-skeptic-r1",
+      "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253Ac4f49128-d209-4786-b3c4-dd47d816ab9a%253Adelegate-task%253Apm-chef-20261014-evidence-review-skeptic-r1:ordinal:1",
+      "statusAtDispatch": "running",
+      "provider": "claudeAgent",
+      "model": "claude-opus-5-5",
+      "options": {
+        "effort": "high",
+        "fastMode": false
+      },
+      "isolation": "shared-read-only",
+      "round": 1,
+      "pinnedScopes": [
+        {
+          "label": "Windows retirement diagnostics",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "6a2a81fa76023c28e6b7e4a6d8282820c4e09fdc",
+          "paths": "owned Windows scripts/native-channel examples+tests/custody examples windows_human_tui_seed and report only"
+        },
+        {
+          "label": "macOS observation diagnostics",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "837f5564b14f5b6f8a058b21304dfbd5d7ef1fb7",
+          "paths": "macos custody tests+scripts+own report only"
+        },
+        {
+          "label": "TLS framing measurement probe",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "5e26f3b4d4813c4e606339353e67e82ede4dcdf5",
+          "paths": "pm-sync tests/example/own report; product unchanged"
+        },
+        {
+          "label": "G7 staging/custody-loss measurement probes",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "0eff9d93b97abefd8048d16236cf674601af0a41",
+          "paths": "pm-vault examples+tests+own report; product/shared verifiers unchanged"
+        }
+      ],
+      "requiresOwnerDecision": []
+    },
+    {
+      "lane": "evidence-review-architect-r1",
+      "clientRequestId": "pm-chef-20261014-evidence-review-architect-r1",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-architect-r1",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-architect-r1",
+      "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253Ac4f49128-d209-4786-b3c4-dd47d816ab9a%253Adelegate-task%253Apm-chef-20261014-evidence-review-architect-r1:ordinal:1",
+      "statusAtDispatch": "running",
+      "provider": "claudeAgent",
+      "model": "claude-opus-5-5",
+      "options": {
+        "effort": "high",
+        "fastMode": false
+      },
+      "isolation": "shared-read-only",
+      "round": 1,
+      "pinnedScopes": [
+        {
+          "label": "Windows retirement diagnostics",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "6a2a81fa76023c28e6b7e4a6d8282820c4e09fdc",
+          "paths": "owned Windows scripts/native-channel examples+tests/custody examples windows_human_tui_seed and report only"
+        },
+        {
+          "label": "macOS observation diagnostics",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "837f5564b14f5b6f8a058b21304dfbd5d7ef1fb7",
+          "paths": "macos custody tests+scripts+own report only"
+        },
+        {
+          "label": "TLS framing measurement probe",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "5e26f3b4d4813c4e606339353e67e82ede4dcdf5",
+          "paths": "pm-sync tests/example/own report; product unchanged"
+        },
+        {
+          "label": "G7 staging/custody-loss measurement probes",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "0eff9d93b97abefd8048d16236cf674601af0a41",
+          "paths": "pm-vault examples+tests+own report; product/shared verifiers unchanged"
+        }
+      ],
+      "requiresOwnerDecision": []
+    },
+    {
+      "lane": "evidence-review-minimalist-r1",
+      "clientRequestId": "pm-chef-20261014-evidence-review-minimalist-r1",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-minimalist-r1",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-minimalist-r1",
+      "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253Ac4f49128-d209-4786-b3c4-dd47d816ab9a%253Adelegate-task%253Apm-chef-20261014-evidence-review-minimalist-r1:ordinal:1",
+      "statusAtDispatch": "running",
+      "provider": "claudeAgent",
+      "model": "claude-opus-5-5",
+      "options": {
+        "effort": "high",
+        "fastMode": false
+      },
+      "isolation": "shared-read-only",
+      "round": 1,
+      "pinnedScopes": [
+        {
+          "label": "Windows retirement diagnostics",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "6a2a81fa76023c28e6b7e4a6d8282820c4e09fdc",
+          "paths": "owned Windows scripts/native-channel examples+tests/custody examples windows_human_tui_seed and report only"
+        },
+        {
+          "label": "macOS observation diagnostics",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "837f5564b14f5b6f8a058b21304dfbd5d7ef1fb7",
+          "paths": "macos custody tests+scripts+own report only"
+        },
+        {
+          "label": "TLS framing measurement probe",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "5e26f3b4d4813c4e606339353e67e82ede4dcdf5",
+          "paths": "pm-sync tests/example/own report; product unchanged"
+        },
+        {
+          "label": "G7 staging/custody-loss measurement probes",
+          "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+          "head": "0eff9d93b97abefd8048d16236cf674601af0a41",
+          "paths": "pm-vault examples+tests+own report; product/shared verifiers unchanged"
+        }
+      ],
+      "requiresOwnerDecision": []
     }
   ]
 }

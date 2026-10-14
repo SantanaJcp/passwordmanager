@@ -66,6 +66,14 @@ La política de ancestros Windows procede del TCB administrativo ya confirmado (
 
 No batch PASS, cambios de tickets, master/PR/publicación/instalación ni CI. Puertas 3 y 4 siguen sin respuesta. `kitchen integrate`, clean/52 y caller Windows permanecen pendientes. Follow-up de implementación `native-profile-proof-r3` no es tercera revisión.
 
+## Continuación local sin espera del propietario
+
+El propietario corrigió la espera innecesaria («que esperass?»). `owner-attention`/`prove`: puertas 3 y 4 bloquean **solo** publicación/dispatch nativo y cambio durable/retention respectivamente, no composición ni documentación local. Los nuevos registros codifican `requiresOwnerDecision: []` para esas tareas.
+
+Despachados desde `31b48ace`: integrador aislado del vector exacto de nueve siblings (API config2801/e18 excluida), método/check/52 y flujos nuevos; escritor aislado de guía README/docs-user; tres lentes Claude R1 read-only de los cuatro candidatos de diagnóstico/probes restantes. Integrador único ejecutor de builds bajo flock; guía/revisores no compiten por Cargo ni archivos. Guía nueva se compondrá aparte, no mutará el vector en vuelo.
+
+No resultado de ejecución recibido al despacho, no PASS nuevo ni cierre nativo/G7. Sin publicación/CI/instalación/schema ni aceptación implícita de 3A/4A.
+
 ## Seguimiento
 
 Los taskIds, clientRequestIds y resultados del despacho se guardan en el registro JSON adyacente `parallel-run-20261014.tasks.json`, propiedad exclusiva del coordinador. No son estados duplicados de los tickets.
