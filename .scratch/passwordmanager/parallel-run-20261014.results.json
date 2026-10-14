@@ -311,11 +311,20 @@
     },
     {
       "lane": "g7-audit-tail-witness",
-      "status": "RUNNING delegated; no terminalresult evidence yet",
+      "status": "BLOCKED — bootstrap tail authenticated; ambiguous vault capture invalid",
       "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-g7-audit-tail-witness-r1",
       "base": "8cd45529b062506a2cbe0c567538d3999ac8a2b6",
       "requiresOwnerDecision": [],
-      "action": "Authenticate/decodeTWOaudit-tailadditions onsyntheticoriginalcustodylosscontrol, no readwrite/WALperturbation claim or oracle/schemachange; stopfinite ifBLOCKED."
+      "action": "Preserve bounded bootstrap knowledge and invalid vault evidence; stop this experiment, retain G7 red and original verifier. Caller migrations/guide local work continue; final exact composition remains required.",
+      "head": "e44854e451b4dea705fdf57972ea3bb3ba78ae1d",
+      "resultAcknowledged": true,
+      "worktree": "/home/santana/.t3/worktrees/passwordmanager/t3-01325f72",
+      "sourceDuringRuns": "b633a3060081ace024d790ebb361029cbe51fac5",
+      "artifactRoot": "/home/santana/.t3/worktrees/passwordmanager/t3-01325f72/.scratch/chef-g7-audit-tail-20261014",
+      "workerMeasured": "Original baselines bootstrap/vault rc1; original witness rc1 each; completed controls rc0 each. Bootstrap 10→12: ordinal11 AuthUse/Accepted, ordinal12 AuthState/Indeterminate, actorAgent and same attempt authenticated via existing codec. Eleven authority/receipt tables and original ciphertext prefix identical; provider calls1, stateindeterminate, terminalnull. Six valid decode queries/tamper Crypto(Authentication). Vault snapshot2 blocked under paused-daemon SQLite backup; interrupted/resumed, evidence invalid.",
+      "coordinatorObserved": "Inspected all3 core files, run receipts, manifest, bootstrap/vault summaries, interruption and six decode logs; six snapshot hashes verified, archived executed helper hash verified, Python AST checked. Original product/tests/manifests diff empty against8cd. No coordinator Cargo/lab rerun.",
+      "limits": "Pause/trace explicitly perturb scheduling. Original RDWRcounts/firstassertions preserved; not pure observer. Preunlock original audit manifest NOT verified (copy-only HumanUnlock rebuilds); reason/frontier not exposed. Executed ambiguous helper archived203f06f differs final guard; controls executed final only. Intermediate invariance and vault semantics NOT demonstrated. No ambiguous rerun; no G7/owner4 closure.",
+      "composition": "Evidence-only candidate e448 retained separately; not added to pending product vector. New Rust reader directly imports unix modules, source-inferred non-Unix all-target compilation gap if promoted. No native validation."
     },
     {
       "lane": "guide-observed-state",

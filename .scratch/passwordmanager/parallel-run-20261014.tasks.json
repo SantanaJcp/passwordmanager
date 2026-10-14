@@ -714,6 +714,8 @@
     },
     {
       "lane": "g7-audit-tail-witness",
+      "terminalStatus": "completed",
+      "resultHead": "e44854e451b4dea705fdf57972ea3bb3ba78ae1d",
       "clientRequestId": "pm-chef-20261014-g7-audit-tail-witness-r1",
       "ownership": "New vault/examples chef_g7_audit_tail.rs/py ifneeded and ownreport ONLY; originaloracle/product/oldwitness unchanged.",
       "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-g7-audit-tail-witness-r1",

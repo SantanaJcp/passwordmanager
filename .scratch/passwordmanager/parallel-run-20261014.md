@@ -90,6 +90,8 @@ Incidente/tmpEDQUOTse conserva como infraestructura, no ProductRED. Nuevoswriter
 
 Guía alineada `e1307808` recibida: README/docsuser/propioinforme,17links3anchors/diff0 (solo documentación). Parent inspeccionó diff/parserreferencias, no builds. Su estado snapshot31b anterior aún decía integrationExecutedfalse; sameowner corrige mínimo a hecho8cd42/52 y recetasblockingflock, sin dar guía nueva por compuesta o ordinarioinstaladorlisto. No nueva revisión ni producción; callers y witnessG7 siguenparalelos.
 
+Witness G7 `e44854e4` recibido **BLOCKED**: bootstrap tail10→12 autenticado como AuthUse/Accepted + AuthState/Indeterminate del mismo intento; once tablas/prefijo intactos, provider1/estado no terminal. Vault segunda captura inválida por backup SQLite bajo daemon pausado, interrumpida/reanudada; no extrapolación. Parent leyó3archivos/recibos/6decode logs y verificó6snapshotshashes/copiahelper; no rerun. Manifiesto original preunlock no verificado, pausa/trace perturbadores, helperfinal solo controles; límites preservados. Serie finita cerrada, e448 evidencia separada no incluido en vectorproducto (lector Rust unix-only; no plataforma nativa/check completo). [Triage](g7-audit-tail-20261014-triage.md), sin cambiar verifier/cerrarG7/owner4.
+
 ## Seguimiento
 
 Los taskIds, clientRequestIds y resultados del despacho se guardan en el registro JSON adyacente `parallel-run-20261014.tasks.json`, propiedad exclusiva del coordinador. No son estados duplicados de los tickets.
