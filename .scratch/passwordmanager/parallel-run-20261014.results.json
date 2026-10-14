@@ -67,6 +67,53 @@
       "workerMeasured": "Matrixrc1 retained staging1/1/17, authorityatomic/cleanup0; losswitness audit10to12, fullauthority/receipt rows andhistoricalprefix identical, provider1call. Existingprepared replay andW734tests/check.shrc0. No productfix.",
       "coordinatorInference": "Report and G4/G7 contracts inspected: data representation/recovery change is a one-way door. Audit rowcount alone is not authority mutation; stronger witness required for verifier correction.",
       "action": "Need distinguish durable encrypted prepared intent from disposable partials preserving signed retry/receipt; do not delete retained payload or silently weaken oracle. Await bounded owner decision if representation/schema changes."
+    },
+    {
+      "lane": "protected-memory",
+      "status": "ISSUES",
+      "head": "a900a69f0a57e4ff09baa458dae69f278d29b250",
+      "nativeSidHead": "f56c993b2ba3d770f6aae7f5c3401bf0263d98e1",
+      "coreDiffInspectedByCoordinator": true,
+      "workerMeasured": "Three actualmemlockRED→sameGREEN; check.shonce0. Windows/macOS nativeNOTRUN; nativeSID source localtestsnotexecuted.",
+      "review": "ClaudeR1all3lenses noP0/P1 only protectedcrypto diff f56..a900. SOURCEPASS, noexecutedacceptance. SID+futureconfigrequiresseparatereview.",
+      "action": "Samewriter implementingfixed-ownerinstalledfilecapability, Linuxpolicy4/4+checkreported; immutableconfigSHApending. NoG7closure."
+    },
+    {
+      "lane": "adapter-memory",
+      "status": "ISSUES",
+      "head": "15bfaa248cf4950f5c8a3bf99dccc869791f3227",
+      "coreDiffInspectedByCoordinator": true,
+      "workerMeasured": "Onefilter actualRED101→GREEN0;31packagetests+SSH/weblabs+check0. NoGitHubreal/native.",
+      "review": "ClaudeR1all3lensesnoP0/P1 sourceSSH. Retainedprofile/reference/thirdpartybuffers stillgaps.",
+      "action": "Exactcompositionpending, noG7orproductreadyclaim."
+    },
+    {
+      "lane": "user-guide",
+      "status": "PASS documentation only",
+      "head": "9de9aa99347cc2b3300190601ba00c568f22aa86",
+      "coreDiffInspectedByCoordinator": false,
+      "workerMeasured": "Links16/check0/build0; actualpmhelpINVALID_ARGUMENT2,pmtui_jsonUNAUTHORIZED3; custody/TUInativeNOTRUN.",
+      "action": "Specalreadyconfirms pmtui, notnewownerquestion. NewexclusiveCLIwriterimplementsactualhumanentry; guidewillbealignedatcomposition."
+    },
+    {
+      "lane": "windows-retire-diagnostic",
+      "status": "PASS local diagnostic only",
+      "head": "6a2a81fa76023c28e6b7e4a6d8282820c4e09fdc",
+      "base": "872a880e2549a65f93f33c58da961f4dfdea1a94",
+      "coreDiffInspectedByCoordinator": false,
+      "workerMeasured": "Sameexample behavioralRED7/7→GREEN7/7, SQLprobe5/5+check0. RETIREWindowsNOTRUN, causeunknown.",
+      "action": "ExactWinbranchwillcapturecategoricalstderrafterauthorizedrun3; notretirementgreen."
+    },
+    {
+      "lane": "daemon-implementation",
+      "status": "ISSUES — Claude R1 twoP1 blockers",
+      "head": "7b7026e0099ec87114dbb8e962e8e398bee18a71",
+      "base": "ecc2e9d390b780223dfdf1322288762f87af891c",
+      "withdrawnAloneHead": "6728bbd7fe475ef3fb1d79da6aa16722c22d85ea",
+      "coreDiffInspectedByCoordinator": true,
+      "workerMeasured": "RootagentownedactualRED→sameGREEN; legitimateownchroot0+actualexternalTUI A+Bcrossroles/hotrevoke andrealmigration, realwebadapterTLSsyntheticsuccess/restartonecall+WAITINGrecovery+negative0calls. Packages/clippytarget0; fullcheckoncefailedthenfiveclippyfixesverifiedtargeted(notfullrc0).",
+      "review": "ClaudeSkeptic+ArchitectagreeP1global4crossagentstarvation andlocalpreflightterminalizesunknownreconciliation. Parenttracedrun_provider_once/call_provider, D2inferredreachability; realREDassignedsamewriter. MinimalistP2only.",
+      "action": "NOTaccepted/integrated. Sameownerfollow-upadmission+recovery; excludeslib.rsnowCLIwriter. NativeWindowsworker/APIintegrationpending, macOSNOTRUN, noallG7acceptance."
     }
   ]
 }
