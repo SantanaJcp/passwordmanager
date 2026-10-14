@@ -28,6 +28,7 @@ pub(crate) fn serve_agent(
     service: &AgentService<'_>,
     observed_rpk: &[u8],
 ) -> Result<(), Failure> {
+    service.admission.verify_local()?;
     let peer = AgentPeer::from_transport_rpk(observed_rpk).map_err(|_| Failure::Unavailable)?;
     let vault = DelegatedVault::open(
         service.path,
@@ -186,6 +187,7 @@ fn handle_attempt_request(
     request: &[u8],
 ) -> Result<Vec<u8>, Failure> {
     let (&opcode, rest) = request.split_first().ok_or(Failure::Unavailable)?;
+    service.admission.verify_local()?;
     verify_admission_custody(service, opcode)?;
     let attempts = AttemptVault::open(
         DelegatedVault::open(

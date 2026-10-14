@@ -65,6 +65,9 @@ use crate::human_wire::{
     handle_stream_upload, protected_fields_frame, read_frame, read_frame_bounded,
     read_frame_bounded_classified, write_frame,
 };
+#[path = "installed_unix.rs"]
+mod installed;
+
 use crate::sync_job;
 use crate::{Failure, take_path};
 
@@ -428,6 +431,7 @@ struct VaultService {
     device: [u8; 16],
     audit_custody: Arc<AuditDeviceCustody>,
     provider: Option<ControlledProvider>,
+    registry: Option<Arc<installed::Registry>>,
     sync_jobs: Arc<sync_job::Manager>,
     admission: Arc<crate::custody_admission::CustodyAdmission>,
 }
@@ -444,6 +448,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
     let command = arguments.next().ok_or(Failure::Usage)?;
     match command.to_str() {
         Some("keygen") => keygen(&mut arguments),
+        Some("migrate-agent-registry") => installed::migrate(&mut arguments),
         Some("provision-bootstrap") => provision_bootstrap(&mut arguments),
         Some("provision-profile") => provision_profile(&mut arguments),
         Some("serve") => serve(&mut arguments),
@@ -761,13 +766,30 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
         &vault_path,
         device,
     )?);
+    let registry_path = installed::sidecar(&vault_path, ".agent-registry");
+    let bootstrap = read_bootstrap(&bootstrap_path)?;
+    let registry_snapshot = match fs::symlink_metadata(&registry_path) {
+        Ok(_) => Some(installed::read_installed(&registry_path)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(Failure::Unavailable),
+    };
+    let mut admission = crate::custody_admission::CustodyAdmission::load(
+        &bootstrap_path,
+        &audit_path,
+        bootstrap_custody_fingerprint,
+        audit_custody_fingerprint,
+    )?;
+    let registry = if let Some((bytes, fingerprint)) = registry_snapshot {
+        let registry = installed::Registry::parse(&bytes, &vault_path, device, &bootstrap)?;
+        admission =
+            admission.bind_local_snapshot(&registry_path, fingerprint, installed::fingerprint)?;
+        Some(Arc::new(registry))
+    } else {
+        None
+    };
     let service = VaultService {
-        admission: Arc::new(crate::custody_admission::CustodyAdmission::load(
-            &bootstrap_path,
-            &audit_path,
-            bootstrap_custody_fingerprint,
-            audit_custody_fingerprint,
-        )?),
+        admission: Arc::new(admission),
+        registry,
         path: vault_path,
         device,
         audit_custody,
@@ -801,6 +823,12 @@ fn serve_attempt_lab(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
         device,
     )?);
     let service = VaultService {
+        registry: Some(Arc::new(installed::Registry {
+            entries: vec![(
+                read_bootstrap(&bootstrap_path)?.agent_spki,
+                read_bootstrap(&bootstrap_path)?.agent_uid,
+            )],
+        })),
         admission: Arc::new(crate::custody_admission::CustodyAdmission::load(
             &bootstrap_path,
             &audit_path,
@@ -4113,11 +4141,28 @@ fn accept_one(
     }
     if let Some(connections) = connections {
         // Native identity is checked before consuming an expensive worker.
-        match unix_peer_uid(&stream) {
-            Ok(uid) if uid == expected_uid => {}
-            Ok(_) | Err(_) => return Ok(()),
-        }
-        let config = Arc::clone(config);
+        let uid = match unix_peer_uid(&stream) {
+            Ok(uid) => uid,
+            Err(_) => return Ok(()),
+        };
+        let (config, expected_uid) = if let Some(service) = vault {
+            let Some(registry) = &service.registry else {
+                return Ok(());
+            };
+            let keys = registry.keys_for(uid);
+            if keys.is_empty() {
+                return Ok(());
+            }
+            (
+                server_config_keys(config.cert_resolver.clone(), keys, Role::Agent)?,
+                uid,
+            )
+        } else {
+            if uid != expected_uid {
+                return Ok(());
+            }
+            (Arc::clone(config), expected_uid)
+        };
         let vault = vault.cloned();
         let peer_rpk = peer_rpk.map(<[u8]>::to_vec);
         connections.dispatch(move || {
@@ -4196,7 +4241,7 @@ fn handle_connection(
     role: Role,
     config: &Arc<ServerConfig>,
     vault: Option<&VaultService>,
-    peer_rpk: Option<&[u8]>,
+    _peer_rpk: Option<&[u8]>,
 ) -> Result<(), Failure> {
     let mut timing =
         (role == Role::Human).then(|| pm_crypto::phase_timing::PhaseTimer::new("human-dispatch"));
@@ -4248,6 +4293,24 @@ fn handle_connection(
     }
     if request == *AGENT_MAGIC && role == Role::Agent {
         let service = vault.ok_or(Failure::Unavailable)?;
+        service.admission.verify()?;
+        let observed = tls
+            .conn
+            .peer_certificates()
+            .and_then(|keys| keys.first())
+            .ok_or(Failure::Unavailable)?
+            .as_ref()
+            .to_vec();
+        if !service
+            .registry
+            .as_ref()
+            .ok_or(Failure::Unavailable)?
+            .entries
+            .iter()
+            .any(|(key, uid)| key == &observed && *uid == expected_uid)
+        {
+            return Err(Failure::Unavailable);
+        }
         return crate::agent_wire::serve_agent(
             &mut tls,
             &crate::agent_wire::AgentService {
@@ -4256,7 +4319,7 @@ fn handle_connection(
                 audit_custody: &service.audit_custody,
                 admission: &service.admission,
             },
-            peer_rpk.ok_or(Failure::Unavailable)?,
+            &observed,
         );
     }
     if request != *b"PING\n" {
@@ -4297,17 +4360,29 @@ fn server_config(
     expected_client_spki: &[u8],
     role: Role,
 ) -> Result<Arc<ServerConfig>, Failure> {
+    server_config_keys(
+        Arc::new(AlwaysResolvesServerRawPublicKeys::new(key)),
+        vec![expected_client_spki.to_vec()],
+        role,
+    )
+}
+
+fn server_config_keys(
+    resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+    keys: Vec<Vec<u8>>,
+    role: Role,
+) -> Result<Arc<ServerConfig>, Failure> {
     let provider = crypto_provider();
     let algorithms = provider.signature_verification_algorithms;
     let verifier = Arc::new(PinnedClientVerifier {
-        expected: expected_client_spki.to_vec(),
+        expected: keys,
         algorithms,
     });
     let mut config = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&version::TLS13])
         .map_err(|_| Failure::Unavailable)?
         .with_client_cert_verifier(verifier)
-        .with_cert_resolver(Arc::new(AlwaysResolvesServerRawPublicKeys::new(key)));
+        .with_cert_resolver(resolver);
     config.alpn_protocols = vec![role.alpn().to_vec()];
     config.max_early_data_size = 0;
     config.send_half_rtt_data = false;
@@ -4386,7 +4461,7 @@ impl ServerCertVerifier for PinnedServerVerifier {
 
 #[derive(Debug)]
 struct PinnedClientVerifier {
-    expected: Vec<u8>,
+    expected: Vec<Vec<u8>>,
     algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
 }
 
@@ -4401,7 +4476,15 @@ impl ClientCertVerifier for PinnedClientVerifier {
         intermediates: &[CertificateDer<'_>],
         _now: UnixTime,
     ) -> Result<ClientCertVerified, TlsError> {
-        verify_pin(end_entity, intermediates, &self.expected)?;
+        if !self
+            .expected
+            .iter()
+            .any(|key| verify_pin(end_entity, intermediates, key).is_ok())
+        {
+            return Err(TlsError::InvalidCertificate(
+                CertificateError::UnknownIssuer,
+            ));
+        }
         Ok(ClientCertVerified::assertion())
     }
 

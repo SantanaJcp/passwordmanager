@@ -26,6 +26,7 @@ pub(crate) struct CustodyAdmission {
     audit_hash: [u8; 32],
     read_bootstrap: Fingerprint,
     read_audit: Fingerprint,
+    local: Vec<(PathBuf, [u8; 32], Fingerprint)>,
 }
 
 impl CustodyAdmission {
@@ -40,9 +41,32 @@ impl CustodyAdmission {
             audit: audit.to_owned(),
             bootstrap_hash: read_bootstrap(bootstrap)?,
             audit_hash: read_audit(audit)?,
+            local: Vec::new(),
             read_bootstrap,
             read_audit,
         })
+    }
+
+    pub(crate) fn bind_local_snapshot(
+        mut self,
+        path: &Path,
+        expected: [u8; 32],
+        fingerprint: Fingerprint,
+    ) -> Result<Self, Failure> {
+        if fingerprint(path)? != expected {
+            return Err(Failure::Unavailable);
+        }
+        self.local.push((path.to_owned(), expected, fingerprint));
+        Ok(self)
+    }
+
+    pub(crate) fn verify_local(&self) -> Result<(), Failure> {
+        for (path, expected, read) in &self.local {
+            if read(path)? != *expected {
+                return Err(Failure::Unavailable);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn verify(&self) -> Result<(), Failure> {
@@ -51,6 +75,6 @@ impl CustodyAdmission {
         {
             return Err(Failure::Unavailable);
         }
-        Ok(())
+        self.verify_local()
     }
 }
