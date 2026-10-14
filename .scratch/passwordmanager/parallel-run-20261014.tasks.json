@@ -541,6 +541,8 @@
     },
     {
       "lane": "evidence-review-skeptic-r1",
+      "terminalStatus": "completed",
+      "reviewCoverage": "incomplete-EDQUOT",
       "clientRequestId": "pm-chef-20261014-evidence-review-skeptic-r1",
       "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-skeptic-r1",
       "childThreadId": "thread:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-skeptic-r1",
