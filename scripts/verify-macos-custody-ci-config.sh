@@ -388,6 +388,7 @@ path = pathlib.Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("pm_macos_lab", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+module.assert_unlock_cutoff_diagnostic_regression()
 
 normal, pasteboard, final, paths = module.parse_lab_arguments(["custody", "cli", "plist", "config"])
 assert normal is False and pasteboard is False and final is False and len(paths) == 4
