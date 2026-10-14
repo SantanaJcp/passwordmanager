@@ -1,0 +1,100 @@
+{
+  "branch": "t3/chef-integration-tests",
+  "canonical_refs_read_only": {
+    "refs/heads/chef/normalized-guide-20261014": "55abf2592cc67a7da9a0fcaa89055540f41fe61c",
+    "refs/heads/chef/normalized-tls-gate-20261014": "15013de74d7bf55464c2d6aef7e99ee2f9ee25fc",
+    "refs/inputs/original-composite": "8cd45529b062506a2cbe0c567538d3999ac8a2b6",
+    "refs/inputs/original-method": "0a11733ffc784e80cb75c8df01d2cdcf34862d7e",
+    "refs/inputs/selected-caller": "3b4dd416a4dcd6f7cc301fc4c9f2c1d30ce540d9"
+  },
+  "cli_source_proof": {
+    "assertions": 23,
+    "migration": "d9789af63e3995ecf92dba054a184dfabc935d9539cb5616d3551f733ef0b7ec",
+    "removal_equality": true,
+    "source": "f70418c7284f4a7ef4153ce4a100169bc5ec4b1b42c0675358149d418d0c7d07",
+    "transformed": "cee71f4c91bbdb86ffbefcff5ed858ca26ed460d3d2dec72fe697743a8c434e8"
+  },
+  "command": [
+    "flock",
+    "/tmp/pm-cargo-window.lock",
+    "env",
+    "PYTHONDONTWRITEBYTECODE=1",
+    "PM_METHOD_UNIT_EVIDENCE=structural-evidence-final2",
+    "python3",
+    "scripts/chef-integration-followup-20261014/test_method.py"
+  ],
+  "command_digest": "6447d46c940215f947cfe64ecbf9f78b317594b84810d81ead23819f7d566e2d",
+  "d056_preparation_files": {
+    "docs/verification/chef-composition-prepare-20261014.md": "a6d63a677dc809ae2391a22cdd58efeee70587fbb0cff85387b67e4fa41ef915",
+    "scripts/chef-integration-20261014/prepare_refs.py": "d1da15463be7dc9cb065c4d5f58574f6b3ed4a8d463f04d08caf7aef305bc09f"
+  },
+  "final_log": "structural-check-final2.log",
+  "final_log_digest": "993dec8fe3a05580c1e1c1073dc977ae3140cdc5d5effad1f65ee96d43e7a63f",
+  "gui_status": "BLOCKED_NOT_LAUNCHED",
+  "historical_cases": 52,
+  "historical_input_digest": "0644a20f2f18a21c3f5f3298bf8d8f2b37495c7b59af26c613c2584ad764751c",
+  "installed_headless_sources": {
+    "/usr/include/aquamarine/backend/Backend.hpp": "48c5f2e8d9d20112de335f720e083b62dfd4217c28641ef0534b7f3a2697a6d8",
+    "/usr/include/aquamarine/backend/Headless.hpp": "ab02fb1acecab2b5eaedac49def423cd1a25e0dca91c59f5811b885be4615ad8",
+    "/usr/share/man/man1/Hyprland.1.gz": "9299fa83500e15cbedf9854fb0c549eb8c8357a03fb50da2f17e9fca90cac85d"
+  },
+  "kitchen_log": {
+    "command": [
+      "/home/santana/.local/bin/kitchen",
+      "log",
+      "CLEAN_METHOD_ONLY: 18 synthetic/structural tests rc0; exact52/0a bytes retained; GUI prerequisite BLOCKED, compositor NOT launched; product/build/check/labs/integration NOT RUN. New method paths only.",
+      "--status",
+      "done"
+    ],
+    "private_home": "/home/santana/.t3/worktrees/passwordmanager/t3-0eed2d3d/scripts/chef-integration-followup-20261014/journal-home",
+    "rc": 0,
+    "state": "/home/santana/.t3/worktrees/passwordmanager/t3-0eed2d3d/scripts/chef-integration-followup-20261014/kitchen-state/log.jsonl"
+  },
+  "new_helpers": {
+    "cli_adapter.py": "ce7fcca407645a057edab86158635f489b0f6391217d591ba82b99a13f4ac8d7",
+    "core.py": "75855ce2aa0dbfb7494777ce127e91013a5cb404a20bbea5621d4dea22591d3b",
+    "dispatch.py": "11bd48bf30ed12aadba0a16a4b23a913b56b6ff3bf31347994cbee23e33912a3",
+    "gui.py": "5758a77d4dbc6cc48cb6038f5f285c50a5f7afa074ee0f0b33d09fdd62c2da67",
+    "stage.py": "8821c31e574fc5adc3b5ab5ee3332a6ecc9442653139cbce0d60697c56dea300",
+    "sweep.py": "6a91b8503f714aa70598b654af4754c91c9d1b9c25a513ffa2c3418883a6e623",
+    "test_method.py": "92cc91a3f08782fdf7867d0543c97cfbfffa1848107330d280865953c1c03d2c"
+  },
+  "not_run": [
+    "kitchen integrate",
+    "Cargo",
+    "Rust build",
+    "scripts/check.sh",
+    "clean build",
+    "52 product cases",
+    "affected product flows",
+    "Hyprland",
+    "wl-copy",
+    "wl-paste",
+    "native CI",
+    "product review"
+  ],
+  "old_eleven_files": {
+    "docs/verification/chef-integration-20261014.md": "b808048fe07cb584971fe3cafc067f9be7651a384b09eb54be9b0f20e39d8c08",
+    "scripts/chef-integration-20261014.sh": "2f321e70dcca382251eea051f347b30803ca853cd99c29c75d101c9721c56f26",
+    "scripts/chef-integration-20261014/affected.py": "d3d5b300b5601b281b517f215fed769799523bb3e82c83d30c7074e383fc4adf",
+    "scripts/chef-integration-20261014/historical-cases.json": "0644a20f2f18a21c3f5f3298bf8d8f2b37495c7b59af26c613c2584ad764751c",
+    "scripts/chef-integration-20261014/integrate.py": "0fa8af6cbd50075098fb3b39b670fc042475f7f7af00932e4e2a585f5148d35f",
+    "scripts/chef-integration-20261014/matrix_boundaries.py": "adc6fec76f869c8ba27ecd6381416b7f717ed5dfce3975a8dda62477a415e3fc",
+    "scripts/chef-integration-20261014/matrix_counts.py": "20f28078c6243356da83793c5f79d9a750b9b6f72cae9376689b21c2aec394e4",
+    "scripts/chef-integration-20261014/memory_red.py": "8307cd65e5f3ffdfb9f9638588d1132f126efc93e67aa913f1a72ef7a39f1cd9",
+    "scripts/chef-integration-20261014/owned_root.py": "e92e075c91fb0394cb8f4690030eb0b5e228e1857e51c622c0d085e66dbaecc6",
+    "scripts/chef-integration-20261014/stage.py": "b376ccc443bb57c67334b97b2d689be4bc248a3d243e8cdd704c3261faf3e5f2",
+    "scripts/chef-integration-20261014/sweep.py": "b5cd2bb4464ffff9bc41fcacf5140dc6778d47fab3535a80051cd924d2319a46"
+  },
+  "rc": 0,
+  "starting_head": "d056ec72d75773c750fddc9cd71f945e8315f384",
+  "status": "CLEAN_METHOD_ONLY",
+  "synthetic_socket_root": {
+    "mode": "0o700",
+    "path": "/tmp/pm-method-unit-h3izpsv8",
+    "purpose": "SYNTHETIC UNIT SOCKET ONLY; NOT A GUI",
+    "uid": 1000
+  },
+  "tests": 18,
+  "workspace": "/home/santana/.t3/worktrees/passwordmanager/t3-0eed2d3d"
+}

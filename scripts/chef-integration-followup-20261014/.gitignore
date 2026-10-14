@@ -1,0 +1,3 @@
+# Preserve private synthetic Git repositories and socket receipts locally.
+structural-evidence*/
+__pycache__/
