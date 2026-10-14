@@ -1,7 +1,8 @@
 {
   "codeBase": "d4b1be662a1b8766eff54c2b8269ef4c94770c54",
   "batchAccepted": false,
-  "integrationExecuted": false,
+  "integrationExecuted": true,
+  "integrationSubsetStatus": "PASS kitchen combined-check only; complete52 ISSUES",
   "results": [
     {
       "lane": "verification-map",
@@ -204,11 +205,31 @@
     },
     {
       "lane": "exact-local-integration",
-      "status": "RUNNING delegated; no terminal result/test evidence yet",
+      "status": "ISSUES measured — kitchen/check/cleanPASS subset; 42/52 suite",
       "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-exact-local-integration-r1",
       "base": "31b48ace181512d273738ff3b344201be8e8f08b",
       "requiresOwnerDecision": [],
-      "action": "Exact private kitchen composition/check/52/newaffectedflows; knownG7RED remainsRED, no native/publication."
+      "action": "Sevenordinarycallerfixturemigrations delegatedsinglecoherentwriter8files/sharedhelper; independentboundedG7audit-tail authenticitywitness. KeepG7staging/ordinaldrift andnativeblocked. Current52notPASS; guide/synccorrectivestillpendingnextexactcomposition. ReportsRC1notknown-redexit0.",
+      "resultAcknowledged": true,
+      "head": "8cd45529b062506a2cbe0c567538d3999ac8a2b6",
+      "methodHead": "0a11733ffc784e80cb75c8df01d2cdcf34862d7e",
+      "worktree": "/home/santana/.t3/worktrees/passwordmanager/t3-0eed2d3d",
+      "artifactRoot": "/home/santana/.t3/worktrees/passwordmanager/t3-0eed2d3d/.scratch/chef-integration-20261014/run1",
+      "localCompositeRef": "chef/exact-integrated-20261014",
+      "coordinatorObserved": "Readmethod/report andreceiptskitchen/check/52summary/results/baselineRED,failedauthorization/concurrencylogs; inspectedstage/sweep/ownedroot scripts; fetchedONLYlocalcomposite8cd private ref, sourceparent/masterunchanged.",
+      "workerMeasured": "9head kitchen0+fullcombinedcheck0+cleanoffline0;52cases42rc0/10rc1;17groupednewaffectedflows pass; actualmemorybaseline3RED101→composite3GREEN; allsources unchanged. /tmpquota incident preserved and ownroot movedtodisk, infra notProductRED.",
+      "failedCases": [
+        "lab-authorization",
+        "lab-content",
+        "lab-human-transaction",
+        "lab-passkey",
+        "lab-passkey-login",
+        "lab-token-exchange",
+        "g7-matrix",
+        "g7-extra-bootstrap",
+        "g7-extra-vault",
+        "concurrency"
+      ]
     },
     {
       "lane": "guide-alignment",
@@ -272,6 +293,22 @@
       "coreDiffInspectedByCoordinator": true,
       "workerMeasured": "Same combined-write proof originaldefaulttestRED101→correctedGREEN0 (32 actualroundtrips,0ignored); finalsplitpackage39passed/0failed/0ignored; metrics32/1088vs16/736; fmt/diff0, productionidentical5e.",
       "coordinatorObserved": "Read red/green/packageexit files and log test summaries/counters, diffonlytwoownedfiles and main/lib/session/manifestdiffempty; verified preservedproof/finalmain/testSHA256. DidnotexecuteCargoorindependentlyrerun."
+    },
+    {
+      "lane": "caller-fixture-migrations",
+      "status": "RUNNING delegated; no terminalresult evidence yet",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-caller-fixture-migrations-r1",
+      "base": "8cd45529b062506a2cbe0c567538d3999ac8a2b6",
+      "requiresOwnerDecision": [],
+      "action": "SevenactuallegacyRED→sameGREEN byexplicit1A/2Afixtureprovisioning/ownedroot; allassertions/grants/revocation/timeouts unchanged."
+    },
+    {
+      "lane": "g7-audit-tail-witness",
+      "status": "RUNNING delegated; no terminalresult evidence yet",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-g7-audit-tail-witness-r1",
+      "base": "8cd45529b062506a2cbe0c567538d3999ac8a2b6",
+      "requiresOwnerDecision": [],
+      "action": "Authenticate/decodeTWOaudit-tailadditions onsyntheticoriginalcustodylosscontrol, no readwrite/WALperturbation claim or oracle/schemachange; stopfinite ifBLOCKED."
     }
   ]
 }

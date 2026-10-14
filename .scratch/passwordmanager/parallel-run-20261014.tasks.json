@@ -487,6 +487,8 @@
     },
     {
       "lane": "exact-local-integration",
+      "terminalStatus": "completed",
+      "resultHead": "8cd45529b062506a2cbe0c567538d3999ac8a2b6",
       "clientRequestId": "pm-chef-20261014-exact-local-integration-r1",
       "provider": "codex",
       "model": "gpt-6.1-sol",
@@ -689,6 +691,40 @@
       "isolation": "worktree",
       "ownership": "pm-sync/src/frame_cost_tests.rs ONLY + new chef-sync-probe-gate report",
       "base": "5e26f3b4d4813c4e606339353e67e82ede4dcdf5",
+      "requiresOwnerDecision": []
+    },
+    {
+      "lane": "caller-fixture-migrations",
+      "clientRequestId": "pm-chef-20261014-caller-fixture-migrations-r1",
+      "ownership": "custody/tests authorization_lab linux_lab passkey_lab concurrency_lab tui_access_lab; web-auth/tests passkey_login_lab token_exchange_lab; new custody/tests/chef_installed_fixture.py and own report. No product/scripts/oracle/timeout changes.",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-caller-fixture-migrations-r1",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-caller-fixture-migrations-r1",
+      "statusAtDispatch": "running",
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "options": {
+        "reasoningEffort": "medium",
+        "serviceTier": "default"
+      },
+      "isolation": "worktree",
+      "sourceBase": "8cd45529b062506a2cbe0c567538d3999ac8a2b6",
+      "requiresOwnerDecision": []
+    },
+    {
+      "lane": "g7-audit-tail-witness",
+      "clientRequestId": "pm-chef-20261014-g7-audit-tail-witness-r1",
+      "ownership": "New vault/examples chef_g7_audit_tail.rs/py ifneeded and ownreport ONLY; originaloracle/product/oldwitness unchanged.",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-g7-audit-tail-witness-r1",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-g7-audit-tail-witness-r1",
+      "statusAtDispatch": "running",
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "options": {
+        "reasoningEffort": "medium",
+        "serviceTier": "default"
+      },
+      "isolation": "worktree",
+      "sourceBase": "8cd45529b062506a2cbe0c567538d3999ac8a2b6",
       "requiresOwnerDecision": []
     }
   ]
