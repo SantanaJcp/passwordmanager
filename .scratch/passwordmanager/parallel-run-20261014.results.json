@@ -260,11 +260,18 @@
     },
     {
       "lane": "sync-probe-gate",
-      "status": "RUNNING focused P2 implementation; not reviewR2",
+      "status": "PASS local test-only; exact composition pending",
       "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-sync-probe-gate-r2",
       "base": "5e26f3b4d4813c4e606339353e67e82ede4dcdf5",
       "requiresOwnerDecision": [],
-      "action": "Default TLS/RPK gate must retain literal wire roundtrips without requiring currentinefficiency. Temporaryowned combined-framing proof RED→sameGREEN; final no productionchange. Inflightoriginal9headvectorunchanged."
+      "action": "Test no longer requiresinefficiency; independentliteralALPN stronger,wire/replyguards remain. Exactsiblingsphasepending; immutableoriginal9headvectornotchanged. Native/G7NOTRUN.",
+      "head": "fffceb33622af151a55216677b20946b05f4e844",
+      "cherryPickedBase": "7499754386931663a844c8b0522cb6ccbb26a4b2",
+      "resultAcknowledged": true,
+      "worktree": "/home/santana/.t3/worktrees/passwordmanager/t3-e1e1ea68",
+      "coreDiffInspectedByCoordinator": true,
+      "workerMeasured": "Same combined-write proof originaldefaulttestRED101→correctedGREEN0 (32 actualroundtrips,0ignored); finalsplitpackage39passed/0failed/0ignored; metrics32/1088vs16/736; fmt/diff0, productionidentical5e.",
+      "coordinatorObserved": "Read red/green/packageexit files and log test summaries/counters, diffonlytwoownedfiles and main/lib/session/manifestdiffempty; verified preservedproof/finalmain/testSHA256. DidnotexecuteCargoorindependentlyrerun."
     }
   ]
 }

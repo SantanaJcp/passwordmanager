@@ -76,6 +76,8 @@ No resultado de ejecución recibido al despacho, no PASS nuevo ni cierre nativo/
 
 Architect/Minimalist evidencia R1 recibidos: ambos sin P0/P1; P2 real en gate TLS que exige ineficiencia actual. Parent trazó fuente y despachó corrección aislada test-only, prueba RED→mismoGREEN sin producción nueva; se compondrá después, no cambia vector en vuelo. PID-reuse cleanup Windows es falsoRED fail-closed para corpus nativo, no se relajan guards. G7 witness read-only/aserción añadida no es observador puro; layout/oráculos se coordinan con decisión4. [Triage evidencia R1](reviews/20261014-evidence-r1/triage.md). Skeptic cobertura incompleta no se vuelve PASS por consenso.
 
+Correctivo TLS `fffceb33` recibido: mismo test real sobre proof combinado RED101→GREEN0; producción split intacta39/39,0ignored. Parent inspeccionó dos archivos propios, logs/exitcodes/hashes; ninguna write_frame productiva cambiada. Delta listo para siguiente composición exacta, no altera vector original en vuelo. Native/G7 siguen NOT_RUN.
+
 ## Seguimiento
 
 Los taskIds, clientRequestIds y resultados del despacho se guardan en el registro JSON adyacente `parallel-run-20261014.tasks.json`, propiedad exclusiva del coordinador. No son estados duplicados de los tickets.
