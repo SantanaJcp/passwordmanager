@@ -2,7 +2,12 @@
 
 //! Installed local policy, separate from synced human authority. A running
 //! daemon pins file identity as well as contents; changes require a restart.
-use super::*;
+use super::{
+    Arc, AuditDeviceCustody, Bootstrap, ControlledProvider, Cursor, DelegatedVault, Failure, File,
+    FileTypeExt, MAX_PROTECTED_BYTES, MetadataExt, OpenOptions, OpenOptionsExt, OsString, Path,
+    Read, SPKI_BYTES, current_uid, decode_hex_16, fs, hex, push_bytes, read_bootstrap, read_public,
+    read_regular, take_path, take_u32, validate_spki, write_new,
+};
 use std::path::{Component, PathBuf};
 
 pub(super) const REGISTRY_MAGIC: &[u8] = b"PMAR1";
@@ -24,10 +29,6 @@ fn safe_parent(path: &Path) -> Result<(), Failure> {
     if !path.is_absolute() {
         return Err(Failure::Unavailable);
     }
-    // The filesystem root is the trusted traversal anchor. In the documented
-    // subordinate-UID namespace its owner is intentionally unmapped, while
-    // administrative UID 0 owns the disposable installation root.
-    let root_owner = fs::metadata("/").map_err(|_| Failure::Unavailable)?.uid();
     let mut prefix = PathBuf::new();
     for component in path.parent().ok_or(Failure::Unavailable)?.components() {
         if !matches!(component, Component::RootDir | Component::Normal(_)) {
@@ -36,8 +37,8 @@ fn safe_parent(path: &Path) -> Result<(), Failure> {
         prefix.push(component);
         let m = fs::symlink_metadata(&prefix).map_err(|_| Failure::Unavailable)?;
         if !m.is_dir()
-            || ![0, current_uid(), root_owner].contains(&m.uid())
-            || (m.mode() & 0o022 != 0 && !(m.uid() == root_owner && m.mode() & 0o1000 != 0))
+            || ![0, current_uid()].contains(&m.uid())
+            || (m.mode() & 0o022 != 0 && !(m.uid() == 0 && m.mode() & 0o1000 != 0))
         {
             return Err(Failure::Unavailable);
         }
@@ -47,12 +48,12 @@ fn safe_parent(path: &Path) -> Result<(), Failure> {
 
 fn stamp(m: &fs::Metadata) -> [u8; 48] {
     let mut value = [0; 48];
-    for (part, number) in value.chunks_exact_mut(8).zip([
+    for (part, number) in value.as_chunks_mut::<8>().0.iter_mut().zip([
         m.dev(),
         m.ino(),
         m.len(),
-        m.ctime() as u64,
-        m.ctime_nsec() as u64,
+        m.ctime().cast_unsigned(),
+        m.ctime_nsec().cast_unsigned(),
         u64::from(m.mode()),
     ]) {
         part.copy_from_slice(&number.to_be_bytes());
@@ -266,4 +267,207 @@ pub(super) fn migrate(arguments: &mut impl Iterator<Item = OsString>) -> Result<
     }
     Registry::parse(&bytes, &vault, device, &bootstrap)?;
     publish(&sidecar(&vault, ".agent-registry"), &bytes)
+}
+
+const ADAPTER_MAGIC: &[u8] = b"PMAC1";
+
+#[derive(Clone)]
+struct Route {
+    integration: String,
+    profile: String,
+    method: String,
+    endpoint: ControlledProvider,
+}
+
+#[derive(Clone)]
+pub(super) struct Adapters {
+    path: PathBuf,
+    fingerprint: [u8; 32],
+    routes: Vec<Route>,
+}
+
+fn supported(integration: &str, method: &str) -> bool {
+    matches!(
+        (integration, method),
+        ("keycloak-browser-oidc", "password" | "password_totp")
+            | ("keycloak-token-exchange", "token_exchange")
+            | ("keycloak-webauthn", "webauthn")
+            | ("github-rest-bearer", "bearer")
+            | ("ssh-server" | "linux-system-ssh", "publickey" | "password")
+    )
+}
+
+fn parse_routes(
+    bytes: &[u8],
+    vault: &Path,
+    device: [u8; 16],
+    bootstrap: &Bootstrap,
+) -> Result<Vec<Route>, Failure> {
+    let (mut c, count) = header(bytes, ADAPTER_MAGIC, vault, device, bootstrap)?;
+    // Four nonempty length-prefixed fields, version and UID: at least28 bytes.
+    if count > bytes.len() / 28 {
+        return Err(Failure::Unavailable);
+    }
+    let mut routes: Vec<Route> = Vec::new();
+    for _ in 0..count {
+        let integration = c.public_string()?;
+        let version = c.u32()?;
+        let profile = c.public_string()?;
+        let method = c.public_string()?;
+        let socket = PathBuf::from(c.public_string()?);
+        let uid = c.u32()?;
+        if version != 1
+            || !supported(&integration, &method)
+            || profile.is_empty()
+            || profile.len() > 128
+            || profile
+                .bytes()
+                .any(|b| !b.is_ascii_alphanumeric() && !b"-._/".contains(&b))
+            || !socket.is_absolute()
+            || socket
+                .components()
+                .any(|p| !matches!(p, Component::RootDir | Component::Normal(_)))
+            || uid == 0
+            || uid == bootstrap.human_uid
+            || uid == bootstrap.agent_uid
+            || routes
+                .iter()
+                .any(|r| r.integration == integration && r.profile == profile && r.method == method)
+        {
+            return Err(Failure::Unavailable);
+        }
+        routes.push(Route {
+            integration,
+            profile,
+            method,
+            endpoint: ControlledProvider { socket, uid },
+        });
+    }
+    c.finish()?;
+    Ok(routes)
+}
+
+impl Adapters {
+    pub(super) fn load(
+        vault: &Path,
+        device: [u8; 16],
+        bootstrap: &Bootstrap,
+        registry: Option<&Registry>,
+    ) -> Result<Option<Self>, Failure> {
+        let path = sidecar(vault, ".adapters");
+        match fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(Failure::Unavailable),
+            Ok(_) => {}
+        }
+        let (bytes, fingerprint) = read_installed(&path)?;
+        let routes = parse_routes(&bytes, vault, device, bootstrap)?;
+        if routes.iter().any(|r| {
+            registry.is_some_and(|reg| reg.entries.iter().any(|(_, uid)| *uid == r.endpoint.uid))
+        }) {
+            return Err(Failure::Unavailable);
+        }
+        if self::fingerprint(&path)? != fingerprint {
+            return Err(Failure::Unavailable);
+        }
+        Ok(Some(Self {
+            path,
+            fingerprint,
+            routes,
+        }))
+    }
+
+    pub(super) fn select(
+        &self,
+        lease: &pm_vault::AttemptLease,
+    ) -> Result<&ControlledProvider, &'static str> {
+        if fingerprint(&self.path).ok() != Some(self.fingerprint) {
+            return Err("ADAPTER_UNAVAILABLE");
+        }
+        let route = self
+            .routes
+            .iter()
+            .find(|r| {
+                r.integration == lease.integration_id()
+                    && r.profile == lease.destination()
+                    && r.method == lease.method()
+            })
+            .ok_or("UNSUPPORTED_INTEGRATION")?;
+        endpoint_ready(&route.endpoint).map_err(|_| "ADAPTER_UNAVAILABLE")?;
+        Ok(&route.endpoint)
+    }
+}
+
+fn endpoint_ready(endpoint: &ControlledProvider) -> Result<(), Failure> {
+    let parent = endpoint.socket.parent().ok_or(Failure::Unavailable)?;
+    // The adapter, not the daemon, owns its last runtime directory. All earlier
+    // ancestors must belong to the installed trusted traversal chain.
+    safe_parent(parent)?;
+    let directory = fs::symlink_metadata(parent).map_err(|_| Failure::Unavailable)?;
+    let socket = fs::symlink_metadata(&endpoint.socket).map_err(|_| Failure::Unavailable)?;
+    if !directory.is_dir()
+        || directory.uid() != endpoint.uid
+        || directory.mode() & 0o022 != 0
+        || !socket.file_type().is_socket()
+        || socket.uid() != endpoint.uid
+        || socket.nlink() != 1
+    {
+        return Err(Failure::Unavailable);
+    }
+    Ok(())
+}
+
+pub(super) fn provision_adapters(
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<(), Failure> {
+    let bootstrap = read_bootstrap(&take_path(arguments, "--bootstrap")?)?;
+    let vault = take_path(arguments, "--vault")?;
+    let device = decode_hex_16(&take_path(arguments, "--device")?)?;
+    let mut fields = Vec::new();
+    let mut count = 0;
+    while let Some(flag) = arguments.next() {
+        if flag != "--integration" {
+            return Err(Failure::Usage);
+        }
+        let integration = arguments
+            .next()
+            .ok_or(Failure::Usage)?
+            .into_string()
+            .map_err(|_| Failure::Usage)?;
+        let profile = take_path(arguments, "--profile")?;
+        let method = take_path(arguments, "--method")?;
+        let endpoint = take_path(arguments, "--endpoint")?;
+        let uid = take_u32(arguments, "--adapter-uid")?;
+        push_bytes(&mut fields, integration.as_bytes())?;
+        fields.extend_from_slice(&1_u32.to_be_bytes());
+        for value in [profile, method, endpoint] {
+            push_bytes(
+                &mut fields,
+                value.to_str().ok_or(Failure::Usage)?.as_bytes(),
+            )?;
+        }
+        fields.extend_from_slice(&uid.to_be_bytes());
+        count += 1;
+        if fields.len() as u64 > MAX_PROTECTED_BYTES {
+            return Err(Failure::Unavailable);
+        }
+    }
+    let mut bytes = encode_header(ADAPTER_MAGIC, &vault, device, &bootstrap, count)?;
+    bytes.extend_from_slice(&fields);
+    let routes = parse_routes(&bytes, &vault, device, &bootstrap)?;
+    let registry = Registry::parse(
+        &read_installed(&sidecar(&vault, ".agent-registry"))?.0,
+        &vault,
+        device,
+        &bootstrap,
+    )?;
+    if routes.iter().any(|r| {
+        registry
+            .entries
+            .iter()
+            .any(|(_, uid)| *uid == r.endpoint.uid)
+    }) {
+        return Err(Failure::Unavailable);
+    }
+    publish(&sidecar(&vault, ".adapters"), &bytes)
 }

@@ -430,10 +430,16 @@ struct VaultService {
     path: std::path::PathBuf,
     device: [u8; 16],
     audit_custody: Arc<AuditDeviceCustody>,
-    provider: Option<ControlledProvider>,
+    provider: Option<Provider>,
     registry: Option<Arc<installed::Registry>>,
     sync_jobs: Arc<sync_job::Manager>,
     admission: Arc<crate::custody_admission::CustodyAdmission>,
+}
+
+#[derive(Clone)]
+enum Provider {
+    Laboratory(ControlledProvider),
+    Installed(Option<Arc<installed::Adapters>>),
 }
 
 #[derive(Clone)]
@@ -448,6 +454,7 @@ pub(crate) fn run(arguments: Vec<OsString>) -> Result<(), Failure> {
     let command = arguments.next().ok_or(Failure::Usage)?;
     match command.to_str() {
         Some("keygen") => keygen(&mut arguments),
+        Some("provision-adapters") => installed::provision_adapters(&mut arguments),
         Some("migrate-agent-registry") => installed::migrate(&mut arguments),
         Some("provision-bootstrap") => provision_bootstrap(&mut arguments),
         Some("provision-profile") => provision_profile(&mut arguments),
@@ -787,13 +794,14 @@ fn serve_vault(arguments: &mut impl Iterator<Item = OsString>) -> Result<(), Fai
     } else {
         None
     };
+    let adapters = installed::Adapters::load(&vault_path, device, &bootstrap, registry.as_deref())?;
     let service = VaultService {
         admission: Arc::new(admission),
         registry,
         path: vault_path,
         device,
         audit_custody,
-        provider: None,
+        provider: Some(Provider::Installed(adapters.map(Arc::new))),
         sync_jobs,
     };
     service.sync_jobs.resume()?;
@@ -838,10 +846,10 @@ fn serve_attempt_lab(arguments: &mut impl Iterator<Item = OsString>) -> Result<(
         path: vault_path,
         device,
         audit_custody,
-        provider: Some(ControlledProvider {
+        provider: Some(Provider::Laboratory(ControlledProvider {
             socket: provider_socket,
             uid: provider_uid,
-        }),
+        })),
         sync_jobs,
     };
     service.sync_jobs.resume()?;
@@ -3625,13 +3633,23 @@ fn run_provider_once(service: &VaultService) -> Result<(), Failure> {
     } else {
         return Ok(());
     };
+    let use_provider = || {
+        if service.admission.verify().is_err()
+            || (matches!(provider, Provider::Installed(_)) && service.registry.is_none())
+        {
+            return Ok(AttemptOutcome::Failed {
+                reason: "CUSTODY_UNAVAILABLE",
+            });
+        }
+        call_provider(provider, &lease)
+    };
     let guarded = if matches!(
         lease.integration_id(),
         "keycloak-token-exchange" | "github-rest-bearer"
     ) {
-        attempts.with_authorized_provider_use(&lease, || call_controlled_provider(provider, &lease))
+        attempts.with_authorized_provider_use(&lease, use_provider)
     } else {
-        Ok(call_controlled_provider(provider, &lease))
+        Ok(use_provider())
     };
     let result = match guarded {
         Ok(result) => result,
@@ -3659,6 +3677,25 @@ fn run_provider_once(service: &VaultService) -> Result<(), Failure> {
         .settle(&lease, outcome)
         .map_err(|_| Failure::Unavailable)?;
     Ok(())
+}
+
+fn call_provider(
+    provider: &Provider,
+    lease: &pm_vault::AttemptLease,
+) -> Result<AttemptOutcome, ()> {
+    let endpoint = match provider {
+        Provider::Laboratory(endpoint) => endpoint,
+        Provider::Installed(Some(adapters)) => match adapters.select(lease) {
+            Ok(endpoint) => endpoint,
+            Err(reason) => return Ok(AttemptOutcome::Failed { reason }),
+        },
+        Provider::Installed(None) => {
+            return Ok(AttemptOutcome::Failed {
+                reason: "ADAPTER_UNAVAILABLE",
+            });
+        }
+    };
+    call_controlled_provider(endpoint, lease)
 }
 
 fn encode_provider_message(
@@ -4141,9 +4178,8 @@ fn accept_one(
     }
     if let Some(connections) = connections {
         // Native identity is checked before consuming an expensive worker.
-        let uid = match unix_peer_uid(&stream) {
-            Ok(uid) => uid,
-            Err(_) => return Ok(()),
+        let Ok(uid) = unix_peer_uid(&stream) else {
+            return Ok(());
         };
         let (config, expected_uid) = if let Some(service) = vault {
             let Some(registry) = &service.registry else {

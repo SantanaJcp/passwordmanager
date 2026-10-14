@@ -83,11 +83,13 @@ def main():
             "--vault", vault, "--device", DEVICE])
         wait_for_sockets(daemon, [runtime / "agent.sock", runtime / "human.sock"])
         baseline = discover(binary, AGENT_A, a_key, agent_profile, runtime / "agent.sock")
-        start_tui(root, binary, human_profile, human_key, runtime, password)
-        tui_started = True
+        if os.environ.get("CHEF_ROOT_NO_TUI")!="1":
+            start_tui(root, binary, human_profile, human_key, runtime, password)
+            tui_started = True
+        else: print("NOT_RUN active-TUI owned-root-device-creation=EPERM",flush=True)
         second = discover(binary, AGENT_B, b_key, agent_profile, runtime / "agent.sock")
         assert second == baseline and daemon.poll() is None
-        assert "Unlocked:" in screen(root)
+        if tui_started: assert "Unlocked:" in screen(root)
         for source, uid, directory in ((b_key, AGENT_A, "agent-3"), (a_key, AGENT_B, "agent-4")):
             copied = root / directory / "cross.key"
             shutil.copyfile(source, copied); os.chown(copied, uid, uid); copied.chmod(0o400)
@@ -95,8 +97,41 @@ def main():
                 "--private", copied, "--socket", runtime / "agent.sock"], check=False)
             expect_unavailable(denied)
         assert discover(binary, AGENT_A, a_key, agent_profile, runtime / "agent.sock") == baseline
-        send(root, "a"); wait_text(root, "Delegated authority"); close_tui(root)
-        print("OBSERVED A+B same-pid tui=open crossed-pairs=denied", flush=True)
+        if tui_started: send(root, "a"); wait_text(root, "Delegated authority"); close_tui(root)
+        unknown_key=root/"agent-3/unknown.key";unknown_public=root/"agent-3/unknown.pub"
+        as_uid(AGENT_A,[binary,"keygen","--private",unknown_key,"--public",unknown_public])
+        discover(binary,AGENT_A,unknown_key,agent_profile,runtime/"agent.sock",allowed=False)
+        role_denied=as_uid(AGENT_B,[binary,"probe","--profile",human_profile,"--private",b_key,"--socket",runtime/"human.sock"],check=False)
+        expect_unavailable(role_denied)
+        print("OBSERVED unknown-RPK known-UID=rejected native-role-separation=preserved",flush=True)
+        print("OBSERVED A+B same-pid tui="+("open" if tui_started else "NOT_RUN")+" crossed-pairs=denied", flush=True)
+        if "CHEF_RUNTIME_ROOT" in os.environ:
+            owned_root=pathlib.Path(os.environ["CHEF_RUNTIME_ROOT"])
+            assert (owned_root/"chef-owned-root.marker").read_text()=="synthetic private root filesystem\n"
+            daemon.terminate();daemon.communicate(timeout=5);daemon=None
+            for endpoint in (runtime/"agent.sock",runtime/"human.sock"):endpoint.unlink()
+            os.chmod(owned_root/"tmp",0o755)
+            os.chown(owned_root,AGENT_A,AGENT_A)
+            unsafe=None
+            try:
+                unsafe=start_as(CUSTODIAN,[binary,"serve-vault","--bootstrap",bootstrap,
+                    "--agent-socket",runtime/"agent.sock","--human-socket",runtime/"human.sock",
+                    "--vault",vault,"--device",DEVICE])
+                try:
+                    out,err=unsafe.communicate(timeout=10)
+                    assert unsafe.returncode==4 and out==b"" and err==b"CUSTODY_UNAVAILABLE\n",(unsafe.returncode,out,err)
+                except subprocess.TimeoutExpired:
+                    discover(binary,AGENT_B,b_key,agent_profile,runtime/"agent.sock")
+                    raise AssertionError("agent-owned filesystem root admitted a real registered peer")
+            finally:
+                if unsafe is not None and unsafe.poll() is None:unsafe.terminate();unsafe.communicate(timeout=5)
+                os.chown(owned_root,0,0)
+                os.chmod(owned_root/"tmp",0o1777)
+            print("OBSERVED agent-owned filesystem root=rejected",flush=True)
+            daemon=start_as(CUSTODIAN,[binary,"serve-vault","--bootstrap",bootstrap,
+                "--agent-socket",runtime/"agent.sock","--human-socket",runtime/"human.sock",
+                "--vault",vault,"--device",DEVICE])
+            wait_for_sockets(daemon,[runtime/"agent.sock",runtime/"human.sock"])
         held = start_as(AGENT_A, [sys.executable,"-c", "import socket,sys; s=[socket.socket(socket.AF_UNIX) for _ in range(4)]; [c.connect(sys.argv[1]) for c in s]; print('READY',flush=True); sys.stdin.buffer.read(1); [c.close() for c in s]", str(runtime/"agent.sock")],stdin=subprocess.PIPE)
         try:
             readable,_,_=select.select([held.stdout],[],[],10)
@@ -134,6 +169,14 @@ def main():
         def install(value=expected, mode=0o400, uid=CUSTODIAN):
             registry.unlink(missing_ok=True); registry.write_bytes(value)
             os.chown(registry,uid,uid); registry.chmod(mode)
+        c_key=root/"agent-6/unknown.key";c_public=root/"agent-6/unknown.pub"
+        as_uid(AGENT_C,[binary,"keygen","--private",c_key,"--public",c_public])
+        extra=expected[:81]+(3).to_bytes(2,"big")+expected[83:]+c_public.read_bytes()+AGENT_C.to_bytes(4,"big")
+        install(extra);daemon=launch()
+        discover(binary,AGENT_C,c_key,agent_profile,runtime/"agent.sock",allowed=False)
+        assert discover(binary,AGENT_B,b_key,agent_profile,runtime/"agent.sock")==baseline
+        daemon.terminate();daemon.communicate(timeout=5);daemon=None
+        print("OBSERVED registered-native-pair without-human-grant=rejected",flush=True)
         # Every corruption is tested through ordinary startup or real admission.
         for label, value, mode, uid in (
                 ("corrupt", b"broken", 0o400, CUSTODIAN),
@@ -201,7 +244,7 @@ def main():
         try: cleanup_owned_root(root)
         except BaseException as error: errors.append(error)
         if errors: raise BaseExceptionGroup("registry cleanup failed",errors)
-    print("PASS runtime-registry daemon=ordinary agents=A+B tui=open crossed-pairs=denied cleanup=verified")
+    print("PASS runtime-registry daemon=ordinary agents=A+B tui="+("open" if tui_started else "NOT_RUN")+" crossed-pairs=denied cleanup=verified")
 
 
 if __name__ == "__main__":
