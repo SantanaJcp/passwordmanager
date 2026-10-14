@@ -42,6 +42,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(all(test, unix))]
+mod frame_cost_tests;
 #[cfg(all(test, windows))]
 mod windows_pipe_tests;
 #[cfg(windows)]
