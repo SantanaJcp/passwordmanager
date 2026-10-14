@@ -233,11 +233,18 @@
     },
     {
       "lane": "guide-alignment",
-      "status": "RUNNING delegated; no terminal result/test evidence yet",
+      "status": "PASS documentation checks only; stale integration paragraph correctivefollowup",
       "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-guide-alignment-r2",
       "base": "31b48ace181512d273738ff3b344201be8e8f08b",
       "requiresOwnerDecision": [],
-      "action": "Update truthful docs against exact realCLI/registry source; docs-only no builds."
+      "action": "Sameexclusiveguideownerfollowup exacte130 minimalnewobservedstate/sourceattribution+blockingflockrecipeprefixes; preserve historicalfirstmeasurement, no currentguide-compositionclaim. Ordinaryinstaller/service/provisionsequence gap remains, noProductPASS.",
+      "head": "e1307808be9b88a77cc3a9725356b7281f4bb49f",
+      "cherryPickedGuide": "6e5fbee0",
+      "resultAcknowledged": true,
+      "worktree": "/home/santana/.t3/worktrees/passwordmanager/t3-9eb5de46",
+      "coreDiffInspectedByCoordinator": true,
+      "workerMeasured": "17relative links/3anchors, scopedcredentialpatternscan0matches,diffcheck0; sourceparserverification only,noCargo/build/lab.",
+      "coordinatorInference": "README/guide current pmtui+6flags/headerPMAR1PMAC1/provision/adapters/grantnativechecks alignsource. Currentstate text 'integrationExecutedfalse' reflectsolder31b snapshot and nowstale; parentreceivedactual8cd42/52. Build/check/labrecipeprefixes needflockconsistency."
     },
     {
       "lane": "evidence-review-skeptic-r1",
@@ -309,6 +316,14 @@
       "base": "8cd45529b062506a2cbe0c567538d3999ac8a2b6",
       "requiresOwnerDecision": [],
       "action": "Authenticate/decodeTWOaudit-tailadditions onsyntheticoriginalcustodylosscontrol, no readwrite/WALperturbation claim or oracle/schemachange; stopfinite ifBLOCKED."
+    },
+    {
+      "lane": "guide-observed-state",
+      "status": "RUNNING docs-only followup; no newreviewround",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Athread-send%3Apm-chef-20261014-guide-observed-state-r3",
+      "base": "e1307808be9b88a77cc3a9725356b7281f4bb49f",
+      "requiresOwnerDecision": [],
+      "action": "Correct exactlatestintegration8cd42/52truth/source-snapshot and mandatoryflockexamples; no producer source edits, ordinaryinstallation gap visible."
     }
   ]
 }

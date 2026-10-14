@@ -88,6 +88,8 @@ Diecisiete grupos focalizados nuevos pasan en compuesto (incluyeTUIpública/admi
 
 Incidente/tmpEDQUOTse conserva como infraestructura, no ProductRED. Nuevoswriters artefactosgrandes propios en disco/worktree,TMPDIR explícito cuando aplicable; no purga global. Datos nativos/decisiones3/4 siguenpendientes. fffceb33 y guíanueva irán siguientecomposición exacta, no alteración del vector recibido. `prove`,`truthful-state`,`root-cause`,`owner-attention`,`isolate`.
 
+Guía alineada `e1307808` recibida: README/docsuser/propioinforme,17links3anchors/diff0 (solo documentación). Parent inspeccionó diff/parserreferencias, no builds. Su estado snapshot31b anterior aún decía integrationExecutedfalse; sameowner corrige mínimo a hecho8cd42/52 y recetasblockingflock, sin dar guía nueva por compuesta o ordinarioinstaladorlisto. No nueva revisión ni producción; callers y witnessG7 siguenparalelos.
+
 ## Seguimiento
 
 Los taskIds, clientRequestIds y resultados del despacho se guardan en el registro JSON adyacente `parallel-run-20261014.tasks.json`, propiedad exclusiva del coordinador. No son estados duplicados de los tickets.
