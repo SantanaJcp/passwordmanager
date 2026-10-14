@@ -33,6 +33,40 @@
       "workerMeasured": "Diagnostic overlap flags RED/GREEN; observer regression, CI verifier and check.sh rc0. No native execution.",
       "coordinatorInference": "Core diff adds independent categorical prompt/unlock/Items diagnostics and synthetic regression; timers, acceptance oracles and product unchanged. Does not prove ARM unlock or streaming root cause.",
       "action": "Hold for cross-review/composition; native capture requires explicit owner authorization."
+    },
+    {
+      "lane": "windows-acceptance",
+      "status": "ISSUES",
+      "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+      "head": "872a880e2549a65f93f33c58da961f4dfdea1a94",
+      "branch": "t3/reconcile-windows-retire-observer",
+      "worktree": "/home/santana/.t3/worktrees/passwordmanager/t3-424546e4",
+      "coreDiffInspectedByCoordinator": false,
+      "workerMeasured": "W1 script reconciled byte-identically; five SQL-only probe tests and check.sh rc0. Windows/PowerShell NOT_RUN.",
+      "action": "Read original SQLite observer and SQL probe; expanded same writer's follow-up to exact unowned custody example for categorical phase/errors; no native cause claim."
+    },
+    {
+      "lane": "sync-windows",
+      "status": "BLOCKED",
+      "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+      "head": "5e26f3b4d4813c4e606339353e67e82ede4dcdf5",
+      "branch": "t3/windows-sync-performance",
+      "worktree": "/home/santana/.t3/worktrees/passwordmanager/t3-fe348d1a",
+      "coreDiffInspectedByCoordinator": false,
+      "workerMeasured": "Real TLS/RPK differential sixteen frames: current32writes/1088TLSbytes, combined16writes/736bytes, exactresponses. Session4/4 and check.sh rc0; no product code fix or speed claim.",
+      "action": "Current read-only native70event push8.739s, pullpartial/RETIREnotrun. Authorisation3 required for exact-sha nativeprofiling; no comparative timing conclusion."
+    },
+    {
+      "lane": "vault-g7",
+      "status": "BLOCKED",
+      "base": "ea57a7173424a7c607376ff5e0b49d2a19bc334f",
+      "head": "0eff9d93b97abefd8048d16236cf674601af0a41",
+      "branch": "t3/g7-stream-staging",
+      "worktree": "/home/santana/.t3/worktrees/passwordmanager/t3-aff64197",
+      "coreDiffInspectedByCoordinator": false,
+      "workerMeasured": "Matrixrc1 retained staging1/1/17, authorityatomic/cleanup0; losswitness audit10to12, fullauthority/receipt rows andhistoricalprefix identical, provider1call. Existingprepared replay andW734tests/check.shrc0. No productfix.",
+      "coordinatorInference": "Report and G4/G7 contracts inspected: data representation/recovery change is a one-way door. Audit rowcount alone is not authority mutation; stronger witness required for verifier correction.",
+      "action": "Need distinguish durable encrypted prepared intent from disposable partials preserving signed retry/receipt; do not delete retained payload or silently weaken oracle. Await bounded owner decision if representation/schema changes."
     }
   ]
 }

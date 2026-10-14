@@ -17,7 +17,7 @@ Cada escritor obtiene un worktree T3 hijo desde el commit local del coordinador 
 | Frente | Resultado acotado | Archivos autorizados |
 | --- | --- | --- |
 | sync-windows | Diagnóstico y corrección mínima de coste/transportes del sync Windows, sin ampliar 15 s ni cambiar wire/semántica | `crates/pm-sync/src/**`, `crates/pm-sync/tests/**`, `crates/pm-sync/examples/**` |
-| windows-acceptance | Reconciliar cleanup W1 heredado sobre código actual y discriminar RETIRE durable | `crates/pm-native-channel/examples/**`, `crates/pm-native-channel/tests/**`, `scripts/test-windows-custody-lab.ps1`, `scripts/test-windows-storage-diagnostics.ps1` |
+| windows-acceptance | Reconciliar cleanup W1 heredado sobre código actual y discriminar RETIRE durable; follow-up diagnóstico del observer SQLite sin alterar su oráculo | `crates/pm-native-channel/examples/**`, `crates/pm-native-channel/tests/**`, `scripts/test-windows-custody-lab.ps1`, `scripts/test-windows-storage-diagnostics.ps1`, `crates/pm-custody/examples/windows_human_tui_seed.rs`, nuevo `crates/pm-custody/examples/windows_human_tui_seed/**` |
 | macos-stability | Eliminar causas reproducidas de observación parcial/streaming en las fixtures macOS, sin cambiar producto/plazos | `crates/pm-custody/tests/macos*`, `scripts/test-macos-custody-lab.sh`, `scripts/verify-macos-custody-ci-config.sh` |
 | vault-g7 | Discriminar/corregir fallos de staging y pérdida de custodia/auditoría preservando commit, replay y receipt | `crates/pm-vault/src/**`, `crates/pm-vault/tests/**`, `crates/pm-vault/examples/**` |
 | protected-memory | Completar riesgos propios reproducibles de memoria protegida/nativos sin modificar APIs ajenas | `crates/pm-crypto/src/**`, `crates/pm-crypto/tests/**`, `crates/pm-native-channel/src/**` |
@@ -38,6 +38,8 @@ Los frentes sensibles usan Sol medium, Standard; documentación mecánica Luna m
 5. Prohibido editar tickets, spec, ejecución global, este plan, Cargo manifests/lock, workflow, build config o documentos heredados de otros frentes. Informes nuevos exclusivos. Commits locales solo de archivos propios; no merge de ramas antiguas completo ni modificaciones al checkout raíz.
 6. Inspeccionar core diff/evidencia al retorno, revisión cruzada acotada por riesgo y `kitchen integrate` sobre siblings exactos antes de atribuir PASS al lote. Los tres RED G7 heredados no se convierten en éxito por ser conocidos.
 7. Registrar checkpoints con `kitchen log`. Reportar PASS, ISSUES o BLOCKED; distinguir medido, inferido y no ejecutado. Un candidato local sin nativo no certifica macOS/Windows.
+
+Coordinación de seams sin segundo escritor: el owner de protected-memory implementa en `pm-native-channel/src/windows.rs` el constructor agent con lista SID validada y el accessor del SID observado por impersonación. Daemon-implementation consume únicamente el SHA comprometido y cruza ese SID con RPK TLS y autoridad vigente. El contrato sigue fijando 4 conexiones/agente, no se atribuye prueba de aislamiento por identidad al dispatcher global actual. El bound existente de configuración 16 KiB se comprueba con bytes serializados reales, no estimaciones.
 
 ## Puertas concretas pendientes
 

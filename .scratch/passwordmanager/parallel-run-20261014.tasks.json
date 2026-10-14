@@ -107,6 +107,18 @@
         "1A",
         "2A"
       ]
+    },
+    {
+      "lane": "windows-retire-diagnostic",
+      "clientRequestId": "pm-chef-20261014-windows-retire-diagnostic-r2",
+      "taskId": "node:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Athread-send%3Apm-chef-20261014-windows-retire-diagnostic-r2",
+      "childThreadId": "thread:delegated-task:command%3Amcp%3A48a5063a-6d33-41df-a90e-6794d7402ab6%3Adelegate-task%3Apm-chef-20261014-windows-acceptance-r1",
+      "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A48a5063a-6d33-41df-a90e-6794d7402ab6%253Adelegate-task%253Apm-chef-20261014-windows-acceptance-r1:ordinal:2",
+      "statusAtDispatch": "starting",
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "delegationBase": "872a880e2549a65f93f33c58da961f4dfdea1a94",
+      "followUpOf": "windows-acceptance"
     }
   ]
 }
