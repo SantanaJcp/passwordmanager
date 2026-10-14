@@ -22,7 +22,8 @@ Cada escritor obtiene un worktree T3 hijo desde el commit local del coordinador 
 | vault-g7 | Discriminar/corregir fallos de staging y pérdida de custodia/auditoría preservando commit, replay y receipt | `crates/pm-vault/src/**`, `crates/pm-vault/tests/**`, `crates/pm-vault/examples/**` |
 | protected-memory | Completar riesgos propios reproducibles de memoria protegida/nativos sin modificar APIs ajenas | `crates/pm-crypto/src/**`, `crates/pm-crypto/tests/**`, `crates/pm-native-channel/src/**` |
 | adapter-memory | Cerrar exposiciones propias reproducibles de adaptadores HTTP/browser/SSH, sin simular proveedores reales | `crates/pm-web-auth/src/**`, `crates/pm-web-auth/tests/**`, `crates/pm-ssh-client/src/**`, `crates/pm-ssh-client/tests/**` |
-| daemon-readiness | Repro ordinario A/B y mapa concreto de provisión/configuración; implementación de autoridad detenida hasta decisión | Solo nuevos `crates/pm-custody/tests/chef_daemon_*.py`; producto read-only |
+| daemon-readiness | Repro ordinario A/B y mapa concreto de provisión/configuración; conserva su alcance de prueba | Solo nuevos `crates/pm-custody/tests/chef_daemon_*.py`; producto read-only |
+| daemon-implementation | Implementar 1A y 2A aprobadas, primero registro/migración explícita y después adaptadores | `crates/pm-custody/src/**`, nuevos `crates/pm-custody/tests/chef_runtime_*.py`, nuevos `crates/pm-custody/examples/chef_runtime_*`, nuevo `docs/verification/chef-daemon-implementation-20261014.md` |
 | user-guide | Instrucciones Linux reproducibles para evaluación sintética, con límites y prerrequisitos explícitos | `README.md`, nuevos `docs/user/**` |
 | verification-map | Recuperar método observable exacto y vector de candidatos; no revisar formalmente ni cambiar verificadores | Read-only; resultado por respuesta del agente |
 
@@ -40,7 +41,9 @@ Los frentes sensibles usan Sol medium, Standard; documentación mecánica Luna m
 
 ## Puertas concretas pendientes
 
-Se tramitan con dos opciones estructuralmente distintas, sin frenar frentes independientes: binding confiable RPK→principal nativo versus nueva versión de enrolamiento; configuración instalada de adaptadores versus procesos supervisados por daemon; cleanup/recovery durable si la corrección cambia el contrato de prepared/replay. Plazos, KDF y alcance se preservan. Firmas reales, plataformas ausentes y aceptación humana siguen siendo externas.
+El propietario confirmó «1 A» y «2 A»: registro local confiable RPK→principal nativo con migración explícita y configuración instalada de adaptadores. La decisión y sus fronteras verificables están en [decisions.md](../../decisions.md). Un nuevo escritor exclusivo de producto custody implementa ambas en orden, sin solaparse con el agente de probes ni las fixtures macOS/Windows.
+
+Sigue pendiente tramitar con dos opciones estructuralmente distintas el cleanup/recovery durable si un fallo concreto exige cambiar el contrato de prepared/replay. Plazos, KDF y alcance se preservan. Firmas reales, plataformas ausentes y aceptación humana siguen siendo externas.
 
 ## Seguimiento
 
