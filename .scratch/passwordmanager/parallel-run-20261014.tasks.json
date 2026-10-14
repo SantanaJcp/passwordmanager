@@ -733,6 +733,8 @@
     },
     {
       "lane": "guide-observed-state",
+      "terminalStatus": "completed",
+      "resultHead": "2d86a31537d9418b7f7f7a66e567ca84fe82f505",
       "clientRequestId": "pm-chef-20261014-guide-observed-state-r3",
       "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Athread-send%3Apm-chef-20261014-guide-observed-state-r3",
       "childThreadId": "thread:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-guide-alignment-r2",

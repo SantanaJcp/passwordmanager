@@ -237,14 +237,15 @@
       "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-guide-alignment-r2",
       "base": "31b48ace181512d273738ff3b344201be8e8f08b",
       "requiresOwnerDecision": [],
-      "action": "Sameexclusiveguideownerfollowup exacte130 minimalnewobservedstate/sourceattribution+blockingflockrecipeprefixes; preserve historicalfirstmeasurement, no currentguide-compositionclaim. Ordinaryinstaller/service/provisionsequence gap remains, noProductPASS.",
+      "action": "Observed-state correction completed in2d86a315; latest doc candidate passes scope checks, still NOT_COMPOSED. Original e130 first-snapshot evidence retained.",
       "head": "e1307808be9b88a77cc3a9725356b7281f4bb49f",
       "cherryPickedGuide": "6e5fbee0",
       "resultAcknowledged": true,
       "worktree": "/home/santana/.t3/worktrees/passwordmanager/t3-9eb5de46",
       "coreDiffInspectedByCoordinator": true,
       "workerMeasured": "17relative links/3anchors, scopedcredentialpatternscan0matches,diffcheck0; sourceparserverification only,noCargo/build/lab.",
-      "coordinatorInference": "README/guide current pmtui+6flags/headerPMAR1PMAC1/provision/adapters/grantnativechecks alignsource. Currentstate text 'integrationExecutedfalse' reflectsolder31b snapshot and nowstale; parentreceivedactual8cd42/52. Build/check/labrecipeprefixes needflockconsistency."
+      "coordinatorInference": "README/guide current pmtui+6flags/headerPMAR1PMAC1/provision/adapters/grantnativechecks alignsource. Currentstate text 'integrationExecutedfalse' reflectsolder31b snapshot and nowstale; parentreceivedactual8cd42/52. Build/check/labrecipeprefixes needflockconsistency.",
+      "followUpHead": "2d86a31537d9418b7f7f7a66e567ca84fe82f505"
     },
     {
       "lane": "evidence-review-skeptic-r1",
@@ -328,11 +329,16 @@
     },
     {
       "lane": "guide-observed-state",
-      "status": "RUNNING docs-only followup; no newreviewround",
+      "status": "PASS documentation only; not composed into product",
       "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Athread-send%3Apm-chef-20261014-guide-observed-state-r3",
       "base": "e1307808be9b88a77cc3a9725356b7281f4bb49f",
       "requiresOwnerDecision": [],
-      "action": "Correct exactlatestintegration8cd42/52truth/source-snapshot and mandatoryflockexamples; no producer source edits, ordinaryinstallation gap visible."
+      "action": "Latest guide2d86 incorporates e130 alignment and corrects old integrationExecutedfalse to snapshottrue/batchfalse/42-of-52 ISSUES, G8 design confirmed not unselected. Pending exact composition with syncfff and eventual caller candidate, retaining original8cd evidence and G7/native gaps.",
+      "head": "2d86a31537d9418b7f7f7a66e567ca84fe82f505",
+      "resultAcknowledged": true,
+      "worktree": "/home/santana/.t3/worktrees/passwordmanager/t3-9eb5de46",
+      "workerMeasured": "Two owned documents only; 17 relative links/3anchors, commands/credential checks and diffcheck pass. No Cargo/build/tests/labs/native/review.",
+      "coordinatorObserved": "Inspected two-file diff/report. Independently checked 17 relative links and3anchors, public human/admin syntax unchanged, blocking flock present in build/check/lab recipes, and coordinator166669b9 snapshot digest5af9e1251ad88b82235614fc4ff2d0f8fdbc9f91cd55fadc9810791ff15d3e90. No product commands run."
     }
   ]
 }
