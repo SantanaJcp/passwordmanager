@@ -3654,7 +3654,24 @@ fn run_provider_once(service: &VaultService) -> Result<(), Failure> {
         lease.integration_id(),
         "keycloak-token-exchange" | "github-rest-bearer"
     ) {
-        attempts.with_authorized_provider_use(&lease, use_provider)
+        let emission_attempted = std::cell::Cell::new(false);
+        // Connect and encode without holding a database writer. Authority and
+        // deadline are checked after connection, immediately before emission.
+        let connected = connect_provider_request(service, provider, &lease);
+        let emitted = attempts.with_authorized_provider_use(&lease, || {
+            emit_provider_request(service, provider, &lease, connected?, &emission_attempted)
+        });
+        match emitted {
+            // No SQLite transaction survives into the response wait. The exact
+            // lease still gates settlement, so local cancellation wins a late
+            // success without making any claim about external session state.
+            Ok(pending) => Ok(pending.and_then(PendingProviderResponse::receive)),
+            // The claim/AuthUse commit already preceded emission. If releasing
+            // the emission guard fails after a possible write, its external
+            // outcome is unknown; preserve reconciliation, never a second login.
+            Err(_) if emission_attempted.get() => Ok(Ok(AttemptOutcome::Indeterminate)),
+            Err(error) => Err(error),
+        }
     } else {
         Ok(use_provider())
     };
@@ -3667,8 +3684,14 @@ fn run_provider_once(service: &VaultService) -> Result<(), Failure> {
         ) => {
             let _ = attempts.settle(
                 &lease,
-                AttemptOutcome::Failed {
-                    reason: "AUTHORITY_REVOKED",
+                if lease.reconciliation_only() {
+                    // Withdrawal forbids another use; it cannot establish the
+                    // external outcome of the authentication already issued.
+                    AttemptOutcome::Indeterminate
+                } else {
+                    AttemptOutcome::Failed {
+                        reason: "AUTHORITY_REVOKED",
+                    }
                 },
             );
             return Ok(());
@@ -3686,22 +3709,116 @@ fn run_provider_once(service: &VaultService) -> Result<(), Failure> {
     Ok(())
 }
 
+fn provider_endpoint<'a>(
+    provider: &'a Provider,
+    lease: &pm_vault::AttemptLease,
+) -> Result<&'a ControlledProvider, &'static str> {
+    match provider {
+        Provider::Laboratory(endpoint) => Ok(endpoint),
+        Provider::Installed(Some(adapters)) => adapters.select(lease),
+        Provider::Installed(None) => Err("ADAPTER_UNAVAILABLE"),
+    }
+}
+
 fn call_provider(
     provider: &Provider,
     lease: &pm_vault::AttemptLease,
 ) -> Result<AttemptOutcome, ()> {
-    let endpoint = match provider {
-        Provider::Laboratory(endpoint) => endpoint,
-        Provider::Installed(Some(adapters)) => match adapters.select(lease) {
-            Ok(endpoint) => endpoint,
-            Err(reason) => return Ok(local_provider_failure(lease, reason)),
-        },
-        Provider::Installed(None) => {
-            return Ok(local_provider_failure(lease, "ADAPTER_UNAVAILABLE"));
-        }
+    let endpoint = match provider_endpoint(provider, lease) {
+        Ok(endpoint) => endpoint,
+        Err(reason) => return Ok(local_provider_failure(lease, reason)),
     };
     LAST_LOCAL_PROVIDER_FAILURE.with(|last| last.set(None));
     call_controlled_provider(endpoint, lease)
+}
+
+// In-memory phase boundary only: no new durable/prepared representation.
+// A pending response contains the already-issued transport, never permission to
+// send another request or select a substitute adapter.
+enum PendingProviderResponse {
+    Local(AttemptOutcome),
+    Sent(UnixStream),
+}
+impl PendingProviderResponse {
+    fn receive(self) -> Result<AttemptOutcome, ()> {
+        match self {
+            Self::Local(outcome) => Ok(outcome),
+            Self::Sent(mut stream) => receive_controlled_provider_response(&mut stream),
+        }
+    }
+}
+
+enum ConnectedProviderRequest {
+    Local(AttemptOutcome),
+    Ready {
+        stream: UnixStream,
+        request: ProtectedBytes,
+    },
+}
+
+fn connect_provider_request(
+    service: &VaultService,
+    provider: &Provider,
+    lease: &pm_vault::AttemptLease,
+) -> Result<ConnectedProviderRequest, ()> {
+    if service.admission.verify().is_err()
+        || (matches!(provider, Provider::Installed(_)) && service.registry.is_none())
+    {
+        return Ok(ConnectedProviderRequest::Local(local_provider_failure(
+            lease,
+            "CUSTODY_UNAVAILABLE",
+        )));
+    }
+    let endpoint = match provider_endpoint(provider, lease) {
+        Ok(endpoint) => endpoint,
+        Err(reason) => {
+            return Ok(ConnectedProviderRequest::Local(local_provider_failure(
+                lease, reason,
+            )));
+        }
+    };
+    let stream = connect_controlled_provider(endpoint)?;
+    let request = encode_controlled_provider_request(controlled_provider_opcode(lease), lease)?;
+    Ok(ConnectedProviderRequest::Ready { stream, request })
+}
+
+fn emit_provider_request(
+    service: &VaultService,
+    provider: &Provider,
+    lease: &pm_vault::AttemptLease,
+    connected: ConnectedProviderRequest,
+    emission_attempted: &std::cell::Cell<bool>,
+) -> Result<PendingProviderResponse, ()> {
+    let (mut stream, request) = match connected {
+        ConnectedProviderRequest::Local(outcome) => {
+            return Ok(PendingProviderResponse::Local(outcome));
+        }
+        ConnectedProviderRequest::Ready { stream, request } => (stream, request),
+    };
+    // Revalidate pinned custody/registry/config and the actual native peer at
+    // the write boundary, including after connect. No secret was sent yet.
+    if service.admission.verify().is_err() {
+        return Ok(PendingProviderResponse::Local(local_provider_failure(
+            lease,
+            "CUSTODY_UNAVAILABLE",
+        )));
+    }
+    let endpoint = match provider_endpoint(provider, lease) {
+        Ok(endpoint) => endpoint,
+        Err(reason) => {
+            return Ok(PendingProviderResponse::Local(local_provider_failure(
+                lease, reason,
+            )));
+        }
+    };
+    if unix_peer_uid(&stream).map_err(|_| ())? != endpoint.uid {
+        return Err(());
+    }
+    LAST_LOCAL_PROVIDER_FAILURE.with(|last| last.set(None));
+    // A partial write is just as uncertain as a fully transmitted request.
+    emission_attempted.set(true);
+    write_frame(&mut stream, &request).map_err(|_| ())?;
+    Ok(PendingProviderResponse::Sent(stream))
 }
 
 // One bounded diagnostic slot on the existing provider worker; repeated
@@ -3808,14 +3925,8 @@ fn encode_controlled_provider_request(
     encode_provider_message(&prefix, &fields, suffix)
 }
 
-fn call_controlled_provider(
-    provider: &ControlledProvider,
-    lease: &pm_vault::AttemptLease,
-) -> Result<AttemptOutcome, ()> {
-    if matches!(lease.integration_id(), "ssh-server" | "linux-system-ssh") {
-        return call_ssh_provider(provider, lease);
-    }
-    let mut stream = UnixStream::connect(&provider.socket).map_err(|_| ())?;
+fn connect_controlled_provider(provider: &ControlledProvider) -> Result<UnixStream, ()> {
+    let stream = UnixStream::connect(&provider.socket).map_err(|_| ())?;
     configure_unix_stream(&stream).map_err(|_| ())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -3824,7 +3935,11 @@ fn call_controlled_provider(
     if unix_peer_uid(&stream).map_err(|_| ())? != provider.uid {
         return Err(());
     }
-    let opcode = if lease.reconciliation_only() {
+    Ok(stream)
+}
+
+fn controlled_provider_opcode(lease: &pm_vault::AttemptLease) -> u8 {
+    if lease.reconciliation_only() {
         2
     } else if lease.integration_id() == "keycloak-webauthn" {
         4
@@ -3836,10 +3951,24 @@ fn call_controlled_provider(
         5
     } else {
         1
-    };
-    let request = encode_controlled_provider_request(opcode, lease)?;
+    }
+}
+
+fn call_controlled_provider(
+    provider: &ControlledProvider,
+    lease: &pm_vault::AttemptLease,
+) -> Result<AttemptOutcome, ()> {
+    if matches!(lease.integration_id(), "ssh-server" | "linux-system-ssh") {
+        return call_ssh_provider(provider, lease);
+    }
+    let mut stream = connect_controlled_provider(provider)?;
+    let request = encode_controlled_provider_request(controlled_provider_opcode(lease), lease)?;
     write_frame(&mut stream, &request).map_err(|_| ())?;
-    let response = read_frame(&mut stream).map_err(|_| ())?;
+    receive_controlled_provider_response(&mut stream)
+}
+
+fn receive_controlled_provider_response(stream: &mut UnixStream) -> Result<AttemptOutcome, ()> {
+    let response = read_frame(stream).map_err(|_| ())?;
     let mut c = Cursor::new(&response);
     let status = *c.fixed(1).map_err(|_| ())?.first().ok_or(())?;
     let value = c.bytes().map_err(|_| ())?;

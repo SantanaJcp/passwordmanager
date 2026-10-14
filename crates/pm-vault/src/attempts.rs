@@ -30,6 +30,20 @@ const MAX_CONTEXT: usize = 64 * 1024;
 const MAX_PER_AGENT: i64 = 16;
 const MAX_PER_CUSTODIAN: i64 = 128;
 
+#[derive(Eq, PartialEq)]
+enum ExecutionOwner {
+    IntrinsicPasskey,
+    Adapter,
+}
+impl ExecutionOwner {
+    fn of(integration: &str) -> Self {
+        match integration {
+            "vault-webauthn-provider" => Self::IntrinsicPasskey,
+            _ => Self::Adapter,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttemptState {
     Created,
@@ -1129,31 +1143,57 @@ impl AttemptVault {
         Ok(snapshot)
     }
 
+    /// Claims ordinary adapter work. Intrinsic passkey attempts are owned by
+    /// `PasskeyProvider`, including their human-confirmation and recovery phases.
     pub fn claim_next(&self) -> Result<Option<AttemptLease>, AttemptError> {
         self.claim(false)
     }
     pub fn claim_waiting_for_reconciliation(&self) -> Result<Option<AttemptLease>, AttemptError> {
         self.claim(true)
     }
+    #[allow(clippy::too_many_lines)]
     fn claim(&self, reconcile: bool) -> Result<Option<AttemptLease>, AttemptError> {
         let now = now_us()?;
         let mut c = open(self.delegated.path())?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_clock(&tx, now)?;
         let sql = if reconcile {
-            "SELECT attempt_id,item_id,owner_subject,owner_generation,state_package FROM authentication_attempts WHERE state IN ('waiting_for_human','indeterminate') AND expires_at_us>?1 AND claimed_at_us<=?1-100000 ORDER BY claimed_at_us LIMIT 1"
+            "SELECT attempt_id,item_id,owner_subject,owner_generation,state_package FROM authentication_attempts WHERE state IN ('waiting_for_human','indeterminate') AND expires_at_us>?1 AND claimed_at_us<=?1-100000 ORDER BY claimed_at_us LIMIT ?2"
         } else {
-            "SELECT attempt_id,item_id,owner_subject,owner_generation,state_package FROM authentication_attempts WHERE state='created' AND expires_at_us>?1 ORDER BY created_at_us LIMIT 1"
+            "SELECT attempt_id,item_id,owner_subject,owner_generation,state_package FROM authentication_attempts WHERE state='created' AND expires_at_us>?1 ORDER BY created_at_us LIMIT ?2"
         };
-        let row: Option<(Vec<u8>, Vec<u8>, Vec<u8>, i64, Vec<u8>)> = tx
-            .query_row(sql, [now], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-            })
-            .optional()?;
-        let Some((aid, item, subject, generation, package)) = row else {
+        // The global admission bound also bounds this scan. Inspect the sealed
+        // execution owner before opening credential material or issuing a lease;
+        // an older intrinsic attempt must not starve ordinary adapter work.
+        let candidate = {
+            let mut statement = tx.prepare(sql)?;
+            let mut rows = statement.query(params![now, MAX_PER_CUSTODIAN])?;
+            loop {
+                let Some(row) = rows.next()? else {
+                    break None;
+                };
+                let aid: Vec<u8> = row.get(0)?;
+                let item: Vec<u8> = row.get(1)?;
+                let subject: Vec<u8> = row.get(2)?;
+                let generation: i64 = row.get(3)?;
+                let package: Vec<u8> = row.get(4)?;
+                let attempt = fixed(&aid)?;
+                let snap = decode_snapshot(&self.custody.open_attempt_state(
+                    &package,
+                    *self.trusted.vault_id(),
+                    self.device,
+                    self.generation,
+                    attempt,
+                )?)?;
+                if ExecutionOwner::of(&snap.integration_id) == ExecutionOwner::IntrinsicPasskey {
+                    continue;
+                }
+                break Some((attempt, item, subject, generation, package, snap));
+            }
+        };
+        let Some((attempt, item, subject, generation, package, mut snap)) = candidate else {
             return Ok(None);
         };
-        let attempt = fixed(&aid)?;
         let identity = AgentIdentity {
             subject: fixed(&subject)?,
             generation: u64::try_from(generation).map_err(|_| AttemptError::Integrity)?,
@@ -1161,13 +1201,6 @@ impl AttemptVault {
         let op = self
             .delegated
             .operational_credential_for_identity(identity, fixed(&item)?)?;
-        let mut snap = decode_snapshot(&self.custody.open_attempt_state(
-            &package,
-            *self.trusted.vault_id(),
-            self.device,
-            self.generation,
-            attempt,
-        )?)?;
         if snap.revision_id != *op.descriptor.revision_id() {
             return Err(AttemptError::CredentialUnavailable);
         }
@@ -1238,10 +1271,12 @@ impl AttemptVault {
         }))
     }
 
-    /// Executes the single provider-use boundary while holding a SQLite
-    /// immediate transaction. A human suspension/revocation that commits first
-    /// is observed and the closure is not called; one that commits afterwards
-    /// is serialized after the already-issued provider request.
+    /// Executes only authorized emission while holding a SQLite immediate
+    /// transaction. The closure must return the sent transport/pending result;
+    /// response waiting and settlement happen after this guard is released.
+    /// A withdrawal that commits first prevents emission. The durable claim and
+    /// `AuthUse` audit precede this boundary; failure after a write was attempted
+    /// is uncertain and must reconcile without issuing another authentication.
     ///
     /// # Errors
     /// Returns a stable authority or integrity error when the lease is no
@@ -1257,8 +1292,12 @@ impl AttemptVault {
             .query_row(
                 "SELECT revision_id,owner_subject,owner_generation,lease_token
                  FROM authentication_attempts
-                 WHERE attempt_id=?1 AND item_id=?2 AND state='running'",
-                params![lease.attempt_id.as_slice(), lease.credential_id.as_slice()],
+                 WHERE attempt_id=?1 AND item_id=?2 AND state='running' AND expires_at_us>?3",
+                params![
+                    lease.attempt_id.as_slice(),
+                    lease.credential_id.as_slice(),
+                    now_us()?
+                ],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
@@ -1271,10 +1310,22 @@ impl AttemptVault {
         {
             return Err(AttemptError::Integrity);
         }
-        let current = self
-            .delegated
-            .operational_credential_for_identity(lease.owner, lease.credential_id)?;
-        if current.descriptor.revision_id() != &lease.revision_id {
+        let current = self.delegated.operational_credential_for_identity_in(
+            &transaction,
+            lease.owner,
+            lease.credential_id,
+        )?;
+        let visible_revision: Vec<u8> = transaction
+            .query_row(
+                "SELECT visible_revision FROM vault_items WHERE item_id=?1 AND status='active'",
+                [lease.credential_id.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(AttemptError::CredentialUnavailable)?;
+        if current.descriptor.revision_id() != &lease.revision_id
+            || fixed::<16>(&visible_revision)? != lease.revision_id
+        {
             return Err(AttemptError::CredentialUnavailable);
         }
         let result = use_once();
