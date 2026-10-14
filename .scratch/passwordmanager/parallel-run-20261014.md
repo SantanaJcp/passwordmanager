@@ -23,7 +23,8 @@ Cada escritor obtiene un worktree T3 hijo desde el commit local del coordinador 
 | protected-memory | Completar riesgos propios reproducibles de memoria protegida/nativos sin modificar APIs ajenas | `crates/pm-crypto/src/**`, `crates/pm-crypto/tests/**`, `crates/pm-native-channel/src/**` |
 | adapter-memory | Cerrar exposiciones propias reproducibles de adaptadores HTTP/browser/SSH, sin simular proveedores reales | `crates/pm-web-auth/src/**`, `crates/pm-web-auth/tests/**`, `crates/pm-ssh-client/src/**`, `crates/pm-ssh-client/tests/**` |
 | daemon-readiness | Repro ordinario A/B y mapa concreto de provisión/configuración; conserva su alcance de prueba | Solo nuevos `crates/pm-custody/tests/chef_daemon_*.py`; producto read-only |
-| daemon-implementation | Implementar 1A y 2A aprobadas, primero registro/migración explícita y después adaptadores | `crates/pm-custody/src/**`, nuevos `crates/pm-custody/tests/chef_runtime_*.py`, nuevos `crates/pm-custody/examples/chef_runtime_*`, nuevo `docs/verification/chef-daemon-implementation-20261014.md` |
+| daemon-implementation | Implementar 1A y 2A aprobadas; follow-up corrige admisión/concurrencia G4 y atiende findings acotados | `crates/pm-custody/src/**` **excepto `lib.rs`** transferido tras finalizar el candidato Unix; nuevos `crates/pm-custody/tests/chef_runtime_*.py`, nuevos `crates/pm-custody/examples/chef_runtime_*`, informes exclusivos `chef-daemon-implementation-20261014.md` y nuevo `chef-daemon-admission-20261014.md` |
+| cli-human-entry | Exponer `pm tui` ya confirmado, solo entorno humano y sin ampliar MCP ni permisos | `crates/pm-cli/src/**`, nuevos `crates/pm-cli/tests/chef_human_*`, únicamente `crates/pm-custody/src/lib.rs` para bridge público fijo a la TUI existente; nuevo `docs/verification/chef-cli-human-entry-20261014.md` |
 | user-guide | Instrucciones Linux reproducibles para evaluación sintética, con límites y prerrequisitos explícitos | `README.md`, nuevos `docs/user/**` |
 | verification-map | Recuperar método observable exacto y vector de candidatos; no revisar formalmente ni cambiar verificadores | Read-only; resultado por respuesta del agente |
 
@@ -45,7 +46,15 @@ Coordinación de seams sin segundo escritor: el owner de protected-memory implem
 
 El propietario confirmó «1 A» y «2 A»: registro local confiable RPK→principal nativo con migración explícita y configuración instalada de adaptadores. La decisión y sus fronteras verificables están en [decisions.md](../../decisions.md). Un nuevo escritor exclusivo de producto custody implementa ambas en orden, sin solaparse con el agente de probes ni las fixtures macOS/Windows.
 
-Sigue pendiente tramitar con dos opciones estructuralmente distintas el cleanup/recovery durable si un fallo concreto exige cambiar el contrato de prepared/replay. Plazos, KDF y alcance se preservan. Firmas reales, plataformas ausentes y aceptación humana siguen siendo externas.
+**Decisión 3 pendiente:** publicar solo candidatos exactos y ejecutar los workflows gratuitos existentes, con máximo tres Windows y dos macOS (3A recomendada), o permanecer local con aceptación nativa pendiente (3B). «1 A / 2 A» no autoriza 3A.
+
+**Decisión 4 pendiente:** separar intención preparada cifrada durable de temporales recuperables con lifecycle explícito, preservando retry/receipt (4A recomendada), o abortar definitivamente y requerir nuevo prepare/firma (4B, reduce comportamiento acordado). El probe G7 no autoriza borrar payload ni cambiar esquema/contrato. Plazos y KDF se conservan.
+
+Hallazgo y correctivo comprobado por autor: `6728bbd` aprendía el owner observado de `/`; candidato **no aceptable aislado**, nunca integrar ese checkpoint. `7b7026e` retira esa ampliación y conserva ROOT/current con RED→GREEN de filesystemroot de agente; fixture propia usa chroot UID0 y TUI externa real. No reescritura de historia. La revisión usa el diff combinado `ecc2e9d..7b7026e`.
+
+La política de ancestros Windows procede del TCB administrativo ya confirmado (security-operations §1 y distribution mantenimiento): SYSTEM/Administrators/TrustedInstaller/servicio exacto para control de componentes existentes; archivo y directorio privado exactos servicio/SYSTEM. No aprender cualquier owner/installer SID. Implementación nativa aún NOT_RUN. No modificar padres ajenos para adecuar fixtures.
+
+`pm tui` está confirmado en spec §11 y agent-identity, no es una nueva puerta de elección de nombre. Nuevo escritor exclusivo expone la entrada humana mediante código existente, sin shell/PATH/role flag ni permisos nuevos; no toca daemon fuera del bridge `lib.rs`. El owner daemon continúa admisión G4 (4 conexiones/agente, no global4) en sus propios archivos. Revisores Claude R1 read-only inspeccionan SHAs fijados, no archivos en vivo. Firmas reales, plataformas ausentes y aceptación humana siguen siendo externas.
 
 ## Seguimiento
 
