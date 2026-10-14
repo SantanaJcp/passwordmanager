@@ -20,7 +20,7 @@ import tempfile
 def main():
     assert os.getuid()==0
     assert pathlib.Path('/proc/self/uid_map').read_text().split()[1] != '0'
-    mode=sys.argv[1];assert mode in ('registry','adapter')
+    mode=sys.argv[1];assert mode in ('registry','adapter','admission','reconciliation')
     binaries=[pathlib.Path(p).resolve(strict=True) for p in sys.argv[2:]]
     root=pathlib.Path(tempfile.mkdtemp(prefix='chef-runtime-owned-root-'))
     def copy_file(source,target):
@@ -60,9 +60,10 @@ def main():
         tempfile.tempdir=str(root/'tmp')
         os.environ['CHEF_RUNTIME_ROOT']=str(root)
         fixture=importlib.import_module('chef_runtime_'+mode)
-        if mode=='adapter':
-            original_common_run=fixture.common.run_uid
-            original_common_start=fixture.common.start_uid
+        if mode in ('adapter','reconciliation'):
+            common=fixture.common if mode=='adapter' else fixture.adapter.common
+            original_common_run=common.run_uid
+            original_common_start=common.start_uid
             def is_installed(command):
                 return (len(command)>1 and pathlib.Path(command[0]).name=='pm-custody' and
                     command[1] in ('serve-vault','migrate-agent-registry','provision-adapters'))
@@ -70,8 +71,8 @@ def main():
                 return scoped(uid,command,**kwargs) if is_installed(command) else original_common_run(uid,command,**kwargs)
             def common_start(uid,command,**kwargs):
                 return scoped(uid,command,start=True,**kwargs) if is_installed(command) else original_common_start(uid,command,**kwargs)
-            fixture.common.run_uid=common_run;fixture.common.start_uid=common_start
-        sys.argv=[fixture.__file__,*map(str,copied if mode=='adapter' else copied[:2])]
+            common.run_uid=common_run;common.start_uid=common_start
+        sys.argv=[fixture.__file__,*map(str,copied if mode in ('adapter','reconciliation') else copied[:2])]
         fixture.main()
     finally:
         # Exact owned root only; all child resources must already be stopped by

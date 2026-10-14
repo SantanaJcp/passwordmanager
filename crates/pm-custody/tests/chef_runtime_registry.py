@@ -136,8 +136,8 @@ def main():
         try:
             readable,_,_=select.select([held.stdout],[],[],10)
             assert readable and held.stdout.readline()==b"READY\n"
-            discover(binary,AGENT_B,b_key,agent_profile,runtime/"agent.sock",allowed=False)
-            print("LIMITATION global-four-slots A=full B=denied per-agent-fairness=NOT_IMPLEMENTED",flush=True)
+            assert discover(binary,AGENT_B,b_key,agent_profile,runtime/"agent.sock")==baseline
+            print("OBSERVED native-four-A B=admitted independent-principal=1",flush=True)
         finally:
             out,err=held.communicate(b"x",timeout=5)
             assert held.returncode==0 and out==b"" and err==b""

@@ -76,7 +76,11 @@ mod client {
     }
     pub fn run() {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
-        assert_eq!(args.len(), 3);
+        assert!(matches!(args.len(), 3 | 4));
+        assert!(
+            args.get(3)
+                .is_none_or(|mode| matches!(mode.as_str(), "tls-only" | "tls-quota-denied"))
+        );
         let profile = std::fs::read(&args[0]).unwrap();
         assert_eq!(&profile[..5], b"PMP1\x01");
         let uid = u32::from_be_bytes(profile[5..9].try_into().unwrap());
@@ -124,6 +128,35 @@ mod client {
         )
         .unwrap();
         let mut tls = rustls::StreamOwned::new(connection, stream);
+        if args.get(3).is_some() {
+            while tls.conn.is_handshaking() {
+                tls.conn.complete_io(&mut tls.sock).unwrap();
+            }
+            if args[3] == "tls-quota-denied" {
+                tls.sock
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut byte = [0];
+                match tls.read(&mut byte) {
+                    Ok(0) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+                        ) => {}
+                    result => {
+                        panic!("quota did not close TLS before application magic: {result:?}")
+                    }
+                }
+                println!("PASS tls-quota-denied no-application-magic=1");
+                return;
+            }
+            println!("READY");
+            std::io::stdout().flush().unwrap();
+            let mut signal = [0];
+            std::io::stdin().read_exact(&mut signal).unwrap();
+            return;
+        }
         tls.write_all(b"PMA1\n").unwrap();
         tls.flush().unwrap();
         assert_eq!(frame(&mut tls).unwrap()[0], 0);

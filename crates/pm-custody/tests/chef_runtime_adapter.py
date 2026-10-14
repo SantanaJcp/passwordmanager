@@ -136,6 +136,9 @@ def main():
         registry = pathlib.Path(str(vault) + ".agent-registry")
         registry.write_bytes(b"PMAR1" + vault_id + bytes.fromhex(DEVICE) + server_pub.read_bytes()
             + (1).to_bytes(2,"big") + agent_pub.read_bytes() + AGENT_A.to_bytes(4,"big"))
+        if os.environ.get("CHEF_RECONCILIATION_CASE"):
+            value=registry.read_bytes()
+            registry.write_bytes(value[:81]+(2).to_bytes(2,"big")+value[83:]+b_pub.read_bytes()+AGENT_B.to_bytes(4,"big"))
         os.chown(registry,CUSTODIAN,CUSTODIAN); registry.chmod(0o400)
         config = pathlib.Path(str(vault) + ".adapters")
         endpoint_path=str(provider_socket)
@@ -153,6 +156,10 @@ def main():
         rows=json.loads(common.cli(AGENT_A,local_cli,env,["--json","credentials","list"]).stdout)["result"]["credentials"]
         row=next(value for value in rows if value["destination"]=="github-assigned-issues/1");item=row["id"]
         assert "github-rest-bearer" in row["integrations"]
+        if os.environ.get("CHEF_RECONCILIATION_CASE"):
+            from chef_runtime_reconciliation import exercise
+            exercise(locals())
+            return
         outputs=[]
         expected={1:("SUCCEEDED",None),2:("FAILED","INTEGRITY_FAILURE"),3:("FAILED","INTEGRITY_FAILURE"),4:("FAILED","AUTH_REJECTED"),5:("FAILED","AUTH_REJECTED"),6:("WAITING_FOR_HUMAN",None),7:("FAILED","RATE_LIMITED"),8:("FAILED","INTEGRITY_FAILURE"),9:("INDETERMINATE",None)}
         for page,(state_name,reason) in expected.items():

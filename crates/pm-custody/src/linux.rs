@@ -1022,7 +1022,16 @@ fn serve_independent_accept_lanes(
             }
         })
         .map_err(|_| Failure::Unavailable)?;
-    let mut connections = crate::connection_dispatch::AgentConnections::new();
+    let bindings = vault.map_or_else(
+        || vec![(agent_spki.to_vec(), agent_uid)],
+        |service| {
+            service
+                .registry
+                .as_ref()
+                .map_or_else(Vec::new, |registry| registry.entries.clone())
+        },
+    );
+    let mut connections = crate::connection_dispatch::RegisteredConnections::new(&bindings)?;
     loop {
         // A stopped or panicked human lane is a fatal custody condition. The
         // binary's existing top-level error path terminates the whole process.
@@ -3637,9 +3646,7 @@ fn run_provider_once(service: &VaultService) -> Result<(), Failure> {
         if service.admission.verify().is_err()
             || (matches!(provider, Provider::Installed(_)) && service.registry.is_none())
         {
-            return Ok(AttemptOutcome::Failed {
-                reason: "CUSTODY_UNAVAILABLE",
-            });
+            return Ok(local_provider_failure(&lease, "CUSTODY_UNAVAILABLE"));
         }
         call_provider(provider, &lease)
     };
@@ -3687,15 +3694,40 @@ fn call_provider(
         Provider::Laboratory(endpoint) => endpoint,
         Provider::Installed(Some(adapters)) => match adapters.select(lease) {
             Ok(endpoint) => endpoint,
-            Err(reason) => return Ok(AttemptOutcome::Failed { reason }),
+            Err(reason) => return Ok(local_provider_failure(lease, reason)),
         },
         Provider::Installed(None) => {
-            return Ok(AttemptOutcome::Failed {
-                reason: "ADAPTER_UNAVAILABLE",
-            });
+            return Ok(local_provider_failure(lease, "ADAPTER_UNAVAILABLE"));
         }
     };
+    LAST_LOCAL_PROVIDER_FAILURE.with(|last| last.set(None));
     call_controlled_provider(endpoint, lease)
+}
+
+// One bounded diagnostic slot on the existing provider worker; repeated
+// reconciliation of the same unavailable condition cannot grow a per-attempt
+// map or flood a log. Categories are fixed local codes, never upstream text.
+std::thread_local! {
+    static LAST_LOCAL_PROVIDER_FAILURE: std::cell::Cell<Option<(&'static str, bool)>> = const { std::cell::Cell::new(None) };
+}
+
+fn local_provider_failure(lease: &pm_vault::AttemptLease, reason: &'static str) -> AttemptOutcome {
+    let reconciliation = lease.reconciliation_only();
+    LAST_LOCAL_PROVIDER_FAILURE.with(|last| {
+        if last.replace(Some((reason, reconciliation))) != Some((reason, reconciliation)) {
+            eprintln!(
+                "PM_PROVIDER_LOCAL_FAILURE category={reason} reconciliation={reconciliation}"
+            );
+        }
+    });
+    if reconciliation {
+        // An already-issued authentication is unknown when local custody,
+        // installed routing or adapter availability fails. Never invent a
+        // terminal external failure or turn reconciliation into a new login.
+        AttemptOutcome::Indeterminate
+    } else {
+        AttemptOutcome::Failed { reason }
+    }
 }
 
 fn encode_provider_message(
@@ -4158,8 +4190,8 @@ fn accept_one(
     role: Role,
     config: &Arc<ServerConfig>,
     vault: Option<&VaultService>,
-    peer_rpk: Option<&[u8]>,
-    connections: Option<&mut crate::connection_dispatch::AgentConnections>,
+    _peer_rpk: Option<&[u8]>,
+    connections: Option<&mut crate::connection_dispatch::RegisteredConnections>,
 ) -> Result<(), Failure> {
     let Ok((stream, _)) = listener.accept() else {
         return Ok(());
@@ -4200,8 +4232,7 @@ fn accept_one(
             (Arc::clone(config), expected_uid)
         };
         let vault = vault.cloned();
-        let peer_rpk = peer_rpk.map(<[u8]>::to_vec);
-        connections.dispatch(move || {
+        connections.dispatch(uid, move |authenticated| {
             // Preserve the inherited handler-error policy; changing its error
             // taxonomy is outside W4's approved concurrency correction.
             let _ = handle_connection(
@@ -4210,12 +4241,12 @@ fn accept_one(
                 role,
                 &config,
                 vault.as_ref(),
-                peer_rpk.as_deref(),
+                Some(&authenticated),
             );
         })?;
         return Ok(());
     }
-    let _ = handle_connection(stream, expected_uid, role, config, vault, peer_rpk);
+    let _ = handle_connection(stream, expected_uid, role, config, vault, None);
     Ok(())
 }
 
@@ -4277,7 +4308,7 @@ fn handle_connection(
     role: Role,
     config: &Arc<ServerConfig>,
     vault: Option<&VaultService>,
-    _peer_rpk: Option<&[u8]>,
+    authenticated: Option<&crate::connection_dispatch::AuthenticatedAgents>,
 ) -> Result<(), Failure> {
     let mut timing =
         (role == Role::Human).then(|| pm_crypto::phase_timing::PhaseTimer::new("human-dispatch"));
@@ -4305,6 +4336,18 @@ fn handle_connection(
     let connection = ServerConnection::new(config.clone()).map_err(|_| Failure::Unavailable)?;
     ticket26_diagnostic(Ticket26DiagnosticPhase::ServerTlsConfigured);
     let mut tls = rustls::StreamOwned::new(connection, stream);
+    // Reserve by the proven RPK as soon as TLS finishes, before waiting for
+    // application magic. A valid TLS peer cannot evade its four-slot budget by
+    // withholding the first application bytes under a shared native UID.
+    let agent_admission = match (role, vault) {
+        (Role::Agent, Some(service)) => Some(admit_agent_tls(
+            &mut tls,
+            expected_uid,
+            service,
+            authenticated.ok_or(Failure::Unavailable)?,
+        )?),
+        _ => None,
+    };
     let mut request = [0_u8; 5];
     tls.read_exact(&mut request)
         .map_err(|_| Failure::Unavailable)?;
@@ -4330,23 +4373,7 @@ fn handle_connection(
     if request == *AGENT_MAGIC && role == Role::Agent {
         let service = vault.ok_or(Failure::Unavailable)?;
         service.admission.verify()?;
-        let observed = tls
-            .conn
-            .peer_certificates()
-            .and_then(|keys| keys.first())
-            .ok_or(Failure::Unavailable)?
-            .as_ref()
-            .to_vec();
-        if !service
-            .registry
-            .as_ref()
-            .ok_or(Failure::Unavailable)?
-            .entries
-            .iter()
-            .any(|(key, uid)| key == &observed && *uid == expected_uid)
-        {
-            return Err(Failure::Unavailable);
-        }
+        let (observed, _permit) = agent_admission.as_ref().ok_or(Failure::Unavailable)?;
         return crate::agent_wire::serve_agent(
             &mut tls,
             &crate::agent_wire::AgentService {
@@ -4355,7 +4382,7 @@ fn handle_connection(
                 audit_custody: &service.audit_custody,
                 admission: &service.admission,
             },
-            &observed,
+            observed,
         );
     }
     if request != *b"PING\n" {
@@ -4365,6 +4392,42 @@ fn handle_connection(
     tls.flush().map_err(|_| Failure::Unavailable)?;
     ticket26_diagnostic(Ticket26DiagnosticPhase::ServerReady);
     Ok(())
+}
+
+fn admit_agent_tls(
+    tls: &mut rustls::StreamOwned<ServerConnection, UnixStream>,
+    expected_uid: u32,
+    service: &VaultService,
+    authenticated: &crate::connection_dispatch::AuthenticatedAgents,
+) -> Result<(Vec<u8>, crate::connection_dispatch::AuthenticatedPermit), Failure> {
+    while tls.conn.is_handshaking() {
+        tls.conn
+            .complete_io(&mut tls.sock)
+            .map_err(|_| Failure::Unavailable)?;
+    }
+    if tls.conn.alpn_protocol() != Some(Role::Agent.alpn()) {
+        return Err(Failure::Unavailable);
+    }
+    service.admission.verify()?;
+    let observed = tls
+        .conn
+        .peer_certificates()
+        .and_then(|keys| keys.first())
+        .ok_or(Failure::Unavailable)?
+        .as_ref()
+        .to_vec();
+    if !service
+        .registry
+        .as_ref()
+        .ok_or(Failure::Unavailable)?
+        .entries
+        .iter()
+        .any(|(key, uid)| key == &observed && *uid == expected_uid)
+    {
+        return Err(Failure::Unavailable);
+    }
+    let permit = authenticated.admit(&observed).ok_or(Failure::Unavailable)?;
+    Ok((observed, permit))
 }
 
 fn crypto_provider() -> CryptoProvider {

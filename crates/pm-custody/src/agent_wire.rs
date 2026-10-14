@@ -76,7 +76,13 @@ fn serve_agent_requests(
         let Some(request) = read_agent_frame(tls).map_err(AgentReadFailure::public_failure)? else {
             return Ok(());
         };
-        write_frame(tls, &handle_attempt_request(service, peer, &request)?)?;
+        let response = handle_attempt_request(service, peer, &request)?;
+        write_frame(tls, &response)?;
+        // A current revoked identity has no further delegated operations. Close
+        // its channel so all native/authenticated admission permits are freed.
+        if response == [5] {
+            return Ok(());
+        }
     }
 }
 
