@@ -74,6 +74,8 @@ Despachados desde `31b48ace`: integrador aislado del vector exacto de nueve sibl
 
 No resultado de ejecución recibido al despacho, no PASS nuevo ni cierre nativo/G7. Sin publicación/CI/instalación/schema ni aceptación implícita de 3A/4A.
 
+Architect/Minimalist evidencia R1 recibidos: ambos sin P0/P1; P2 real en gate TLS que exige ineficiencia actual. Parent trazó fuente y despachó corrección aislada test-only, prueba RED→mismoGREEN sin producción nueva; se compondrá después, no cambia vector en vuelo. PID-reuse cleanup Windows es falsoRED fail-closed para corpus nativo, no se relajan guards. G7 witness read-only/aserción añadida no es observador puro; layout/oráculos se coordinan con decisión4. [Triage evidencia R1](reviews/20261014-evidence-r1/triage.md). Skeptic cobertura incompleta no se vuelve PASS por consenso.
+
 ## Seguimiento
 
 Los taskIds, clientRequestIds y resultados del despacho se guardan en el registro JSON adyacente `parallel-run-20261014.tasks.json`, propiedad exclusiva del coordinador. No son estados duplicados de los tickets.

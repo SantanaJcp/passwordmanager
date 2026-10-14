@@ -238,19 +238,33 @@
     },
     {
       "lane": "evidence-review-architect-r1",
-      "status": "RUNNING delegated; no terminal result/test evidence yet",
+      "status": "PASS source noP0/P1; P2 findings",
       "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-architect-r1",
       "base": "31b48ace181512d273738ff3b344201be8e8f08b",
       "requiresOwnerDecision": [],
-      "action": "Independent configuredClaude R1 source-only evidence/oracle review; no executions or nested review."
+      "action": "Parent traced syncP2 and delegated bounded test-only correction; WindowsPIDcleanup falseRED retainednativecorpus/noimplicitguardrelaxation; G7witness/layout caveats noted. No full batch/nativeG7pass; Skeptic coverage remainsincomplete.",
+      "resultAcknowledged": true,
+      "report": "reviews/20261014-evidence-r1/architect.md",
+      "executedTests": false
     },
     {
       "lane": "evidence-review-minimalist-r1",
-      "status": "RUNNING delegated; no terminal result/test evidence yet",
+      "status": "ISSUES source P2/P3 only; noP0/P1",
       "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-evidence-review-minimalist-r1",
       "base": "31b48ace181512d273738ff3b344201be8e8f08b",
       "requiresOwnerDecision": [],
-      "action": "Independent configuredClaude R1 source-only evidence/oracle review; no executions or nested review."
+      "action": "Parent traced syncP2 and delegated bounded test-only correction; WindowsPIDcleanup falseRED retainednativecorpus/noimplicitguardrelaxation; G7witness/layout caveats noted. No full batch/nativeG7pass; Skeptic coverage remainsincomplete.",
+      "resultAcknowledged": true,
+      "report": "reviews/20261014-evidence-r1/minimalist.md",
+      "executedTests": false
+    },
+    {
+      "lane": "sync-probe-gate",
+      "status": "RUNNING focused P2 implementation; not reviewR2",
+      "taskId": "node:delegated-task:command%3Amcp%3Ac4f49128-d209-4786-b3c4-dd47d816ab9a%3Adelegate-task%3Apm-chef-20261014-sync-probe-gate-r2",
+      "base": "5e26f3b4d4813c4e606339353e67e82ede4dcdf5",
+      "requiresOwnerDecision": [],
+      "action": "Default TLS/RPK gate must retain literal wire roundtrips without requiring currentinefficiency. Temporaryowned combined-framing proof RED→sameGREEN; final no productionchange. Inflightoriginal9headvectorunchanged."
     }
   ]
 }
