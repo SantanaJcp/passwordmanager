@@ -1425,8 +1425,7 @@ impl HumanVault {
         item: [u8; 16],
     ) -> Result<PreparedHumanCommand, AuthorizationError> {
         let record = self.read_record(item).map_err(AuthorizationError::from)?;
-        let account =
-            delegated_account(&record).ok_or(AuthorizationError::CredentialUnavailable)?;
+        delegated_account(&record).ok_or(AuthorizationError::CredentialUnavailable)?;
         let connection = open_connection(&self.path).map_err(AuthorizationError::from)?;
         let revision_bytes: Vec<u8> = connection
             .query_row(
@@ -1436,55 +1435,9 @@ impl HumanVault {
             )
             .map_err(|_| AuthorizationError::Integrity)?;
         let revision = bytes::<16>(&revision_bytes).map_err(AuthorizationError::from)?;
-        let package = audit::load_matching_package(
-            &connection,
-            &self.trusted_root,
-            self.device,
-            &self.audit_custody,
-        )
-        .map_err(|_| AuthorizationError::Integrity)?;
-        let descriptor = new_credential(
-            item,
-            revision,
-            record.kind(),
-            record.human().title.clone(),
-            record
-                .human()
-                .destinations
-                .first()
-                .map(|value| value.value.clone()),
-            Some(account),
-        );
-        let auth = record
-            .encode_auth()?
-            .ok_or(AuthorizationError::CredentialUnavailable)?;
-        let plaintext = encode_credential(&descriptor, &auth)?;
-        let control_package = self
-            .root
-            .seal_control_package(
-                ControlPackageInput {
-                    object: item,
-                    revision,
-                    recipient: self.device,
-                    recipient_generation: package.generation(),
-                    plaintext: &plaintext,
-                },
-                self.audit_custody.encryption_public_key(),
-            )
-            .map_err(|_| AuthorizationError::Integrity)?;
-        let pending = self
-            .root
-            .prepare_grant_vector(
-                GrantVectorInput {
-                    item,
-                    revision,
-                    recipient: self.device,
-                    authorization_generation: package.generation(),
-                    payload_sha256: digest(&control_package),
-                },
-                self.audit_custody.encryption_public_key(),
-            )
-            .map_err(|_| AuthorizationError::Integrity)?;
+        let (control_package, pending) = self
+            .provision_record(&connection, item, revision, &record)
+            .map_err(AuthorizationError::from)?;
         let staged_grant = pending.to_staged_bytes();
         let positives =
             authority_digests(&connection, item, &["enable"]).map_err(AuthorizationError::from)?;
@@ -1505,6 +1458,141 @@ impl HumanVault {
             Some(&staged_grant),
         )
         .map_err(AuthorizationError::from)
+    }
+
+    fn provision_record(
+        &self,
+        connection: &Connection,
+        item: [u8; 16],
+        revision: [u8; 16],
+        record: &LogicalRecord,
+    ) -> Result<(Vec<u8>, pm_crypto::PendingGrantVector), HumanCommitError> {
+        let account = delegated_account(record).ok_or(HumanCommitError::InvalidInput)?;
+        let package = audit::load_matching_package(
+            connection,
+            &self.trusted_root,
+            self.device,
+            &self.audit_custody,
+        )
+        .map_err(|_| HumanCommitError::Integrity)?;
+        let descriptor = new_credential(
+            item,
+            revision,
+            record.kind(),
+            record.human().title.clone(),
+            record
+                .human()
+                .destinations
+                .first()
+                .map(|value| value.value.clone()),
+            Some(account),
+        );
+        let auth = record
+            .encode_auth()?
+            .ok_or(HumanCommitError::InvalidInput)?;
+        let plaintext = encode_credential(&descriptor, &auth)?;
+        let control_package = self
+            .root
+            .seal_control_package(
+                ControlPackageInput {
+                    object: item,
+                    revision,
+                    recipient: self.device,
+                    recipient_generation: package.generation(),
+                    plaintext: &plaintext,
+                },
+                self.audit_custody.encryption_public_key(),
+            )
+            .map_err(|_| HumanCommitError::Integrity)?;
+        let pending = self
+            .root
+            .prepare_grant_vector(
+                GrantVectorInput {
+                    item,
+                    revision,
+                    recipient: self.device,
+                    authorization_generation: package.generation(),
+                    payload_sha256: digest(&control_package),
+                },
+                self.audit_custody.encryption_public_key(),
+            )
+            .map_err(|_| HumanCommitError::Integrity)?;
+        Ok((control_package, pending))
+    }
+
+    /// Refresh only an already-enabled local provision, under the same human
+    /// transaction as its complete content revision. No recipient or identity
+    /// is added and no withdrawal is undone.
+    fn publish_edited_provision(
+        &self,
+        transaction: &Transaction<'_>,
+        staged: &Staged,
+        revision_event: [u8; 32],
+    ) -> Result<[u8; 32], HumanCommitError> {
+        let revision = staged.revision_id.ok_or(HumanCommitError::BodyChanged)?;
+        let record = self.read_revision_from(
+            transaction,
+            staged.item_id,
+            revision,
+            staged.item_kind.as_deref(),
+        )?;
+        let (control, pending) =
+            self.provision_record(transaction, staged.item_id, revision, &record)?;
+        let positives = authority_digests(transaction, staged.item_id, &["enable"])?;
+        let withdrawals = authority_digests(
+            transaction,
+            staged.item_id,
+            &["disable", "trash", "purge-item", "purge-revisions"],
+        )?;
+        let body = encode_enable_body(revision, pending.commitment(), &positives, &withdrawals);
+        let previous = current_device_head(transaction, self.device, 1)?;
+        let mut parents = positives;
+        parents.extend(withdrawals);
+        parents.push(revision_event);
+        if let Some(previous) = previous {
+            parents.push(previous);
+        }
+        parents.sort_unstable();
+        parents.dedup();
+        if parents.len() > 4096 {
+            return Err(HumanCommitError::InvalidCommand);
+        }
+        let seq = next_authority_seq(transaction, self.device, 1)?;
+        let event_id = random_id()?;
+        let event = encode_g5_event(&G5EventInput {
+            vault: self.root.vault_id(),
+            event_id,
+            authority_epoch: 1,
+            issuer_device: self.device,
+            issuer_generation: 1,
+            seq,
+            previous,
+            parents: &parents,
+            kind: "enable",
+            subject: staged.item_id,
+            subject_generation: 1,
+            body: &body,
+        });
+        let human = self.root.sign_human_event(&event)?;
+        let device = self.audit_custody.sign_device_event(&event)?;
+        let digest = digest(&event);
+        let commitment = pending.commitment();
+        let grant = self.root.finish_grant_vector(pending, digest)?.to_bytes();
+        let changed=transaction.execute("UPDATE credential_authorizations SET revision_id=?2,event_digest=?3,control_package=?4,grant=?5,grant_commitment=?6 WHERE item_id=?1 AND status='enabled'",params![staged.item_id.as_slice(),revision.as_slice(),digest.as_slice(),control,grant,commitment.as_slice()])?;
+        if changed != 1 {
+            return Err(HumanCommitError::StateChanged);
+        }
+        // Existing multi-event transactions use a distinct event transaction ID;
+        // the single outer human receipt binds the resulting causal head.
+        transaction.execute("INSERT INTO authority_events(event_digest,event_id,transaction_id,issuer_device,issuer_generation,seq,previous_digest,parents,kind,subject,subject_generation,event,human_signature,device_signature) VALUES(?1,?2,?3,?4,1,?5,?6,?7,'enable',?8,1,?9,?10,?11)",params![digest.as_slice(),event_id.as_slice(),random_id()?.as_slice(),self.device.as_slice(),i64::try_from(seq).map_err(|_|HumanCommitError::InvalidCommand)?,previous.as_ref().map(<[u8;32]>::as_slice),encode_heads_allow_empty(&parents),staged.item_id.as_slice(),event,human.as_slice(),device.as_slice()])?;
+        transaction.execute(
+            "INSERT INTO outbox(event_digest,event) VALUES(?1,?2)",
+            params![
+                digest.as_slice(),
+                encode_signed_event(&event, &device, &human)
+            ],
+        )?;
+        Ok(digest)
     }
 
     /// Stages removal of one credential from the common delegated set.
@@ -1781,6 +1869,13 @@ impl HumanVault {
                 committed_at_us,
             );
         }
+        let refresh_enabled =
+            staged.event_kind == "item-revision" && item_is_enabled(&transaction, staged.item_id)?;
+        if refresh_enabled {
+            crate::DelegatedVault::open(&self.path, self.device, Arc::clone(&self.audit_custody))
+                .and_then(|vault| vault.enabled_credential_in(&transaction, staged.item_id))
+                .map_err(|_| HumanCommitError::Integrity)?;
+        }
         let event_id = random_id()?;
         let previous = current_device_head(&transaction, self.device, 1)?;
         let seq = next_authority_seq(&transaction, self.device, 1)?;
@@ -1858,6 +1953,11 @@ impl HumanVault {
             "INSERT INTO outbox (event_digest,event) VALUES (?1,?2)",
             params![event_digest.as_slice(), signed_event],
         )?;
+        let event_digest = if refresh_enabled {
+            self.publish_edited_provision(&transaction, &staged, event_digest)?
+        } else {
+            event_digest
+        };
         if staged.event_kind == "audit-purge" {
             audit::purge(
                 &transaction,
@@ -3499,10 +3599,16 @@ impl HumanVault {
             None,
             None,
         );
+        let enabled_edit = item_is_enabled(&transaction, item)?;
+        let manifest = if enabled_edit {
+            enabled_edit_manifest(&manifest, item, Some(revision), object_digest)
+        } else {
+            manifest
+        };
         let body = encode_body(&Body {
             transaction_id,
             events_manifest_digest: digest(&manifest),
-            event_count: 1,
+            event_count: if enabled_edit { 2 } else { 1 },
             object_manifest_digest: object_digest,
         });
         let expires_at_us = now_us()?
@@ -3567,10 +3673,16 @@ impl HumanVault {
             audit_through_seq,
             authority_body.map(digest),
         );
+        let enabled_edit = event_kind == "item-revision" && item_is_enabled(&connection, item)?;
+        let event_manifest = if enabled_edit {
+            enabled_edit_manifest(&event_manifest, item, revision, object_digest)
+        } else {
+            event_manifest
+        };
         let body = encode_body(&Body {
             transaction_id,
             events_manifest_digest: digest(&event_manifest),
-            event_count: 1,
+            event_count: if enabled_edit { 2 } else { 1 },
             object_manifest_digest: object_digest,
         });
         let body_hash = digest(&body);
@@ -5804,8 +5916,20 @@ fn validate_staged(
         }
         return Ok(());
     }
+    let enabled_edit =
+        staged.event_kind == "item-revision" && item_is_enabled(transaction, staged.item_id)?;
+    let event_manifest = if enabled_edit {
+        enabled_edit_manifest(
+            &event_manifest,
+            staged.item_id,
+            staged.revision_id,
+            object_digest,
+        )
+    } else {
+        event_manifest
+    };
     if !valid_shape
-        || body.event_count != 1
+        || body.event_count != if enabled_edit { 2 } else { 1 }
         || body.object_manifest_digest != object_digest
         || body.events_manifest_digest != digest(&event_manifest)
     {
@@ -6695,6 +6819,25 @@ fn encode_event_manifest(
         authority_body_digest.as_ref().map(<[u8; 32]>::as_slice),
     );
     encoder.into_writer()
+}
+
+fn item_is_enabled(connection: &Connection, item: [u8; 16]) -> Result<bool, HumanCommitError> {
+    Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM credential_authorizations WHERE item_id=?1 AND status='enabled')",[item.as_slice()],|row|row.get(0))?)
+}
+
+// Both entries use the existing event-manifest entry encoding. The human signs
+// the complete content plus replacement provision effect, not random event IDs.
+fn enabled_edit_manifest(
+    revision_entry: &[u8],
+    item: [u8; 16],
+    revision: Option<[u8; 16]>,
+    objects: Option<[u8; 32]>,
+) -> Vec<u8> {
+    let provision = encode_event_manifest("enable", item, revision, objects, None, None, None);
+    let mut manifest = vec![0x82];
+    manifest.extend_from_slice(&revision_entry[1..]);
+    manifest.extend_from_slice(&provision[1..]);
+    manifest
 }
 
 fn encode_restore_manifest(

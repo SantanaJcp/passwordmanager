@@ -7,6 +7,7 @@ The full passkey/token-exchange labs remain independent unchanged acceptance.
 """
 import json
 import inspect
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -50,6 +51,40 @@ def adapter(endpoint, events, release):
             connection.sendall(len(response).to_bytes(4, "big") + response)
 
 
+def edit_adapter(endpoint, events, marker):
+    listener=socket.socket(socket.AF_UNIX);listener.bind(endpoint);os.chmod(endpoint,0o666);listener.listen()
+    after=0
+    def exact(c,n):
+        data=b""
+        while len(data)<n:
+            block=c.recv(n-len(data))
+            if not block: return None
+            data+=block
+        return data
+    while True:
+        c,_=listener.accept()
+        with c:
+            c.settimeout(20);header=exact(c,4)
+            if header is None:
+                with open(events,"a") as out: out.write(json.dumps({"frame":False})+"\n")
+                continue
+            request=exact(c,int.from_bytes(header,"big"));assert request
+            row={"frame":True,"opcode":request[0],"attempt":request[1:17].hex(),"revision":request[17:33].hex(),"after_edit":Path(marker).exists()}
+            if request[0]!=2:
+                fields=[];cursor=request[33:]
+                while cursor:
+                    n=int.from_bytes(cursor[:4],"big");fields.append(cursor[4:4+n]);cursor=cursor[4+n:]
+                assert fields[:4]==[b"keycloak-token-exchange",b"token_exchange",b"keycloak-exchange-lab",b"keycloak-exchange-lab"]
+                assert len(fields)==7
+                row["requester_sha256"]=hashlib.sha256(fields[5]).hexdigest();row["subject_sha256"]=hashlib.sha256(fields[6]).hexdigest()
+            if request[0]==2 and row["after_edit"]:after+=1
+            with open(events,"a") as out:out.write(json.dumps(row)+"\n")
+            # First post-edit query can have been in flight before the human
+            # commit. Only a second fresh query may resolve this fixture.
+            status=2 if request[0]==2 and after>=2 else 3
+            response=bytes([status])+b"\0\0\0\0";c.sendall(len(response).to_bytes(4,"big")+response)
+
+
 def wait_until(predicate, label):
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -61,7 +96,9 @@ def wait_until(predicate, label):
 
 
 def main():
-    custody_source, cli_source = map(lambda p: Path(p).resolve(strict=True), sys.argv[1:])
+    custody_source, cli_source = map(lambda p: Path(p).resolve(strict=True), sys.argv[1:3])
+    case_mode=sys.argv[3] if len(sys.argv)>3 else "boundary"
+    helper_source=Path(sys.argv[4]).resolve(strict=True) if case_mode.startswith("edit-") else None
     root = installed.initialize(custody_source)
     processes = []
     daemon = None
@@ -98,9 +135,22 @@ def main():
         common.human(custody,hk,profiles/"human",runtime/"human.sock","setup",ap.read_bytes(),bp.read_bytes())
         common.human(custody,hk,profiles/"human",runtime/"human.sock","add-keycloak-exchange",b"synthetic-boundary-subject-token",exchange.CLIENT_SECRET.encode())
         stop_daemon(daemon); daemon = None
+        # Public migration must reject a genuine native-bound bootstrap RPK
+        # that never received a human grant, not merely a stale TLS generation.
+        rogue=root/"rogue";rogue.mkdir();os.chown(rogue,6,6);rogue.chmod(0o755)
+        rogue_key,rogue_public=rogue/"private",rogue/"public"
+        common.run_uid(6,[custody,"keygen","--private",rogue_key,"--public",rogue_public])
+        rogue_bootstrap=state/"rogue-bootstrap"
+        common.run_uid(1,[custody,"provision-bootstrap","--path",rogue_bootstrap,"--server-private",sk,"--server-public",sp,"--agent-public",rogue_public,"--agent-uid","6","--human-public",hp,"--human-uid","2"])
+        before_bootstrap=rogue_bootstrap.read_bytes()
+        rejected=installed.run(1,[custody,"migrate-agent-registry","--bootstrap",rogue_bootstrap,"--vault",vault,"--device",exchange.DEVICE],check=False)
+        assert rejected.returncode==4 and rejected.stderr==b"CUSTODY_UNAVAILABLE\n",rejected
+        assert rogue_bootstrap.read_bytes()==before_bootstrap and not Path(str(vault)+".agent-registry").exists()
+        print("PASS corpus pinned-but-unenrolled RPK migration=denied native-principal=6",flush=True)
         installed.migrate(custody,bootstrap,vault,exchange.DEVICE,(bp,4))
         endpoint, events, release = provider/"adapter.sock", provider/"events.jsonl", provider/"release"
-        adapter_code = "import json, socket, time, sys, os\nfrom pathlib import Path\n" + inspect.getsource(adapter) + "\nadapter(*sys.argv[1:])\n"
+        adapter_function=edit_adapter if case_mode.startswith("edit-") else adapter
+        adapter_code = "import json, socket, time, sys, os, hashlib\nfrom pathlib import Path\n" + inspect.getsource(adapter_function) + "\n"+adapter_function.__name__+"(*sys.argv[1:])\n"
         server = common.start_uid(5,[sys.executable,"-c",adapter_code,endpoint,events,release]); processes.append(server)
         common.wait_path(server,endpoint)
         installed.run(1,[custody,"provision-adapters","--bootstrap",bootstrap,"--vault",vault,"--device",exchange.DEVICE,"--integration","keycloak-token-exchange","--profile","keycloak-exchange-lab","--method","token_exchange","--endpoint",endpoint,"--adapter-uid","5"])
@@ -109,17 +159,60 @@ def main():
         def rpc(args, check=True): return common.cli(3,cli,env,["--json",*args],check=check)
         rows = json.loads(rpc(["credentials","list"]).stdout)["result"]["credentials"]
         item = next(r["id"] for r in rows if r["destination"] == "keycloak-exchange-lab")
+        if case_mode.startswith("edit-"):
+            helper=root/"chef_human_enabled_edit";shutil.copy2(helper_source,helper);helper.chmod(0o755)
+            def edit(action):
+                result=common.run_uid(2,[helper,profiles/"human",hk,runtime/"human.sock",item,action],input=common.MASTER,check=False,timeout=20)
+                assert result.returncode==0,(result.stdout,result.stderr)
+                (root/("human-edit-"+action+"-receipt.txt")).write_bytes(result.stdout)
+            def observations():
+                return [json.loads(line) for line in events.read_text().splitlines()] if events.exists() else []
+            if case_mode=="edit-new":
+                for action,nonce in (("organize","d"),("title","e"),("rotate","f")):
+                    edit(action)
+                    _, result=exchange.start_attempt(cli,env,item,nonce);assert result.returncode==0
+                    aid=json.loads(result.stdout)["result"]["attempt_id"]
+                    wait_until(lambda:any(r.get("opcode")==4 and r.get("attempt")==aid for r in observations()),"F1: enabled "+action+" edit blocked NEW ordinary adapter emission")
+                    if action=="rotate":
+                        sent=next(r for r in observations() if r.get("attempt")==aid and r.get("opcode")==4)
+                        assert sent["subject_sha256"]==hashlib.sha256(b"synthetic-r2-new-subject").hexdigest()
+                        assert sent["requester_sha256"]==hashlib.sha256(b"synthetic-r2-new-requester").hexdigest()
+                print("PASS F1 ordinary enabled organize+title+material edits emit new authenticated revision; rotation=new synthetic material",flush=True)
+            else:
+                _, result=exchange.start_attempt(cli,env,item,"d");assert result.returncode==0
+                aid=json.loads(result.stdout)["result"]["attempt_id"]
+                wait_until(lambda:any(r.get("opcode")==2 for r in observations()),"initial unknown did not enter query recovery")
+                edit("rotate")
+                release.touch();os.chown(release,5,5)
+                with sqlite3.connect(vault) as db:before=db.execute("SELECT count(*) FROM encrypted_audit_records").fetchone()[0]
+                deadline=time.monotonic()+1.2;state=None
+                while time.monotonic()<deadline:
+                    observed=rpc(["auth","status","--attempt",aid]);state=json.loads(observed.stdout)["result"]["state"]
+                    if state=="FAILED":break
+                    time.sleep(.01)
+                with sqlite3.connect(vault) as db:after=db.execute("SELECT count(*) FROM encrypted_audit_records").fetchone()[0]
+                rows=observations();capture={"audit_before":before,"audit_after":after,"audit_delta":after-before,"connections":len(rows),"initial_calls":sum(r.get("opcode")==4 for r in rows),"post_edit_queries":sum(r.get("opcode")==2 and r.get("after_edit") for r in rows),"final_state":state}
+                (root/"edit-reconcile-measurement.json").write_text(json.dumps(capture,indent=2)+"\n")
+                print("MEASURED F2 "+json.dumps(capture),flush=True)
+                assert state=="FAILED" and capture["post_edit_queries"]>=2,"F2: no legitimate opcode-2 result after enabled edit"
+                assert capture["initial_calls"]==1 and capture["audit_delta"]<=8,capture
+                assert all(r.get("opcode")!=2 or r["revision"]==next(v["revision"] for v in rows if v.get("opcode")==4) for r in rows)
+                print("PASS F2 edited unknown recovered through pinned opcode2 with one original authentication and finite audit",flush=True)
+            return
         _, started = exchange.start_attempt(cli,env,item,"a")
         assert started.returncode == 0
         attempt = json.loads(started.stdout)["result"]["attempt_id"]
         wait_until(events.exists,"provider emission missing")
         # Independent SQLite writer must be admitted while only response is held.
-        connection = sqlite3.connect(vault,timeout=0)
-        try:
-            connection.execute("BEGIN IMMEDIATE"); connection.rollback()
-        except sqlite3.OperationalError as error:
-            raise AssertionError("response wait holds SQLite writer: " + str(error)) from error
-        finally: connection.close()
+        def writer_released():
+            connection=sqlite3.connect(vault,timeout=0)
+            try:
+                connection.execute("BEGIN IMMEDIATE");connection.rollback();return True
+            except sqlite3.OperationalError as error:
+                if getattr(error,"sqlite_errorcode",None)!=sqlite3.SQLITE_BUSY:raise
+                return False
+            finally:connection.close()
+        wait_until(writer_released,"response wait holds SQLite writer")
         assert json.loads(rpc(["auth","status","--attempt",attempt]).stdout)["result"]["state"] == "RUNNING"
         assert json.loads(rpc(["credentials","list"]).stdout)["result"]["credentials"]
         cancelled = json.loads(rpc(["auth","cancel","--attempt",attempt]).stdout)["result"]

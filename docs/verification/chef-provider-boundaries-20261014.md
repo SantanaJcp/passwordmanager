@@ -1,5 +1,260 @@
 # Provider worker boundaries — 2026-10-14
 
+## r2 data shape — enabled human edits and retained attempts
+
+This is a bounded implementation follow-up to parent
+`899890f72be093b1d1be94fd65cce55aee9edb47`, in branch
+`t3/fix-provider-worker-boundaries`, worktree
+`/home/santana/.t3/worktrees/passwordmanager/t3-affa6bd1`.
+The historical 899 report below is retained verbatim. This section supersedes
+its treatment of an ordinary edit as a withdrawal and its replacement-grant
+limitation. It does not supersede historical measurements with new acceptance.
+
+Inferred from the corrective source: an edit of an already-enabled item is one
+complete content revision plus one authenticated replacement provision for the
+same enabled common set, within one SQLite human transaction and one replayable
+receipt. Both effects use existing signed authority-event and event-manifest
+encodings. The prepared body binds both effects and the complete content object
+digest. No new persisted fields, schema, wire version, key format, recipients,
+generation, auth scope, or durable-prepared representation is introduced.
+
+Execution still has intrinsic versus ordinary owners. For ordinary workers,
+connection precedes the protected authorized-emission phase; result waiting and
+exact-token settlement follow guard release. Those transport functions are
+byte-identical to 899 in this follow-up. A private in-memory lease fingerprint
+records relevant authenticated causal withdrawals. Current native/config/RPK,
+identity, grants, current coherent provision, exact token and deadline checks
+still apply at emission. No unconditional removal of the revision guard.
+
+A materialized lease holds its original authenticated revision and material.
+A content edit alone permits that lease to finish while valid; disable,
+disable/re-enable, suspend/resume, revoke or retirement cannot revive it through
+this fingerprint. Query recovery keeps the sealed attempt ID, owner, revision,
+destination and context and opens **no** new credential plaintext. An initial
+Created row whose old provision was replaced before any lease/material was
+issued cannot be rebound to the new revision: it becomes explicit
+FAILED/CREDENTIAL_UNAVAILABLE with an AuthState audit and no AuthUse/emission.
+This narrowly handles known-unsent superseded work without blocking fresh work;
+it does not terminalize an unknown external result or provide history access.
+
+## r2 authorization, trace and discriminating hypotheses
+
+Local implementation authorization expressly extends the human/authorization
+seam for these two accepted P1s. No owner decisions3/4 were inferred. Skills
+chef-mode/PRINCIPLES, feature-xray and find-the-cause, project context/decisions,
+spec §15, key-hierarchy §4, synchronization §9.2, agent-identity G3/G4 and
+existing delegated authorization tests informed the trace. No agent was
+spawned, no review authored and no remaining review budget spent.
+
+Ranked falsifiable causes traced before product correction:
+
+1. Human edit changes only visible content while the enabled provision remains
+   old. Discriminator: enable → genuine organize commit → NEW start/claim/use;
+   compare visible revision, grant, discovery and emitted revision.
+2. Unknown reconciliation reuses the old grant and hits the new guard instead
+   of querying. Discriminator: one initial authentication → unknown → genuine
+   edit → finite opcode/audit/connection observation and legitimate query result.
+3. Edits are causal withdrawals that should invalidate all old leases.
+   Discriminator: compare normal organization/rotation against signed disable
+   and disable/re-enable on a previously materialized lease. Contract and tests
+   reject this hypothesis for a plain edit.
+4. Query recovery requires a fresh credential opening. Discriminator: require
+   empty authentication fields and original pinned request metadata, then
+   resolve through opcode2 with exactly one original opcode4 authentication.
+
+The source trace confirmed hypotheses1/2 and rejected3/4. Existing
+`commit_restore` demonstrated multi-event human receipts; restore was not
+changed. Fresh enable and enabled-edit publication share the original
+control-package/grant primitives. `publish_edited_provision` validates the old
+signed provision before mutation, opens the complete new revision within the
+transaction, generates fresh envelopes, updates only the existing enabled row,
+and publishes existing item-revision + enable authority/outbox events. Failed
+grant publication rolls all effects and the receipt back. Current expected
+state, challenge, body and signature checks precede those effects.
+
+## r2 own 899 RED and same corrective GREEN
+
+Measured baseline and original byte snapshots:
+[baseline.json](../../.scratch/chef-provider-boundaries-r2-20261014/baseline.json),
+[original sources/tests/report](../../.scratch/chef-provider-boundaries-r2-20261014/original/).
+No foreign target, executable or modified caller was used. All builds/labs use
+one blocking `/tmp/pm-cargo-window.lock`, fixed repository toolchain homes/PATH,
+`RUSTUP_AUTO_INSTALL=0`, locked/offline Cargo, fresh owned `target-provider-r2`,
+and explicit short TMPDIR. Namespace labs use unchanged strict root UID0,
+separate actual subordinate native identities, original installed registry and
+real human/browser channels outside custody. Existing Keycloak/Java/CFT were
+reused; nothing was installed/downloaded. Namespace PID1 reaps adopted children;
+original strict cleanup assertions and deadlines remain unchanged.
+
+Measured RED on 899 production, before correction:
+
+- The two new F1/F2 Rust tests failed with `CredentialUnavailable`:
+  [red-rust.log](../../.scratch/chef-provider-boundaries-r2-20261014/red-rust.log).
+- Genuine installed human organize/commit → NEW start failed to produce the
+  expected adapter opcode4 within the unchanged20s predicate bound:
+  [red-worker-edit-new.log](../../.scratch/chef-provider-boundaries-r2-20261014/red-worker-edit-new.log),
+  root `/var/tmp/pc-917khctd`.
+- Genuine installed unknown → human rotation → finite1.2s recovery observation:
+  **audit26→48 (+22),17 connections,1 original authentication,0 post-edit
+  queries,INDETERMINATE**. The legitimate-result assertion failed:
+  [red-cause-edit-unknown.log](../../.scratch/chef-provider-boundaries-r2-20261014/red-cause-edit-unknown.log),
+  root `/var/tmp/pc-g4tkd54y`. The reviewer estimate of1.7M/day is not a measured
+  result and is not extrapolated here.
+
+Measured corrective GREEN, same F1/F2 public paths and assertions:
+
+- [final-edit-new.log](../../.scratch/chef-provider-boundaries-r2-20261014/final-edit-new.log):
+  organize, title and actual secret rotation each permit a NEW ordinary
+  opcode4 request. Captured SHA256 fields equal the independently specified
+  new synthetic subject/requester values after rotation. Real human wire
+  prepare/commit/receipt replay used; helper never mutates SQL or manufactures
+  trust. Root `/var/tmp/pc-2hohy0sw` retains per-edit receipt digests and requests.
+- [final-edit-unknown.log](../../.scratch/chef-provider-boundaries-r2-20261014/final-edit-unknown.log):
+  **audit22→26 (+4),6 connections,1 original authentication,2 post-edit opcode2
+  queries,FAILED via actual provider AUTH_REJECTED**. Query revision remains
+  the original revision. The adapter returns unknown on the first post-marker
+  query and a legitimate result only on the second, excluding a single
+  pre-edit in-flight query as a false GREEN. Root `/var/tmp/pc-ry_csf0k`.
+- [affected-final2.log](../../.scratch/chef-provider-boundaries-r2-20261014/affected-final2.log):
+  all23 boundary tests pass, including the same original F1/F2 tests. Entire
+  affected pm-vault/pm-custody/pm-web-auth all-targets command rc0:
+  **251 passed,0 failed,3 ignored across29 result groups**. Existing
+  delegated_authorization, human transactions/content/history, passkey provider,
+  token material and web profile checks are included.
+
+The unchanged core commands are `bash .scratch/chef-provider-boundaries-r2-20261014/cargo.sh
+test -p pm-vault --test chef_provider_boundary` (the first RED filters `r2_`),
+and `python3 .scratch/chef-provider-boundaries-r2-20261014/run_labs.py PHASE
+edit-new edit-unknown`. Phase only names evidence output. The worker tests use
+the same substantive oracles; subsequent corpus adds genuine pinned-but-unenrolled
+migration denial and human receipt capture. Exact command arrays, binary hashes
+and source hashes are in each phase's results JSON and the final manifest.
+
+## r2 transaction and boundary controls
+
+Measured in the23 boundary cases:
+
+- Injected existing-grant UPDATE failure rolls back new visible content,
+  provision, both authority events and receipt; the same signed transaction
+  retries successfully with two events/one receipt, then replays identically.
+- Tampered staging is rejected. Edit staged before disable/suspend/revoke/trash
+  cannot commit over the withdrawal; editing an already-disabled item does not
+  enable it. Newly prepared edits after suspension/revocation retain their
+  denial. No recipients or generations are added.
+- An old materialized lease retains old material across organization and secret
+  rotation while new starts use new material. Subsequent disable/re-enable
+  rejects that old lease. Real withdrawals before emission yield zero callback
+  calls; expired and stale-token guards remain denied.
+- Query-only authorization verifies signed current provision and revision
+  metadata without opening authentication plaintext. SQL metadata altered to
+  disagree with the signed provision produces Integrity; the unknown result
+  remains unknown.
+- A genuinely withdrawn oldest unknown for one enrolled RPK is skipped without
+  claim/audit, allowing another enrolled RPK's query. Unexpected errors still
+  propagate. This is a vault claimant test, not worker race injection.
+- **127 genuine intrinsic passkey rows +1 ordinary** with eight explicitly
+  enrolled peers respect16/agent and128/custodian. Only the ordinary row is
+  leased; all127 intrinsic rows stay Created. The old128 test had no intrinsic
+  rows and is now honestly named for its ordinary-only coverage.
+
+The original899 revision-as-withdrawal case is retained in the immutable
+original test snapshot. Its oracle was wrong under the confirmed edit contract:
+this corrective file separates positive normal edits from genuine withdrawals.
+No historical caller or original52 assertion was relaxed. Initial fixture/helper
+construction errors and an error-category regression caught by the unchanged
+delegated authorization test are retained in failed logs; the latter was fixed
+by restoring `prepare_enable`'s original CredentialUnavailable rejection for a
+non-delegable note. None is counted as product RED or a successful test run.
+
+The Python independent-writer proof now waits for a successful timeout0
+BEGIN IMMEDIATE predicate within the existing20s bound. An adapter event alone
+can precede guard release and is not claimed as proof. It does not add a busy
+retry to production. The added corpus also rejects a genuinely native-bound,
+pinned-but-unenrolled RPK at installed registry migration; bootstrap bytes are
+unchanged and no registry is created. This supplements immutable migrated
+caller negatives without editing their source.
+
+## r2 full flow checks, footprint and limitations
+
+Measured: all nine final namespace lab executions rc0, each with own binaries
+from `target-provider-r2/debug` and unchanged source during execution:
+[final-results.json](../../.scratch/chef-provider-boundaries-r2-20261014/final-results.json).
+The full immutable [passkey](../../.scratch/chef-provider-boundaries-r2-20261014/final-passkey.log)
+and [token-exchange](../../.scratch/chef-provider-boundaries-r2-20261014/final-token-exchange.log)
+labs retain their original assertions and deadlines. Actual browser create,
+registration, human enable/UP/UV, intrinsic assertion/restart/revocation and
+actual Keycloak exchange/own pm-web-auth TLS POST/cancel controls pass.
+[Boundary](../../.scratch/chef-provider-boundaries-r2-20261014/final-boundary.log)
+proves real writer availability, status/discovery, durable cancellation before
+release, late success still CANCELLED, restart and opcode2-only unknown recovery.
+[Authorization](../../.scratch/chef-provider-boundaries-r2-20261014/final-authorization.log),
+[concurrency](../../.scratch/chef-provider-boundaries-r2-20261014/final-concurrency.log),
+[passkey-login](../../.scratch/chef-provider-boundaries-r2-20261014/final-passkey-login.log)
+and [attempts](../../.scratch/chef-provider-boundaries-r2-20261014/final-attempts.log)
+also pass. This includes hot-revoked identities, limit4, human open, strict
+cleanup, public cancel/status and one-call crash/restart ambiguity. These are
+controlled installed/laboratory paths, not native/formal acceptance.
+
+The23 boundary tests and251 affected package tests are measured separately from
+those nine process labs; they are not an original52 matrix run. Per-edit human
+transaction IDs/receipt digests and artifact hashes are retained in
+[edit-new receipt manifest](../../.scratch/chef-provider-boundaries-r2-20261014/final-edit-new-receipts.json)
+and [edit-unknown receipt manifest](../../.scratch/chef-provider-boundaries-r2-20261014/final-edit-unknown-receipts.json).
+
+Inferred footprint: human.rs supplies atomic complete enabled edits;
+authorization.rs reuses signed provision verification and supplies metadata-only
+attempt authorization; attempts.rs separates fresh material from query-only
+leases and checks causal withdrawals. Existing two boundary test files extend
+the corpus; the new `pm-custody/examples/chef_human_enabled_edit.rs` is a narrow
+synthetic client for existing authenticated human operations. This report is
+the seventh authored path. linux.rs, passkey.rs, all eight3b callers, manifests,
+lockfile, crypto, native, registry wire, CLI/frameworks, restore semantics, sync,
+workflows, spec/tickets and foreign ledgers remain unchanged in this follow-up.
+
+Measured byte comparison and all final source/log/binary digests:
+[final-source-evidence.json](../../.scratch/chef-provider-boundaries-r2-20261014/final-source-evidence.json).
+Commands/roots/log hashes and human receipt artifacts are retained under own
+[private evidence](../../.scratch/chef-provider-boundaries-r2-20261014/).
+No original target, untracked evidence or foreign artifact was removed.
+
+Status: **F1/F2 scoped local implementation GREEN; overall ISSUES / partial
+verification**, with no reviewer acceptance claimed. Accepted are the two
+source-inferred P1s, now independently reproduced and corrected. Rejected are
+unconditional visible-guard removal, disable/re-enable as user recovery,
+configured-but-unusable success, suppressing audit/errors, and invented terminal
+unknown outcomes. Parent's one bounded R2 on these repros remains unused.
+
+Measured finite corpus still OPEN: expiry between claim and guard rejects
+emission, leaves Running until a status poll, and recovery can call it unknown.
+No status poll was used to hide this case. The new finite test records it;
+no unrelated state cleanup is claimed. Inferred coverage limits: worker
+post-write guard-release COMMIT fault and withdrawal precisely between a real
+worker reconciliation claim and emission were not injected. Vault-level
+withdrawal/fairness controls are narrower evidence. Causal withdrawal digest
+verification scans retained relevant signed event history; no performance or
+retention certification is claimed. Unknown withdrawn work remains unknown
+without new login or fabricated acknowledgement.
+
+Inherited fallbacks remain unchanged: startup vault-open failure skips recovery;
+provider/handler/settlement errors can be discarded by their existing outer
+loops; pool-full closes connections; CLI environment/JSON/UnavailableEngine
+behavior is inherited. Activation and hidden outcome are described in the899
+report below. No new fallback or external session management was added.
+
+NOT_RUN: native dispatch/Windows/macOS/other CPUs, native CI, reboot/FDE/human
+formal acceptance, G7 staging deletion/representation acceptance, full52/full
+clean/integrator composition, installation/release/publication and real
+credentials. Decisions3/4 remain unanswered and do not block this reversible
+local correction. No ticket closure or product-ready claim.
+
+FINAL_CHECK_RESULTS
+
+---
+
+## Historical 899 report — preserved verbatim below
+
+# Provider worker boundaries — 2026-10-14
+
 ## Data shape
 
 Execution ownership is intrinsic (`vault-webauthn-provider` → `PasskeyProvider`)

@@ -343,6 +343,7 @@ pub struct AttemptLease {
     totp: Option<TotpLease>,
     ssh: Option<SshLease>,
     reconciliation: bool,
+    withdrawals: [u8; 32],
 }
 
 pub struct SshLease {
@@ -1165,6 +1166,7 @@ impl AttemptVault {
         // The global admission bound also bounds this scan. Inspect the sealed
         // execution owner before opening credential material or issuing a lease;
         // an older intrinsic attempt must not starve ordinary adapter work.
+        let mut superseded = Vec::new();
         let candidate = {
             let mut statement = tx.prepare(sql)?;
             let mut rows = statement.query(params![now, MAX_PER_CUSTODIAN])?;
@@ -1188,22 +1190,76 @@ impl AttemptVault {
                 if ExecutionOwner::of(&snap.integration_id) == ExecutionOwner::IntrinsicPasskey {
                     continue;
                 }
-                break Some((attempt, item, subject, generation, package, snap));
+                let identity = AgentIdentity {
+                    subject: fixed(&subject)?,
+                    generation: u64::try_from(generation).map_err(|_| AttemptError::Integrity)?,
+                };
+                let withdrawals =
+                    match self
+                        .delegated
+                        .attempt_authority_in(&tx, identity, fixed(&item)?)
+                    {
+                        Ok(value) => value,
+                        Err(
+                            AuthorizationError::AccessSuspended
+                            | AuthorizationError::AgentRevoked
+                            | AuthorizationError::CredentialUnavailable,
+                        ) if reconcile => continue,
+                        Err(error) => return Err(error.into()),
+                    };
+                // Query recovery never opens new credentials. For an initial
+                // use, the accepted attempt must still have its pinned grant.
+                let op = if reconcile {
+                    None
+                } else {
+                    let op = self.delegated.operational_credential_for_identity_in(
+                        &tx,
+                        identity,
+                        fixed(&item)?,
+                    )?;
+                    if snap.revision_id != *op.descriptor.revision_id() {
+                        if snap.state != AttemptState::Created {
+                            return Err(AttemptError::Integrity);
+                        }
+                        // No lease/material or external use was issued for this
+                        // created row. Its retired provision is unavailable;
+                        // never replace its pinned revision with a new login.
+                        superseded.push(snap);
+                        continue;
+                    }
+                    Some(op)
+                };
+                break Some((attempt, identity, package, snap, withdrawals, op));
             }
         };
-        let Some((attempt, item, subject, generation, package, mut snap)) = candidate else {
+        for mut snapshot in superseded {
+            snapshot.state = AttemptState::Failed;
+            snapshot.reason = Some("CREDENTIAL_UNAVAILABLE".into());
+            update_snapshot(
+                &tx,
+                &self.custody,
+                *self.trusted.vault_id(),
+                self.device,
+                self.generation,
+                &snapshot,
+                None,
+                now,
+            )?;
+            append_audit(
+                &tx,
+                &self.trusted,
+                self.device,
+                &self.custody,
+                &snapshot,
+                AuditAction::AuthState,
+                AuditOutcome::Failed,
+                now,
+            )?;
+        }
+        let Some((attempt, identity, package, mut snap, withdrawals, op)) = candidate else {
+            tx.commit()?;
             return Ok(None);
         };
-        let identity = AgentIdentity {
-            subject: fixed(&subject)?,
-            generation: u64::try_from(generation).map_err(|_| AttemptError::Integrity)?,
-        };
-        let op = self
-            .delegated
-            .operational_credential_for_identity(identity, fixed(&item)?)?;
-        if snap.revision_id != *op.descriptor.revision_id() {
-            return Err(AttemptError::CredentialUnavailable);
-        }
         let (destination, context, method) = decode_execution(&self.custody.open_attempt_state(
             &package,
             *self.trusted.vault_id(),
@@ -1211,14 +1267,18 @@ impl AttemptVault {
             self.generation,
             attempt,
         )?)?;
-        let material = credential_material(
-            reconcile,
-            &snap.integration_id,
-            &op.auth,
-            &destination,
-            &method,
-            now,
-        )?;
+        let material = if let Some(op) = op {
+            credential_material(
+                false,
+                &snap.integration_id,
+                &op.auth,
+                &destination,
+                &method,
+                now,
+            )?
+        } else {
+            CredentialMaterial::empty()?
+        };
         let token = random_id().map_err(|_| AttemptError::Integrity)?;
         snap.state = AttemptState::Running;
         let replacement = self.custody.update_attempt_state(
@@ -1268,6 +1328,7 @@ impl AttemptVault {
             totp: material.totp,
             ssh: material.ssh,
             reconciliation: reconcile,
+            withdrawals,
         }))
     }
 
@@ -1310,22 +1371,10 @@ impl AttemptVault {
         {
             return Err(AttemptError::Integrity);
         }
-        let current = self.delegated.operational_credential_for_identity_in(
-            &transaction,
-            lease.owner,
-            lease.credential_id,
-        )?;
-        let visible_revision: Vec<u8> = transaction
-            .query_row(
-                "SELECT visible_revision FROM vault_items WHERE item_id=?1 AND status='active'",
-                [lease.credential_id.as_slice()],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or(AttemptError::CredentialUnavailable)?;
-        if current.descriptor.revision_id() != &lease.revision_id
-            || fixed::<16>(&visible_revision)? != lease.revision_id
-        {
+        let withdrawals =
+            self.delegated
+                .attempt_authority_in(&transaction, lease.owner, lease.credential_id)?;
+        if withdrawals != lease.withdrawals {
             return Err(AttemptError::CredentialUnavailable);
         }
         let result = use_once();

@@ -415,35 +415,34 @@ impl DelegatedVault {
         self.verify_agent_and_global(&connection, peer)
     }
 
-    pub(crate) fn operational_credential_for_identity(
-        &self,
-        identity: AgentIdentity,
-        item: [u8; 16],
-    ) -> Result<OperationalCredential, AuthorizationError> {
-        let connection = open_connection(&self.path)?;
-        self.operational_credential_for_identity_in(&connection, identity, item)
-    }
-
     pub(crate) fn operational_credential_for_identity_in(
         &self,
         connection: &Connection,
         identity: AgentIdentity,
         item: [u8; 16],
     ) -> Result<OperationalCredential, AuthorizationError> {
-        let rpk: Vec<u8> = connection.query_row(
-            "SELECT transport_rpk FROM agent_authorizations WHERE subject_id=?1 AND generation=?2",
-            rusqlite::params![identity.subject.as_slice(), i64::try_from(identity.generation).map_err(|_| AuthorizationError::Integrity)?],
-            |row| row.get(0),
-        ).optional()?.ok_or(AuthorizationError::AgentRevoked)?;
-        let peer = AgentPeer::from_transport_rpk(&rpk)?;
-        self.verify_agent_and_global(connection, &peer)?;
-        let row: Option<CredentialRow> = connection.query_row(
-            "SELECT revision_id,control_package,grant,event_digest,grant_commitment FROM credential_authorizations WHERE item_id=?1 AND status='enabled'",
-            [item.as_slice()],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
-        ).optional()?;
-        let (revision, package, grant, event, commitment) =
-            row.ok_or(AuthorizationError::CredentialUnavailable)?;
+        self.verify_attempt_identity_in(connection, identity)?;
+        self.enabled_credential_in(connection, item)
+    }
+
+    fn verify_attempt_identity_in(
+        &self,
+        connection: &Connection,
+        identity: AgentIdentity,
+    ) -> Result<(), AuthorizationError> {
+        self.verify_device_not_retired()?;
+        let rpk:Vec<u8>=connection.query_row("SELECT transport_rpk FROM agent_authorizations WHERE subject_id=?1 AND generation=?2",rusqlite::params![identity.subject.as_slice(),i64::try_from(identity.generation).map_err(|_|AuthorizationError::Integrity)?],|r|r.get(0)).optional()?.ok_or(AuthorizationError::AgentRevoked)?;
+        self.verify_agent_and_global(connection, &AgentPeer::from_transport_rpk(&rpk)?)
+    }
+
+    /// Current enabled provision, including the original signed grant. Human
+    /// replacement verifies this before publishing a new complete provision.
+    pub(crate) fn enabled_credential_in(
+        &self,
+        connection: &Connection,
+        item: [u8; 16],
+    ) -> Result<OperationalCredential, AuthorizationError> {
+        let (revision, package, grant, event, commitment) = Self::enabled_row_in(connection, item)?;
         self.open_operational_credential(
             connection,
             item,
@@ -453,6 +452,69 @@ impl DelegatedVault {
             fixed_sql(&event)?,
             fixed_sql(&commitment)?,
         )
+    }
+
+    fn enabled_row_in(
+        connection: &Connection,
+        item: [u8; 16],
+    ) -> Result<CredentialRow, AuthorizationError> {
+        connection.query_row("SELECT revision_id,control_package,grant,event_digest,grant_commitment FROM credential_authorizations WHERE item_id=?1 AND status='enabled'",[item.as_slice()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?.ok_or(AuthorizationError::CredentialUnavailable)
+    }
+
+    /// Authorizes an already-owned attempt without opening new authentication
+    /// material. A query keeps its sealed attempt identity/context; an existing
+    /// materialized lease may keep its revision across content edits only while
+    /// this authenticated causal-withdrawal fingerprint is unchanged.
+    pub(crate) fn attempt_authority_in(
+        &self,
+        connection: &Connection,
+        identity: AgentIdentity,
+        item: [u8; 16],
+    ) -> Result<[u8; 32], AuthorizationError> {
+        self.verify_attempt_identity_in(connection, identity)?;
+        let (revision, package, grant, event, commitment) = Self::enabled_row_in(connection, item)?;
+        let signed_revision = self.verify_credential_provision(
+            connection,
+            item,
+            &package,
+            &grant,
+            fixed_sql(&event)?,
+            fixed_sql(&commitment)?,
+        )?;
+        let visible: Vec<u8> = connection
+            .query_row(
+                "SELECT visible_revision FROM vault_items WHERE item_id=?1 AND status='active'",
+                [item.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(AuthorizationError::CredentialUnavailable)?;
+        if fixed_sql::<16>(&revision)? != signed_revision {
+            return Err(AuthorizationError::Integrity);
+        }
+        if revision != visible {
+            return Err(AuthorizationError::CredentialUnavailable);
+        }
+        let mut withdrawals=connection.prepare("SELECT event_digest,kind,subject FROM authority_events WHERE subject IN (?1,?2,?3,?4) AND kind IN ('disable','trash','purge-item','purge-revisions','suspend','agent-revoke','device-retire') ORDER BY event_digest")?;
+        let mut rows = withdrawals.query(rusqlite::params![
+            item.as_slice(),
+            identity.subject.as_slice(),
+            self.trusted.vault_id().as_slice(),
+            self.device.as_slice()
+        ])?;
+        let mut digest = pm_crypto::DigestState::new()
+            .map_err(|e| AuthorizationError::Vault(VaultError::Crypto(e)))?;
+        while let Some(row) = rows.next()? {
+            let value = fixed_sql(&row.get::<_, Vec<u8>>(0)?)?;
+            let header = self.verify_authority_event(connection, value)?;
+            if header.kind != row.get::<_, String>(1)?
+                || header.subject != fixed_sql::<16>(&row.get::<_, Vec<u8>>(2)?)?
+            {
+                return Err(AuthorizationError::Integrity);
+            }
+            digest.update(&value);
+        }
+        Ok(digest.finish())
     }
 
     /// Exposes verified causal headers for ticket-16 reduction without a second ledger.
@@ -602,17 +664,14 @@ impl DelegatedVault {
         event_digest: [u8; 32],
         commitment: [u8; 32],
     ) -> Result<OperationalCredential, AuthorizationError> {
-        let enable = self.verify_authority_event(connection, event_digest)?;
-        if enable.kind != "enable" || enable.subject != item {
-            return Err(AuthorizationError::Integrity);
-        }
-        let payload_digest = self
-            .custody
-            .verify_grant_vector(grant, &self.trusted, self.device, event_digest, commitment)
-            .map_err(|_| AuthorizationError::Integrity)?;
-        if payload_digest != digest(package) {
-            return Err(AuthorizationError::Integrity);
-        }
+        self.verify_credential_provision(
+            connection,
+            item,
+            package,
+            grant,
+            event_digest,
+            commitment,
+        )?;
         let plaintext = self
             .custody
             .open_control_package(
@@ -634,6 +693,52 @@ impl DelegatedVault {
             return Err(AuthorizationError::Integrity);
         }
         Ok(credential)
+    }
+
+    fn verify_credential_provision(
+        &self,
+        connection: &Connection,
+        item: [u8; 16],
+        package: &[u8],
+        grant: &[u8],
+        event_digest: [u8; 32],
+        commitment: [u8; 32],
+    ) -> Result<[u8; 16], AuthorizationError> {
+        let enable = self.verify_authority_event(connection, event_digest)?;
+        if enable.kind != "enable" || enable.subject != item {
+            return Err(AuthorizationError::Integrity);
+        }
+        let payload_digest = self
+            .custody
+            .verify_grant_vector(grant, &self.trusted, self.device, event_digest, commitment)
+            .map_err(|_| AuthorizationError::Integrity)?;
+        if payload_digest != digest(package) {
+            return Err(AuthorizationError::Integrity);
+        }
+        // Bind SQL revision metadata to the authenticated event without opening
+        // credential plaintext on the query-only recovery path.
+        let event: Vec<u8> = connection.query_row(
+            "SELECT event FROM authority_events WHERE event_digest=?1",
+            [event_digest.as_slice()],
+            |row| row.get(0),
+        )?;
+        let mut decoder = Decoder::new(&event);
+        expect_map(&mut decoder, 13)?;
+        for _ in 0..12 {
+            decoder.skip().map_err(|_| AuthorizationError::Integrity)?;
+            decoder.skip().map_err(|_| AuthorizationError::Integrity)?;
+        }
+        expect_key(&mut decoder, "body")?;
+        expect_map(&mut decoder, 4)?;
+        expect_key(&mut decoder, "revision_id")?;
+        let revision = fixed_decode(&mut decoder)?;
+        expect_key(&mut decoder, "grant_commitments")?;
+        if decoder.array().map_err(|_| AuthorizationError::Integrity)? != Some(1)
+            || fixed_decode::<32>(&mut decoder)? != commitment
+        {
+            return Err(AuthorizationError::Integrity);
+        }
+        Ok(revision)
     }
 
     fn verify_authority_event(

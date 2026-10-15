@@ -304,7 +304,7 @@ fn expired_running_lease_cannot_emit_even_without_a_status_poll() {
 
 #[test]
 fn authority_withdrawals_before_emission_make_zero_calls() {
-    for withdrawal in ["suspend", "revoke", "disable", "revision"] {
+    for withdrawal in ["suspend", "revoke", "disable"] {
         let mut f = Fixture::new();
         f.start(0x62);
         let lease = f.attempts.claim_next().unwrap().unwrap();
@@ -318,10 +318,6 @@ fn authority_withdrawals_before_emission_make_zero_calls() {
                 .prepare_agent_revocation(AGENT, AuthorizationReason::OwnerRequest)
                 .unwrap(),
             "disable" => f.human.prepare_disable(f.item).unwrap(),
-            "revision" => f
-                .human
-                .prepare_edit_record(f.item, &exchange_record())
-                .unwrap(),
             _ => unreachable!(),
         };
         commit(&mut f.human, &p);
@@ -495,7 +491,7 @@ fn claim_commit_failure_rolls_back_before_a_provider_receives_a_lease() {
 }
 
 #[test]
-fn ordinary_and_intrinsic_selection_preserves_the_128_custodian_admission_bound() {
+fn ordinary_attempts_preserve_the_128_custodian_admission_bound() {
     let mut f = Fixture::new();
     let mut peers = vec![AgentPeer::from_transport_rpk(&RPK).unwrap()];
     for n in 0x80..=0x87 {
@@ -548,4 +544,591 @@ fn ordinary_and_intrinsic_selection_preserves_the_128_custodian_admission_bound(
         .unwrap();
     assert_eq!(count, 128);
     assert!(f.attempts.claim_next().unwrap().is_some());
+}
+
+#[test]
+fn r2_enabled_organization_edit_preserves_new_ordinary_uses() {
+    let mut f = Fixture::new();
+    let before = f.start(0x71);
+    f.attempts.cancel(&f.peer, *before.attempt_id()).unwrap();
+    let p = f
+        .human
+        .prepare_organize(f.item, vec!["synthetic-r2".into()], true)
+        .unwrap();
+    let receipt = f
+        .human
+        .commit(p.command(), &f.human.sign(&p).unwrap(), p.body())
+        .unwrap();
+    assert_eq!(f.human.receipt(*p.transaction_id()).unwrap(), receipt);
+    let started = f.start(0x72);
+    let lease = f.attempts.claim_next().unwrap().unwrap();
+    let calls = std::cell::Cell::new(0);
+    let emitted = f
+        .attempts
+        .with_authorized_provider_use(&lease, || calls.set(calls.get() + 1));
+    assert!(
+        emitted.is_ok(),
+        "F1: ordinary edit denied new emission: {emitted:?}"
+    );
+    assert_ne!(
+        started.revision_id(),
+        before.revision_id(),
+        "new starts must pin the new enabled revision"
+    );
+    assert_eq!(calls.get(), 1);
+    let c = rusqlite::Connection::open(&f.path).unwrap();
+    let revisions:(Vec<u8>,Vec<u8>)=c.query_row("SELECT visible_revision,revision_id FROM vault_items JOIN credential_authorizations USING(item_id) WHERE item_id=?1",[f.item.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(revisions.0, revisions.1);
+}
+
+#[test]
+fn r2_edited_unknown_uses_pinned_query_without_new_auth_material() {
+    let mut f = Fixture::new();
+    let original = f.start(0x73);
+    let lease = f.attempts.claim_next().unwrap().unwrap();
+    f.attempts
+        .with_authorized_provider_use(&lease, || ())
+        .unwrap();
+    f.attempts
+        .settle(&lease, AttemptOutcome::Indeterminate)
+        .unwrap();
+    let p = f.human.prepare_organize(f.item, vec![], true).unwrap();
+    commit(&mut f.human, &p);
+    std::thread::sleep(std::time::Duration::from_millis(110));
+    let query = f
+        .attempts
+        .claim_waiting_for_reconciliation()
+        .unwrap()
+        .unwrap();
+    assert!(query.reconciliation_only());
+    assert_eq!(query.revision_id(), original.revision_id());
+    assert!(query.password().is_empty());
+    assert!(query.subject_token().is_none());
+    let calls = std::cell::Cell::new(0);
+    let issued = f
+        .attempts
+        .with_authorized_provider_use(&query, || calls.set(calls.get() + 1));
+    assert!(
+        issued.is_ok(),
+        "F2: legitimate query denied after normal edit: {issued:?}"
+    );
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn r2_new_start_after_material_rotation_uses_new_material() {
+    use pm_vault::{AuthRecord, Destination, HumanMetadata};
+    let mut f = Fixture::new();
+    let pinned = f.start(0x70);
+    let previous_lease = f.attempts.claim_next().unwrap().unwrap();
+    // Construct the new complete record through the public content API.
+    let updated = LogicalRecord::new(
+        RecordKind::Token,
+        HumanMetadata {
+            title: "Synthetic rotated exchange".into(),
+            destinations: vec![Destination {
+                label: "installed profile".into(),
+                value: "keycloak-exchange-lab".into(),
+            }],
+            tags: vec![],
+            favorite: false,
+            notes: pm_crypto::ProtectedText::copy_from_str("").unwrap(),
+            fields: vec![],
+            source_fields: vec![],
+        },
+        vec![AuthRecord::TokenExchange {
+            subject_token: ProtectedBytes::copy_from_slice(b"synthetic-r2-new-subject").unwrap(),
+            requester_client_id: "pm-exchanger".into(),
+            requester_client_secret: ProtectedBytes::copy_from_slice(b"synthetic-r2-new-requester")
+                .unwrap(),
+            provider: "keycloak".into(),
+            profile_id: "keycloak-exchange-lab".into(),
+            destination_refs: vec![0],
+            expires_at: None,
+        }],
+        vec![],
+    )
+    .unwrap();
+    let p = f.human.prepare_edit_record(f.item, &updated).unwrap();
+    commit(&mut f.human, &p);
+    f.start(0x74);
+    let lease = f.attempts.claim_next().unwrap().unwrap();
+    assert_eq!(lease.password(), b"synthetic-r2-new-requester");
+    assert_eq!(
+        lease.subject_token(),
+        Some(b"synthetic-r2-new-subject".as_slice())
+    );
+    f.attempts
+        .with_authorized_provider_use(&lease, || ())
+        .unwrap();
+    let delegated = DelegatedVault::open(&f.path, DEVICE, Arc::clone(&f.custody)).unwrap();
+    let found = delegated.discover(&f.peer).unwrap();
+    assert_eq!(found[0].title(), "Synthetic rotated exchange");
+    assert_eq!(found[0].revision_id(), lease.revision_id());
+    let overview = f.human.access_overview().unwrap();
+    let visible = overview
+        .credentials()
+        .iter()
+        .find(|entry| entry.item() == &f.item)
+        .unwrap();
+    assert!(visible.enabled());
+    assert_eq!(visible.title(), "Synthetic rotated exchange");
+    assert_eq!(previous_lease.revision_id(), pinned.revision_id());
+    assert_eq!(
+        previous_lease.password(),
+        b"synthetic-requester-secret-canary"
+    );
+    f.attempts
+        .with_authorized_provider_use(&previous_lease, || ())
+        .unwrap();
+}
+
+#[test]
+fn r2_materialized_pinned_lease_survives_organization_but_not_a_causal_withdrawal() {
+    let mut f = Fixture::new();
+    let started = f.start(0x75);
+    let lease = f.attempts.claim_next().unwrap().unwrap();
+    let p = f.human.prepare_organize(f.item, vec![], true).unwrap();
+    commit(&mut f.human, &p);
+    let calls = std::cell::Cell::new(0);
+    f.attempts
+        .with_authorized_provider_use(&lease, || calls.set(calls.get() + 1))
+        .expect("a materialized valid attempt retains its pinned revision");
+    assert_eq!(lease.revision_id(), started.revision_id());
+    assert_eq!(calls.get(), 1);
+    let p = f.human.prepare_disable(f.item).unwrap();
+    commit(&mut f.human, &p);
+    let p = f.human.prepare_enable(f.item).unwrap();
+    commit(&mut f.human, &p);
+    assert!(
+        f.attempts
+            .with_authorized_provider_use(&lease, || calls.set(calls.get() + 1))
+            .is_err(),
+        "enable must not resurrect a lease invalidated by disable"
+    );
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn r2_staged_enabled_edit_cannot_undo_a_later_withdrawal() {
+    for withdrawal in ["disable", "suspend", "revoke", "trash"] {
+        let mut f = Fixture::new();
+        let edit = f.human.prepare_organize(f.item, vec![], true).unwrap();
+        let signature = f.human.sign(&edit).unwrap();
+        let p = match withdrawal {
+            "disable" => f.human.prepare_disable(f.item).unwrap(),
+            "suspend" => f
+                .human
+                .prepare_delegated_suspend(AuthorizationReason::OwnerRequest)
+                .unwrap(),
+            "revoke" => f
+                .human
+                .prepare_agent_revocation(AGENT, AuthorizationReason::OwnerRequest)
+                .unwrap(),
+            "trash" => f.human.prepare_delete(f.item).unwrap(),
+            _ => unreachable!(),
+        };
+        commit(&mut f.human, &p);
+        assert!(
+            matches!(
+                f.human.commit(edit.command(), &signature, edit.body()),
+                Err(pm_vault::HumanCommitError::StateChanged)
+            ),
+            "{withdrawal}"
+        );
+        assert!(
+            f.attempts
+                .start(
+                    &f.peer,
+                    &StartAttempt::new(
+                        f.item,
+                        "keycloak-token-exchange",
+                        1,
+                        "token_exchange",
+                        "keycloak-exchange-lab",
+                        b"keycloak-exchange-lab".to_vec(),
+                        IdempotencyKey::new(now(), [0x76; 16]).unwrap()
+                    )
+                    .unwrap()
+                )
+                .is_err(),
+            "{withdrawal}"
+        );
+    }
+}
+
+#[test]
+fn r2_failed_grant_publication_rolls_back_revision_receipt_and_authority() {
+    let mut f = Fixture::new();
+    let p = f.human.prepare_organize(f.item, vec![], true).unwrap();
+    let signature = f.human.sign(&p).unwrap();
+    let c = rusqlite::Connection::open(&f.path).unwrap();
+    let state = || -> (Vec<u8>, Vec<u8>, i64, i64) {
+        c.query_row("SELECT visible_revision,revision_id,(SELECT count(*) FROM authority_events),(SELECT count(*) FROM human_receipts) FROM vault_items JOIN credential_authorizations USING(item_id) WHERE item_id=?1",[f.item.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap()
+    };
+    let before = state();
+    c.execute_batch("CREATE TRIGGER synthetic_r2_fail_publication BEFORE UPDATE ON credential_authorizations BEGIN SELECT RAISE(ABORT,'synthetic publication failure'); END;").unwrap();
+    assert!(
+        f.human.commit(p.command(), &signature, p.body()).is_err(),
+        "edit must include provision in the same transaction"
+    );
+    assert_eq!(state(), before);
+    assert!(f.human.receipt(*p.transaction_id()).is_err());
+    c.execute_batch("DROP TRIGGER synthetic_r2_fail_publication")
+        .unwrap();
+    let receipt = f.human.commit(p.command(), &signature, p.body()).unwrap();
+    assert_eq!(
+        f.human.commit(p.command(), &signature, p.body()).unwrap(),
+        receipt
+    );
+    let after = state();
+    assert_eq!(after.0, after.1);
+    assert_ne!(after.0, before.0);
+    assert_eq!(after.2, before.2 + 2);
+    assert_eq!(after.3, before.3 + 1);
+}
+
+#[test]
+fn r2_tampered_content_staging_never_publishes_a_grant() {
+    let mut f = Fixture::new();
+    let p = f.human.prepare_organize(f.item, vec![], true).unwrap();
+    let signature = f.human.sign(&p).unwrap();
+    let c = rusqlite::Connection::open(&f.path).unwrap();
+    let before: Vec<u8> = c
+        .query_row(
+            "SELECT grant FROM credential_authorizations WHERE item_id=?1",
+            [f.item.as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    c.execute(
+        "UPDATE human_staging SET package=zeroblob(length(package)) WHERE transaction_id=?1",
+        [p.transaction_id().as_slice()],
+    )
+    .unwrap();
+    assert!(f.human.commit(p.command(), &signature, p.body()).is_err());
+    let after: Vec<u8> = c
+        .query_row(
+            "SELECT grant FROM credential_authorizations WHERE item_id=?1",
+            [f.item.as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn r2_edit_of_disabled_item_does_not_publish_an_enable() {
+    let mut f = Fixture::new();
+    let p = f.human.prepare_disable(f.item).unwrap();
+    commit(&mut f.human, &p);
+    let c = rusqlite::Connection::open(&f.path).unwrap();
+    let enables = || {
+        c.query_row(
+            "SELECT count(*) FROM authority_events WHERE kind='enable'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    let before = enables();
+    let p = f.human.prepare_organize(f.item, vec![], true).unwrap();
+    commit(&mut f.human, &p);
+    assert_eq!(enables(), before);
+    assert!(
+        DelegatedVault::open(&f.path, DEVICE, Arc::clone(&f.custody))
+            .unwrap()
+            .discover(&f.peer)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn r2_127_intrinsic_plus_one_ordinary_preserves_selection_and_16_128_bounds() {
+    let mut f = Fixture::new();
+    let provider = PasskeyProvider::open(
+        AttemptVault::open(DelegatedVault::open(&f.path, DEVICE, Arc::clone(&f.custody)).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    let create = PasskeyRequest::registration(
+        [0x51; 16],
+        "synthetic-register",
+        ORIGIN,
+        "passkey.test",
+        &[0x52; 32],
+        b"synthetic-user",
+        "alice",
+        "Alice",
+        UserVerificationRequirement::Required,
+    )
+    .unwrap();
+    provider.begin(&create).unwrap();
+    let p = f.human.prepare_passkey_registration(&create).unwrap();
+    let public = p.public().clone();
+    let item = *p.prepared().item_id();
+    commit(&mut f.human, p.prepared());
+    provider
+        .complete_registration(
+            &f.human,
+            *create.request_id(),
+            item,
+            &public,
+            HumanVerification::Verified,
+        )
+        .unwrap();
+    let p = f.human.prepare_enable(item).unwrap();
+    commit(&mut f.human, &p);
+
+    let mut peers = vec![AgentPeer::from_transport_rpk(&RPK).unwrap()];
+    for n in 0x80..0x87 {
+        let rpk = [n; 44];
+        let enrollment = AgentEnrollment::new(
+            [n; 16],
+            [n; 16],
+            &rpk,
+            "Synthetic intrinsic-bound agent",
+            "synthetic-boundary",
+        )
+        .unwrap();
+        let p = f.human.prepare_agent_enrollment(&enrollment).unwrap();
+        commit(&mut f.human, p.prepared());
+        peers.push(AgentPeer::from_transport_rpk(&rpk).unwrap());
+    }
+    for (index, peer) in peers.iter().enumerate() {
+        for nonce in 1..=if index == 7 { 15 } else { 16 } {
+            f.attempts
+                .start(
+                    peer,
+                    &StartAttempt::new(
+                        item,
+                        "vault-webauthn-provider",
+                        1,
+                        "webauthn",
+                        ORIGIN,
+                        b"keycloak-webauthn/1".to_vec(),
+                        IdempotencyKey::new(now(), [nonce; 16]).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+    }
+    let request = StartAttempt::new(
+        f.item,
+        "keycloak-token-exchange",
+        1,
+        "token_exchange",
+        "keycloak-exchange-lab",
+        b"keycloak-exchange-lab".to_vec(),
+        IdempotencyKey::new(now(), [0x79; 16]).unwrap(),
+    )
+    .unwrap();
+    let ordinary = f.attempts.start(&peers[7], &request).unwrap();
+    let c = rusqlite::Connection::open(&f.path).unwrap();
+    let count: i64 = c
+        .query_row("SELECT count(*) FROM authentication_attempts", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 128);
+    let lease = f.attempts.claim_next().unwrap().unwrap();
+    assert_eq!(lease.attempt_id(), ordinary.attempt_id());
+    let pending: i64 = c
+        .query_row(
+            "SELECT count(*) FROM authentication_attempts WHERE state='created'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 127);
+    assert!(f.attempts.claim_next().unwrap().is_none());
+}
+
+#[test]
+fn r2_withdrawn_oldest_unknown_does_not_starve_another_registered_agent() {
+    let mut f = Fixture::new();
+    f.start(0x7a);
+    let a = f.attempts.claim_next().unwrap().unwrap();
+    f.attempts
+        .settle(&a, AttemptOutcome::Indeterminate)
+        .unwrap();
+    let rpk = [0x81; 44];
+    let enrollment = AgentEnrollment::new(
+        [0x81; 16],
+        [0x81; 16],
+        &rpk,
+        "Synthetic second agent",
+        "synthetic-boundary",
+    )
+    .unwrap();
+    let p = f.human.prepare_agent_enrollment(&enrollment).unwrap();
+    commit(&mut f.human, p.prepared());
+    let peer = AgentPeer::from_transport_rpk(&rpk).unwrap();
+    let b = f
+        .attempts
+        .start(
+            &peer,
+            &StartAttempt::new(
+                f.item,
+                "keycloak-token-exchange",
+                1,
+                "token_exchange",
+                "keycloak-exchange-lab",
+                b"keycloak-exchange-lab".to_vec(),
+                IdempotencyKey::new(now(), [0x7b; 16]).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let lease = f.attempts.claim_next().unwrap().unwrap();
+    f.attempts
+        .settle(&lease, AttemptOutcome::Indeterminate)
+        .unwrap();
+    let p = f
+        .human
+        .prepare_agent_revocation(AGENT, AuthorizationReason::OwnerRequest)
+        .unwrap();
+    commit(&mut f.human, &p);
+    std::thread::sleep(std::time::Duration::from_millis(110));
+    let query = f
+        .attempts
+        .claim_waiting_for_reconciliation()
+        .unwrap()
+        .unwrap();
+    assert_eq!(query.attempt_id(), b.attempt_id());
+    assert!(query.reconciliation_only());
+    assert!(query.password().is_empty());
+    f.attempts
+        .with_authorized_provider_use(&query, || ())
+        .unwrap();
+}
+
+#[test]
+fn r2_edit_after_suspension_or_revocation_does_not_restore_authority() {
+    for withdrawal in ["suspend", "revoke"] {
+        let mut f = Fixture::new();
+        let p = if withdrawal == "suspend" {
+            f.human
+                .prepare_delegated_suspend(AuthorizationReason::OwnerRequest)
+                .unwrap()
+        } else {
+            f.human
+                .prepare_agent_revocation(AGENT, AuthorizationReason::OwnerRequest)
+                .unwrap()
+        };
+        commit(&mut f.human, &p);
+        let p = f.human.prepare_organize(f.item, vec![], true).unwrap();
+        commit(&mut f.human, &p);
+        assert!(
+            f.attempts
+                .start(
+                    &f.peer,
+                    &StartAttempt::new(
+                        f.item,
+                        "keycloak-token-exchange",
+                        1,
+                        "token_exchange",
+                        "keycloak-exchange-lab",
+                        b"keycloak-exchange-lab".to_vec(),
+                        IdempotencyKey::new(now(), [0x7c; 16]).unwrap()
+                    )
+                    .unwrap()
+                )
+                .is_err(),
+            "{withdrawal}"
+        );
+    }
+}
+
+#[test]
+fn r2_claim_to_guard_expiry_is_observed_without_status_poll() {
+    let f = Fixture::new();
+    let started = f.start(0x7d);
+    let lease = f.attempts.claim_next().unwrap().unwrap();
+    let c = rusqlite::Connection::open(&f.path).unwrap();
+    c.execute(
+        "UPDATE authentication_attempts SET expires_at_us=0 WHERE attempt_id=?1",
+        [started.attempt_id().as_slice()],
+    )
+    .unwrap();
+    let calls = std::cell::Cell::new(0);
+    assert!(
+        f.attempts
+            .with_authorized_provider_use(&lease, || calls.set(calls.get() + 1))
+            .is_err()
+    );
+    assert_eq!(calls.get(), 0);
+    // Finite observation of the inherited slot/recovery gap, not acceptance:
+    // absent a status poll the existing implementation still records running.
+    let state: String = c
+        .query_row(
+            "SELECT state FROM authentication_attempts WHERE attempt_id=?1",
+            [started.attempt_id().as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    println!(
+        "CORPUS expiry pre-restart-state={state} recovered={}",
+        f.attempts.recover_inflight().unwrap()
+    );
+}
+
+#[test]
+fn r2_never_leased_old_revision_does_not_block_new_current_work() {
+    let mut f = Fixture::new();
+    let old = f.start(0x7e);
+    let p = f.human.prepare_organize(f.item, vec![], true).unwrap();
+    commit(&mut f.human, &p);
+    let current = f.start(0x7f);
+    let lease = f.attempts.claim_next().unwrap().unwrap();
+    assert_eq!(lease.attempt_id(), current.attempt_id());
+    let old = f.attempts.get(&f.peer, *old.attempt_id()).unwrap();
+    assert_eq!(old.state(), AttemptState::Failed);
+    assert_eq!(old.reason(), Some("CREDENTIAL_UNAVAILABLE"));
+    f.attempts
+        .with_authorized_provider_use(&lease, || ())
+        .unwrap();
+}
+
+#[test]
+fn r2_query_only_recovery_rejects_sql_revision_metadata_without_signed_provision() {
+    let mut f = Fixture::new();
+    let original = f.start(0x6a);
+    let lease = f.attempts.claim_next().unwrap().unwrap();
+    f.attempts
+        .settle(&lease, AttemptOutcome::Indeterminate)
+        .unwrap();
+    let p = f
+        .human
+        .prepare_organize(f.item, vec!["synthetic-edited".into()], false)
+        .unwrap();
+    commit(&mut f.human, &p);
+    let c = rusqlite::Connection::open(&f.path).unwrap();
+    // Tamper metadata only: the new signed provision still authenticates its
+    // real new revision. Query authorization must not trust these SQL columns.
+    c.execute(
+        "UPDATE credential_authorizations SET revision_id=?1 WHERE item_id=?2",
+        rusqlite::params![original.revision_id().as_slice(), f.item.as_slice()],
+    )
+    .unwrap();
+    c.execute(
+        "UPDATE vault_items SET visible_revision=?1 WHERE item_id=?2",
+        rusqlite::params![original.revision_id().as_slice(), f.item.as_slice()],
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(110));
+    assert!(matches!(
+        f.attempts.claim_waiting_for_reconciliation(),
+        Err(AttemptError::Integrity)
+    ));
+    assert_eq!(
+        f.attempts
+            .get(&f.peer, *original.attempt_id())
+            .unwrap()
+            .state(),
+        AttemptState::Indeterminate
+    );
 }
