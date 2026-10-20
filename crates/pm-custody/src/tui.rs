@@ -86,6 +86,8 @@ enum Mode {
     Search,
     Tag,
     Generate,
+    ItemFields,
+    ItemPassword,
     SelectField,
     ConfirmPurgeRevisions,
     ConfirmPurgeItem,
@@ -235,6 +237,19 @@ enum PendingOperation {
         attachment: [u8; 16],
     },
     RecoveryCode(ProtectedBytes),
+    ItemEdit([u8; 16]),
+    ItemDraft(ItemDraft),
+}
+
+/// Public fields of a login being created or edited, held until the masked
+/// password prompt completes. Notes may be sensitive, so all stay protected.
+struct ItemDraft {
+    item: Option<[u8; 16]>,
+    title: ProtectedText,
+    username: ProtectedText,
+    destination: ProtectedText,
+    notes: ProtectedText,
+    current_password: Option<ProtectedBytes>,
 }
 
 struct AttachmentDescriptor {
@@ -1049,6 +1064,12 @@ fn handle_key(app: &mut App, tls: &mut HumanTls, key: KeyEvent) -> Result<bool, 
         KeyCode::Char('/') => begin_prompt(app, Mode::Search, "Search (engine-decrypted):"),
         KeyCode::Char('t') => begin_prompt(app, Mode::Tag, "Tag (replaces tags):"),
         KeyCode::Char('g') => begin_prompt(app, Mode::Generate, "Generator length 1-1024:"),
+        KeyCode::Char('n') => begin_prompt(
+            app,
+            Mode::ItemFields,
+            "New login: title|username|URL|notes (password is asked next, masked):",
+        ),
+        KeyCode::Char('e') => begin_edit(app)?,
         KeyCode::Char('f') => toggle_favorite(app, tls)?,
         KeyCode::Char('h') => show_history(app, tls)?,
         KeyCode::Char('d') => trash(app, tls)?,
@@ -1220,6 +1241,8 @@ fn submit_prompt(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
         Mode::Search => search(app, tls, value_text),
         Mode::Tag => organize(app, tls, Some(value_text.to_owned())),
         Mode::Generate => generate(app, tls, value_text),
+        Mode::ItemFields => item_fields(app, tls, value_text),
+        Mode::ItemPassword => item_password(app, tls, &value),
         Mode::ConfirmPurgeRevisions if value_text == "PURGE" => purge_revisions(app, tls),
         Mode::ConfirmPurgeItem if value_text == "PURGE" => purge_item(app, tls),
         Mode::ConfirmPurgeRevisions | Mode::ConfirmPurgeItem => {
@@ -2563,6 +2586,138 @@ fn toggle_favorite(app: &mut App, tls: &mut HumanTls) -> Result<(), Failure> {
     Ok(())
 }
 
+fn begin_edit(app: &mut App) -> Result<(), Failure> {
+    let entry = selected(app)?;
+    if entry.trash {
+        app.status = "Restore before editing".into();
+        return Ok(());
+    }
+    begin_prompt(
+        app,
+        Mode::ItemFields,
+        "Edit login: title|username|URL|notes (empty field keeps current; password next):",
+    );
+    app.operation = Some(PendingOperation::ItemEdit(entry.id));
+    Ok(())
+}
+
+fn item_fields(app: &mut App, tls: &mut HumanTls, value: &str) -> Result<(), Failure> {
+    let [title, username, destination, notes] = split_exact::<4>(value)?;
+    let item = match app.operation.take() {
+        Some(PendingOperation::ItemEdit(item)) => Some(item),
+        None => None,
+        Some(_) => return Err(Failure::Unavailable),
+    };
+    let draft = if let Some(item) = item {
+        let mut request = vec![6];
+        request.extend_from_slice(&item);
+        write_frame(tls, &request)?;
+        let response = read_frame(tls)?;
+        if response.first() != Some(&0) {
+            app.status = "Only login items can be edited; nothing changed".into();
+            return Ok(());
+        }
+        let mut cursor = Cursor::new(&response);
+        cursor.expect(&[0])?;
+        let keep = |replacement: ProtectedText, current: &[u8]| {
+            if replacement.is_empty() {
+                let current = std::str::from_utf8(current).map_err(|_| Failure::Unavailable)?;
+                ProtectedText::copy_from_str(current).map_err(|_| Failure::Unavailable)
+            } else {
+                Ok(replacement)
+            }
+        };
+        let title = keep(title, cursor.bytes()?)?;
+        let username = keep(username, cursor.bytes()?)?;
+        let current_password = protected_copy(cursor.bytes()?)?;
+        let destination = keep(destination, cursor.bytes()?)?;
+        let notes = keep(notes, cursor.bytes()?)?;
+        cursor.finish()?;
+        ItemDraft {
+            item: Some(item),
+            title,
+            username,
+            destination,
+            notes,
+            current_password: Some(current_password),
+        }
+    } else {
+        if title.is_empty() {
+            app.status = "A title is required; nothing changed".into();
+            return Ok(());
+        }
+        ItemDraft {
+            item: None,
+            title,
+            username,
+            destination,
+            notes,
+            current_password: None,
+        }
+    };
+    let prompt = if draft.item.is_some() {
+        "New password (masked; empty keeps current):"
+    } else {
+        "Password (masked; empty generates 24 random characters):"
+    };
+    begin_prompt(app, Mode::ItemPassword, prompt);
+    app.operation = Some(PendingOperation::ItemDraft(draft));
+    Ok(())
+}
+
+fn item_password(app: &mut App, tls: &mut HumanTls, value: &[u8]) -> Result<(), Failure> {
+    let Some(PendingOperation::ItemDraft(draft)) = app.operation.take() else {
+        return Err(Failure::Unavailable);
+    };
+    let password = if !value.is_empty() {
+        protected_copy(value)?
+    } else if let Some(current) = draft.current_password {
+        current
+    } else {
+        let mut request = vec![50];
+        request.extend_from_slice(&24_u16.to_be_bytes());
+        request.push(0b1111);
+        write_frame(tls, &request)?;
+        expect_secret(&read_frame(tls)?)?
+    };
+    let fields: [&[u8]; 5] = [
+        draft.title.as_bytes(),
+        draft.username.as_bytes(),
+        &password,
+        draft.destination.as_bytes(),
+        draft.notes.as_bytes(),
+    ];
+    let mut size: usize = if draft.item.is_some() { 17 } else { 1 };
+    for field in fields {
+        size = size
+            .checked_add(encoded_bytes_len(field)?)
+            .ok_or(Failure::Unavailable)?;
+    }
+    let mut request = ProtectedFrameWriter::new(size)?;
+    if let Some(item) = draft.item {
+        request.fixed(&[3])?;
+        request.fixed(&item)?;
+    } else {
+        request.fixed(&[2])?;
+    }
+    for field in fields {
+        request.bytes(field)?;
+    }
+    let request = request.finish_exact()?;
+    drop(password);
+    write_frame(tls, &request)?;
+    drop(request);
+    let prepared = decode_prepared_response(&read_frame(tls)?)?;
+    rpc_commit(tls, &prepared)?;
+    refresh(app, tls)?;
+    app.status = if draft.item.is_some() {
+        "Login updated".into()
+    } else {
+        "Login created".into()
+    };
+    Ok(())
+}
+
 fn commit_request(tls: &mut HumanTls, request: &[u8]) -> Result<(), Failure> {
     write_frame(tls, request)?;
     let prepared = decode_prepared_response(&read_frame(tls)?)?;
@@ -3145,7 +3300,11 @@ fn render_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &
 
     let prompt = if matches!(
         app.mode,
-        Mode::Unlock | Mode::ConfirmPasskeyPassword | Mode::MasterRotate | Mode::RecoveryRotate
+        Mode::Unlock
+            | Mode::ConfirmPasskeyPassword
+            | Mode::MasterRotate
+            | Mode::RecoveryRotate
+            | Mode::ItemPassword
     ) {
         "•".repeat(app.input.chars().count())
     } else {
@@ -3170,7 +3329,7 @@ fn render_footer(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &
         .map_or_else(|| "<hidden>".into(), |(secret, _)| display_secret(secret));
     let controls = match app.screen {
         Screen::Content => {
-            "↑↓/jk select  / search  t tag  f favorite  g generate  h history  d trash  u restore  p/P purge  r reveal  c copy  a access  w pending  m migrate  b backup  y sync  z audit  D download  l lock  q quit"
+            "↑↓/jk select  / search  n new  e edit  t tag  f favorite  g generate  h history  d trash  u restore  p/P purge  r reveal  c copy  a access  w pending  m migrate  b backup  y sync  z audit  D download  l lock  q quit"
         }
         Screen::Access => {
             "↑↓/jk select  n enroll  s suspend/resume  x revoke agent  e enable/disable credential  Esc content"

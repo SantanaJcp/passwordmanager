@@ -15,6 +15,14 @@ from tui_content_lab import HUMAN, query, screen, send, setup, start_tui, tmux, 
 from tui_operations_lab import finish_owned_resources
 
 
+def metadata(path):
+    # Every mutation-relevant field; atime is excluded because the test's own
+    # digest reads advance it nondeterministically on coarse tmpfs timestamps.
+    value = path.stat()
+    return (value.st_ino, value.st_size, value.st_mode, value.st_uid, value.st_nlink,
+            value.st_mtime_ns, value.st_ctime_ns)
+
+
 def digest(path):
     value = hashlib.sha256()
     with path.open("rb") as source:
@@ -86,10 +94,10 @@ def main():
             try:
                 as_uid(HUMAN, [sys.executable, "-c",
                     "import os,sys;fd=os.open(sys.argv[1],os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600);os.write(fd,b'synthetic-confirmation-destination');os.close(fd)", confirmation_collision])
-                before_confirmation = (digest(confirmation_collision), confirmation_collision.stat())
+                before_confirmation = (digest(confirmation_collision), metadata(confirmation_collision))
                 send(root, "EXPORT", enter=True)
                 wait_text(root, "Operation failed explicitly; no success was recorded (DESTINATION_EXISTS)")
-                assert (digest(confirmation_collision), confirmation_collision.stat()) == before_confirmation
+                assert (digest(confirmation_collision), metadata(confirmation_collision)) == before_confirmation
                 assert not confirmation_collision.with_suffix(".partial").exists()
             finally:
                 os.kill(daemon.pid, signal.SIGCONT)
@@ -113,11 +121,11 @@ def main():
                     time.sleep(.05)
                 as_uid(HUMAN, [sys.executable, "-c",
                     "import os,sys;fd=os.open(sys.argv[1],os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600);os.write(fd,b'synthetic-race-destination');os.close(fd)", raced])
-                original_race = (digest(raced), raced.stat())
+                original_race = (digest(raced), metadata(raced))
             finally:
                 os.kill(daemon.pid, signal.SIGCONT)
             wait_text(root, "Operation failed explicitly; no success was recorded (DESTINATION_EXISTS)")
-            assert (digest(raced), raced.stat()) == original_race
+            assert (digest(raced), metadata(raced)) == original_race
             assert not raced.with_suffix(".partial").exists()
             print(f"PASS {kind}-race collision=DestinationExists destination=unchanged partial=absent", flush=True)
     finally:

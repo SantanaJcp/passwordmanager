@@ -19,3 +19,11 @@ Este registro conserva decisiones explícitas del propietario. No sustituye la e
 - **Alcance:** configuración versionada, validación de owner/permisos/identidad, selección y conexión explícitas, más pruebas locales. Configuración ausente, inválida, ambigua o retirada falla de forma explícita; jamás deriva a un proveedor de laboratorio ni a otra integración. No modifica eventos/wire publicados, gestión de sesiones externas, límites ni plazos. No autoriza instalación sobre hosts reales, credenciales reales, secrets, gasto, publicación ni nuevos runners.
 - **Comprobación específica:** intento ordinario contra adaptador permitido, ownership y resolución humana conservados, perfil/destino/método exactos, negativa por binding/configuración incorrecta o retirada, recuperación sin repetir autenticación y evidencia real de proveedor separada de dobles sintéticos.
 - **Revisitar:** solo ante evidencia concreta que refute la composición o una ampliación explícita del propietario. Principios: `doors`, `no-fallbacks`, `design`, `prove`.
+
+## 2026-10-19 — Recorte a producto Linux local
+
+- **Confirmación:** el propietario indicó que el proceso se había complicado demasiado y pidió terminar lo existente «con todo», sin extender alcance, todo local, sin runners, sin sincronización entre dispositivos y consolidando ramas.
+- **Decisión:** el objetivo pasa a ser un producto Linux x86_64 funcionando en el equipo del propietario. Una sola rama (`codex/implement-passwordmanager`) consolida los candidatos; la verificación es `scripts/check.sh` más los labs Linux locales.
+- **Fuera de alcance hasta nueva orden:** macOS y Windows (26, 27, 31, 32), matriz de seis targets (33), aarch64 (parte de 30), firma/TUF/paquetes (resto de 29), gate humano independiente (34), CI hospedado (decisión 3 queda en 3B) y el correctivo pendiente de sync del proveedor (P1 F1-sync). El código de sync se conserva pero no se instala ni se configura.
+- **Instalación:** `scripts/build-linux-release.sh` + `sudo scripts/install-linux-local.sh` siguen el layout G8/G1 (cuenta `passwordmanager`, `/opt`, `/etc`, `/var/lib`, `/run`) sin descarga ni paquete. El propietario la ejecuta con sus credenciales de administrador.
+- **Revisitar:** si el propietario reabre sync, otra plataforma o distribución firmada.

@@ -295,6 +295,33 @@ def main():
         assert subprocess.run(["/usr/bin/wl-paste", "--no-newline", "--type", "application/octet-stream"], capture_output=True).stdout == b"ticket23-external-replacement"
         replacement.terminate(); replacement.wait(timeout=5); replacement = None
 
+        # Keyboard login creation and edit; the password prompt stays masked.
+        send(root, "n"); wait_information(root, "New login: title|username|URL|notes")
+        send(root, "tui-created-login|tui-user|https://created.invalid|tui-note", enter=True)
+        wait_information(root, "Password (masked; empty generates 24 random characters):")
+        send(root, "tui-created-password-canary", enter=True, hidden=True)
+        created = wait_text(root, "Login created")
+        assert "tui-created-password-canary" not in created and "•" * 27 not in created
+        assert "tui-created-login" in query(root, "tui-created-login")
+        send(root, "e"); wait_information(root, "Edit login: title|username|URL|notes")
+        send(root, "tui-edited-login|||", enter=True)
+        wait_information(root, "New password (masked; empty keeps current):")
+        send(root, "", enter=True, hidden=True)
+        wait_text(root, "Login updated")
+        assert "tui-edited-login" in query(root, "tui-edited-login")
+        send(root, "r"); wait_text(root, "Fields (explicit selection; values hidden)")
+        for _ in range(12):
+            if any("›" in line and "password" in line for line in screen(root).splitlines()):
+                break
+            send(root, "j"); time.sleep(0.15)
+        tmux(root, "send-keys", "Enter")
+        assert "tui-created-password-canary" in wait_text(root, "Secret revealed temporarily")
+        assert "tui-created-password-canary" not in wait_text(root, "Reveal expired")
+        send(root, "n"); wait_information(root, "New login: title|username|URL|notes")
+        send(root, "|no-title|https://untitled.invalid|", enter=True)
+        wait_text(root, "A title is required; nothing changed")
+        print("PASS tui-login create=keyboard edit=keep-password password-prompt=masked untitled=rejected", flush=True)
+
         # Non-visible purge, trash, restore, then typed permanent purge.
         query(root, "ticket05-e2e-search-canary")
         send(root, "p"); send(root, "PURGE", enter=True); wait_text(root, "Purged")
