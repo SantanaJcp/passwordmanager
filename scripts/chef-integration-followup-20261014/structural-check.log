@@ -1,0 +1,31 @@
+test_arbitrary_seven_stage_vector_final_only (__main__.MethodTests.test_arbitrary_seven_stage_vector_final_only) ... ok
+test_cli_all_assertions_and_removal_equality (__main__.MethodTests.test_cli_all_assertions_and_removal_equality) ... ok
+test_complete_synthetic_resolution (__main__.MethodTests.test_complete_synthetic_resolution) ... ok
+test_crossed_endpoint_rejected_without_contact (__main__.MethodTests.test_crossed_endpoint_rejected_without_contact) ... ok
+test_duplicate_role (__main__.MethodTests.test_duplicate_role) ... ok
+test_duplicate_sha (__main__.MethodTests.test_duplicate_sha) ... ok
+test_historical_bytes_order_expectations (__main__.MethodTests.test_historical_bytes_order_expectations) ... ok
+test_lost_previous_ancestry_fails (__main__.MethodTests.test_lost_previous_ancestry_fails) ... ok
+test_missing_candidate (__main__.MethodTests.test_missing_candidate) ... ok
+test_no_desktop_or_unproved_gui_mode (__main__.MethodTests.test_no_desktop_or_unproved_gui_mode) ... ok
+test_no_mixed_root_mode (__main__.MethodTests.test_no_mixed_root_mode) ... ok
+test_outside_owned_source (__main__.MethodTests.test_outside_owned_source) ... ok
+test_red_remains_red_even_expected (__main__.MethodTests.test_red_remains_red_even_expected) ... ok
+test_source_ast_no_chroot_hook_in_new_adapter (__main__.MethodTests.test_source_ast_no_chroot_hook_in_new_adapter) ... ok
+test_symbolic_sha_forbidden (__main__.MethodTests.test_symbolic_sha_forbidden) ... ok
+test_synthetic_socket_process_identity_is_not_gui_proof (__main__.MethodTests.test_synthetic_socket_process_identity_is_not_gui_proof) ... ERROR
+test_unresolvable_actual_sha (__main__.MethodTests.test_unresolvable_actual_sha) ... ok
+
+======================================================================
+ERROR: test_synthetic_socket_process_identity_is_not_gui_proof (__main__.MethodTests.test_synthetic_socket_process_identity_is_not_gui_proof)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/santana/.t3/worktrees/passwordmanager/t3-0eed2d3d/scripts/chef-integration-followup-20261014/test_method.py", line 162, in test_synthetic_socket_process_identity_is_not_gui_proof
+    server.bind(str(endpoint)); server.listen(1)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^
+OSError: AF_UNIX path too long
+
+----------------------------------------------------------------------
+Ran 17 tests in 0.162s
+
+FAILED (errors=1)

@@ -1,78 +1,130 @@
 # Evaluación local en Linux
 
-Esta guía es solo para desarrollo y evaluación con datos sintéticos. No uses contraseñas, claves, cuentas ni archivos personales. No conectes agentes a este equipo durante la evaluación.
+Esta guía describe una evaluación de desarrollo con datos sintéticos. No uses credenciales, claves, cuentas ni archivos personales. No conectes agentes a un equipo donde puedan leer la TUI, el terminal humano, el portapapeles, la bóveda o las claves locales.
 
 ## Qué hay en este árbol
 
-El código contiene una bóveda cifrada local, una TUI humana, un CLI y un adaptador MCP stdio para cinco operaciones delegadas: consultar capacidades, descubrir credenciales habilitadas y comenzar, consultar o cancelar un intento de autenticación. El agente no recibe los secretos guardados. La bóveda no gestiona las sesiones externas posteriores.
+El producto separa la bóveda cifrada, las operaciones humanas y el uso delegado por agentes. El CLI público ofrece **pm tui** exclusivamente para el propietario humano. CLI/MCP delegados exponen cinco operaciones de agente; no entregan secretos guardados ni administran las sesiones externas posteriores.
 
-Este checkout no incluye una instalación ordinaria y autorizada del custodio. Aunque el binario `pm-custody` contiene comandos internos de servicio y provisión, no son una receta de instalación. No los ejecutes con `sudo` ni conviertas este laboratorio en un servicio persistente. Los paquetes y su mantenimiento siguen pendientes en el [ticket 29](../../.scratch/passwordmanager/issues/29-paquetes-tuf-mantenimiento-y-fuente-correspondiente.md); la aceptación Linux de instalación, reboot y volumen cifrado sigue pendiente en el [ticket 30](../../.scratch/passwordmanager/issues/30-evidencia-nativa-linux-en-dos-arquitecturas.md).
+La implementación Linux fijada para esta alineación añade dos archivos locales protegidos junto a la ruta de la bóveda:
 
-## Aislamiento y requisitos
+| Archivo lateral | Cabecera | Se crea con | Vínculo que valida |
+| --- | --- | --- | --- |
+| `<vault>.agent-registry` | Binaria **PMAR1** | **migrate-agent-registry** | Bóveda, dispositivo, clave pública exacta del servidor y pares RPK→UID |
+| `<vault>.adapters` | Binaria **PMAC1** | **provision-adapters** | Bóveda, dispositivo, clave pública exacta del servidor, integración, versión, perfil, método, endpoint y UID del adaptador |
 
-El perfil de diseño separa tres entornos: propietario humano, proceso custodio y agente. Una cuenta distinta por sí sola no demuestra separación. Cada agente necesita su propia identidad y clave privada protegida en su entorno; no se comparte entre registros. El agente no debe leer la bóveda humana, claves maestras/de contenido/recuperación, perfiles del propietario o custodio, la TUI, el terminal humano ni su portapapeles, ni poder modificar el binario o la configuración del custodio. Este repositorio no configura ni demuestra ese aislamiento; por eso esta evaluación no conecta agentes. Consulta el [contrato de aislamiento](../design/isolation.md).
+El registro local vincula una clave RPK con el principal nativo UID de Linux. No reemplaza la concesión humana vigente ni la revocación: el daemon vuelve a validar ambas durante el uso. La configuración del adaptador se resuelve desde el estado local instalado según integración, perfil/destino y método; el agente no entrega una configuración alternativa en su solicitud. El worker externo conserva su propio perfil y ciclo de vida. El daemon no crea ni supervisa el proceso del adaptador.
 
-Para compilar offline se necesita el toolchain Rust 1.98.1 y las dependencias fijadas ya disponibles en el `.toolchain` compartido por la raíz Git. [`scripts/cargo-local.sh`](../../scripts/cargo-local.sh) selecciona ese toolchain local; `--locked --offline` evita cambiar el lockfile o descargar dependencias. Si el toolchain o su caché no existen, detente: esta guía no instala paquetes ni descarga artefactos.
+Estos archivos no son texto para editar a mano. El parser fija los encabezados, los campos y los flags. La lectura valida su identidad, permisos, propietario, tamaño máximo serializado de 16 KiB y estabilidad; los padres solo se aceptan bajo la cadena confiable de root o del custodio actual, con la excepción acotada del ancestro root-owned sticky. No se aprende un propietario desde / ni se añade una excepción para UID 65534. La ausencia, retirada o invalidez de configuración no activa un proveedor de laboratorio, un binding por UID solamente ni otra ruta delegada.
 
-La evidencia de laboratorio disponible es Linux x86_64. Para ejecutar el laboratorio de custodia hacen falta user namespaces habilitados, rangos `subuid` y `subgid` asignados, `unshare` y Python 3. No necesita `sudo`, Docker, cuentas nuevas ni unidades de servicio. El [preflight Linux](../verification/linux-lab-preflight.md) demuestra viabilidad de mecanismos en un host concreto; no es aceptación del producto ni un perfil de producción.
+**Inferido de spec §15:** el diseño de distribución G8 está confirmado documentalmente; este árbol todavía no entrega una distribución o instalador aceptado, el ciclo de vida de un servicio del sistema ni un procedimiento aprobado para establecer la cadena de directorios y recursos nativos de un host normal. Las capacidades de provisión del binario no sustituyen esos pasos.
+
+## Requisitos de evaluación
+
+El perfil de diseño separa al propietario humano, al proceso custodio y al agente. Una cuenta distinta por sí sola no demuestra separación. Cada agente debe tener su identidad y clave privada protegida en su entorno, sin compartirla entre registros. El agente no debe leer la bóveda humana, claves maestras/de contenido/recuperación, perfiles del propietario o custodio, la TUI, el terminal humano ni su portapapeles, ni poder modificar el binario o la configuración del custodio. Este árbol no configura la instalación ordinaria ni demuestra ese aislamiento; la evaluación local no conecta agentes fuera de fixtures propios. Consulta el [contrato de aislamiento](../design/isolation.md).
+
+Para compilar offline se necesita el toolchain Rust 1.98.1 y las dependencias fijadas ya disponibles en el directorio `.toolchain` de la raíz Git. **scripts/cargo-local.sh** selecciona ese toolchain fijo; los ejemplos desactivan la instalación automática con **RUSTUP_AUTO_INSTALL=0**, esperan el bloqueo exclusivo y bloqueante **flock -x /tmp/pm-cargo-window.lock** y usan **--locked --offline**. Si el toolchain o su caché no existen, detente: esta guía no instala paquetes, descarga artefactos ni busca una alternativa.
+
+Los laboratorios Linux documentados usan user namespaces, rangos subuid y subgid ya asignados, unshare y Python 3. El [preflight Linux](../verification/linux-lab-preflight.md) demuestra viabilidad de mecanismos en un host concreto; no es aceptación del producto ni un perfil de producción. No cambies ownership de mounts o directorios ajenos, ACLs del host ni crees un servicio privilegiado para ejecutar esta guía.
 
 ## Compilar y comprobar
 
-Desde la raíz del checkout, con el toolchain y las dependencias ya provisionados:
+Desde la raíz del checkout, con el toolchain y las dependencias ya provisionados y usando el target `target/` de este checkout (no uno heredado de otro worktree):
 
-```sh
-./scripts/cargo-local.sh build --workspace --locked --offline
-./scripts/check.sh
-```
+    RUSTUP_AUTO_INSTALL=0 flock -x /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh build --workspace --locked --offline
+    RUSTUP_AUTO_INSTALL=0 flock -x /tmp/pm-cargo-window.lock ./scripts/check.sh
 
-`check.sh` valida entradas de build y ejecuta `fmt`, `check`, tests y `clippy` en modo bloqueado y offline. Un resultado verde de ese comando no significa que los laboratorios de producto, la aceptación nativa o la revisión final estén verdes.
+check.sh valida entradas de build y ejecuta fmt, check, tests y clippy en modo bloqueado y offline. Un resultado verde no significa que los laboratorios completos, la aceptación nativa, la composición exacta de candidatos o la revisión final estén verdes. Esta actualización documental no ejecuta Cargo ni laboratorios.
 
-El CLI no implementa `--help`: `pm --help` devuelve `INVALID_ARGUMENT`. Para comprobar que el binario arranca sin abrir una bóveda ni usar credenciales:
+El CLI no implementa **--help**: **pm --help** devuelve INVALID_ARGUMENT con código 2. Para comprobar que el binario arranca sin abrir una bóveda ni usar credenciales:
 
-```sh
-./target/debug/pm --version
-```
+    ./target/debug/pm --version
 
-## Superficies que reconoce el código
+El CLI también reconoce **pm vault create <archivo>** y **pm vault open <archivo>**. Son operaciones interactivas: la contraseña maestra se lee desde el prompt, la creación muestra un código de recuperación y pide reintroducirlo. Usa únicamente rutas y datos sintéticos; guarda el código de recuperación fuera del equipo de prueba. No lo pongas en argv, logs, chats o documentación.
 
-El CLI acepta `pm vault create <archivo>` y `pm vault open <archivo>`. Son operaciones interactivas: creación solicita una contraseña maestra, muestra un código de recuperación y pide volver a introducirlo; no uses una contraseña real ni una bóveda personal para probarlas. El código de recuperación debe guardarse fuera del equipo. No lo guardes en logs, chats o documentación.
+## Entrada humana con pm tui
 
-El CLI delegado reconoce `pm capabilities`, `pm credentials list`, `pm auth start`, `pm auth status`, `pm auth cancel` y `pm mcp`; admite `--json`. Las operaciones distintas de MCP aceptan referencias al perfil del agente, a su clave privada y al socket del custodio mediante `--profile`, `--private` y `--socket`. `pm mcp` obtiene esas referencias de `PM_PROFILE`, `PM_PRIVATE` y `PM_SOCKET`. Son recursos de una identidad de agente previamente autorizada; nunca pases el contenido de una clave como argumento o valor de entorno. No hay un procedimiento de provisión de producción en este árbol, así que esta guía no inventa uno ni ofrece comandos `auth` que aparenten completar una autenticación.
+La entrada pública acordada es **pm tui**, según [spec §11](../../.scratch/passwordmanager/spec.md#11-tui-importación-exportación-y-recuperación) y el [contrato de identidad/comandos](../../docs/design/agent-identity.md#9-cierre-de-comandos-humanos-y-autoridad-distribuida); no hace falta invocar **pm-custody tui**. El perfil humano, el archivo de clave privada protegida y el endpoint Unix humano deben existir y estar provisionados previamente. El orden y los flags Linux del parser son:
 
-MCP funciona por stdin/stdout y anuncia cinco tools. Puedes comprobar únicamente el listado local con una solicitud JSON-RPC sintética; esta prueba no contacta un custodio ni demuestra que una operación delegada funcione:
+    pm tui --profile /synthetic/human.profile --private /synthetic/human.key --socket /synthetic/human.sock --idle-seconds 300 --reveal-seconds 15 --copy-seconds 30
 
-```sh
-pm="${CARGO_TARGET_DIR:-target}/debug/pm"
-env -i PATH=/usr/bin:/bin "$pm" mcp <<'JSONL'
-{"jsonrpc":"2.0","id":"synthetic-list","method":"tools/list","params":{}}
-JSONL
-```
+Las rutas son marcadores sintéticos y el comando es una muestra de sintaxis, no un archivo de instalación. Los seis flags son requeridos en ese orden por el parser Linux fijado; los límites máximos de los tres tiempos son 300, 15 y 30 segundos. **--private** nombra un archivo protegido: nunca pongas el contenido de la clave, la contraseña maestra ni el código de recuperación en argv, variables de entorno, logs o documentación. La contraseña maestra se introduce en el prompt interactivo. El perfil debe tener rol humano, y el pin del servidor debe coincidir con el endpoint seleccionado; los flags no conceden rol ni autorización.
 
-La TUI existe en el binario custodio como `pm-custody tui --profile <perfil-humano> --private <clave-humana> --socket <socket-humano>`. Requiere los tres recursos de una instalación autorizada. La spec nombra `pm tui`, pero el CLI actual rechaza esa forma como `UNAUTHORIZED`; el código actual no ofrece un alias. La discrepancia se deja registrada para resolverla en el frente dueño del contrato CLI, fuera del alcance documental de esta guía. No ejecutes la TUI contra perfiles o claves personales.
+**pm tui --json** devuelve UNAUTHORIZED con código 3, también con recursos humanos válidos. No se expone una TUI humana por MCP ni por el modo JSON del CLI delegado. Si faltan perfil, clave, socket o identidad verificada, corrige el paso de provisión que falta: no elimines flags ni uses valores por defecto.
 
-## Evaluar solo con laboratorios existentes
+**Medición atribuida al worker CLI, no repetida aquí:** el harness Linux sintético observó prompt enmascarado, desbloqueo, búsqueda, commit de organización, bloqueo, salida y restauración del terminal. El worker registró nueve tests del CLI y una ejecución de check.sh con código 0. La fixture no equivale a aceptación de instalación ordinaria ni a una TUI ejecutada sobre datos reales. El informe anterior [de la guía Linux](../verification/chef-user-guide-20261014.md) mide un CLI previo que rechazaba pm tui; esa observación es histórica y no describe el candidato CLI fijado ahora. Ver [esta alineación documental](../verification/chef-guide-alignment-20261014.md).
+
+En Windows, el parser heredado también admite **--console-diagnostics <archivo>** después de los flags comunes de TUI. El código escribe métricas/indicadores, no texto de celdas; Windows no se ejecutó para esta validación y esta nota no es evidencia nativa. Ese flag no aplica a Linux.
+
+## Registro y adaptadores instalados
+
+El flujo de provisión de los candidatos Linux debe distinguirse de la entrada humana. Las formas que reconoce el parser fijado son:
+
+    pm-custody migrate-agent-registry --bootstrap /synthetic/bootstrap --vault /synthetic/vault.sqlite3 --device 11111111111111111111111111111111 --agent-public /synthetic/agent-B.pub --agent-uid 1202
+
+La migración incorpora el par RPK/UID ya confiable del bootstrap y, opcionalmente, pares adicionales mediante argumentos repetidos **--agent-public** y **--agent-uid**. Verifica bóveda, dispositivo, clave pública exacta del servidor y que cada agente conserve una identidad/concesión humana actual. También requiere que ya exista el sidecar protegido **<vault>.audit-custody**; serve-vault lo carga o crea al arrancar, pero la migración no lo crea. Publica el registro una sola vez y no reactiva agentes revocados ni sobrescribe un archivo existente.
+
+Después de crear el registro se puede fijar una ruta de adaptador con la forma:
+
+    pm-custody provision-adapters --bootstrap /synthetic/bootstrap --vault /synthetic/vault.sqlite3 --device 11111111111111111111111111111111 --integration github-rest-bearer --profile github-assigned-issues/1 --method bearer --endpoint /synthetic/github-adapter.sock --adapter-uid 1203
+
+Los valores identifican una integración/perfil/método sintéticos; no son credenciales. La versión de integración que serializa este parser es 1; no se pasa un flag de versión. El endpoint debe ser absoluto y pertenecer al UID del adaptador. El UID del adaptador no puede reutilizar el principal humano, el agente bootstrap ni otro UID de agente. El daemon valida el endpoint y su peer nativo antes de enviar una operación; la ruta no inicia el proceso externo.
+
+El uso normal requiere, además, que el propietario de la instalación prepare de forma segura bootstrap, bóveda, dispositivo, registro, grants, perfiles y claves, rutas de sockets y ciclo de vida del servicio. El parser del servicio Linux **serve-vault** requiere, en este orden, **--bootstrap**, **--agent-socket**, **--human-socket**, **--vault** y **--device**, pero este árbol no ofrece un servicio del sistema o instalador aceptado que establezca esos recursos y sus propietarios. Por ello, los ejemplos anteriores documentan el parser y los límites de configuración; no son instrucciones para ejecutar con sudo en un host personal. No afirmes que el bootstrap único A+B deja listos el registro por agente y los adaptadores: la migración verificada y la provisión de cada adaptador son pasos distintos.
+
+## CLI delegado y MCP sintético
+
+El CLI delegado reconoce **pm capabilities**, **pm credentials list**, **pm auth start**, **pm auth status**, **pm auth cancel** y **pm mcp**. Las operaciones CLI aceptan referencias al perfil del agente, su clave privada y el socket custodio mediante **--profile**, **--private** y **--socket**; pm mcp obtiene esas rutas desde **PM_PROFILE**, **PM_PRIVATE** y **PM_SOCKET**. Son rutas a recursos de una identidad previamente autorizada, no el contenido de una clave. Estas referencias de transporte no sustituyen el registro instalado RPK→UID, los grants humanos ni la revocación.
+
+MCP funciona por stdin/stdout y anuncia cinco tools. Esta consulta JSON-RPC sintética solo lista la superficie local; no contacta un custodio ni prueba una operación delegada:
+
+    pm=./target/debug/pm
+    env -i PATH=/usr/bin:/bin "$pm" mcp <<JSONL
+    {"jsonrpc":"2.0","id":"synthetic-list","method":"tools/list","params":{}}
+    JSONL
+
+La respuesta contiene **get_capabilities**, **discover_credentials**, **start_authentication**, **get_authentication** y **cancel_authentication**. No publiques ni solicites tools administrativas o humanas por MCP.
+
+## Laboratorios sintéticos
 
 El laboratorio existente de custodia usa un user namespace descartable y datos sintéticos:
 
-```sh
-./scripts/test-linux-custody-lab.sh
-```
+    RUSTUP_AUTO_INSTALL=0 flock -x /tmp/pm-cargo-window.lock ./scripts/test-linux-custody-lab.sh
 
-Lee [el contrato y la evidencia del ticket 03](../verification/ticket-03.md) antes de interpretar su salida. El runner crea temporales bajo `/tmp`; su cleanup actual usa `shutil.rmtree(..., ignore_errors=True)`, por lo que su código de salida no demuestra por sí solo que la limpieza terminó. Comprueba el prefijo temporal del laboratorio antes de considerar limpio el entorno. El script usa `target/debug/pm-custody` aunque Cargo compile a otra ruta: ejecútalo solo con el target predeterminado en un checkout desechable, sin override de `CARGO_TARGET_DIR`.
+Lee el [contrato y la evidencia del ticket 03](../verification/ticket-03.md) antes de interpretar su salida. Ambos wrappers de laboratorio compilan con `--locked --offline`; el de custodia ejecuta `target/debug/pm-custody` del mismo checkout. Usa el target predeterminado, sin apuntar `CARGO_TARGET_DIR` al target de otro worktree. El test histórico limpia algunos temporales con ignore_errors=True, así que su código de salida no acredita por sí solo la limpieza.
 
-El laboratorio de contenido TUI [`test-linux-tui-content-lab.sh`](../../scripts/test-linux-tui-content-lab.sh) usa Wayland real, `wl-copy` y `wl-paste`. Puede modificar el portapapeles de la sesión; ejecútalo solo en una sesión desechable, nunca en un escritorio con datos personales. No lo necesitas para el smoke check sintético de MCP anterior.
+El laboratorio de contenido TUI usa Wayland real, wl-copy y wl-paste, y puede modificar el portapapeles de la sesión. Si se ejecuta en un entorno de laboratorio descartable, conserva el mismo bloqueo y el target predeterminado del checkout:
+
+    RUSTUP_AUTO_INSTALL=0 flock -x /tmp/pm-cargo-window.lock ./scripts/test-linux-tui-content-lab.sh
+
+No lo ejecutes en el escritorio del propietario ni con su portapapeles o datos personales.
+
+**Fixture nueva 1A/2A, evidencia atribuida al worker daemon:** los casos registry y adapter del runner **crates/pm-custody/tests/chef_runtime_chroot.py** se ejecutaron dentro de un namespace UID-mapped propio, con custodia en un chroot UID 0 propio y cliente/TUI humano fuera en PTY. Cuando los archivos de los candidatos fijados estén presentes en el checkout, el runner se puede repetir con binarios propios, un target privado y los prerrequisitos del preflight:
+
+    export CARGO_TARGET_DIR="$PWD/target-chef-daemon-implementation"
+    export RUSTUP_AUTO_INSTALL=0
+    RUSTUP_AUTO_INSTALL=0 flock -x /tmp/pm-cargo-window.lock ./scripts/cargo-local.sh build -p pm-custody -p pm-cli -p pm-web-auth --example chef_runtime_open_channel --bins --locked --offline
+    BIN="$CARGO_TARGET_DIR/debug"
+    flock -x /tmp/pm-cargo-window.lock python3 crates/pm-custody/tests/chef_runtime_chroot.py registry "$BIN/pm-custody" "$BIN/pm" "$BIN/pm-web-auth"
+    flock -x /tmp/pm-cargo-window.lock python3 crates/pm-custody/tests/chef_runtime_chroot.py adapter "$BIN/pm-custody" "$BIN/pm" "$BIN/pm-web-auth"
+
+El runner debe ejecutarse dentro de un namespace UID-mapped propio con los rangos ya asignados que exige el [preflight Linux](../verification/linux-lab-preflight.md). La fixture crea su chroot de evaluación; no es un instalador, servicio normal, aceptación de sistema de archivos raíz productivo ni evidencia de que la instalación cotidiana esté lista. No cambies ownership ni ACL de mounts del host. Esta actualización documental no compiló ni ejecutó estos comandos.
 
 ## Backup y recuperación
 
-- En la TUI, `b` abre el menú: `1` crea un backup nativo cifrado, `2` exporta texto legible, `3` restaura, `4` rota la contraseña maestra y `5` rota el código de recuperación. No copies la base SQLite ni sus archivos WAL/SHM como método de backup.
+- En la TUI, **b** abre el menú: **1** crea un backup nativo cifrado, **2** exporta texto legible, **3** restaura, **4** rota la contraseña maestra y **5** rota el código de recuperación. No copies la base SQLite ni sus archivos WAL/SHM como método de backup.
 - El export plaintext es una copia persistente legible; protégela y elimínala explícitamente cuando corresponda. La limpieza no equivale a borrado seguro certificado.
 - La restauración incorpora IDs y claves nuevos y conserva la autoridad vigente del destino. Un backup no prueba que sea el más reciente ni incluye cambios que no llegaron a ese equipo.
 - Cambiar la contraseña o el código de recuperación no invalida backups antiguos ni copias expuestas. Si se pierde la vía válida de recuperación o el backup utilizable, no hay bypass.
 
 El contrato y el alcance implementado están en los tickets [21](../../.scratch/passwordmanager/issues/21-backup-pmb1-pmf1-y-exportacion-humana.md) y [22](../../.scratch/passwordmanager/issues/22-recuperacion-rotacion-de-vias-y-compromiso.md), y en el [diseño de claves y backup](../design/key-hierarchy.md).
 
-## Límites de la evidencia actual
+## Estado y evidencia pendiente
 
-El último barrido local documentado sobre `2272a1f446fb80cf35566b2b4406338a61e4f1dd` fue de 52 casos: 49 terminaron con código 0 y tres conservaron RED conocidos de G7. No es una suite verde. En el último corte nativo W7 del mismo SHA, Windows pasó `local-operations`, falló sync al plazo original de 15 s, no llegó a RETIRE y reportó fallo de cleanup; macOS Intel pasó, mientras ARM falló antes de la edición W7 durante la observación del prompt de contraseña y tuvo un timeout de 30 s en `human-streaming-file`. Los detalles y logs están en [W7](../verification/w7-vault-org.md).
+**Medición Linux atribuida a los workers; reporte de integración no repetido aquí:** la entrada humana de CLI mostró el flujo TUI descrito arriba; el daemon midió registro, adaptadores sintéticos, revocación, admisión y reconciliación. El reporte `0a11733ffc784e80cb75c8df01d2cdcf34862d7e` registró el compuesto exacto `8cd45529b062506a2cbe0c567538d3999ac8a2b6`: kitchen, check completo y clean/offline terminaron con código 0; la barrida completa tuvo 42/52 casos con código 0 y 10 con código 1. Pasaron 17 flujos focalizados agrupados, incluidos TUI humana pública, registry/admission, ocho reconciliaciones y tres comprobaciones de memoria que cambiaron de RED en baseline a GREEN en el compuesto. El resultado global sigue siendo ISSUES: siete fixtures ordinarias aún no migradas a 1A/2A y tres casos G7 dieron código 1; no equivale a PASS de 52 casos ni a aceptación de producto.
 
-Faltan los paquetes/actualizaciones, la aceptación Linux nativa en x86_64 y AArch64 y la revisión formal final; consulta los tickets [29](../../.scratch/passwordmanager/issues/29-paquetes-tuf-mantenimiento-y-fuente-correspondiente.md), [30](../../.scratch/passwordmanager/issues/30-evidencia-nativa-linux-en-dos-arquitecturas.md) y [35](../../.scratch/passwordmanager/issues/35-revision-unificada-y-cierre-verificable-de-la-especificacion.md). El código o un laboratorio local no equivalen a producto listo para producción.
+**Medido en el snapshot actual del coordinador:** `batchAccepted=false` e `integrationExecuted=true`; el PASS de integración cubre solo kitchen/check/clean y la suite completa sigue ISSUES. **Inferido por comparación de SHAs:** el compuesto `8cd45529b062506a2cbe0c567538d3999ac8a2b6` no incluye esta guía en su head actual `e1307808be9b88a77cc3a9725356b7281f4bb49f` ni la corrección posterior de sync; hace falta otra composición exacta después de las migraciones de callers. El estado del coordinador mantiene Windows y macOS nativos en NOT_RUN y el consumidor Windows ordinario de registro/adaptadores incompleto. La compatibilidad de ACL/ubicación de configuración Windows continúa como hipótesis inferida; la propuesta de configuración pública bajo ProgramFiles tampoco tiene prueba nativa. No se afirma soporte de Windows o macOS. El [estado consolidado de spec §15](../../.scratch/passwordmanager/spec.md#15-estado-consolidado-acuerdos-cierres-de-diseño-y-validación) sigue siendo la fuente global.
+
+La aceptación nativa hospedada continúa pendiente de la decisión del propietario 3. La intención preparada durable y el cierre de esquema G7 continúan pendientes de la decisión del propietario 4. Revisa el [método CI nativo efímero](../verification/native-ci.md) antes de preparar runners; su disponibilidad no acredita soporte. No se cierran tickets ni se declara producto listo, aceptado para instalación o certificado en seguridad.
+
+La guía conserva límites y comandos útiles del corte anterior, pero la comparación histórica con SHA 2272a1f446fb80cf35566b2b4406338a61e4f1dd y los resultados W7 ya no se presentan como estado actual. Los tickets [29](../../.scratch/passwordmanager/issues/29-paquetes-tuf-mantenimiento-y-fuente-correspondiente.md), [30](../../.scratch/passwordmanager/issues/30-evidencia-nativa-linux-en-dos-arquitecturas.md) y [35](../../.scratch/passwordmanager/issues/35-revision-unificada-y-cierre-verificable-de-la-especificacion.md) conservan las puertas de distribución, aceptación Linux multi-arquitectura y revisión unificada.

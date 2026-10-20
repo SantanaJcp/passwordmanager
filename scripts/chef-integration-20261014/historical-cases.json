@@ -1,0 +1,430 @@
+{
+  "source": "rollout-2026-10-04T04-37-17-01a1060f-6f38-7d82-b1e9-d211c5905672.jsonl:40",
+  "runner_sha256": "fb15ef233d8be29bedff9dc06b6fe6030dddc01c7c9acbe160e06d3b30b24dc0",
+  "cases": [
+    {
+      "name": "final-check",
+      "command": [
+        "./scripts/check.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "final-clean",
+      "command": [
+        "./scripts/clean-offline-build.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-1pux-import",
+      "command": [
+        "./scripts/test-linux-1pux-import-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-adapter-protected-frame",
+      "command": [
+        "./scripts/test-linux-adapter-protected-frame-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-attempts",
+      "command": [
+        "./scripts/test-linux-attempts-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-authorization",
+      "command": [
+        "./scripts/test-linux-authorization-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-backup",
+      "command": [
+        "./scripts/test-linux-backup-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-cleanup-fault",
+      "command": [
+        "./scripts/test-linux-cleanup-fault-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-content",
+      "command": [
+        "./scripts/test-linux-content-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-csv-import",
+      "command": [
+        "./scripts/test-linux-csv-import-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-custody",
+      "command": [
+        "./scripts/test-linux-custody-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-custody-protected-input",
+      "command": [
+        "./scripts/test-linux-custody-protected-input-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-fault-safety",
+      "command": [
+        "./scripts/test-linux-fault-safety-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-github-bearer",
+      "command": [
+        "./scripts/test-linux-github-bearer-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-history",
+      "command": [
+        "./scripts/test-linux-history-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-human-transaction",
+      "command": [
+        "./scripts/test-linux-human-transaction-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-passkey",
+      "command": [
+        "./scripts/test-linux-passkey-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-passkey-login",
+      "command": [
+        "./scripts/test-linux-passkey-login-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-recovery",
+      "command": [
+        "./scripts/test-linux-recovery-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-rpc-cleanup-fault",
+      "command": [
+        "./scripts/test-linux-rpc-cleanup-fault-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-ssh",
+      "command": [
+        "./scripts/test-linux-ssh-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-storage-fault",
+      "command": [
+        "./scripts/test-linux-storage-fault-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-sync",
+      "command": [
+        "./scripts/test-linux-sync-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-token-exchange",
+      "command": [
+        "./scripts/test-linux-token-exchange-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-tui-access",
+      "command": [
+        "./scripts/test-linux-tui-access-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-tui-content",
+      "command": [
+        "./scripts/test-linux-tui-content-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-tui-operations",
+      "command": [
+        "./scripts/test-linux-tui-operations-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "lab-web-auth",
+      "command": [
+        "./scripts/test-linux-web-auth-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "publication-backup",
+      "command": [
+        "./scripts/test-linux-download-publication-lab.sh",
+        "backup"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "publication-plaintext",
+      "command": [
+        "./scripts/test-linux-download-publication-lab.sh",
+        "plaintext"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "publication-attachment",
+      "command": [
+        "./scripts/test-linux-download-publication-lab.sh",
+        "attachment"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "custody-audit",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "audit"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "sqlite-sync",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "sqlite-sync"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "bootstrap-completed",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "bootstrap",
+        "completed"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-matrix",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "matrix"
+      ],
+      "historical_expected": 1
+    },
+    {
+      "name": "g7-inflight-result-sync",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "inflight",
+        "result-sync"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-inflight-bootstrap",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "inflight",
+        "bootstrap"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-inflight-audit",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "inflight",
+        "audit"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-inflight-crash",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "inflight",
+        "crash"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-canaries",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "canaries"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-extra-vault-completed",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "vault",
+        "completed"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-extra-inflight-vault",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "inflight",
+        "vault"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-extra-inflight-live-bootstrap",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "inflight-live",
+        "bootstrap"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-extra-inflight-live-audit",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "inflight-live",
+        "audit"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-extra-inflight-live-vault",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "inflight-live",
+        "vault"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-extra-matrix-trace",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "matrix",
+        "trace"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "g7-extra-bootstrap",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "bootstrap"
+      ],
+      "historical_expected": 1
+    },
+    {
+      "name": "g7-extra-vault",
+      "command": [
+        "./scripts/verify-ticket28-custody-loss.sh",
+        "vault"
+      ],
+      "historical_expected": 1
+    },
+    {
+      "name": "concurrency",
+      "command": [
+        "./scripts/test-linux-concurrency-lab.sh"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "purge-probe",
+      "command": [
+        "./scripts/cargo-local.sh",
+        "run",
+        "-p",
+        "pm-sync",
+        "--example",
+        "shared_purge_probe",
+        "--locked",
+        "--offline",
+        "--",
+        "target/debug/pm-sync"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "purge-sync-tests",
+      "command": [
+        "./scripts/cargo-local.sh",
+        "test",
+        "-p",
+        "pm-sync",
+        "--test",
+        "e2ee_replication",
+        "--test",
+        "shared_purge",
+        "--locked",
+        "--offline",
+        "--",
+        "--nocapture"
+      ],
+      "historical_expected": 0
+    },
+    {
+      "name": "restore-digest-tests",
+      "command": [
+        "./scripts/cargo-local.sh",
+        "test",
+        "-p",
+        "pm-vault",
+        "--lib",
+        "restore_graph_digest",
+        "--locked",
+        "--offline",
+        "--",
+        "--nocapture"
+      ],
+      "historical_expected": 0
+    }
+  ]
+}
