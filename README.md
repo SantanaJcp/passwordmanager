@@ -4,7 +4,7 @@ Passwordmanager es una bóveda local cifrada. La TUI permite al propietario admi
 
 ## Estado
 
-Este árbol es para desarrollo y evaluación, no una distribución lista para producción. El CLI ofrece la entrada humana **pm tui** cuando ya existen un perfil humano, su clave protegida y el socket humano correctos. No es una ruta de provisión ni expone los comandos administrativos del custodio. La implementación Linux también reconoce archivos locales versionados para asociar claves RPK con UID y para fijar adaptadores; esto no proporciona por sí solo un instalador ni un procedimiento completo y verificado para preparar un host normal.
+Este árbol es para desarrollo y evaluación, no una distribución lista para producción. El CLI ofrece la entrada humana **pm tui** cuando ya existen un perfil humano, su clave protegida y el socket humano correctos. No es una ruta de provisión ni expone los comandos administrativos del custodio. La implementación Linux también reconoce archivos locales versionados para asociar claves RPK con UID y para fijar adaptadores; La [instalación local Linux](docs/user/instalacion-linux.md) prepara este equipo con la cuenta de servicio, el servicio systemd, las claves y la bóveda; no es un paquete firmado ni cubre otras plataformas.
 
 No introduzcas credenciales reales ni conectes un agente que pueda leer la TUI, su terminal, el portapapeles, la bóveda o las claves locales.
 

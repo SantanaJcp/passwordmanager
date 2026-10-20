@@ -35,3 +35,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-10-19 — Recorte 2026-10-19: evidencia local x86_64 en el equipo del propietario. aarch64 y runners quedan aplazados.

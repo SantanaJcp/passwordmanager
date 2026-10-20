@@ -1,7 +1,7 @@
 # 26 — Custodia y canal humano macOS
 
 Type: task
-Status: claimed
+Status: open
 Owner: sol-26
 Blocked by: 03,07,08
 Spec: ../spec.md
@@ -35,3 +35,5 @@ Pendiente de implementación y evidencia.
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
 
 2026-09-13 — Claimed por Sol medium. Se preserva el motor único y se implementa port Darwin conforme G1. Método CI nativo efímero adicional autorizado; no confundir preflight/build con procesos/canales nativos verificados ni con reboot/FDE/humano/firma de 31/34.
+
+2026-10-19 — Aplazado por el recorte del propietario (decisions.md, 2026-10-19): sin macOS ni runners. Se libera la reclamación; el trabajo previo queda en las ramas codex/pm-26*.

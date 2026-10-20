@@ -1,7 +1,7 @@
 # 27 — Custodia y canal humano Windows
 
 Type: task
-Status: claimed
+Status: open
 Owner: sol-27
 Blocked by: 03,07,08
 Spec: ../spec.md
@@ -50,3 +50,5 @@ workflow manual Windows 11 ARM64, aún sin ejecución de producto. Preflight de
 entorno `34763094631` pasó 5/5; el fallback MSVC existente de
 `libsodium-sys-stable` sigue sin cambios/autorización, por lo que no hay
 candidato aceptado y todos los criterios permanecen abiertos.
+
+2026-10-19 — Aplazado por el recorte del propietario (decisions.md, 2026-10-19): sin Windows ni runners. Se libera la reclamación; el trabajo previo queda en las ramas codex/pm-27*.

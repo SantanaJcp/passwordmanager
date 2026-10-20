@@ -237,3 +237,5 @@ Cronología, comandos/logs y tabla vigente en
 [la fase 3 del método](../../../docs/verification/ticket-28.md#fase-3--2026-10-03-custodia-audit-autorizada).
 Entrega parcial en codex/pm-28; claimed, sin integrar principal,
 sin fusionar PR #1 ni tocar worktrees/zonas concurrentes 26/27.
+
+2026-10-19 — Linux local: G7 de pérdida de custodia en verde. Se corrigió la reconciliación sin backoff, que inundaba la auditoría (de67f022), y el oráculo ahora exige todas las tablas intactas durante la pérdida. Sigue abierto g7-matrix: deriva del ordinal del fixture y staging cifrado retenido tras EIO/ENOSPC (decisión 4 pendiente).

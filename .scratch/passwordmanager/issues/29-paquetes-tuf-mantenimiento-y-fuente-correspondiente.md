@@ -33,3 +33,5 @@ Pendiente de implementación y evidencia.
 
 ## Comments
 2026-09-12 — Publicado tras aprobación explícita del DAG de 35 tickets. La solicitud implement-spec autoriza esta ejecución; no reabrir alcance ni confundir contrato con validación.
+
+2026-10-19 — Recorte 2026-10-19: solo se entrega instalación local Linux (scripts/build-linux-release.sh, scripts/install-linux-local.sh, docs/user/instalacion-linux.md). Paquetes, TUF, firma y fuente correspondiente quedan aplazados.
