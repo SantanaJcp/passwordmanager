@@ -1132,3 +1132,41 @@ fn r2_query_only_recovery_rejects_sql_revision_metadata_without_signed_provision
         AttemptState::Indeterminate
     );
 }
+
+#[test]
+fn indeterminate_reconciliation_backs_off_with_attempt_age() {
+    use std::time::{Duration, Instant};
+    let f = Fixture::new();
+    f.start(0x61);
+    // Measured after creation, so the recorded age is at least this long.
+    let started = Instant::now();
+    let lease = f.attempts.claim_next().unwrap().unwrap();
+    // The outcome becomes unknown only after the attempt has aged.
+    std::thread::sleep(Duration::from_millis(400));
+    f.attempts
+        .settle(&lease, AttemptOutcome::Indeterminate)
+        .unwrap();
+    let settled = Instant::now();
+    let age = settled.duration_since(started);
+    // A fixed 100 ms cadence re-queried the provider and appended audit
+    // records every cycle until expiry; the next query waits for its age.
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        f.attempts
+            .claim_waiting_for_reconciliation()
+            .unwrap()
+            .is_none()
+    );
+    let again = loop {
+        if let Some(lease) = f.attempts.claim_waiting_for_reconciliation().unwrap() {
+            break lease;
+        }
+        assert!(
+            settled.elapsed() < age * 3 + Duration::from_secs(1),
+            "unknown outcome was never re-queried"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(settled.elapsed() >= age);
+    assert!(again.reconciliation_only());
+}

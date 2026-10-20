@@ -125,6 +125,9 @@ def case(source_binary, source_cli, target, completed):
             saved.rename(path)
         retained.clear()
         assert all(path.read_bytes() == value for path, value in originals.items()), "custody keys changed"
+        # Every table, audit included, must be untouched by the loss itself.
+        restored = counts(vault)
+        assert restored == before, "lost custody mutated authority, receipts or audit"
         for path in (agent_socket, human_socket):
             if path.exists():
                 path.unlink()
@@ -133,7 +136,11 @@ def case(source_binary, source_cli, target, completed):
         observe_state(binary, AGENT, ak, aprof, agent_socket, attempt, "SUCCEEDED" if completed else "INDETERMINATE", {("RUNNING", "INDETERMINATE")})
         after = counts(vault)
         print("PM28_CUSTODY_LOSS_INVARIANTS target=" + target + " unchanged=" + str(tuple(int(a == b) for a, b in zip(before, after))) + " replacement=" + str(int(replacement)) + " closed=" + str(int(admission_closed)), flush=True)
-        assert after == before, "authority or receipts changed across loss"
+        # After restoration the ordinary reconciler may append audit records
+        # for the unknown attempt; nothing else may change and audit only grows.
+        audit = TABLES.index("encrypted_audit_records")
+        assert all(a == b for index, (a, b) in enumerate(zip(before, after)) if index != audit), "authority or receipts changed across loss"
+        assert after[audit] >= before[audit], "audit records were lost"
         restored_calls = provider_calls(journal, attempt)
         assert restored_calls == 1, "provider repeated after restoration"
         print("PM28_CUSTODY_LOSS_OBSERVED target=" + target + " replacement=" + str(int(replacement)) + " closed=" + str(int(admission_closed)) + " provider-calls=" + str(restored_calls) + " exact-restoration=1", flush=True)

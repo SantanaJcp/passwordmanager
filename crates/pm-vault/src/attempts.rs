@@ -1158,8 +1158,11 @@ impl AttemptVault {
         let mut c = open(self.delegated.path())?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_clock(&tx, now)?;
+        // An unknown outcome is re-queried after a delay equal to its age when
+        // last settled (100 ms floor, 60 s cap): geometric spacing bounds the
+        // provider queries and audit records over the attempt lifetime.
         let sql = if reconcile {
-            "SELECT attempt_id,item_id,owner_subject,owner_generation,state_package FROM authentication_attempts WHERE state IN ('waiting_for_human','indeterminate') AND expires_at_us>?1 AND claimed_at_us<=?1-100000 ORDER BY claimed_at_us LIMIT ?2"
+            "SELECT attempt_id,item_id,owner_subject,owner_generation,state_package FROM authentication_attempts WHERE expires_at_us>?1 AND ((state='waiting_for_human' AND claimed_at_us<=?1-100000) OR (state='indeterminate' AND claimed_at_us<=?1-max(100000,min(60000000,claimed_at_us-created_at_us)))) ORDER BY claimed_at_us LIMIT ?2"
         } else {
             "SELECT attempt_id,item_id,owner_subject,owner_generation,state_package FROM authentication_attempts WHERE state='created' AND expires_at_us>?1 ORDER BY created_at_us LIMIT ?2"
         };
