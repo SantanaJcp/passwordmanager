@@ -176,8 +176,9 @@ Next steps (as $human):
 
      $(enrollment_line)
 
-  3. create/import credentials, select one in the access screen and press 'e' to enable it for agents
-  4. quit the TUI and run:  sudo $root/scripts/install-linux-local.sh register-agent
+  3. still in the access screen press 's' to resume delegated access (a new vault starts suspended)
+  4. press Esc, create ('n') or import ('m') logins, then in the access screen select one and press 'e' to enable it
+  5. quit the TUI ('l') and run:  sudo $root/scripts/install-linux-local.sh register-agent
 EOF
 }
 

@@ -36,7 +36,7 @@ El custodio, tú y el agente son tres UID distintos: el diseño lo exige. Los ag
    - Desbloquea con la contraseña maestra.
    - `n` crea un login (`título|usuario|URL|notas` y luego la contraseña enmascarada; si la dejas vacía, se genera una de 24 caracteres). `e` edita el seleccionado.
    - `m` importa CSV de Chrome o Apple, o un 1PUX de 1Password.
-   - `a` abre el acceso delegado: `n` y pega la línea de inscripción; en una credencial, `e` la habilita para agentes.
+   - `a` abre el acceso delegado: `n` y pega la línea de inscripción; `s` reanuda el acceso delegado (una bóveda nueva empieza suspendida); en una credencial, `e` la habilita para agentes. `Esc` vuelve al contenido.
    - `b` gestiona backup y recuperación; `l` bloquea y sale.
 
 4. Registrar la identidad nativa del agente (una vez, después de inscribirlo):
